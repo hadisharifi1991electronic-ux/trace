@@ -12,7 +12,8 @@ checker and simulator all read.
 ```
 trace inspect board.PcbDoc       stack-up, components, nets, classes, rules, primitive counts
 trace inspect sheet.SchDoc       symbols with designators, values and pin counts; labels; child sheets
-trace pairs board.PcbDoc [5mil]  routed length of each differential pair net and the P/N skew
+trace pairs board.PcbDoc [5mil]  length of each differential pair (tracks, arcs, via barrels), skew, and open nets
+trace view board.PcbDoc          open the board viewer in your browser
 trace rules board.PcbDoc         design rules grouped by kind
 trace convert <file> out.json    export to Trace's open JSON model
 ```
@@ -22,12 +23,12 @@ pairs: it reads in about 0.3 s.
 
 ## Limits to know
 
-- Pair lengths count copper tracks and arcs only. Pad-to-pad length, via
-  barrels and package delays are not included yet, and a partly routed net
-  looks short rather than unrouted.
+- Lengths include tracks, arcs and via barrels between the layers used, but
+  not package pin delays. Nets joined through copper pours are not checked
+  for completeness yet.
 - Schematic pins stored as binary records are counted against the previous
   symbol; the text form is exact.
-- No geometry (pads, polygons, outlines) is imported yet, only counted.
+- Copper pours and regions are counted but not imported yet.
 
 ## Layout
 

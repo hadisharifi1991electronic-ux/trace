@@ -45,6 +45,9 @@ pub struct Arc {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Via {
     pub net: Option<u32>,
+    /// First and last copper layer the via spans (0 = top).
+    pub from_layer: u8,
+    pub to_layer: u8,
     pub at: Point,
     pub diameter: Length,
     pub hole: Length,

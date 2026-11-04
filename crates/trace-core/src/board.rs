@@ -68,7 +68,15 @@ pub struct Net {
     pub name: String,
     /// Total length of copper tracks and arcs on this net.
     pub routed_length: Length,
+    /// Vertical length through via barrels, between the layers actually used.
+    pub via_length: Length,
     pub vias: usize,
+    pub pads: usize,
+    /// Separate copper islands joining this net's pads; 1 means fully routed.
+    pub pieces: usize,
+    /// Net is connected partly through copper pours, which are not imported
+    /// yet, so `pieces` overstates how open it is.
+    pub has_pour: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -81,6 +89,34 @@ pub struct DiffPair {
 impl Board {
     pub fn net(&self, name: &str) -> Option<&Net> {
         self.nets.iter().find(|n| n.name == name)
+    }
+}
+
+impl Net {
+    /// Track, arc and via barrel length together.
+    pub fn total_length(&self) -> Length {
+        Length(self.routed_length.0 + self.via_length.0)
+    }
+    /// True when every pad of the net is joined by copper.
+    pub fn is_complete(&self) -> bool {
+        self.pads < 2 || self.pieces <= 1
+    }
+}
+
+impl Stackup {
+    /// Depth of the centre of each copper layer below the top surface, top first.
+    pub fn copper_depths(&self) -> Vec<Length> {
+        let mut depth = 0i64;
+        let mut out = Vec::new();
+        for l in &self.layers {
+            if l.kind == LayerKind::Copper {
+                out.push(Length(depth + l.thickness.0 / 2));
+            }
+            if matches!(l.kind, LayerKind::Copper | LayerKind::Dielectric) {
+                depth += l.thickness.0;
+            }
+        }
+        out
     }
 }
 

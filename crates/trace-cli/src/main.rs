@@ -121,10 +121,19 @@ fn print_board(b: &Board) {
         top,
         b.components.len() - top
     );
+    let multi: Vec<_> = b
+        .nets
+        .iter()
+        .filter(|n| n.pads >= 2 && !n.has_pour)
+        .collect();
+    let open = multi.iter().filter(|n| !n.is_complete()).count();
     println!(
-        "Nets: {} ({} routed)",
+        "Nets: {} ({} join two or more pads: {} fully routed, {} still open; {} use copper pours, not checked yet)",
         b.nets.len(),
-        b.nets.iter().filter(|n| n.routed_length.0 > 0).count()
+        multi.len(),
+        multi.len() - open,
+        open,
+        b.nets.iter().filter(|n| n.has_pour).count()
     );
     println!(
         "Net classes: {}   Differential pairs: {} in {} classes",
@@ -191,42 +200,62 @@ fn pairs(file: &str, max_skew: &str) -> Res {
         .iter()
         .filter_map(|p| {
             let (pos, neg) = (b.net(&p.positive)?, b.net(&p.negative)?);
-            let skew = Length((pos.routed_length.0 - neg.routed_length.0).abs());
-            Some((p, pos, neg, skew))
+            let skew = Length((pos.total_length().0 - neg.total_length().0).abs());
+            let done = pos.is_complete()
+                && neg.is_complete()
+                && pos.routed_length.0 > 0
+                && neg.routed_length.0 > 0;
+            Some((p, pos, neg, skew, done))
         })
         .collect();
-    rows.sort_by_key(|r| std::cmp::Reverse(r.3));
-    println!(
-        "{:<34} {:>10} {:>10} {:>9}",
-        "Pair", "P (mil)", "N (mil)", "Skew"
-    );
-    let mut over = 0;
-    let mut unrouted = 0;
-    for (p, pos, neg, skew) in &rows {
-        let flag = if pos.routed_length.0 == 0 || neg.routed_length.0 == 0 {
-            unrouted += 1;
-            "unrouted"
-        } else if *skew > limit {
-            over += 1;
-            "OVER"
-        } else {
-            ""
-        };
-        println!(
-            "{:<34} {:>10.1} {:>10.1} {:>9.1}  {flag}",
-            clip(&p.name, 34),
-            pos.routed_length.mil(),
-            neg.routed_length.mil(),
-            skew.mil()
-        );
-    }
+    // Finished pairs first, worst skew first: those are the ones to fix.
+    rows.sort_by_key(|r| (!r.4, std::cmp::Reverse(r.3)));
+    println!("Lengths include tracks, arcs and via barrels between the layers used.");
     println!();
     println!(
-        "{} pairs: {} over {:.1} mil skew, {} not fully routed",
+        "{:<30} {:>9} {:>9} {:>8} {:>7}  Status",
+        "Pair", "P (mil)", "N (mil)", "Skew", "Vias"
+    );
+    let (mut over, mut open) = (0, 0);
+    for (p, pos, neg, skew, done) in &rows {
+        let status = if !done {
+            open += 1;
+            match (
+                pos.routed_length.0 == 0 && neg.routed_length.0 == 0,
+                pos.is_complete(),
+                neg.is_complete(),
+            ) {
+                (true, _, _) => "not routed".to_string(),
+                (_, false, false) => "P and N open".into(),
+                (_, false, true) => "P open".into(),
+                _ => "N open".into(),
+            }
+        } else if *skew > limit {
+            over += 1;
+            "OVER".into()
+        } else {
+            "ok".into()
+        };
+        println!(
+            "{:<30} {:>9.1} {:>9.1} {:>8.1} {:>3}/{:<3}  {status}",
+            clip(&p.name, 30),
+            pos.total_length().mil(),
+            neg.total_length().mil(),
+            skew.mil(),
+            pos.vias,
+            neg.vias
+        );
+    }
+    let done = rows.len() - open;
+    println!();
+    println!(
+        "{} pairs: {} fully routed ({} within {:.1} mil, {} over), {} open or not routed",
         rows.len(),
-        over,
+        done,
+        done - over,
         limit.mil(),
-        unrouted
+        over,
+        open
     );
     Ok(())
 }

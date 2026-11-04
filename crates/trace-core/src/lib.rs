@@ -4,6 +4,7 @@
 //! types, and the editor, router and checkers only ever read these types.
 
 pub mod board;
+pub mod connectivity;
 pub mod geometry;
 pub mod schematic;
 pub mod units;

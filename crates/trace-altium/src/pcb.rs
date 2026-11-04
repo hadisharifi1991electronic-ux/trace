@@ -89,9 +89,15 @@ fn parse_arc(b: &[u8], layers: &LayerMap) -> Option<Arc> {
     })
 }
 
-fn parse_via(b: &[u8]) -> Option<Via> {
+fn parse_via(b: &[u8], layers: &LayerMap) -> Option<Via> {
+    let copper = |id: u8| match layers.get(id) {
+        LayerRef::Copper(i) => Some(i),
+        _ => None,
+    };
     Some(Via {
         net: net(b),
+        from_layer: copper(*b.get(29)?)?,
+        to_layer: copper(*b.get(30)?)?,
         at: point(b, 13)?,
         diameter: len_at(b, 21)?,
         hole: len_at(b, 25)?,
@@ -231,7 +237,7 @@ pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
     if let Some(d) = c.stream("/Vias6/Data")? {
         g.vias = split_binary(&d, 1)
             .iter()
-            .filter_map(|r| parse_via(r[0]))
+            .filter_map(|r| parse_via(r[0], &layers))
             .collect();
     }
     if let Some(d) = c.stream("/Pads6/Data")? {
@@ -282,7 +288,23 @@ pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
         net.routed_length = Length::from_mil(mil);
         net.vias = v;
     }
-    board.stats.polygons = text(&mut c, "/Polygons6/Data", 0)?.len();
+    trace_core::connectivity::analyse(&mut board);
+    let polygons = text(&mut c, "/Polygons6/Data", 0)?;
+    board.stats.polygons = polygons.len();
+    for p in &polygons {
+        let digits: String = p
+            .str("NET")
+            .chars()
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
+        if let Some(n) = digits
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| board.nets.get_mut(n))
+        {
+            n.has_pour = true;
+        }
+    }
 
     Ok(board)
 }

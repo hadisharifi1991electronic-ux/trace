@@ -130,7 +130,17 @@ pub fn render(board: &Board, name: &str) -> String {
     let nets: Vec<Value> = board
         .nets
         .iter()
-        .map(|n| json!({"name": n.name, "len": (n.routed_length.mil() * 10.0).round() / 10.0, "vias": n.vias}))
+        .map(|n| {
+            json!({
+                "name": n.name,
+                "len": (n.total_length().mil() * 10.0).round() / 10.0,
+                "via": (n.via_length.mil() * 10.0).round() / 10.0,
+                "vias": n.vias,
+                "pads": n.pads,
+                "pieces": n.pieces,
+                "pour": n.has_pour,
+            })
+        })
         .collect();
     let pairs: Vec<Value> = board
         .diff_pairs

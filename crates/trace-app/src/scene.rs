@@ -80,8 +80,18 @@ impl Geom {
     }
 }
 
+/// The board item a primitive was drawn from.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Source {
+    Track(usize),
+    Arc(usize),
+    Pad(usize),
+    Via(usize),
+}
+
 #[derive(Clone, Copy)]
 pub struct Prim {
+    pub source: Source,
     pub slot: Slot,
     pub net: Option<u32>,
     pub geom: Geom,
@@ -138,9 +148,30 @@ fn mil(l: trace_core::Length) -> f32 {
 }
 
 impl Scene {
+    /// Opens an Altium `.PcbDoc` or a Trace `.tracepcb` board.
     pub fn load(path: PathBuf) -> Result<Self, String> {
-        let board = trace_altium::read_pcbdoc(&path).map_err(|e| e.to_string())?;
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase());
+        let board = match ext.as_deref() {
+            Some("pcbdoc") => trace_altium::read_pcbdoc(&path).map_err(|e| e.to_string())?,
+            Some(trace_core::file::EXTENSION) => trace_core::file::load(&path)?,
+            _ => return Err("expected an Altium .PcbDoc or a Trace .tracepcb board".into()),
+        };
         Ok(Self::from_board(path, board))
+    }
+
+    /// Rebuilds the drawing after the board changed, keeping layer settings.
+    #[allow(dead_code)] // used by editing, paused for now
+    pub fn rebuild(&mut self) {
+        let board = std::mem::take(&mut self.board);
+        let mut next = Self::from_board(std::mem::take(&mut self.path), board);
+        for l in &mut next.layers {
+            if let Some(old) = self.layers.iter().find(|o| o.slot == l.slot) {
+                l.visible = old.visible;
+            }
+        }
+        *self = next;
     }
 
     pub fn from_board(path: PathBuf, board: Board) -> Self {
@@ -160,8 +191,9 @@ impl Scene {
         let g = &board.geometry;
         let mut prims =
             Vec::with_capacity(g.tracks.len() + g.arcs.len() * 4 + g.vias.len() + g.pads.len());
-        for t in &g.tracks {
+        for (i, t) in g.tracks.iter().enumerate() {
             prims.push(Prim {
+                source: Source::Track(i),
                 slot: slot(&t.layer),
                 net: t.net,
                 geom: Geom::Seg {
@@ -175,7 +207,7 @@ impl Scene {
                 component: None,
             });
         }
-        for a in &g.arcs {
+        for (ai, a) in g.arcs.iter().enumerate() {
             let (cx, cy, r) = (a.center.x.mil(), a.center.y.mil(), a.radius.mil());
             let mut sweep = (a.end_deg - a.start_deg).rem_euclid(360.0);
             if sweep == 0.0 {
@@ -189,6 +221,7 @@ impl Scene {
             for i in 0..steps {
                 let ((x1, y1), (x2, y2)) = (p(i), p(i + 1));
                 prims.push(Prim {
+                    source: Source::Arc(ai),
                     slot: slot(&a.layer),
                     net: a.net,
                     geom: Geom::Seg {
@@ -203,7 +236,7 @@ impl Scene {
                 });
             }
         }
-        for p in &g.pads {
+        for (pi, p) in g.pads.iter().enumerate() {
             let (x, y, sx, sy) = (mil(p.at.x), mil(p.at.y), mil(p.size_x), mil(p.size_y));
             let geom = if p.shape == PadShape::Round && (sx - sy).abs() < 1e-3 {
                 Geom::Circle { x, y, r: sx / 2.0 }
@@ -229,6 +262,7 @@ impl Scene {
                 }
             };
             prims.push(Prim {
+                source: Source::Pad(pi),
                 slot: slot(&p.layer),
                 net: p.net,
                 geom,
@@ -236,8 +270,9 @@ impl Scene {
                 component: p.component,
             });
         }
-        for v in &g.vias {
+        for (vi, v) in g.vias.iter().enumerate() {
             prims.push(Prim {
+                source: Source::Via(vi),
                 slot: Slot::Vias,
                 net: v.net,
                 geom: Geom::Circle {
@@ -405,6 +440,52 @@ impl Scene {
             }
         }
         best.map(|(_, i)| i)
+    }
+
+    /// A point to start or end a route at: the centre of a pad or via, or
+    /// the nearer end of a track, on the given copper layer. Also returns
+    /// the net found there.
+    #[allow(dead_code)]
+    pub fn snap(
+        &self,
+        x: f32,
+        y: f32,
+        tolerance: f32,
+        layer: Slot,
+    ) -> Option<([f32; 2], Option<u32>)> {
+        let cell = ((x / CELL).floor() as i32, (y / CELL).floor() as i32);
+        let mut best: Option<(f32, [f32; 2], Option<u32>)> = None;
+        for &i in self.grid.get(&cell)? {
+            let p = &self.prims[i];
+            let on_layer = p.slot == layer || p.all_layers;
+            if !on_layer || p.geom.distance(x, y) > tolerance {
+                continue;
+            }
+            let target = match p.geom {
+                Geom::Circle { x, y, .. } | Geom::Rect { x, y, .. } => [x, y],
+                Geom::Seg { x1, y1, x2, y2, .. } => match p.source {
+                    // Oval pads snap to their centre.
+                    Source::Pad(_) => [(x1 + x2) / 2.0, (y1 + y2) / 2.0],
+                    _ if (x - x1).hypot(y - y1) <= (x - x2).hypot(y - y2) => [x1, y1],
+                    _ => [x2, y2],
+                },
+            };
+            let d = (target[0] - x).hypot(target[1] - y);
+            if best.is_none_or(|(b, _, _)| d < b) {
+                best = Some((d, target, p.net));
+            }
+        }
+        best.map(|(_, t, n)| (t, n))
+    }
+
+    /// Primitives belonging to a part (its pads).
+    #[allow(dead_code)]
+    pub fn component_prims(&self, component: usize) -> impl Iterator<Item = usize> + '_ {
+        self.prims
+            .iter()
+            .enumerate()
+            .filter(move |(_, p)| p.component == Some(component as u32))
+            .map(|(i, _)| i)
     }
 
     /// Bounding box of a net's copper.

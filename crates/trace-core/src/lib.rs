@@ -5,6 +5,8 @@
 
 pub mod board;
 pub mod connectivity;
+pub mod edit;
+pub mod file;
 pub mod geometry;
 pub mod schematic;
 pub mod units;

@@ -251,43 +251,6 @@ pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
     board.stats.vias = g.vias.len();
     board.stats.pads = g.pads.len();
 
-    // Routed length per net from copper tracks and arcs.
-    let mut length_mil = vec![0.0f64; board.nets.len()];
-    let mut vias = vec![0usize; board.nets.len()];
-    let count = length_mil.len();
-    let net_slot = |n: Option<u32>| n.map(|n| n as usize).filter(|&n| n < count);
-    for t in g
-        .tracks
-        .iter()
-        .filter(|t| matches!(t.layer, LayerRef::Copper(_)))
-    {
-        if let Some(n) = net_slot(t.net) {
-            length_mil[n] +=
-                (t.end.x.mil() - t.start.x.mil()).hypot(t.end.y.mil() - t.start.y.mil());
-        }
-    }
-    for a in g
-        .arcs
-        .iter()
-        .filter(|a| matches!(a.layer, LayerRef::Copper(_)))
-    {
-        if let Some(n) = net_slot(a.net) {
-            let mut sweep = (a.end_deg - a.start_deg).rem_euclid(360.0);
-            if sweep == 0.0 {
-                sweep = 360.0;
-            }
-            length_mil[n] += a.radius.mil() * sweep.to_radians();
-        }
-    }
-    for v in &g.vias {
-        if let Some(n) = net_slot(v.net) {
-            vias[n] += 1;
-        }
-    }
-    for ((net, mil), v) in board.nets.iter_mut().zip(length_mil).zip(vias) {
-        net.routed_length = Length::from_mil(mil);
-        net.vias = v;
-    }
     trace_core::connectivity::analyse(&mut board);
     let polygons = text(&mut c, "/Polygons6/Data", 0)?;
     board.stats.polygons = polygons.len();

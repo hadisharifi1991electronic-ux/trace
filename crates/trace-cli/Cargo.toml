@@ -1,0 +1,11 @@
+[package]
+name = "trace"
+description = "Command-line front end for the Trace PCB design tool"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+trace-core.workspace = true
+trace-altium.workspace = true
+serde_json = "1"

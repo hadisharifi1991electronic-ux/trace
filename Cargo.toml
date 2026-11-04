@@ -1,0 +1,13 @@
+[workspace]
+resolver = "2"
+members = ["crates/trace-core", "crates/trace-altium", "crates/trace-cli"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+repository = ""
+
+[workspace.dependencies]
+trace-core = { path = "crates/trace-core" }
+trace-altium = { path = "crates/trace-altium" }

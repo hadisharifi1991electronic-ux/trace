@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/trace-core", "crates/trace-altium", "crates/trace-cli"]
+members = ["crates/trace-core", "crates/trace-altium", "crates/trace-cli", "crates/trace-app"]
 
 [workspace.package]
 version = "0.1.0"

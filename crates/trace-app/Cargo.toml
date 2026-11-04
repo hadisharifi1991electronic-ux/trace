@@ -1,0 +1,16 @@
+[package]
+name = "trace-app"
+description = "Trace desktop application"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "trace-app"
+path = "src/main.rs"
+
+[dependencies]
+trace-core.workspace = true
+trace-altium.workspace = true
+eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts", "persistence", "x11", "wayland"] }
+rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }

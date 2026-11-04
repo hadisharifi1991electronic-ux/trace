@@ -4,10 +4,22 @@ An open-source schematic and PCB design tool, in the spirit of KiCad, aimed at
 Allegro-class high-speed design: one constraint manager that the router,
 checker and simulator all read.
 
-> Status: phase 1, day one. There is no editor yet. What exists is the core
-> data model and an Altium importer, driven from a command-line tool.
+> Status: phase 1. Trace opens Altium boards in a desktop app and checks
+> routing and differential pairs. Editing is not there yet.
 
-## What works today
+## Desktop app
+
+`trace-app` (or `trace-app.exe` on Windows) opens a window where you can:
+
+- open any `.PcbDoc` from File → Open, the recent list, or by dropping it on the window
+- zoom (scroll), pan (drag), flip to the bottom (B), fit (F)
+- show or hide each copper layer; double-click a layer to show only that one
+- click a track, pad or via to select its net and see its length, via
+  barrels, routing state and pair skew; or search a net or part by name
+- review every differential pair in the bottom panel, sorted by problem,
+  click one to zoom to it, and export the list to CSV
+
+## Command-line tool
 
 ```
 trace inspect board.PcbDoc       stack-up, components, nets, classes, rules, primitive counts
@@ -37,6 +49,7 @@ pairs: it reads in about 0.3 s.
 | `crates/trace-core` | Format-neutral design model (lengths in nanometres) |
 | `crates/trace-altium` | Altium `.PcbDoc` / `.SchDoc` reader (OLE compound files) |
 | `crates/trace-cli` | The `trace` command |
+| `crates/trace-app` | The desktop app (egui) |
 
 ## Build
 

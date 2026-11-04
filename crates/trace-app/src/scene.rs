@@ -12,7 +12,20 @@ pub enum Slot {
     TopSilk,
     BottomSilk,
     Vias,
+    /// Switch for copper pours and planes; they are drawn with their layer.
+    Pours,
     Other,
+}
+
+/// A copper pour triangulated for drawing and picking.
+pub struct Fill {
+    pub slot: Slot,
+    pub net: Option<u32>,
+    pub bbox: [f32; 4],
+    /// Range in `Scene::fill_verts`.
+    pub verts: std::ops::Range<usize>,
+    /// Range in `Scene::fill_tris`; indices are relative to `verts.start`.
+    pub tris: std::ops::Range<usize>,
 }
 
 #[derive(Clone, Copy)]
@@ -120,6 +133,9 @@ pub struct Scene {
     grid: HashMap<(i32, i32), Vec<usize>>,
     pub net_by_name: HashMap<String, u32>,
     pub pair_of: HashMap<String, (String, String)>, // net -> (pair name, partner)
+    pub fills: Vec<Fill>,
+    pub fill_verts: Vec<[f32; 2]>,
+    pub fill_tris: Vec<u32>,
 }
 
 const CELL: f32 = 150.0;
@@ -155,8 +171,13 @@ impl Scene {
             .map(|e| e.to_string_lossy().to_ascii_lowercase());
         let board = match ext.as_deref() {
             Some("pcbdoc") => trace_altium::read_pcbdoc(&path).map_err(|e| e.to_string())?,
+            Some("brd") => trace_allegro::read_brd(&path).map_err(|e| e.to_string())?,
             Some(trace_core::file::EXTENSION) => trace_core::file::load(&path)?,
-            _ => return Err("expected an Altium .PcbDoc or a Trace .tracepcb board".into()),
+            _ => {
+                return Err(
+                    "expected an Altium .PcbDoc, an Allegro .brd or a Trace .tracepcb board".into(),
+                )
+            }
         };
         Ok(Self::from_board(path, board))
     }
@@ -312,6 +333,15 @@ impl Scene {
             visible: true,
             count: 0,
         });
+        if !g.polygons.is_empty() {
+            layers.push(Layer {
+                slot: Slot::Pours,
+                name: "Copper pours".into(),
+                color: [120, 130, 150],
+                visible: true,
+                count: g.polygons.len(),
+            });
+        }
         layers.push(Layer {
             slot: Slot::TopSilk,
             name: "Top silk".into(),
@@ -379,8 +409,13 @@ impl Scene {
             pair_of.insert(p.negative.clone(), (p.name.clone(), p.positive.clone()));
         }
 
+        let (fills, fill_verts, fill_tris) = triangulate(&board, &slot);
+
         Scene {
             path,
+            fills,
+            fill_verts,
+            fill_tris,
             board,
             prims,
             layers,
@@ -415,6 +450,33 @@ impl Scene {
         self.layer_visible(p.slot)
     }
 
+    /// Whether a pour shows with the current layer settings.
+    pub fn fill_shows(&self, f: &Fill) -> bool {
+        self.layer_visible(Slot::Pours) && self.layer_visible(f.slot)
+    }
+
+    /// The topmost visible pour containing a point, preferring the active layer.
+    pub fn pick_fill(&self, x: f32, y: f32, active: Slot) -> Option<usize> {
+        let mut found = None;
+        for (i, f) in self.fills.iter().enumerate() {
+            let b = f.bbox;
+            if x < b[0] || x > b[2] || y < b[1] || y > b[3] || !self.fill_shows(f) {
+                continue;
+            }
+            let v = &self.fill_verts[f.verts.clone()];
+            let hit = self.fill_tris[f.tris.clone()].chunks_exact(3).any(|t| {
+                inside_triangle([x, y], v[t[0] as usize], v[t[1] as usize], v[t[2] as usize])
+            });
+            if hit {
+                if f.slot == active {
+                    return Some(i);
+                }
+                found.get_or_insert(i);
+            }
+        }
+        found
+    }
+
     /// The primitive under a board point, preferring the active layer.
     pub fn pick(&self, x: f32, y: f32, tolerance: f32, active: Slot) -> Option<usize> {
         let cell = ((x / CELL).floor() as i32, (y / CELL).floor() as i32);
@@ -445,19 +507,21 @@ impl Scene {
     /// A point to start or end a route at: the centre of a pad or via, or
     /// the nearer end of a track, on the given copper layer. Also returns
     /// the net found there.
-    #[allow(dead_code)]
     pub fn snap(
         &self,
         x: f32,
         y: f32,
         tolerance: f32,
-        layer: Slot,
+        layer: Option<Slot>,
     ) -> Option<([f32; 2], Option<u32>)> {
         let cell = ((x / CELL).floor() as i32, (y / CELL).floor() as i32);
         let mut best: Option<(f32, [f32; 2], Option<u32>)> = None;
         for &i in self.grid.get(&cell)? {
             let p = &self.prims[i];
-            let on_layer = p.slot == layer || p.all_layers;
+            let on_layer = match layer {
+                Some(l) => p.slot == l || p.all_layers,
+                None => self.shows(p),
+            };
             if !on_layer || p.geom.distance(x, y) > tolerance {
                 continue;
             }
@@ -503,4 +567,82 @@ impl Scene {
         }
         Some(b)
     }
+}
+
+fn inside_triangle(p: [f32; 2], a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> bool {
+    let side =
+        |u: [f32; 2], v: [f32; 2]| (v[0] - u[0]) * (p[1] - u[1]) - (v[1] - u[1]) * (p[0] - u[0]);
+    let (d1, d2, d3) = (side(a, b), side(b, c), side(c, a));
+    let neg = d1 < 0.0 || d2 < 0.0 || d3 < 0.0;
+    let pos = d1 > 0.0 || d2 > 0.0 || d3 > 0.0;
+    !(neg && pos)
+}
+
+/// Splits every copper pour into triangles once, so drawing is cheap.
+/// Planes can have thousands of cut-outs, so this uses a sweep-line
+/// tessellator with the even-odd rule rather than ear clipping.
+fn triangulate(
+    board: &Board,
+    slot: &dyn Fn(&LayerRef) -> Slot,
+) -> (Vec<Fill>, Vec<[f32; 2]>, Vec<u32>) {
+    use lyon_tessellation::geometry_builder::{BuffersBuilder, VertexBuffers};
+    use lyon_tessellation::math::point;
+    use lyon_tessellation::path::Path;
+    use lyon_tessellation::{FillOptions, FillRule, FillTessellator, FillVertex};
+
+    let mut fills = Vec::new();
+    let mut verts: Vec<[f32; 2]> = Vec::new();
+    let mut tris: Vec<u32> = Vec::new();
+    let mut tess = FillTessellator::new();
+    let options = FillOptions::tolerance(0.05).with_fill_rule(FillRule::EvenOdd);
+    for poly in &board.geometry.polygons {
+        let mut path = Path::builder();
+        for ring in std::iter::once(&poly.outline).chain(poly.holes.iter()) {
+            if ring.len() < 3 {
+                continue;
+            }
+            let mut pts = ring
+                .iter()
+                .map(|p| point(p.x.mil() as f32, p.y.mil() as f32));
+            path.begin(pts.next().unwrap_or(point(0.0, 0.0)));
+            for p in pts {
+                path.line_to(p);
+            }
+            path.end(true);
+        }
+        let path = path.build();
+        let mut out: VertexBuffers<lyon_tessellation::math::Point, u32> = VertexBuffers::new();
+        if tess
+            .tessellate_path(
+                &path,
+                &options,
+                &mut BuffersBuilder::new(&mut out, |v: FillVertex| v.position()),
+            )
+            .is_err()
+            || out.indices.is_empty()
+        {
+            continue;
+        }
+        let v0 = verts.len();
+        let t0 = tris.len();
+        let mut bbox = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+        for p in &out.vertices {
+            bbox = [
+                bbox[0].min(p.x),
+                bbox[1].min(p.y),
+                bbox[2].max(p.x),
+                bbox[3].max(p.y),
+            ];
+            verts.push([p.x, p.y]);
+        }
+        tris.extend_from_slice(&out.indices);
+        fills.push(Fill {
+            slot: slot(&poly.layer),
+            net: poly.net,
+            bbox,
+            verts: v0..verts.len(),
+            tris: t0..tris.len(),
+        });
+    }
+    (fills, verts, tris)
 }

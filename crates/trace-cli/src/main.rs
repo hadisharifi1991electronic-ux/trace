@@ -7,13 +7,15 @@ use std::process::ExitCode;
 use trace_core::{Board, LayerKind, Length, Sheet};
 
 const USAGE: &str = "\
-trace: read Altium designs with the Trace engine
+trace: read Altium and Allegro designs with the Trace engine
+
+Boards can be Altium .PcbDoc, Cadence Allegro .brd (16.0 or newer) or Trace .tracepcb.
 
 USAGE:
-    trace inspect <file.PcbDoc|file.SchDoc>     Summary of a board or sheet
-    trace pairs <file.PcbDoc> [max-skew]        Differential pair lengths and skew (default max-skew 5mil)
-    trace rules <file.PcbDoc>                   Design rules, grouped by kind
-    trace view <file.PcbDoc> [out.html]         Open the board in the viewer (in your browser)
+    trace inspect <board|file.SchDoc>           Summary of a board or sheet
+    trace pairs <board> [max-skew]              Differential pair lengths and skew (default max-skew 5mil)
+    trace rules <board>                         Design rules, grouped by kind
+    trace view <board> [out.html]               Open the board in the viewer (in your browser)
     trace convert <file> <out.json>             Export to Trace's open JSON model
 ";
 
@@ -60,14 +62,16 @@ fn load(file: &str) -> Result<Design, Box<dyn std::error::Error>> {
     match ext.as_deref() {
         Some("pcbdoc") => Ok(Design::Board(trace_altium::read_pcbdoc(file)?)),
         Some("schdoc") => Ok(Design::Sheet(trace_altium::read_schdoc(file)?)),
-        _ => Err(format!("{file}: expected a .PcbDoc or .SchDoc file").into()),
+        Some("brd") => Ok(Design::Board(trace_allegro::read_brd(file)?)),
+        Some("tracepcb") => Ok(Design::Board(trace_core::file::load(Path::new(file))?)),
+        _ => Err(format!("{file}: expected a .PcbDoc, .brd or .SchDoc file").into()),
     }
 }
 
 fn board(file: &str) -> Result<Board, Box<dyn std::error::Error>> {
     match load(file)? {
         Design::Board(b) => Ok(b),
-        Design::Sheet(_) => Err("this command needs a .PcbDoc file".into()),
+        Design::Sheet(_) => Err("this command needs a board (.PcbDoc or .brd)".into()),
     }
 }
 

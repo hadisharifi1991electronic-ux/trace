@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/trace-core", "crates/trace-altium", "crates/trace-cli", "crates/trace-app"]
+members = ["crates/trace-core", "crates/trace-altium", "crates/trace-allegro", "crates/trace-cli", "crates/trace-app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -11,3 +11,4 @@ repository = ""
 [workspace.dependencies]
 trace-core = { path = "crates/trace-core" }
 trace-altium = { path = "crates/trace-altium" }
+trace-allegro = { path = "crates/trace-allegro" }

@@ -1,7 +1,7 @@
 //! The board canvas: draws the scene and handles zoom, pan and picking.
 
-use crate::scene::{Geom, Prim, Slot};
-use crate::App;
+use crate::scene::{Geom, Prim, Scene, Slot};
+use crate::{App, Measure, Tool, MEASURE};
 use eframe::egui::{self, Color32, Pos2, Rect, Shape, Stroke};
 
 /// Maps board mil (y up) to screen points.
@@ -131,37 +131,58 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let pointer = resp.hover_pos().map(|p| view.to_board(p));
     app.cursor = pointer;
     app.hover = None;
+    let tol = 3.0 / view.scale;
+    // The net under the pointer: copper first, then pours.
+    let net_at = |x: f32, y: f32| -> (Option<u32>, Option<u32>) {
+        match scene.pick(x, y, tol, app.active) {
+            Some(i) => (scene.prims[i].net, scene.prims[i].component),
+            None => (
+                scene
+                    .pick_fill(x, y, app.active)
+                    .and_then(|f| scene.fills[f].net),
+                None,
+            ),
+        }
+    };
     if let Some([x, y]) = pointer {
-        if let Some(i) = scene.pick(x, y, 3.0 / view.scale, app.active) {
-            let p = &scene.prims[i];
-            app.hover = p
-                .net
-                .and_then(|n| scene.board.nets.get(n as usize))
-                .map(|n| n.name.clone());
-            if let Some(c) = p
-                .component
-                .and_then(|c| scene.board.components.get(c as usize))
-            {
-                app.hover = Some(format!(
-                    "{}  ·  {}",
-                    app.hover.clone().unwrap_or_else(|| "no net".into()),
-                    c.designator
-                ));
-            }
+        let (net, component) = net_at(x, y);
+        app.hover = net
+            .and_then(|n| scene.board.nets.get(n as usize))
+            .map(|n| n.name.clone());
+        if let Some(c) = component.and_then(|c| scene.board.components.get(c as usize)) {
+            app.hover = Some(format!(
+                "{}  ·  {}",
+                app.hover.clone().unwrap_or_else(|| "no net".into()),
+                c.designator
+            ));
         }
     }
+    // Measuring snaps to pad and via centres and track ends within 8 px.
+    let snapped = pointer.map(|[x, y]| {
+        scene
+            .snap(x, y, 8.0 / view.scale, None)
+            .map(|(p, _)| p)
+            .unwrap_or([x, y])
+    });
     if resp.clicked() {
-        if let Some([x, y]) = pointer {
-            app.marker = None;
-            match scene
-                .pick(x, y, 3.0 / view.scale, app.active)
-                .and_then(|i| scene.prims[i].net)
-            {
-                Some(n) => {
-                    app.selected = Some(n);
-                    app.message = None;
+        if let (Some([x, y]), Some(at)) = (pointer, snapped) {
+            match app.tool {
+                Tool::Measure => {
+                    app.measure = match app.measure {
+                        Some(Measure { a, b: None }) => Some(Measure { a, b: Some(at) }),
+                        _ => Some(Measure { a: at, b: None }),
+                    };
                 }
-                None => app.selected = None,
+                Tool::Select => {
+                    app.marker = None;
+                    match net_at(x, y).0 {
+                        Some(n) => {
+                            app.selected = Some(n);
+                            app.message = None;
+                        }
+                        None => app.selected = None,
+                    }
+                }
             }
         }
     }
@@ -196,7 +217,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             Slot::Vias => 50,
             Slot::TopSilk => 100,
             Slot::BottomSilk => -100,
-            Slot::Other => -1000,
+            Slot::Pours | Slot::Other => -1000,
         }
     };
     order.sort_by_key(|(s, _)| if view.flip { -rank(*s) } else { rank(*s) });
@@ -213,6 +234,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             _ => 0.9,
         } * dim;
         let col = rgba(*color, alpha);
+        if matches!(slot, Slot::Copper(_)) {
+            draw_fills(&mut shapes, scene, &view, visible, |f| {
+                // Pours sit under the tracks; planes on other layers stay faint.
+                let a = if *slot == app.active { 0.5 } else { 0.22 };
+                (f.slot == *slot).then_some(rgba(*color, a * dim))
+            });
+        }
         for p in scene
             .prims
             .iter()
@@ -246,6 +274,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
 
     // Selected net on top, in white.
     if let Some(n) = app.selected {
+        draw_fills(&mut shapes, scene, &view, visible, |f| {
+            (f.net == Some(n)).then_some(Color32::from_white_alpha(70))
+        });
         if let Some(list) = scene.by_net.get(&n) {
             for &i in list {
                 let p = &scene.prims[i];
@@ -294,6 +325,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
+    if app.tool == Tool::Measure || app.measure.is_some() {
+        draw_measure(ui, &mut shapes, &view, app.measure, snapped);
+    }
+
     if let Some([x, y]) = app.marker {
         shapes.push(Shape::circle_stroke(
             view.to_screen(x, y),
@@ -302,4 +337,93 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ));
     }
     painter.extend(shapes);
+}
+
+/// Adds the visible pours that `color_of` gives a colour to, as one mesh.
+fn draw_fills(
+    shapes: &mut Vec<Shape>,
+    scene: &Scene,
+    view: &View,
+    visible: [f32; 4],
+    color_of: impl Fn(&crate::scene::Fill) -> Option<Color32>,
+) {
+    let mut mesh = egui::Mesh::default();
+    for f in &scene.fills {
+        if !overlaps(f.bbox, visible) || !scene.fill_shows(f) {
+            continue;
+        }
+        let Some(color) = color_of(f) else { continue };
+        let base = mesh.vertices.len() as u32;
+        for v in &scene.fill_verts[f.verts.clone()] {
+            mesh.colored_vertex(view.to_screen(v[0], v[1]), color);
+        }
+        mesh.indices
+            .extend(scene.fill_tris[f.tris.clone()].iter().map(|&i| base + i));
+    }
+    if !mesh.indices.is_empty() {
+        shapes.push(Shape::mesh(mesh));
+    }
+}
+
+/// The measurement line, its end markers and a label with the distance.
+fn draw_measure(
+    ui: &egui::Ui,
+    shapes: &mut Vec<Shape>,
+    view: &View,
+    measure: Option<Measure>,
+    cursor: Option<[f32; 2]>,
+) {
+    let stroke = Stroke::new(1.5_f32, MEASURE);
+    let mark = |shapes: &mut Vec<Shape>, p: Pos2| {
+        shapes.push(Shape::circle_stroke(p, 5.0, stroke));
+        shapes.push(Shape::line_segment(
+            [p - egui::vec2(8.0, 0.0), p + egui::vec2(8.0, 0.0)],
+            stroke,
+        ));
+        shapes.push(Shape::line_segment(
+            [p - egui::vec2(0.0, 8.0), p + egui::vec2(0.0, 8.0)],
+            stroke,
+        ));
+    };
+    let Some(m) = measure else {
+        if let Some([x, y]) = cursor {
+            mark(shapes, view.to_screen(x, y));
+        }
+        return;
+    };
+    let Some(b) = m.b.or(cursor) else { return };
+    let (pa, pb) = (view.to_screen(m.a[0], m.a[1]), view.to_screen(b[0], b[1]));
+    // Dashed guides for the x and y legs, then the direct line.
+    let corner = view.to_screen(b[0], m.a[1]);
+    let guide = Stroke::new(1.0_f32, MEASURE.gamma_multiply(0.5));
+    shapes.extend(Shape::dashed_line(&[pa, corner, pb], guide, 5.0, 4.0));
+    shapes.push(Shape::line_segment([pa, pb], stroke));
+    mark(shapes, pa);
+    mark(shapes, pb);
+    let (dx, dy) = (b[0] - m.a[0], b[1] - m.a[1]);
+    let d = dx.hypot(dy);
+    let text = format!(
+        "{d:.2} mil  ·  {:.4} mm\nΔx {:.2}   Δy {:.2} mil",
+        d * 0.0254,
+        dx.abs(),
+        dy.abs()
+    );
+    let font = egui::FontId::proportional(13.0);
+    let galley = ui.fonts(|f| f.layout_no_wrap(text, font, Color32::BLACK));
+    let size = galley.size();
+    // Beside the middle of the line, kept inside the canvas.
+    let mid = pa + (pb - pa) / 2.0 + egui::vec2(12.0, -size.y - 12.0);
+    let area = view.rect.shrink(8.0);
+    let at = Pos2::new(
+        mid.x
+            .clamp(area.min.x, (area.max.x - size.x).max(area.min.x)),
+        mid.y
+            .clamp(area.min.y, (area.max.y - size.y).max(area.min.y)),
+    );
+    shapes.push(Shape::rect_filled(
+        Rect::from_min_size(at, size).expand(5.0),
+        4.0,
+        MEASURE,
+    ));
+    shapes.push(Shape::galley(at, galley, Color32::BLACK));
 }

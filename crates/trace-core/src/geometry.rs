@@ -74,6 +74,15 @@ pub struct Pad {
     pub rotation_deg: f64,
 }
 
+/// A filled copper area (pour, plane or fill) with its cut-outs.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Polygon {
+    pub layer: LayerRef,
+    pub net: Option<u32>,
+    pub outline: Vec<Point>,
+    pub holes: Vec<Vec<Point>>,
+}
+
 /// Physical content of a board.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Geometry {
@@ -83,4 +92,6 @@ pub struct Geometry {
     pub arcs: Vec<Arc>,
     pub vias: Vec<Via>,
     pub pads: Vec<Pad>,
+    #[serde(default)]
+    pub polygons: Vec<Polygon>,
 }

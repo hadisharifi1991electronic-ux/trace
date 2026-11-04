@@ -1,4 +1,5 @@
-//! Trace desktop app: open Altium boards, inspect nets, check pairs.
+//! Trace desktop app: open Altium and Allegro boards, inspect nets, measure,
+//! check pairs.
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
@@ -27,8 +28,23 @@ fn main() -> eframe::Result {
     )
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum Tool {
+    Select,
+    Measure,
+}
+
+/// A distance measurement: first point, and second once placed.
+#[derive(Clone, Copy)]
+pub struct Measure {
+    pub a: [f32; 2],
+    pub b: Option<[f32; 2]>,
+}
+
 pub struct App {
     scene: Option<Scene>,
+    tool: Tool,
+    measure: Option<Measure>,
     view: canvas::View,
     active: Slot,
     selected: Option<u32>,
@@ -63,6 +79,8 @@ impl App {
             .unwrap_or_default();
         let mut app = App {
             scene: None,
+            tool: Tool::Select,
+            measure: None,
             view: canvas::View::default(),
             active: Slot::Copper(0),
             selected: None,
@@ -83,21 +101,12 @@ impl App {
     }
 
     fn open(&mut self, path: PathBuf) {
-        let ext = path
-            .extension()
-            .map(|e| e.to_string_lossy().to_ascii_lowercase());
-        if ext.as_deref() != Some("pcbdoc") {
-            self.message = Some((
-                format!("{} is not an Altium .PcbDoc board.", path.display()),
-                true,
-            ));
-            return;
-        }
         match Scene::load(path.clone()) {
             Ok(scene) => {
                 self.scene = Some(scene);
                 self.selected = None;
                 self.marker = None;
+                self.measure = None;
                 self.active = Slot::Copper(0);
                 self.needs_fit = true;
                 self.message = None;
@@ -113,7 +122,9 @@ impl App {
 
     fn open_dialog(&mut self) {
         if let Some(p) = rfd::FileDialog::new()
+            .add_filter("Boards", &["PcbDoc", "pcbdoc", "brd", "BRD", "tracepcb"])
             .add_filter("Altium PCB", &["PcbDoc", "pcbdoc"])
+            .add_filter("Allegro board", &["brd", "BRD"])
             .set_title("Open a board")
             .pick_file()
         {
@@ -281,8 +292,43 @@ impl App {
             });
             ui.menu_button("Help", |ui| {
                 ui.label("Trace 0.1, open-source PCB design");
-                ui.label(RichText::new("Scroll to zoom, drag to pan, click to select a net.\nF fits the board, B flips to the bottom, Esc clears.").weak());
+                ui.label("Opens Altium .PcbDoc and Allegro .brd (16.0 and newer) boards.");
+                ui.label(RichText::new("Scroll to zoom, drag to pan, click to select a net.\nM measures: click two points (they snap to pads, vias and track ends).\nF fits the board, B flips to the bottom, Esc clears.").weak());
             });
+        });
+    }
+
+    fn set_tool(&mut self, tool: Tool) {
+        self.tool = tool;
+        self.measure = None;
+    }
+
+    fn toolbar(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            if ui
+                .selectable_label(self.tool == Tool::Select, "Select")
+                .on_hover_text("Click copper to select its net")
+                .clicked()
+            {
+                self.set_tool(Tool::Select);
+            }
+            if ui
+                .selectable_label(self.tool == Tool::Measure, "Measure (M)")
+                .on_hover_text(
+                    "Click two points to measure; they snap to pads, vias and track ends",
+                )
+                .clicked()
+            {
+                self.set_tool(Tool::Measure);
+            }
+            ui.separator();
+            let hint = match (self.tool, self.measure) {
+                (Tool::Measure, None) => "Click the first point.",
+                (Tool::Measure, Some(Measure { b: None, .. })) => "Click the second point.",
+                (Tool::Measure, Some(_)) => "Click to start a new measurement, Esc to clear.",
+                _ => "Drag to pan, scroll to zoom, click copper to select a net.",
+            };
+            ui.label(RichText::new(hint).weak());
         });
     }
 
@@ -308,11 +354,16 @@ impl App {
             .iter()
             .filter(|n| n.pads >= 2 && !n.has_pour && !n.is_complete())
             .count();
+        let thickness = b.stackup.total_thickness();
         ui.label(
             RichText::new(format!(
-                "{} copper layers · {:.2} mm\n{} parts · {} nets · {} pairs\n{} nets still open",
+                "{} copper layers{}\n{} parts · {} nets · {} pairs\n{} nets still open",
                 scene.copper_count,
-                b.stackup.total_thickness().mm(),
+                if thickness.0 > 0 {
+                    format!(" · {:.2} mm", thickness.mm())
+                } else {
+                    String::new()
+                },
                 b.components.len(),
                 b.nets.len(),
                 b.diff_pairs.len(),
@@ -335,6 +386,23 @@ impl App {
             } else {
                 ui.visuals().text_color()
             }));
+        }
+        if let Some(m) = self.measure {
+            ui.separator();
+            ui.label(RichText::new("MEASURE").small().weak());
+            let b = m.b.or(self.cursor).unwrap_or(m.a);
+            let (dx, dy) = (b[0] - m.a[0], b[1] - m.a[1]);
+            let d = dx.hypot(dy);
+            egui::Grid::new("measure")
+                .num_columns(2)
+                .spacing([12.0, 3.0])
+                .show(ui, |ui| {
+                    for (k, v) in [("Distance", d), ("Δx", dx.abs()), ("Δy", dy.abs())] {
+                        ui.label(RichText::new(k).weak());
+                        ui.label(format!("{v:.2} mil · {:.4} mm", v * 0.0254));
+                        ui.end_row();
+                    }
+                });
         }
         ui.separator();
         self.net_info(ui);
@@ -382,7 +450,7 @@ impl App {
             }
             for l in scene.layers.iter_mut() {
                 if solo {
-                    l.visible = l.slot == slot || l.slot == Slot::Vias;
+                    l.visible = l.slot == slot || l.slot == Slot::Vias || l.slot == Slot::Pours;
                 } else if l.slot == slot {
                     l.visible = true;
                 }
@@ -412,12 +480,17 @@ impl App {
                     net.total_length().mm()
                 ));
                 ui.end_row();
-                ui.label(RichText::new("Via barrels").weak());
-                ui.label(format!(
-                    "{:.1} mil ({} vias)",
-                    net.via_length.mil(),
-                    net.vias
-                ));
+                if scene.board.stackup.total_thickness().0 > 0 {
+                    ui.label(RichText::new("Via barrels").weak());
+                    ui.label(format!(
+                        "{:.1} mil ({} vias)",
+                        net.via_length.mil(),
+                        net.vias
+                    ));
+                } else {
+                    ui.label(RichText::new("Vias").weak());
+                    ui.label(net.vias.to_string());
+                }
                 ui.end_row();
                 ui.label(RichText::new("Routing").weak());
                 let (text, bad) = if net.pads < 2 {
@@ -532,6 +605,20 @@ impl App {
     }
 }
 
+pub const MEASURE: Color32 = Color32::from_rgb(255, 214, 10);
+
+/// One-line summary of a measurement.
+pub fn measure_text(a: [f32; 2], b: [f32; 2]) -> Option<String> {
+    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+    let d = dx.hypot(dy);
+    Some(format!(
+        "Measured {d:.2} mil · {:.4} mm   (Δx {:.2}, Δy {:.2} mil)",
+        d * 0.0254,
+        dx.abs(),
+        dy.abs()
+    ))
+}
+
 #[derive(PartialEq, Clone, Copy)]
 enum PairStatus {
     Over,
@@ -628,14 +715,22 @@ impl eframe::App for App {
             self.open(p);
         }
         let typing = ctx.wants_keyboard_input();
-        let (open_shortcut, fit, flip, esc) = ctx.input_mut(|i| {
+        let (open_shortcut, fit, flip, esc, measure_key) = ctx.input_mut(|i| {
             (
                 i.consume_key(egui::Modifiers::COMMAND, egui::Key::O),
                 !typing && i.key_pressed(egui::Key::F),
                 !typing && i.key_pressed(egui::Key::B),
                 i.key_pressed(egui::Key::Escape),
+                !typing && i.key_pressed(egui::Key::M),
             )
         });
+        if measure_key {
+            self.set_tool(if self.tool == Tool::Measure {
+                Tool::Select
+            } else {
+                Tool::Measure
+            });
+        }
         if open_shortcut {
             self.open_dialog();
         }
@@ -647,11 +742,20 @@ impl eframe::App for App {
             self.needs_fit = true;
         }
         if esc {
-            self.selected = None;
-            self.marker = None;
+            if self.measure.is_some() {
+                self.measure = None;
+            } else if self.tool == Tool::Measure {
+                self.set_tool(Tool::Select);
+            } else {
+                self.selected = None;
+                self.marker = None;
+            }
         }
 
         egui::TopBottomPanel::top("menu").show(ctx, |ui| self.menu(ui, ctx));
+        if self.scene.is_some() {
+            egui::TopBottomPanel::top("tools").show(ctx, |ui| self.toolbar(ui));
+        }
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if let Some([x, y]) = self.cursor {
@@ -665,7 +769,9 @@ impl eframe::App for App {
                         .weak(),
                     );
                 }
-                if let Some(h) = &self.hover {
+                if let Some(text) = self.measure.and_then(|m| measure_text(m.a, m.b?)) {
+                    ui.label(RichText::new(text).strong().color(MEASURE));
+                } else if let Some(h) = &self.hover {
                     ui.label(RichText::new(h).strong());
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -702,7 +808,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().frame(egui::Frame::none().fill(Color32::from_rgb(15, 17, 21))).show(ctx, |ui| {
             if self.scene.is_none() {
                 ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new("Open a board with File → Open board…, or drop a .PcbDoc file here.").size(16.0).weak());
+                    ui.label(RichText::new("Open a board with File → Open board…, or drop a .PcbDoc or .brd file here.").size(16.0).weak());
                 });
                 return;
             }

@@ -12,5 +12,7 @@ path = "src/main.rs"
 [dependencies]
 trace-core.workspace = true
 trace-altium.workspace = true
+trace-allegro.workspace = true
 eframe = { version = "0.29", default-features = false, features = ["glow", "default_fonts", "persistence", "x11", "wayland"] }
 rfd = { version = "0.15", default-features = false, features = ["xdg-portal", "tokio"] }
+lyon_tessellation = "1.0.23"

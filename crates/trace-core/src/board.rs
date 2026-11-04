@@ -11,8 +11,8 @@ pub struct Board {
     pub diff_pairs: Vec<DiffPair>,
     pub components: Vec<Component>,
     pub rules: Vec<Rule>,
-    /// Counts of routed primitives, until geometry import lands.
     pub stats: BoardStats,
+    pub geometry: crate::Geometry,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -43,6 +43,9 @@ impl Stackup {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct StackLayer {
     pub name: String,
+    /// Layer number in the source file, kept so primitives can be matched up.
+    #[serde(skip)]
+    pub altium_id: Option<u8>,
     pub kind: LayerKind,
     pub thickness: Length,
     /// Relative permittivity, for dielectric and mask layers.

@@ -1,0 +1,435 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Trace board viewer</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #171a21; --line: #2a2f3a; --text: #e6e8ee; --muted: #9aa3b2;
+    --accent: #ffffff; --board: #0b2a1c; --outline: #d9c27a;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--text);
+    font: 13px/1.4 system-ui, -apple-system, "Segoe UI", sans-serif; overflow: hidden; }
+  #app { display: grid; grid-template-columns: 260px 1fr; height: 100%; }
+  aside { background: var(--panel); border-right: 1px solid var(--line); display: flex; flex-direction: column; min-height: 0; }
+  header { padding: 14px 14px 10px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 15px; margin: 0 0 2px; }
+  header p { margin: 0; color: var(--muted); font-size: 12px; }
+  .section { padding: 10px 14px; border-bottom: 1px solid var(--line); }
+  .section h2 { font-size: 11px; text-transform: uppercase; letter-spacing: .06em; color: var(--muted); margin: 0 0 8px; font-weight: 600; }
+  #layers { overflow-y: auto; flex: 1; min-height: 0; }
+  .layer { display: flex; align-items: center; gap: 8px; padding: 3px 4px; border-radius: 4px; cursor: pointer; user-select: none; }
+  .layer:hover { background: #ffffff10; }
+  .layer.active { background: #ffffff1c; }
+  .swatch { width: 12px; height: 12px; border-radius: 3px; flex: none; }
+  .layer input { margin: 0; }
+  .layer span.name { flex: 1; }
+  .layer span.count { color: var(--muted); font-size: 11px; }
+  input[type=search] { width: 100%; padding: 7px 9px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg); color: var(--text); font: inherit; }
+  .row { display: flex; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
+  button { background: #ffffff12; color: var(--text); border: 1px solid var(--line); border-radius: 6px; padding: 5px 9px; font: inherit; cursor: pointer; }
+  button:hover { background: #ffffff20; }
+  #info { min-height: 92px; }
+  #info .big { font-size: 14px; font-weight: 600; word-break: break-all; }
+  #info .muted { color: var(--muted); }
+  #info table { border-collapse: collapse; margin-top: 4px; width: 100%; }
+  #info td { padding: 1px 0; }
+  #info td { vertical-align: top; }
+  #info td:last-child { text-align: right; font-variant-numeric: tabular-nums; word-break: break-all; padding-left: 8px; }
+  #info td:first-child { white-space: nowrap; }
+  .warn { color: #ffb454; }
+  main { position: relative; min-width: 0; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; cursor: crosshair; }
+  #status { position: absolute; left: 10px; bottom: 8px; color: var(--muted); font-size: 12px; background: #0f1115cc; padding: 3px 8px; border-radius: 4px; font-variant-numeric: tabular-nums; }
+  #help { position: absolute; right: 10px; bottom: 8px; color: var(--muted); font-size: 12px; background: #0f1115cc; padding: 3px 8px; border-radius: 4px; }
+  @media (max-width: 700px) { #app { grid-template-columns: 1fr; grid-template-rows: 45% 55%; } aside { order: 2; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <aside>
+    <header><h1 id="title">Board</h1><p id="subtitle"></p></header>
+    <div class="section">
+      <input id="search" type="search" placeholder="Find a net or part, e.g. DDR4_CK0 or U1" autocomplete="off" list="names">
+      <datalist id="names"></datalist>
+      <div class="row">
+        <button id="fit" title="Fit board (F)">Fit</button>
+        <button id="flip" title="View from the bottom (B)">Flip</button>
+        <button id="allOn">All layers</button>
+        <button id="copperOff">Hide copper</button>
+      </div>
+    </div>
+    <div class="section" id="info"><span class="muted">Click a track, pad or via to select its net.</span></div>
+    <div class="section" style="border-bottom:0;padding-bottom:4px"><h2>Layers</h2></div>
+    <div id="layers" class="section" style="padding-top:0"></div>
+  </aside>
+  <main>
+    <canvas id="c"></canvas>
+    <div id="status"></div>
+    <div id="help">Scroll to zoom · drag to pan · click to select · Esc to clear</div>
+  </main>
+</div>
+<script>
+const D = /*DATA*/null;
+
+// ---------- layers ----------
+const palette = ["#e5484d","#3e9cf0","#46a758","#f5a524","#a86ee9","#12a594","#e93d82","#8e8c99",
+                 "#ffb454","#5fb8f0","#7fd17f","#d6409f","#9e7bf0","#2ebde5","#f76b15","#c2a679",
+                 "#6e9fff","#ff8b8b"];
+const layers = [];
+D.copper.forEach((name, i) => {
+  const last = i === D.copper.length - 1;
+  layers.push({ key: "C" + i, name, color: i === 0 ? "#e5484d" : last ? "#3e9cf0" : palette[(i + 1) % palette.length], on: true, copper: true, order: D.copper.length - i });
+});
+const extra = { ALL: ["Through-hole", "#c9b458"], TS: ["Top silk", "#e6e6e6"], BS: ["Bottom silk", "#b48cff"], KO: ["Keepout", "#ff5d5d"] };
+for (const k of Object.keys(D.layerKeys)) {
+  if (k.startsWith("C")) continue;
+  const [name, color] = extra[k] || [D.layerKeys[k], "#8e8c99"];
+  layers.push({ key: k, name, color, on: k !== "KO" && !k.startsWith("M") && k !== "BS", copper: false, order: k === "TS" ? 100 : k === "ALL" ? 50 : -1 });
+}
+const byKey = Object.fromEntries(layers.map(l => [l.key, l]));
+let activeKey = "C0";
+
+// ---------- geometry caches ----------
+// Each layer gets Path2D batches grouped by stroke width, built once.
+const batches = {};      // key -> { strokes: Map(width -> Path2D), fill: Path2D, count }
+const items = [];        // flat hit-test list: [kind, layerKey, net, ...geom]
+function batch(key) { return batches[key] || (batches[key] = { strokes: new Map(), fill: new Path2D(), count: 0 }); }
+function stroke(key, w) { const b = batch(key); let p = b.strokes.get(w); if (!p) { p = new Path2D(); b.strokes.set(w, p); } b.count++; return p; }
+
+for (const [key, arr] of Object.entries(D.tracks)) {
+  for (let i = 0; i < arr.length; i += 6) {
+    const [x1, y1, x2, y2, w, net] = arr.slice(i, i + 6);
+    const p = stroke(key, w); p.moveTo(x1, y1); p.lineTo(x2, y2);
+    items.push({ t: "track", key, net, x1, y1, x2, y2, w });
+  }
+}
+for (const [key, arr] of Object.entries(D.arcs)) {
+  for (let i = 0; i < arr.length; i += 7) {
+    const [cx, cy, r, a0, a1, w, net] = arr.slice(i, i + 7);
+    const p = stroke(key, w); const s = a0 * Math.PI / 180, e = a1 * Math.PI / 180;
+    p.moveTo(cx + r * Math.cos(s), cy + r * Math.sin(s)); p.arc(cx, cy, r, s, e, false);
+    items.push({ t: "arc", key, net, cx, cy, r, a0, a1, w });
+  }
+}
+// shape: 0 round or oval, 1 rectangle, 2 octagon (drawn as a rectangle)
+function padPath(path, x, y, sx, sy, rot, shape) {
+  if (shape === 0 && Math.abs(sx - sy) < 1e-6) { path.moveTo(x + sx / 2, y); path.arc(x, y, sx / 2, 0, Math.PI * 2); return; }
+  const c = Math.cos(rot * Math.PI / 180), s = Math.sin(rot * Math.PI / 180);
+  if (shape !== 0) {
+    [[-sx / 2, -sy / 2], [sx / 2, -sy / 2], [sx / 2, sy / 2], [-sx / 2, sy / 2]].forEach(([u, v], i) => {
+      const px = x + u * c - v * s, py = y + u * s + v * c; i ? path.lineTo(px, py) : path.moveTo(px, py);
+    });
+    path.closePath(); return;
+  }
+  // oval: a capsule along the long axis
+  const short = Math.min(sx, sy), half = (Math.max(sx, sy) - short) / 2;
+  const ang = (rot + (sx >= sy ? 0 : 90)) * Math.PI / 180, ca = Math.cos(ang), sa = Math.sin(ang);
+  const ax = x - half * ca, ay = y - half * sa, bx = x + half * ca, by = y + half * sa;
+  path.moveTo(ax + short / 2 * Math.cos(ang + Math.PI / 2), ay + short / 2 * Math.sin(ang + Math.PI / 2));
+  path.arc(ax, ay, short / 2, ang + Math.PI / 2, ang + 3 * Math.PI / 2);
+  path.arc(bx, by, short / 2, ang - Math.PI / 2, ang + Math.PI / 2);
+  path.closePath();
+}
+for (let i = 0; i < D.pads.length; i += 9) {
+  const [x, y, sx, sy, rot, shape, net, key, comp] = D.pads.slice(i, i + 9);
+  const b = batch(key); padPath(b.fill, x, y, sx, sy, rot, shape); b.count++;
+  items.push({ t: "pad", key, net, x, y, sx, sy, rot, shape, comp });
+}
+const viaPath = new Path2D(), holePath = new Path2D();
+for (let i = 0; i < D.vias.length; i += 5) {
+  const [x, y, d, h, net] = D.vias.slice(i, i + 5);
+  viaPath.moveTo(x + d / 2, y); viaPath.arc(x, y, d / 2, 0, Math.PI * 2);
+  holePath.moveTo(x + h / 2, y); holePath.arc(x, y, h / 2, 0, Math.PI * 2);
+  items.push({ t: "via", key: "VIA", net, x, y, d });
+}
+layers.push({ key: "VIA", name: "Vias", color: "#c9b458", on: true, copper: false, order: 60 });
+byKey.VIA = layers[layers.length - 1];
+batch("VIA").count = D.vias.length / 5;
+
+const outline = new Path2D();
+D.outline.forEach(([x, y], i) => i ? outline.lineTo(x, y) : outline.moveTo(x, y));
+outline.closePath();
+
+// spatial grid for fast hit tests
+const bounds = (() => {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  const add = (x, y) => { x0 = Math.min(x0, x); y0 = Math.min(y0, y); x1 = Math.max(x1, x); y1 = Math.max(y1, y); };
+  D.outline.forEach(([x, y]) => add(x, y));
+  if (!isFinite(x0)) items.forEach(it => add(it.x ?? it.x1 ?? it.cx, it.y ?? it.y1 ?? it.cy));
+  return { x0, y0, x1, y1 };
+})();
+const CELL = 200, grid = new Map();
+function cellsFor(it) {
+  let a, b, c, d;
+  if (it.t === "track") { a = Math.min(it.x1, it.x2) - it.w; b = Math.min(it.y1, it.y2) - it.w; c = Math.max(it.x1, it.x2) + it.w; d = Math.max(it.y1, it.y2) + it.w; }
+  else if (it.t === "arc") { a = it.cx - it.r - it.w; b = it.cy - it.r - it.w; c = it.cx + it.r + it.w; d = it.cy + it.r + it.w; }
+  else { const r = Math.max(it.sx || 0, it.sy || 0, it.d || 0); a = it.x - r; b = it.y - r; c = it.x + r; d = it.y + r; }
+  const out = [];
+  for (let gx = Math.floor(a / CELL); gx <= Math.floor(c / CELL); gx++)
+    for (let gy = Math.floor(b / CELL); gy <= Math.floor(d / CELL); gy++) out.push(gx + "," + gy);
+  return out;
+}
+items.forEach(it => cellsFor(it).forEach(k => { let l = grid.get(k); if (!l) grid.set(k, l = []); l.push(it); }));
+
+// per-net index for highlighting
+const netItems = new Map();
+items.forEach(it => { if (it.net >= 0) { let l = netItems.get(it.net); if (!l) netItems.set(it.net, l = []); l.push(it); } });
+
+// ---------- view ----------
+const canvas = document.getElementById("c"), ctx = canvas.getContext("2d");
+let view = { s: 1, tx: 0, ty: 0, flip: false };
+let selected = null; // net index
+let marker = null;   // {x,y} for found parts
+function resize() {
+  const r = canvas.getBoundingClientRect(), dpr = window.devicePixelRatio || 1;
+  canvas.width = Math.max(1, r.width * dpr); canvas.height = Math.max(1, r.height * dpr);
+  draw();
+}
+function fit() {
+  const r = canvas.getBoundingClientRect();
+  const w = bounds.x1 - bounds.x0, h = bounds.y1 - bounds.y0;
+  view.s = Math.min(r.width / w, r.height / h) * 0.92;
+  const cx = (bounds.x0 + bounds.x1) / 2, cy = (bounds.y0 + bounds.y1) / 2;
+  view.tx = r.width / 2 - (view.flip ? -cx : cx) * view.s;
+  view.ty = r.height / 2 + cy * view.s;
+  draw();
+}
+function toScreen(x, y) { return [(view.flip ? -x : x) * view.s + view.tx, -y * view.s + view.ty]; }
+function toBoard(px, py) { const x = (px - view.tx) / view.s; return [view.flip ? -x : x, -(py - view.ty) / view.s]; }
+
+function applyTransform() {
+  const dpr = window.devicePixelRatio || 1;
+  ctx.setTransform(dpr * view.s * (view.flip ? -1 : 1), 0, 0, -dpr * view.s, dpr * view.tx, dpr * view.ty);
+}
+function drawLayer(key, color, alpha) {
+  const b = batches[key]; if (!b) return;
+  ctx.globalAlpha = alpha; ctx.strokeStyle = color; ctx.fillStyle = color;
+  const minW = 0.8 / view.s;
+  for (const [w, p] of b.strokes) { ctx.lineWidth = Math.max(w, minW); ctx.stroke(p); }
+  ctx.fill(b.fill);
+}
+function draw() {
+  const dpr = window.devicePixelRatio || 1;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+  ctx.clearRect(0, 0, canvas.width, canvas.height);
+  applyTransform();
+  ctx.lineCap = "round"; ctx.lineJoin = "round";
+  ctx.globalAlpha = 1; ctx.fillStyle = "#0b2a1c"; ctx.fill(outline, "evenodd");
+  const dim = selected !== null ? 0.25 : 1;
+  const visible = layers.filter(l => l.on).sort((a, b) => (view.flip ? b.order - a.order : a.order - b.order));
+  for (const l of visible) {
+    if (l.key === "VIA") {
+      ctx.globalAlpha = 0.9 * dim; ctx.fillStyle = l.color; ctx.fill(viaPath);
+      ctx.globalAlpha = 1; ctx.fillStyle = "#0f1115"; ctx.fill(holePath);
+      continue;
+    }
+    const active = l.key === activeKey;
+    drawLayer(l.key, l.color, (l.copper ? (active ? 0.95 : 0.6) : 0.9) * dim);
+  }
+  ctx.globalAlpha = 1; ctx.strokeStyle = "#d9c27a"; ctx.lineWidth = 1.5 / view.s; ctx.stroke(outline);
+  if (selected !== null) drawNet(selected);
+  drawLabels();
+  if (marker) {
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const [sx, sy] = toScreen(marker.x, marker.y);
+    ctx.strokeStyle = "#ffffff"; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(sx, sy, 18, 0, Math.PI * 2); ctx.stroke();
+  }
+  updateStatus();
+}
+function drawNet(n) {
+  const list = netItems.get(n) || [];
+  ctx.globalAlpha = 1; ctx.strokeStyle = "#ffffff"; ctx.fillStyle = "#ffffff";
+  for (const it of list) {
+    if (it.key !== "VIA" && it.key !== "ALL" && byKey[it.key] && !byKey[it.key].on) continue;
+    if (it.t === "track") { ctx.lineWidth = Math.max(it.w, 2 / view.s); ctx.beginPath(); ctx.moveTo(it.x1, it.y1); ctx.lineTo(it.x2, it.y2); ctx.stroke(); }
+    else if (it.t === "arc") { ctx.lineWidth = Math.max(it.w, 2 / view.s); ctx.beginPath(); ctx.arc(it.cx, it.cy, it.r, it.a0 * Math.PI / 180, it.a1 * Math.PI / 180); ctx.stroke(); }
+    else if (it.t === "via") { ctx.beginPath(); ctx.arc(it.x, it.y, it.d / 2, 0, Math.PI * 2); ctx.fill(); }
+    else { const p = new Path2D(); padPath(p, it.x, it.y, it.sx, it.sy, it.rot, it.shape); ctx.fill(p); }
+  }
+}
+function drawLabels() {
+  if (view.s < 0.25) return;
+  const dpr = window.devicePixelRatio || 1;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0); ctx.globalAlpha = 0.95;
+  const r = canvas.getBoundingClientRect();
+  ctx.font = `${Math.min(14, Math.max(10, view.s * 22))}px system-ui, sans-serif`;
+  ctx.textAlign = "center"; ctx.textBaseline = "middle";
+  const showTop = byKey.C0?.on, last = "C" + (D.copper.length - 1), showBottom = byKey[last]?.on;
+  for (const [ref, x, y, side] of D.comps) {
+    if (side === 0 ? !showTop : !showBottom) continue;
+    const [sx, sy] = toScreen(x, y);
+    if (sx < -40 || sy < -20 || sx > r.width + 40 || sy > r.height + 20) continue;
+    ctx.fillStyle = "#0f1115"; ctx.fillText(ref, sx + 1, sy + 1);
+    ctx.fillStyle = side === 0 ? "#ffffff" : "#c7b8ff"; ctx.fillText(ref, sx, sy);
+  }
+}
+
+// ---------- interaction ----------
+let drag = null;
+canvas.addEventListener("pointerdown", e => { drag = { x: e.clientX, y: e.clientY, tx: view.tx, ty: view.ty, moved: false }; canvas.setPointerCapture(e.pointerId); });
+canvas.addEventListener("pointermove", e => {
+  const r = canvas.getBoundingClientRect();
+  lastMouse = toBoard(e.clientX - r.left, e.clientY - r.top);
+  if (drag) {
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    if (Math.abs(dx) + Math.abs(dy) > 3) drag.moved = true;
+    if (drag.moved) { view.tx = drag.tx + dx; view.ty = drag.ty + dy; requestDraw(); }
+  } else updateStatus();
+});
+canvas.addEventListener("pointerup", e => {
+  if (drag && !drag.moved) pick(e);
+  drag = null;
+});
+canvas.addEventListener("wheel", e => {
+  e.preventDefault();
+  const r = canvas.getBoundingClientRect(), px = e.clientX - r.left, py = e.clientY - r.top;
+  const k = Math.exp(-e.deltaY * 0.0015);
+  view.tx = px - (px - view.tx) * k; view.ty = py - (py - view.ty) * k; view.s *= k;
+  requestDraw();
+}, { passive: false });
+let pending = false;
+function requestDraw() { if (!pending) { pending = true; requestAnimationFrame(() => { pending = false; draw(); }); } }
+let lastMouse = [0, 0];
+function updateStatus() {
+  document.getElementById("status").textContent =
+    `x ${lastMouse[0].toFixed(1)}  y ${lastMouse[1].toFixed(1)} mil   ·   ${(lastMouse[0] * 0.0254).toFixed(3)}, ${(lastMouse[1] * 0.0254).toFixed(3)} mm   ·   zoom ${(view.s * 100).toFixed(0)}%${view.flip ? "   ·   bottom view" : ""}`;
+}
+
+function distToSeg(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1, dy = y2 - y1, l = dx * dx + dy * dy;
+  let t = l ? ((px - x1) * dx + (py - y1) * dy) / l : 0; t = Math.max(0, Math.min(1, t));
+  return Math.hypot(px - (x1 + t * dx), py - (y1 + t * dy));
+}
+function pick(e) {
+  const r = canvas.getBoundingClientRect();
+  const [x, y] = toBoard(e.clientX - r.left, e.clientY - r.top);
+  const tol = 4 / view.s;
+  const cand = grid.get(Math.floor(x / CELL) + "," + Math.floor(y / CELL)) || [];
+  let best = null, bestScore = Infinity;
+  for (const it of cand) {
+    const l = byKey[it.key]; if (it.key !== "ALL" && (!l || !l.on)) continue;
+    let d;
+    if (it.t === "track") d = distToSeg(x, y, it.x1, it.y1, it.x2, it.y2) - it.w / 2;
+    else if (it.t === "arc") d = Math.abs(Math.hypot(x - it.cx, y - it.cy) - it.r) - it.w / 2;
+    else if (it.t === "via") d = Math.hypot(x - it.x, y - it.y) - it.d / 2;
+    else d = Math.hypot(x - it.x, y - it.y) - Math.min(it.sx, it.sy) / 2;
+    if (d > tol) continue;
+    const score = d - (it.key === activeKey ? tol : 0) - (it.t === "pad" ? tol * 0.5 : 0);
+    if (score < bestScore) { bestScore = score; best = it; }
+  }
+  marker = null;
+  if (!best || best.net < 0) { selected = null; showInfo(null, best); draw(); return; }
+  selected = best.net; showInfo(best.net, best); draw();
+}
+
+const netIndex = new Map(D.nets.map((n, i) => [n.name, i]));
+const pairOf = new Map();
+D.pairs.forEach(([name, p, n]) => { pairOf.set(p, { name, other: n }); pairOf.set(n, { name, other: p }); });
+function fmtLen(mil) { return `${mil.toFixed(1)} mil · ${(mil * 0.0254).toFixed(2)} mm`; }
+function showInfo(net, hit) {
+  const el = document.getElementById("info");
+  if (net === null) {
+    if (hit && hit.t === "pad" && hit.comp >= 0) { el.innerHTML = `<div class="big">${esc(D.comps[hit.comp]?.[0] ?? "")}</div><div class="muted">Unconnected pad</div>`; return; }
+    el.innerHTML = `<span class="muted">Click a track, pad or via to select its net.</span>`; return;
+  }
+  const n = D.nets[net];
+  let html = `<div class="big">${esc(n.name)}</div><table>
+    <tr><td class="muted">Routed length</td><td>${fmtLen(n.len)}</td></tr>
+    <tr><td class="muted">Vias</td><td>${n.vias}</td></tr>`;
+  const part = hit && hit.t === "pad" && hit.comp >= 0 ? D.comps[hit.comp] : null;
+  if (part) html += `<tr><td class="muted">Pad on</td><td>${esc(part[0])} (${esc(part[4])})</td></tr>`;
+  const pr = pairOf.get(n.name);
+  if (pr) {
+    const o = D.nets[netIndex.get(pr.other)];
+    if (o) {
+      const skew = Math.abs(n.len - o.len);
+      html += `<tr><td class="muted">Pair</td><td>${esc(pr.name)}</td></tr>
+        <tr><td class="muted">Partner</td><td>${esc(pr.other)} (${o.len.toFixed(1)} mil)</td></tr>
+        <tr><td class="muted">Pair skew</td><td class="${skew > 5 ? "warn" : ""}">${skew.toFixed(1)} mil</td></tr>`;
+    }
+  }
+  html += `</table>`;
+  if (n.len === 0) html += `<div class="warn">Not routed</div>`;
+  el.innerHTML = html;
+}
+function esc(s) { return String(s).replace(/[&<>"]/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+// search
+const compIndex = new Map(D.comps.map((c, i) => [c[0].toUpperCase(), i]));
+const dl = document.getElementById("names");
+const opts = D.nets.map(n => n.name).concat(D.comps.map(c => c[0])).filter(Boolean).sort();
+dl.innerHTML = opts.slice(0, 6000).map(o => `<option value="${esc(o)}">`).join("");
+document.getElementById("search").addEventListener("change", e => find(e.target.value.trim()));
+document.getElementById("search").addEventListener("keydown", e => { if (e.key === "Enter") find(e.target.value.trim()); });
+function find(q) {
+  if (!q) return;
+  let ci = compIndex.get(q.toUpperCase());
+  if (ci === undefined && /^[A-Za-z]+\d+$/.test(q)) {
+    // a designator that doesn't exist: say so rather than matching a net by accident
+    document.getElementById("info").innerHTML = `<span class="warn">No part called “${esc(q)}”.</span>`; return;
+  }
+  if (ci !== undefined) {
+    const [, x, y] = D.comps[ci];
+    zoomTo(x, y, 3); marker = { x, y }; selected = null;
+    document.getElementById("info").innerHTML = `<div class="big">${esc(D.comps[ci][0])}</div><div class="muted">${esc(D.comps[ci][4])} · ${D.comps[ci][3] ? "bottom" : "top"}</div>`;
+    draw(); return;
+  }
+  let ni = netIndex.get(q);
+  if (ni === undefined) { const up = q.toUpperCase(); ni = D.nets.findIndex(n => n.name.toUpperCase() === up); if (ni < 0) ni = D.nets.findIndex(n => n.name.toUpperCase().includes(up)); }
+  if (ni === undefined || ni < 0) { document.getElementById("info").innerHTML = `<span class="warn">Nothing called “${esc(q)}”.</span>`; return; }
+  selected = ni; marker = null;
+  const list = netItems.get(ni) || [];
+  if (list.length) {
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    list.forEach(it => { const xs = [it.x, it.x1, it.x2, it.cx].filter(v => v !== undefined), ys = [it.y, it.y1, it.y2, it.cy].filter(v => v !== undefined);
+      xs.forEach(v => { x0 = Math.min(x0, v); x1 = Math.max(x1, v); }); ys.forEach(v => { y0 = Math.min(y0, v); y1 = Math.max(y1, v); }); });
+    const r = canvas.getBoundingClientRect();
+    const s = Math.min(r.width / Math.max(x1 - x0, 50), r.height / Math.max(y1 - y0, 50)) * 0.8;
+    zoomTo((x0 + x1) / 2, (y0 + y1) / 2, s);
+  }
+  showInfo(ni, null); draw();
+}
+function zoomTo(x, y, s) {
+  const r = canvas.getBoundingClientRect();
+  view.s = s; view.tx = r.width / 2 - (view.flip ? -x : x) * s; view.ty = r.height / 2 + y * s;
+}
+
+// layer panel
+const panel = document.getElementById("layers");
+function renderLayers() {
+  panel.innerHTML = "";
+  for (const l of layers) {
+    const row = document.createElement("div");
+    row.className = "layer" + (l.key === activeKey ? " active" : "");
+    row.innerHTML = `<input type="checkbox" ${l.on ? "checked" : ""}><span class="swatch" style="background:${l.color}"></span><span class="name">${esc(l.name)}</span><span class="count">${(batches[l.key]?.count || 0).toLocaleString()}</span>`;
+    row.querySelector("input").addEventListener("click", e => { e.stopPropagation(); l.on = e.target.checked; draw(); });
+    row.addEventListener("click", () => { if (l.copper) { activeKey = l.key; l.on = true; renderLayers(); draw(); } });
+    row.addEventListener("dblclick", () => { layers.forEach(o => o.on = o === l || o.key === "VIA" || o.key === "ALL"); activeKey = l.copper ? l.key : activeKey; renderLayers(); draw(); });
+    row.title = l.copper ? "Click to make active, double-click to show only this layer" : "";
+    panel.appendChild(row);
+  }
+}
+document.getElementById("fit").onclick = fit;
+document.getElementById("flip").onclick = () => { view.flip = !view.flip; fit(); };
+document.getElementById("allOn").onclick = () => { layers.forEach(l => l.on = true); renderLayers(); draw(); };
+document.getElementById("copperOff").onclick = () => { layers.forEach(l => { if (l.copper) l.on = false; }); renderLayers(); draw(); };
+window.addEventListener("keydown", e => {
+  if (e.target.tagName === "INPUT") return;
+  if (e.key === "Escape") { selected = null; marker = null; showInfo(null); draw(); }
+  if (e.key === "f" || e.key === "F") fit();
+  if (e.key === "b" || e.key === "B") { view.flip = !view.flip; fit(); }
+});
+
+document.getElementById("title").textContent = D.name;
+document.getElementById("subtitle").textContent =
+  `${D.copper.length} copper layers · ${D.comps.length.toLocaleString()} parts · ${D.nets.length.toLocaleString()} nets · ${D.pairs.length} diff pairs`;
+document.title = D.name + " · Trace";
+renderLayers();
+new ResizeObserver(() => { resize(); }).observe(canvas);
+resize(); fit();
+</script>
+</body>
+</html>

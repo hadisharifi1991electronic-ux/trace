@@ -9,9 +9,133 @@ fn internal(v: i32) -> f64 {
     v as f64 / 10_000.0
 }
 
-/// Copper layers use ids 1 (top) to 32 (bottom).
-fn is_copper(layer: u8) -> bool {
-    (1..=32).contains(&layer)
+/// Maps Altium layer ids (1 top copper ... 32 bottom copper, 33+ other
+/// layers) onto Trace layers, numbering copper from the top as stacked.
+struct LayerMap {
+    copper: [Option<u8>; 33],
+}
+
+impl LayerMap {
+    fn new(stackup: &Stackup) -> Self {
+        let mut copper = [None; 33];
+        let ids: Vec<u8> = stackup
+            .copper_layers()
+            .filter_map(|l| l.altium_id)
+            .collect();
+        for (i, id) in ids.iter().enumerate() {
+            if let Some(slot) = copper.get_mut(*id as usize) {
+                *slot = Some(i as u8);
+            }
+        }
+        LayerMap { copper }
+    }
+
+    fn get(&self, id: u8) -> LayerRef {
+        match id {
+            1..=32 => self.copper[id as usize]
+                .map(LayerRef::Copper)
+                .unwrap_or(LayerRef::Other(id)),
+            33 => LayerRef::TopSilk,
+            34 => LayerRef::BottomSilk,
+            56 => LayerRef::Keepout,
+            57..=72 => LayerRef::Mechanical(id - 56),
+            74 => LayerRef::AllCopper,
+            _ => LayerRef::Other(id),
+        }
+    }
+}
+
+fn net(b: &[u8]) -> Option<u32> {
+    u16_at(b, 3).filter(|&n| n != u16::MAX).map(u32::from)
+}
+
+fn point(b: &[u8], at: usize) -> Option<Point> {
+    Some(Point {
+        x: Length::from_mil(internal(i32_at(b, at)?)),
+        y: Length::from_mil(internal(i32_at(b, at + 4)?)),
+    })
+}
+
+fn len_at(b: &[u8], at: usize) -> Option<Length> {
+    Some(Length::from_mil(internal(i32_at(b, at)?)))
+}
+
+// Track, arc, via and pad records all start with: layer u8, two flag bytes,
+// net index u16 and 8 bytes of links, with geometry from offset 13.
+
+fn parse_track(b: &[u8], layers: &LayerMap) -> Option<Track> {
+    Some(Track {
+        layer: layers.get(*b.first()?),
+        net: net(b),
+        start: point(b, 13)?,
+        end: point(b, 21)?,
+        width: len_at(b, 29)?,
+    })
+}
+
+fn parse_arc(b: &[u8], layers: &LayerMap) -> Option<Arc> {
+    let (start_deg, end_deg) = (f64_at(b, 25)?, f64_at(b, 33)?);
+    if !start_deg.is_finite() || !end_deg.is_finite() {
+        return None;
+    }
+    Some(Arc {
+        layer: layers.get(*b.first()?),
+        net: net(b),
+        center: point(b, 13)?,
+        radius: len_at(b, 21)?,
+        start_deg,
+        end_deg,
+        width: len_at(b, 41)?,
+    })
+}
+
+fn parse_via(b: &[u8]) -> Option<Via> {
+    Some(Via {
+        net: net(b),
+        at: point(b, 13)?,
+        diameter: len_at(b, 21)?,
+        hole: len_at(b, 25)?,
+    })
+}
+
+/// Pads have six blocks: name, two unused, a layer-stack string, the main
+/// geometry and extended shape data.
+fn parse_pad(blocks: &[&[u8]], layers: &LayerMap) -> Option<Pad> {
+    let name = blocks
+        .first()
+        .and_then(|n| n.get(1..))
+        .map(|s| s.iter().map(|&c| c as char).collect())
+        .unwrap_or_default();
+    let b = *blocks.get(4)?;
+    let shape = match b.get(49)? {
+        2 => PadShape::Rect,
+        3 => PadShape::Octagon,
+        _ => PadShape::Round,
+    };
+    Some(Pad {
+        layer: layers.get(*b.first()?),
+        net: net(b),
+        component: u16_at(b, 7).filter(|&c| c != u16::MAX).map(u32::from),
+        name,
+        at: point(b, 13)?,
+        size_x: len_at(b, 21)?,
+        size_y: len_at(b, 25)?,
+        hole: len_at(b, 45)?,
+        shape,
+        rotation_deg: f64_at(b, 52).filter(|r| r.is_finite()).unwrap_or(0.0),
+    })
+}
+
+/// The board outline is stored as numbered vertices `VX0`, `VY0`, ...;
+/// arcs between vertices are flattened to their end points for now.
+fn parse_outline(p: &Props) -> Vec<Point> {
+    (0..)
+        .map_while(|i| {
+            let x = p.get(&format!("VX{i}")).and_then(Length::parse)?;
+            let y = p.get(&format!("VY{i}")).and_then(Length::parse)?;
+            Some(Point { x, y })
+        })
+        .collect()
 }
 
 /// Reads a `.PcbDoc`: stack-up, nets with routed lengths, classes, differential
@@ -23,9 +147,11 @@ pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
         .ok_or_else(|| Error::MissingStream("Board6/Data".into()))?;
 
     let mut board = Board::default();
-    if let Some(props) = split_pcb(&board_data, 0).into_iter().next() {
-        board.stackup = parse_stackup(&props);
-    }
+    let board_props = split_pcb(&board_data, 0)
+        .into_iter()
+        .next()
+        .unwrap_or_default();
+    board.stackup = parse_stackup(&board_props);
 
     let text = |c: &mut Container<_>, name: &str, prefix| -> Result<Vec<Props>> {
         Ok(c.stream(name)?
@@ -88,63 +214,73 @@ pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
         .map(parse_rule)
         .collect();
 
-    // Routed length per net from copper tracks and arcs. Both records start
-    // with: layer u8, two flag bytes, net index u16 and 8 bytes of links.
-    // Tracks then hold their end points from offset 13; arcs hold centre,
-    // radius and start/end angles (f64 degrees) from offset 13.
-    let mut length_mil = vec![0.0f64; board.nets.len()];
-    let mut add = |net: Option<u16>, mil: f64| {
-        if let Some(slot) = net.and_then(|n| length_mil.get_mut(n as usize)) {
-            *slot += mil;
-        }
-    };
+    let layers = LayerMap::new(&board.stackup);
+    let g = &mut board.geometry;
     if let Some(d) = c.stream("/Tracks6/Data")? {
-        let recs = split_binary(&d, 1);
-        board.stats.tracks = recs.len();
-        for b in recs {
-            if !b.first().is_some_and(|&l| is_copper(l)) {
-                continue;
-            }
-            if let (Some(x1), Some(y1), Some(x2), Some(y2)) =
-                (i32_at(b, 13), i32_at(b, 17), i32_at(b, 21), i32_at(b, 25))
-            {
-                let dx = internal(x2) - internal(x1);
-                let dy = internal(y2) - internal(y1);
-                add(u16_at(b, 3), dx.hypot(dy));
-            }
-        }
+        g.tracks = split_binary(&d, 1)
+            .iter()
+            .filter_map(|r| parse_track(r[0], &layers))
+            .collect();
     }
     if let Some(d) = c.stream("/Arcs6/Data")? {
-        for b in split_binary(&d, 1) {
-            if !b.first().is_some_and(|&l| is_copper(l)) {
-                continue;
-            }
-            if let (Some(r), Some(a0), Some(a1)) = (i32_at(b, 21), f64_at(b, 25), f64_at(b, 33)) {
-                if r <= 0 || !a0.is_finite() || !a1.is_finite() {
-                    continue;
-                }
-                let mut sweep = (a1 - a0).rem_euclid(360.0);
-                if sweep == 0.0 {
-                    sweep = 360.0;
-                }
-                add(u16_at(b, 3), internal(r) * sweep.to_radians());
-            }
-        }
-    }
-    for (net, mil) in board.nets.iter_mut().zip(length_mil) {
-        net.routed_length = Length::from_mil(mil);
+        g.arcs = split_binary(&d, 1)
+            .iter()
+            .filter_map(|r| parse_arc(r[0], &layers))
+            .collect();
     }
     if let Some(d) = c.stream("/Vias6/Data")? {
-        let recs = split_binary(&d, 1);
-        board.stats.vias = recs.len();
-        for b in recs {
-            if let Some(net) = u16_at(b, 3).and_then(|n| board.nets.get_mut(n as usize)) {
-                net.vias += 1;
-            }
-        }
+        g.vias = split_binary(&d, 1)
+            .iter()
+            .filter_map(|r| parse_via(r[0]))
+            .collect();
     }
     if let Some(d) = c.stream("/Pads6/Data")? {
-        board.stats.pads = split_binary(&d, 6).len();
+        g.pads = split_binary(&d, 6)
+            .iter()
+            .filter_map(|r| parse_pad(r, &layers))
+            .collect();
+    }
+    g.outline = parse_outline(&board_props);
+    board.stats.tracks = g.tracks.len();
+    board.stats.vias = g.vias.len();
+    board.stats.pads = g.pads.len();
+
+    // Routed length per net from copper tracks and arcs.
+    let mut length_mil = vec![0.0f64; board.nets.len()];
+    let mut vias = vec![0usize; board.nets.len()];
+    let count = length_mil.len();
+    let net_slot = |n: Option<u32>| n.map(|n| n as usize).filter(|&n| n < count);
+    for t in g
+        .tracks
+        .iter()
+        .filter(|t| matches!(t.layer, LayerRef::Copper(_)))
+    {
+        if let Some(n) = net_slot(t.net) {
+            length_mil[n] +=
+                (t.end.x.mil() - t.start.x.mil()).hypot(t.end.y.mil() - t.start.y.mil());
+        }
+    }
+    for a in g
+        .arcs
+        .iter()
+        .filter(|a| matches!(a.layer, LayerRef::Copper(_)))
+    {
+        if let Some(n) = net_slot(a.net) {
+            let mut sweep = (a.end_deg - a.start_deg).rem_euclid(360.0);
+            if sweep == 0.0 {
+                sweep = 360.0;
+            }
+            length_mil[n] += a.radius.mil() * sweep.to_radians();
+        }
+    }
+    for v in &g.vias {
+        if let Some(n) = net_slot(v.net) {
+            vias[n] += 1;
+        }
+    }
+    for ((net, mil), v) in board.nets.iter_mut().zip(length_mil).zip(vias) {
+        net.routed_length = Length::from_mil(mil);
+        net.vias = v;
     }
     board.stats.polygons = text(&mut c, "/Polygons6/Data", 0)?.len();
 
@@ -176,6 +312,12 @@ fn parse_stackup(p: &Props) -> Stackup {
         .and_then(Length::parse)
         .unwrap_or_default();
         layers.push(StackLayer {
+            // Bottom copper is stored as 0xFFFF; primitives call it layer 32.
+            altium_id: (kind == LayerKind::Copper).then_some(if id & 0xFFFF == 0xFFFF {
+                32
+            } else {
+                (id & 0xFF) as u8
+            }),
             name: name.to_string(),
             kind,
             thickness,

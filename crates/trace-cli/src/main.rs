@@ -1,5 +1,7 @@
 //! `trace`: command-line front end until the editor exists.
 
+mod view;
+
 use std::path::Path;
 use std::process::ExitCode;
 use trace_core::{Board, LayerKind, Length, Sheet};
@@ -11,6 +13,7 @@ USAGE:
     trace inspect <file.PcbDoc|file.SchDoc>     Summary of a board or sheet
     trace pairs <file.PcbDoc> [max-skew]        Differential pair lengths and skew (default max-skew 5mil)
     trace rules <file.PcbDoc>                   Design rules, grouped by kind
+    trace view <file.PcbDoc> [out.html]         Open the board in the viewer (in your browser)
     trace convert <file> <out.json>             Export to Trace's open JSON model
 ";
 
@@ -27,6 +30,8 @@ fn main() -> ExitCode {
         ["pairs", file, skew] => pairs(file, skew),
         ["rules", file] => rules(file),
         ["convert", file, out] => convert(file, out),
+        ["view", file] => view_board(file, None),
+        ["view", file, out] => view_board(file, Some(out)),
         _ => {
             eprint!("{USAGE}");
             return ExitCode::from(2);
@@ -243,6 +248,22 @@ fn rules(file: &str) -> Res {
             );
         }
     }
+    Ok(())
+}
+
+fn view_board(file: &str, out: Option<&str>) -> Res {
+    let b = board(file)?;
+    let name = Path::new(file)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let out = match out {
+        Some(o) => std::path::PathBuf::from(o),
+        None => Path::new(file).with_extension("trace.html"),
+    };
+    std::fs::write(&out, view::render(&b, &name))?;
+    println!("wrote {}", out.display());
+    view::open(&out);
     Ok(())
 }
 

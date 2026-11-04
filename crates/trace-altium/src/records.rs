@@ -105,13 +105,13 @@ pub fn split_pcb(data: &[u8], prefix: usize) -> Vec<Props> {
 
 /// Splits a binary primitive stream (`Tracks6`, `Vias6`, `Arcs6`, `Pads6`):
 /// each record is a type byte followed by `subrecords` blocks of
-/// `[len u32][bytes]`. Returns the first block of each record.
-pub fn split_binary(data: &[u8], subrecords: usize) -> Vec<&[u8]> {
+/// `[len u32][bytes]`. Returns every block of each record.
+pub fn split_binary(data: &[u8], subrecords: usize) -> Vec<Vec<&[u8]>> {
     let mut out = Vec::new();
     let mut i = 0;
     'records: while i < data.len() {
         i += 1; // record type
-        let mut first = None;
+        let mut blocks = Vec::with_capacity(subrecords);
         for _ in 0..subrecords {
             if i + 4 > data.len() {
                 break 'records;
@@ -121,10 +121,10 @@ pub fn split_binary(data: &[u8], subrecords: usize) -> Vec<&[u8]> {
             if i + len > data.len() {
                 break 'records;
             }
-            first.get_or_insert(&data[i..i + len]);
+            blocks.push(&data[i..i + len]);
             i += len;
         }
-        out.extend(first);
+        out.push(blocks);
     }
     out
 }

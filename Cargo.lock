@@ -1590,6 +1590,8 @@ dependencies = [
  "moxcms",
  "num-traits",
  "png",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]
@@ -3397,7 +3399,7 @@ dependencies = [
 
 [[package]]
 name = "trace"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde_json",
  "trace-allegro",
@@ -3409,7 +3411,7 @@ dependencies = [
 
 [[package]]
 name = "trace-allegro"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "thiserror 1.0.69",
  "trace-core",
@@ -3417,7 +3419,7 @@ dependencies = [
 
 [[package]]
 name = "trace-altium"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "cfb",
  "flate2",
@@ -3428,9 +3430,10 @@ dependencies = [
 
 [[package]]
 name = "trace-app"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "eframe",
+ "image",
  "lyon_tessellation",
  "rfd",
  "serde_json",
@@ -3444,7 +3447,7 @@ dependencies = [
 
 [[package]]
 name = "trace-core"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -3452,7 +3455,7 @@ dependencies = [
 
 [[package]]
 name = "trace-export"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "cfb",
  "trace-allegro",
@@ -3475,7 +3478,7 @@ dependencies = [
 
 [[package]]
 name = "trace-step"
-version = "0.5.0"
+version = "0.6.0"
 dependencies = [
  "truck-meshalgo",
  "truck-stepio",
@@ -4688,6 +4691,21 @@ dependencies = [
  "crc32fast",
  "log",
  "simd-adler32",
+]
+
+[[package]]
+name = "zune-core"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d56377fd46368984a170bc5aac5567e52ca5da874caa60bea39fcbca78fb658b"
+
+[[package]]
+name = "zune-jpeg"
+version = "0.5.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "27bc9d5b815bc103f142aa054f561d9187d191692ec7c2d1e2b4737f8dbd7296"
+dependencies = [
+ "zune-core",
 ]
 
 [[package]]

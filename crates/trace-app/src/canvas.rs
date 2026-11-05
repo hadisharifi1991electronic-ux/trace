@@ -11,7 +11,7 @@ pub struct View {
     pub tx: f32,
     pub ty: f32,
     pub flip: bool,
-    rect: Rect,
+    pub rect: Rect,
 }
 
 impl Default for View {
@@ -27,13 +27,13 @@ impl Default for View {
 }
 
 impl View {
-    fn to_screen(self, x: f32, y: f32) -> Pos2 {
+    pub fn to_screen(self, x: f32, y: f32) -> Pos2 {
         Pos2::new(
             self.rect.min.x + self.tx + if self.flip { -x } else { x } * self.scale,
             self.rect.min.y + self.ty - y * self.scale,
         )
     }
-    fn to_board(self, p: Pos2) -> [f32; 2] {
+    pub fn to_board(self, p: Pos2) -> [f32; 2] {
         let x = (p.x - self.rect.min.x - self.tx) / self.scale;
         [
             if self.flip { -x } else { x },
@@ -51,7 +51,7 @@ impl View {
         self.ty = self.rect.height() / 2.0 + y * scale;
     }
     /// Visible area in board coordinates.
-    fn visible(&self) -> [f32; 4] {
+    pub fn visible(&self) -> [f32; 4] {
         let a = self.to_board(self.rect.min);
         let b = self.to_board(self.rect.max);
         [
@@ -106,6 +106,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if app.needs_fit {
         app.view.fit_rect(scene.bounds, 0.92);
         app.needs_fit = false;
+    }
+    match app.focus.take() {
+        Some(crate::Focus::Point(p, s)) => app.view.center_on(p, s),
+        Some(crate::Focus::Area(b)) => app.view.fit_rect(b, 0.7),
+        None => {}
     }
 
     // Zoom about the cursor, pan by dragging.

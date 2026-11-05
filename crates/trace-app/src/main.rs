@@ -6,6 +6,7 @@
 mod canvas;
 mod cm;
 mod scene;
+mod schview;
 mod view3d;
 
 use eframe::egui::{self, Color32, RichText};
@@ -68,6 +69,18 @@ pub struct App {
     mode3d: bool,
     view3d: view3d::View3d,
     cm: cm::Cm,
+    mode_sch: bool,
+    schem: schview::Schematics,
+    ctx: egui::Context,
+    /// Where the board view should go on its next frame: a point and zoom,
+    /// or an area to fit.
+    focus: Option<Focus>,
+}
+
+#[derive(Clone, Copy)]
+pub enum Focus {
+    Point([f32; 2], f32),
+    Area([f32; 4]),
 }
 
 const RECENT_KEY: &str = "recent_files";
@@ -107,6 +120,10 @@ impl App {
             mode3d: false,
             view3d: view3d::View3d::default(),
             cm: cm::Cm::new(cc.storage.and_then(|s| s.get_string(cm::STORE_KEY))),
+            mode_sch: false,
+            schem: schview::Schematics::default(),
+            ctx: cc.egui_ctx.clone(),
+            focus: None,
         };
         if let Some(f) = start_file {
             app.open(f);
@@ -115,6 +132,44 @@ impl App {
     }
 
     fn open(&mut self, path: PathBuf) {
+        let ext = path
+            .extension()
+            .map(|e| e.to_string_lossy().to_ascii_lowercase())
+            .unwrap_or_default();
+        if ext == "schdoc" || ext == "prjpcb" {
+            self.schem.open_path(&path, &self.ctx);
+            self.mode_sch = true;
+            self.mode3d = false;
+            self.message = None;
+            self.recent.retain(|p| p != &path);
+            self.recent.insert(0, path.clone());
+            self.recent.truncate(8);
+            if ext == "prjpcb" {
+                if let Some(board) = schview::project_boards(&path)
+                    .into_iter()
+                    .find(|b| b.exists())
+                {
+                    self.load_board(board);
+                }
+            }
+            return;
+        }
+        if self.load_board(path.clone()) {
+            self.mode_sch = false;
+            self.recent.retain(|p| p != &path);
+            self.recent.insert(0, path.clone());
+            self.recent.truncate(8);
+            // Bring in the schematic of the board's project, when there is one.
+            if let Some(prj) = schview::find_project(&path) {
+                if self.schem.project.as_ref() != Some(&prj) {
+                    self.schem.open_path(&prj, &self.ctx);
+                }
+            }
+        }
+    }
+
+    /// Loads a board; true when it opened.
+    fn load_board(&mut self, path: PathBuf) -> bool {
         match Scene::load(path.clone()) {
             Ok(scene) => {
                 self.scene = Some(scene);
@@ -126,14 +181,45 @@ impl App {
                 self.active = Slot::Copper(0);
                 self.needs_fit = true;
                 self.message = None;
-                self.recent.retain(|p| p != &path);
-                self.recent.insert(0, path);
-                self.recent.truncate(8);
+                true
             }
             Err(e) => {
-                self.message = Some((format!("Could not open {}: {e}", path.display()), true))
+                self.message = Some((format!("Could not open {}: {e}", path.display()), true));
+                false
             }
         }
+    }
+
+    /// Selects a part on the board by designator, optionally zooming to it.
+    fn select_part(&mut self, designator: &str, zoom: bool) -> bool {
+        let Some(scene) = &self.scene else {
+            return false;
+        };
+        let Some(c) = scene
+            .board
+            .components
+            .iter()
+            .find(|c| c.designator.eq_ignore_ascii_case(designator))
+        else {
+            return false;
+        };
+        let p = [c.x.mil() as f32, c.y.mil() as f32];
+        if zoom {
+            self.focus = Some(Focus::Point(p, 3.0));
+            self.needs_fit = false;
+        }
+        self.marker = Some(p);
+        self.selected = None;
+        self.message = Some((
+            format!(
+                "{} · {} · {}",
+                c.designator,
+                c.footprint,
+                if c.side == Side::Top { "top" } else { "bottom" }
+            ),
+            false,
+        ));
+        true
     }
 
     fn open_dialog(&mut self) {
@@ -141,11 +227,15 @@ impl App {
             "zip", "tgz", "gbr", "ger", "gbx", "pho", "art", "gtl", "gbl", "gto", "gbo", "gts",
             "gbs", "gtp", "gbp", "gko", "gm1", "g1", "g2", "g3", "g4", "drl", "xln", "txt",
         ];
-        let mut boards: Vec<&str> = vec!["PcbDoc", "pcbdoc", "brd", "BRD", "tracepcb"];
+        let mut boards: Vec<&str> = vec![
+            "PcbDoc", "pcbdoc", "brd", "BRD", "tracepcb", "SchDoc", "schdoc", "PrjPcb", "prjpcb",
+        ];
         boards.extend(gerber);
         if let Some(mut picked) = rfd::FileDialog::new()
-            .add_filter("Boards and fabrication data", &boards)
+            .add_filter("Boards, schematics and fabrication data", &boards)
+            .add_filter("Altium project", &["PrjPcb", "prjpcb"])
             .add_filter("Altium PCB", &["PcbDoc", "pcbdoc"])
+            .add_filter("Altium schematic", &["SchDoc", "schdoc"])
             .add_filter("Allegro board", &["brd", "BRD"])
             .add_filter("Gerber, drill or ODB++", &gerber)
             .add_filter("All files", &["*"])
@@ -333,6 +423,39 @@ impl App {
         }
     }
 
+    fn find_in_schematic(&mut self) {
+        let q = self.search.trim().to_string();
+        if q.is_empty() {
+            return;
+        }
+        if self.schem.reveal_part(&q) {
+            self.select_part(&q, true);
+            return;
+        }
+        let net = self.scene.as_ref().and_then(|scene| {
+            scene.net_by_name.get(&q).copied().or_else(|| {
+                scene
+                    .board
+                    .nets
+                    .iter()
+                    .position(|n| n.name.eq_ignore_ascii_case(&q))
+                    .map(|i| i as u32)
+            })
+        });
+        if let (Some(n), Some(scene)) = (net, self.scene.as_ref()) {
+            if self.schem.reveal(n, scene) {
+                self.selected = Some(n);
+                self.marker = None;
+                self.message = None;
+                return;
+            }
+        }
+        self.message = Some((
+            format!("Nothing called \u{201c}{q}\u{201d} on the sheets."),
+            true,
+        ));
+    }
+
     fn load_constraints(&mut self) {
         if let Some(s) = &self.scene {
             self.cm.load(s.path.display().to_string(), &s.board);
@@ -345,7 +468,8 @@ impl App {
         self.message = None;
         if zoom {
             if let Some(b) = self.scene.as_ref().and_then(|s| s.net_bounds(net)) {
-                self.view.fit_rect(b, 0.7);
+                self.focus = Some(Focus::Area(b));
+                self.needs_fit = false;
             }
         }
     }
@@ -490,19 +614,43 @@ impl App {
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
-            if ui
-                .selectable_label(!self.mode3d, "2D")
-                .on_hover_text("Board view (3 switches)")
-                .clicked()
+            let has_board = self.scene.is_some();
+            if !self.schem.is_empty()
+                && ui
+                    .selectable_label(self.mode_sch, "Schematic")
+                    .on_hover_text("Schematic sheets (S switches)")
+                    .clicked()
             {
+                self.mode_sch = true;
                 self.mode3d = false;
             }
-            if ui
-                .selectable_label(self.mode3d, "3D")
-                .on_hover_text("3D view of the assembled board (3 switches)")
-                .clicked()
+            if has_board
+                && ui
+                    .selectable_label(!self.mode3d && !self.mode_sch, "Board")
+                    .on_hover_text("Board view")
+                    .clicked()
+            {
+                self.mode3d = false;
+                self.mode_sch = false;
+            }
+            if has_board
+                && ui
+                    .selectable_label(self.mode3d && !self.mode_sch, "3D")
+                    .on_hover_text("3D view of the assembled board (3 switches)")
+                    .clicked()
             {
                 self.mode3d = true;
+                self.mode_sch = false;
+            }
+            if !has_board {
+                ui.separator();
+                ui.label(
+                    RichText::new(
+                        "Click a wire or pin to select its net. Double-click a sheet symbol to open its sheet. F fits.",
+                    )
+                    .weak(),
+                );
+                return;
             }
             ui.separator();
             if ui
@@ -513,6 +661,15 @@ impl App {
                 self.cm.open = !self.cm.open;
             }
             ui.separator();
+            if self.mode_sch {
+                ui.label(
+                    RichText::new(
+                        "Click a wire or pin to select its net on the board too. Double-click a sheet symbol to open its sheet. F fits.",
+                    )
+                    .weak(),
+                );
+                return;
+            }
             if self.mode3d {
                 ui.label(
                     RichText::new(
@@ -550,6 +707,49 @@ impl App {
     }
 
     fn side_panel(&mut self, ui: &mut egui::Ui) {
+        if self.mode_sch {
+            let r = ui.add(
+                egui::TextEdit::singleline(&mut self.search)
+                    .hint_text("Find a part or net (Enter)")
+                    .desired_width(f32::INFINITY),
+            );
+            if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                self.find_in_schematic();
+            }
+            self.schem
+                .side_panel(ui, self.selected, self.scene.as_ref());
+            if let Some((text, true)) = &self.message {
+                ui.colored_label(Color32::from_rgb(240, 96, 96), text.clone());
+            }
+            if self.scene.is_some() {
+                ui.separator();
+                if let Some(n) = self.selected {
+                    let name = self
+                        .scene
+                        .as_ref()
+                        .and_then(|s| s.board.nets.get(n as usize))
+                        .map(|x| x.name.clone())
+                        .unwrap_or_default();
+                    ui.label(format!("Board net {name}"));
+                    if ui.button("Show on board").clicked() {
+                        self.mode_sch = false;
+                        self.mode3d = false;
+                        self.select_net(n, true);
+                    }
+                } else if let Some((text, false)) = &self.message {
+                    ui.label(text.clone());
+                    if self.marker.is_some() && ui.button("Show on board").clicked() {
+                        self.mode_sch = false;
+                        self.mode3d = false;
+                        if let Some(p) = self.marker {
+                            self.focus = Some(Focus::Point(p, 3.0));
+                            self.needs_fit = false;
+                        }
+                    }
+                }
+            }
+            return;
+        }
         let Some(scene) = &self.scene else {
             ui.add_space(12.0);
             ui.label("No board open.");
@@ -725,7 +925,17 @@ impl App {
         let Some(net) = scene.board.nets.get(id as usize) else {
             return;
         };
-        ui.label(RichText::new(&net.name).strong().size(15.0));
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(&net.name).strong().size(15.0));
+            if !self.schem.is_empty() && ui.small_button("Show in schematic").clicked() {
+                if self.schem.reveal(id, scene) {
+                    self.mode_sch = true;
+                    self.mode3d = false;
+                } else {
+                    self.message = Some(("This net is not on any sheet.".into(), true));
+                }
+            }
+        });
         let warn = Color32::from_rgb(255, 180, 84);
         egui::Grid::new("net")
             .num_columns(2)
@@ -975,22 +1185,35 @@ impl eframe::App for App {
             self.open(p);
         }
         let typing = ctx.wants_keyboard_input();
-        let (open_shortcut, fit, flip, esc, measure_key, toggle3d, cm_key) = ctx.input_mut(|i| {
-            (
-                i.consume_key(egui::Modifiers::COMMAND, egui::Key::O),
-                !typing && !self.mode3d && i.key_pressed(egui::Key::F),
-                !typing && !self.mode3d && i.key_pressed(egui::Key::B),
-                i.key_pressed(egui::Key::Escape),
-                !typing && !self.mode3d && i.key_pressed(egui::Key::M),
-                !typing && i.key_pressed(egui::Key::Num3),
-                !typing && i.key_pressed(egui::Key::C),
-            )
-        });
+        let board2d = !self.mode3d && !self.mode_sch;
+        let (open_shortcut, fit, flip, esc, measure_key, toggle3d, cm_key, sch_key) = ctx
+            .input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::O),
+                    !typing && board2d && i.key_pressed(egui::Key::F),
+                    !typing && board2d && i.key_pressed(egui::Key::B),
+                    i.key_pressed(egui::Key::Escape),
+                    !typing && board2d && i.key_pressed(egui::Key::M),
+                    !typing && i.key_pressed(egui::Key::Num3),
+                    !typing && i.key_pressed(egui::Key::C),
+                    !typing && i.key_pressed(egui::Key::S),
+                )
+            });
+        if sch_key && !self.schem.is_empty() {
+            self.mode_sch = !self.mode_sch || self.scene.is_none();
+            if self.mode_sch {
+                self.mode3d = false;
+            }
+        }
         if cm_key && self.scene.is_some() {
             self.cm.open = !self.cm.open;
         }
         if toggle3d && self.scene.is_some() {
-            self.mode3d = !self.mode3d;
+            self.mode3d = !self.mode3d || self.mode_sch;
+            self.mode_sch = false;
+        }
+        if self.scene.is_none() && !self.schem.is_empty() {
+            self.mode_sch = true;
         }
         if measure_key {
             self.set_tool(if self.tool == Tool::Measure {
@@ -1021,7 +1244,7 @@ impl eframe::App for App {
         }
 
         egui::TopBottomPanel::top("menu").show(ctx, |ui| self.menu(ui, ctx));
-        if self.scene.is_some() {
+        if self.scene.is_some() || !self.schem.is_empty() {
             egui::TopBottomPanel::top("tools").show(ctx, |ui| self.toolbar(ui));
         }
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -1037,7 +1260,11 @@ impl eframe::App for App {
                         .weak(),
                     );
                 }
-                if let Some(text) = self.measure.and_then(|m| measure_text(m.a, m.b?)) {
+                if self.mode_sch {
+                    if let Some(h) = &self.schem.hover {
+                        ui.label(RichText::new(h).strong());
+                    }
+                } else if let Some(text) = self.measure.and_then(|m| measure_text(m.a, m.b?)) {
                     ui.label(RichText::new(text).strong().color(MEASURE));
                 } else if let Some(h) = &self.hover {
                     ui.label(RichText::new(h).strong());
@@ -1076,6 +1303,7 @@ impl eframe::App for App {
             .default_width(270.0)
             .show(ctx, |ui| self.side_panel(ui));
         if self.show_pairs
+            && !self.mode_sch
             && self
                 .scene
                 .as_ref()
@@ -1087,9 +1315,23 @@ impl eframe::App for App {
                 .show(ctx, |ui| self.pairs_panel(ui));
         }
         egui::CentralPanel::default().frame(egui::Frame::none().fill(Color32::from_rgb(15, 17, 21))).show(ctx, |ui| {
+            if self.mode_sch && !self.schem.is_empty() {
+                match self.schem.show(ui, self.selected, self.scene.as_ref()) {
+                    Some(schview::Pick::BoardNet(n)) => {
+                        self.selected = Some(n);
+                        self.marker = None;
+                        self.message = None;
+                    }
+                    Some(schview::Pick::Part(d)) => {
+                        self.select_part(&d, true);
+                    }
+                    None => {}
+                }
+                return;
+            }
             if self.scene.is_none() {
                 ui.centered_and_justified(|ui| {
-                    ui.label(RichText::new("Open a board with File → Open board…, or drop a .PcbDoc or .brd file here.").size(16.0).weak());
+                    ui.label(RichText::new("Open a board or schematic with File → Open…, or drop a .PcbDoc, .brd, .SchDoc or .PrjPcb file here.").size(16.0).weak());
                 });
                 return;
             }

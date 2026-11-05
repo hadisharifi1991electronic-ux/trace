@@ -2,6 +2,21 @@
 
 Each release is installed as `trace-app-<version>.exe` next to the earlier ones.
 
+## 0.6.0 (2026-11-05)
+
+- Schematic viewer (S): opens an Altium `.PrjPcb` (all its sheets and its
+  board) or a single `.SchDoc`, in binary or ASCII form. Parts, pins, wires,
+  buses, net labels, power ports, ports, sheet symbols, notes, directives,
+  pictures, the sheet border and the title block are drawn as Altium draws
+  them.
+- Opening a `.PcbDoc` also loads the schematic of its project, when a
+  `.PrjPcb` next to it (or one folder up) lists it.
+- Cross-probing: click a wire or pin to select its net on the board; select
+  a net on the board and "Show in schematic" jumps to it. Sheets that carry
+  the selected net are marked in the sheet list. Clicking a part selects it
+  on the board.
+- `trace convert sheet.SchDoc out.svg` draws a sheet as SVG.
+
 ## 0.5.0 (2026-11-05)
 
 - Constraint Manager (C): length, match, pair-skew and via limits on groups

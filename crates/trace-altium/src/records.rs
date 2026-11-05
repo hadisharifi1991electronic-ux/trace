@@ -17,7 +17,14 @@ impl Props {
                 let key = k.trim().to_ascii_uppercase();
                 // `%UTF8%KEY` carries a Unicode copy of KEY; prefer it.
                 if let Some(base) = key.strip_prefix("%UTF8%") {
-                    map.insert(base.to_string(), v.to_string());
+                    // Text read byte-per-char holds UTF-8 bytes here; decode them.
+                    let value = if v.chars().all(|c| (c as u32) < 256) {
+                        let bytes: Vec<u8> = v.chars().map(|c| c as u32 as u8).collect();
+                        String::from_utf8(bytes).unwrap_or_else(|_| v.to_string())
+                    } else {
+                        v.to_string()
+                    };
+                    map.insert(base.to_string(), value);
                 } else {
                     map.entry(key).or_insert_with(|| v.to_string());
                 }
@@ -40,6 +47,9 @@ impl Props {
     }
     pub fn bool(&self, key: &str) -> bool {
         matches!(self.get(key), Some(v) if v.eq_ignore_ascii_case("TRUE") || v == "T")
+    }
+    pub fn set(&mut self, key: &str, value: impl Into<String>) {
+        self.map.insert(key.to_ascii_uppercase(), value.into());
     }
     pub fn keys(&self) -> impl Iterator<Item = (&String, &String)> {
         self.map.iter()

@@ -15,6 +15,12 @@ checker and simulator all read.
 
 - open any Altium `.PcbDoc` or Allegro `.brd` from File → Open, the recent
   list, or by dropping it on the window
+- read the schematic (the Schematic button, or S): open an Altium `.PrjPcb`
+  for all its sheets and its board, or a single `.SchDoc`. Opening a board
+  also brings in its project's schematic. Click a wire or pin to select its
+  net on the board too; on the board, "Show in schematic" jumps to the sheet
+  with the selected net, and the sheet list marks every sheet that has it.
+  Double-click a sheet symbol to open its sheet
 - open fabrication data: a folder or `.zip` of Gerber and drill files, several
   files at once, or an ODB++ job (`.tgz`, `.zip` or folder). Each file's layer
   is recognised automatically and the board is rebuilt with copper, holes,
@@ -61,6 +67,7 @@ trace check board.PcbDoc         check the board's length and matched-length rul
 trace convert <file> out.json    export to Trace's open JSON model
 trace convert <file> out.kicad_pcb   write a KiCad board
 trace convert <file> out.PcbDoc      write an Altium Designer board
+trace convert sheet.SchDoc out.svg   draw a schematic sheet as SVG
 ```
 
 Every command also takes an Allegro `.brd` (versions 16.0 to 23.x), a Gerber
@@ -105,8 +112,12 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
 - Lengths include tracks, arcs and via barrels between the layers used, but
   not package pin delays. Nets joined through copper pours are not checked
   for completeness yet.
-- Schematic pins stored as binary records are counted against the previous
-  symbol; the text form is exact.
+- Schematic pins stored as binary records are given to the part before
+  them; the text form is exact. The schematic viewer uses one font for all
+  text, so Altium's bold, italic and font faces are not shown. Signal
+  harnesses are drawn as lines without their connectors' labels.
+- Schematic nets are joined within a sheet (wires, labels, power ports,
+  ports); across sheets they are matched to the board through part pins.
 - Altium solid regions are drawn; Altium polygon pours are counted but not
   drawn yet. Allegro pours are drawn.
 - Traced Gerber nets get names like `Net-042`, since bare Gerber files do not

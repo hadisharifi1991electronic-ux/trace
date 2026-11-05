@@ -339,6 +339,8 @@ mod tests {
             hole: Length(0),
             shape: PadShape::Round,
             rotation_deg: 0.0,
+            outline: Vec::new(),
+            stack: Vec::new(),
         }
     }
     fn track(layer: u8, x1: f64, x2: f64) -> Track {
@@ -399,6 +401,7 @@ mod tests {
             at: pt(50.0, 0.0),
             diameter: Length::from_mil(20.0),
             hole: Length::from_mil(10.0),
+            rings: Vec::new(),
         };
         // Top 0..50, via down, bottom 50..100. The far pad is on top only.
         let b = board(

@@ -101,6 +101,7 @@ fn parse_via(b: &[u8], layers: &LayerMap) -> Option<Via> {
         at: point(b, 13)?,
         diameter: len_at(b, 21)?,
         hole: len_at(b, 25)?,
+        rings: Vec::new(),
     })
 }
 
@@ -129,6 +130,8 @@ fn parse_pad(blocks: &[&[u8]], layers: &LayerMap) -> Option<Pad> {
         hole: len_at(b, 45)?,
         shape,
         rotation_deg: f64_at(b, 52).filter(|r| r.is_finite()).unwrap_or(0.0),
+        outline: Vec::new(),
+        stack: Vec::new(),
     })
 }
 

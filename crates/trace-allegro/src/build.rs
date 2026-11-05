@@ -369,6 +369,7 @@ impl<'a> Builder<'a> {
             at: self.pt(x as f64, y as f64),
             diameter: self.len(diameter),
             hole: self.len(ps.drill as f64),
+            rings: Vec::new(),
         });
     }
 
@@ -539,6 +540,8 @@ impl<'a> Builder<'a> {
             },
             shape,
             rotation_deg,
+            outline: Vec::new(),
+            stack: Vec::new(),
         })
     }
 

@@ -1,6 +1,6 @@
 //! The board canvas: draws the scene and handles zoom, pan and picking.
 
-use crate::scene::{Geom, Prim, Scene, Slot};
+use crate::scene::{Geom, Prim, Scene, Slot, Source};
 use crate::{App, Measure, Tool, MEASURE};
 use eframe::egui::{self, Color32, Pos2, Rect, Shape, Stroke};
 
@@ -77,7 +77,7 @@ fn draw(shapes: &mut Vec<Shape>, view: &View, g: &Geom, color: Color32) {
             let (a, b) = (view.to_screen(x1, y1), view.to_screen(x2, y2));
             let px = (w * view.scale).max(1.0);
             shapes.push(Shape::line_segment([a, b], Stroke::new(px, color)));
-            if px > 3.0 {
+            if px > 1.5 {
                 // Round ends, as copper is drawn by a round aperture.
                 shapes.push(Shape::circle_filled(a, px / 2.0, color));
                 shapes.push(Shape::circle_filled(b, px / 2.0, color));
@@ -250,7 +250,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             if !overlaps(b, visible) || (b[2] - b[0] < tiny && b[3] - b[1] < tiny) {
                 continue;
             }
-            draw(&mut shapes, &view, &p.geom, col);
+            let c = match p.source {
+                Source::Via(vi) => rgba(via_color(scene, vi), 0.95 * dim),
+                _ => col,
+            };
+            draw(&mut shapes, &view, &p.geom, c);
         }
         // Through-hole pads sit with the outermost visible copper, drawn once.
         let last_copper = order
@@ -324,6 +328,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             ));
         }
     }
+
+    draw_holes(&mut shapes, scene, &view, visible);
+    draw_labels(ui, &mut shapes, scene, &view, visible, app.active);
 
     if app.tool == Tool::Measure || app.measure.is_some() {
         draw_measure(ui, &mut shapes, &view, app.measure, snapped);
@@ -426,4 +433,224 @@ fn draw_measure(
         MEASURE,
     ));
     shapes.push(Shape::galley(at, galley, Color32::BLACK));
+}
+
+/// Colour of a via: gold for through vias, and one colour per layer span
+/// for blind and buried ones, so staggered vias are told apart at a glance.
+fn via_color(scene: &Scene, vi: usize) -> [u8; 3] {
+    const SPANS: [[u8; 3]; 8] = [
+        [236, 112, 99],
+        [93, 173, 226],
+        [88, 214, 141],
+        [245, 176, 65],
+        [175, 122, 197],
+        [72, 201, 176],
+        [240, 98, 146],
+        [149, 165, 166],
+    ];
+    let v = &scene.board.geometry.vias[vi];
+    let (a, z) = (v.from_layer.min(v.to_layer), v.from_layer.max(v.to_layer));
+    let last = scene.copper_count.saturating_sub(1);
+    if a == 0 && z >= last {
+        [201, 180, 88]
+    } else {
+        SPANS[(a as usize * 7 + z as usize * 3) % SPANS.len()]
+    }
+}
+
+/// Drill holes of vias and through-hole pads, once they are a few pixels across.
+fn draw_holes(shapes: &mut Vec<Shape>, scene: &Scene, view: &View, visible: [f32; 4]) {
+    let hole_color = Color32::from_rgb(24, 26, 31);
+    let g = &scene.board.geometry;
+    let vias_on = scene.layer_visible(Slot::Vias);
+    for p in &scene.prims {
+        let (at, hole) = match p.source {
+            Source::Via(vi) if vias_on => (g.vias[vi].at, g.vias[vi].hole),
+            Source::Pad(pi) if p.all_layers && scene.shows(p) => (g.pads[pi].at, g.pads[pi].hole),
+            _ => continue,
+        };
+        let r = hole.mil() as f32 / 2.0;
+        if r * view.scale < 1.2 {
+            continue;
+        }
+        let (x, y) = (at.x.mil() as f32, at.y.mil() as f32);
+        if !overlaps([x - r, y - r, x + r, y + r], visible) {
+            continue;
+        }
+        shapes.push(Shape::circle_filled(
+            view.to_screen(x, y),
+            r * view.scale,
+            hole_color,
+        ));
+    }
+}
+
+/// Text centred on `at`, turned by `angle` radians (screen).
+fn label(
+    ui: &egui::Ui,
+    shapes: &mut Vec<Shape>,
+    at: Pos2,
+    text: &str,
+    px: f32,
+    angle: f32,
+    color: Color32,
+) {
+    let galley =
+        ui.fonts(|f| f.layout_no_wrap(text.to_string(), egui::FontId::proportional(px), color));
+    let half = galley.size() / 2.0;
+    let (s, c) = angle.sin_cos();
+    let off = egui::vec2(-half.x * c + half.y * s, -half.x * s - half.y * c);
+    shapes.push(Shape::Text(
+        egui::epaint::TextShape::new(at + off, galley, color).with_angle(angle),
+    ));
+}
+
+/// Net names on tracks and pads, and layer span plus net on vias, once
+/// zoomed in far enough to read them (as in Allegro).
+fn draw_labels(
+    ui: &egui::Ui,
+    shapes: &mut Vec<Shape>,
+    scene: &Scene,
+    view: &View,
+    visible: [f32; 4],
+    active: Slot,
+) {
+    let g = &scene.board.geometry;
+    let name = |n: Option<u32>| {
+        n.and_then(|n| scene.board.nets.get(n as usize))
+            .map(|n| n.name.as_str())
+    };
+    let text = Color32::from_rgb(250, 250, 250);
+    let shadow = Color32::from_black_alpha(200);
+    let mut budget = 1500;
+    let vias_on = scene.layer_visible(Slot::Vias);
+    for p in &scene.prims {
+        if budget == 0 {
+            break;
+        }
+        let b = p.geom.bbox();
+        if !overlaps(b, visible) {
+            continue;
+        }
+        match (p.source, p.geom) {
+            (Source::Via(vi), Geom::Circle { x, y, r }) if vias_on => {
+                let d = 2.0 * r * view.scale;
+                if d < 26.0 {
+                    continue;
+                }
+                let v = &g.vias[vi];
+                let span = format!(
+                    "{}-{}",
+                    v.from_layer.min(v.to_layer) + 1,
+                    v.from_layer.max(v.to_layer) + 1
+                );
+                let px = (d * 0.26).min(16.0);
+                let c = view.to_screen(x, y);
+                label(
+                    ui,
+                    shapes,
+                    c + egui::vec2(1.0, -px * 0.45 + 1.0),
+                    &span,
+                    px,
+                    0.0,
+                    shadow,
+                );
+                label(
+                    ui,
+                    shapes,
+                    c + egui::vec2(0.0, -px * 0.45),
+                    &span,
+                    px,
+                    0.0,
+                    text,
+                );
+                if let Some(n) = name(p.net) {
+                    let px = (d * 0.85 / (n.chars().count().max(3) as f32 * 0.55)).min(px);
+                    if px >= 5.0 {
+                        label(
+                            ui,
+                            shapes,
+                            c + egui::vec2(1.0, px * 0.6 + 1.0),
+                            n,
+                            px,
+                            0.0,
+                            shadow,
+                        );
+                        label(
+                            ui,
+                            shapes,
+                            c + egui::vec2(0.0, px * 0.6),
+                            n,
+                            px,
+                            0.0,
+                            Color32::from_rgb(120, 230, 230),
+                        );
+                    }
+                }
+                budget -= 1;
+            }
+            (Source::Track(_) | Source::Arc(_), Geom::Seg { x1, y1, x2, y2, w })
+                if p.slot == active =>
+            {
+                let Some(n) = name(p.net) else { continue };
+                let wpx = w * view.scale;
+                if wpx < 8.0 {
+                    continue;
+                }
+                let (a, bb) = (view.to_screen(x1, y1), view.to_screen(x2, y2));
+                let len = (bb - a).length();
+                let px = (wpx * 0.75).min(14.0);
+                if len < px * 0.6 * n.chars().count() as f32 + 2.0 * wpx {
+                    continue;
+                }
+                let mut ang = (bb.y - a.y).atan2(bb.x - a.x);
+                if ang > std::f32::consts::FRAC_PI_2 {
+                    ang -= std::f32::consts::PI;
+                } else if ang < -std::f32::consts::FRAC_PI_2 {
+                    ang += std::f32::consts::PI;
+                }
+                label(
+                    ui,
+                    shapes,
+                    a + (bb - a) / 2.0,
+                    n,
+                    px,
+                    ang,
+                    Color32::from_black_alpha(230),
+                );
+                budget -= 1;
+            }
+            (Source::Pad(_), geom) if scene.shows(p) && (p.slot == active || p.all_layers) => {
+                let Some(n) = name(p.net) else { continue };
+                let (cx, cy, short) = match geom {
+                    Geom::Circle { x, y, r } => (x, y, 2.0 * r),
+                    Geom::Rect { x, y, sx, sy, .. } => (x, y, sx.min(sy)),
+                    Geom::Seg { x1, y1, x2, y2, w } => ((x1 + x2) / 2.0, (y1 + y2) / 2.0, w),
+                };
+                let spx = short * view.scale;
+                if spx < 22.0 {
+                    continue;
+                }
+                let px = (spx * 0.3).min(14.0);
+                let c = view.to_screen(cx, cy);
+                let off = if p.all_layers {
+                    egui::vec2(0.0, spx * 0.32)
+                } else {
+                    egui::Vec2::ZERO
+                };
+                label(
+                    ui,
+                    shapes,
+                    c + off + egui::vec2(1.0, 1.0),
+                    n,
+                    px,
+                    0.0,
+                    shadow,
+                );
+                label(ui, shapes, c + off, n, px, 0.0, text);
+                budget -= 1;
+            }
+            _ => {}
+        }
+    }
 }

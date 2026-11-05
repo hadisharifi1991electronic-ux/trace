@@ -44,12 +44,37 @@ pub fn sniff(data: &[u8]) -> bool {
         || head.lines().take(40).any(|l| {
             let l = l.trim();
             l == "M48"
+                || (l.starts_with(";T") && l.contains("Holesize"))
                 || l.starts_with("METRIC")
                 || l.starts_with("INCH")
                 || (l.starts_with('T')
                     && l.contains('C')
                     && l[1..2].chars().all(|c| c.is_ascii_digit()))
         })
+}
+
+/// An Allegro tool comment: number, diameter in mm, plated.
+fn allegro_tool(c: &str) -> Option<(u32, f64, bool)> {
+    let rest = c.strip_prefix('T')?;
+    if !rest.contains("Holesize") {
+        return None;
+    }
+    let n: u32 = rest.split_whitespace().next()?.parse().ok()?;
+    let after = rest.split_once('=')?.1.trim();
+    let v: f64 = after.split_whitespace().next()?.parse().ok()?;
+    let up = c.to_ascii_uppercase();
+    let words: Vec<&str> = up.split_whitespace().collect();
+    let unit = if words.contains(&"MM") {
+        1.0
+    } else if words.contains(&"INCH") || words.contains(&"INCHES") {
+        25.4
+    } else {
+        0.0254
+    };
+    let plated = !(words.contains(&"NON_PLATED")
+        || words.contains(&"NON-PLATED")
+        || words.contains(&"NONPLATED"));
+    Some((n, v * unit, plated))
 }
 
 pub fn parse(data: &[u8]) -> Result<Drill, String> {
@@ -131,6 +156,16 @@ pub fn parse(data: &[u8]) -> Result<Drill, String> {
                         plated_section = Some(true);
                     }
                 }
+            } else if let Some((n, dia, plated)) = allegro_tool(c) {
+                // Allegro: ";T01 Holesize 1. = 8.000000 Tolerance = ... PLATED MILS"
+                tools.insert(
+                    n,
+                    Tool {
+                        diameter: dia,
+                        plated: Some(plated),
+                        function: None,
+                    },
+                );
             } else if let Some(t) = c.strip_prefix("TYPE=") {
                 plated_section = Some(!t.starts_with("NON"));
             } else if let Some(f) = c.strip_prefix("FILE_FORMAT=") {
@@ -241,7 +276,57 @@ pub fn parse(data: &[u8]) -> Result<Drill, String> {
         if in_header {
             continue;
         }
-        // Coordinates, possibly with G00/G01/G85 and a repeat code.
+        // "R03X000500": three more holes, each one step further on.
+        if let Some(rest) = line.strip_prefix('R') {
+            let n_end = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            if let (Ok(n), Some(t)) = (
+                rest[..n_end].parse::<u32>(),
+                tool.and_then(|t| tools.get(&t)).cloned(),
+            ) {
+                let mut step = [0.0, 0.0];
+                let b = &rest.as_bytes()[n_end..];
+                let mut i = 0;
+                while i < b.len() {
+                    let k = match b[i] {
+                        b'X' => 0,
+                        b'Y' => 1,
+                        _ => {
+                            i += 1;
+                            continue;
+                        }
+                    };
+                    let start = i + 1;
+                    let mut j = start;
+                    while j < b.len()
+                        && (b[j].is_ascii_digit() || b[j] == b'.' || b[j] == b'-' || b[j] == b'+')
+                    {
+                        j += 1;
+                    }
+                    step[k] = number(
+                        &rest[n_end + start..n_end + j],
+                        metric,
+                        keep_leading,
+                        digits,
+                        unit,
+                    );
+                    i = j;
+                }
+                for _ in 0..n.min(100_000) {
+                    pos = [pos[0] + step[0], pos[1] + step[1]];
+                    d.holes.push(Hole {
+                        at: pos,
+                        end: None,
+                        diameter: t.diameter,
+                        plated: t.plated,
+                        function: t.function.clone(),
+                    });
+                }
+                continue;
+            }
+        }
+        // Coordinates, possibly with G00/G01/G85.
         let mut slot_split = line.splitn(2, "G85");
         let first = slot_split.next().unwrap_or("");
         let second = slot_split.next();
@@ -322,6 +407,18 @@ pub fn parse(data: &[u8]) -> Result<Drill, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repeat_codes() {
+        let f = b";T01 Holesize 1. = 8.000000 Tolerance = +0.000000/-0.000000 PLATED MILS Quantity = 3\n%\nG90\nT01\nX010000Y-020000\nR02X000500\nM30\n";
+        let d = parse(f).unwrap();
+        assert_eq!(d.holes.len(), 3);
+        assert!(
+            (d.holes[2].at[0] - 1.1 * 25.4).abs() < 1e-9
+                && (d.holes[2].at[1] + 2.0 * 25.4).abs() < 1e-9
+        );
+        assert!((d.holes[0].diameter - 0.2032).abs() < 1e-9);
+    }
 
     #[test]
     fn altium_style() {

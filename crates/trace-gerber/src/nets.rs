@@ -199,7 +199,7 @@ fn geo_bbox(g: &Geo, fallback: [f64; 4]) -> [f64; 4] {
     }
 }
 
-fn report_short(a: Option<String>, b: Option<String>, f: &Feature, g: &Feature) {
+fn report_short(layer: usize, a: Option<String>, b: Option<String>, f: &Feature, g: &Feature) {
     if let (Some(a), Some(b)) = (a, b) {
         if a != b {
             let c = |x: &Feature| [(x.bbox[0] + x.bbox[2]) / 2.0, (x.bbox[1] + x.bbox[3]) / 2.0];
@@ -208,7 +208,8 @@ fn report_short(a: Option<String>, b: Option<String>, f: &Feature, g: &Feature) 
                 Geo::Poly(_) => "polygon",
             };
             eprintln!(
-                "short: {a} ({} at {:.3?}) touches {b} ({} at {:.3?})",
+                "short on layer {}: {a} ({} at {:.3?}) touches {b} ({} at {:.3?})",
+                layer + 1,
                 kind(f),
                 c(f),
                 kind(g),
@@ -395,9 +396,11 @@ pub fn trace(board: &mut Board, extra: &Extra) {
     } else {
         Vec::new()
     };
-    let board_nets = |i: usize| existing.get(i).cloned().flatten();
+    // Per group root, the net name it already carries (debug only), so a
+    // join is reported where two differently named groups first meet.
+    let mut labels: Vec<Option<String>> = existing.clone();
     const CELL: f64 = 1.0;
-    for feats in &layers {
+    for (li, feats) in layers.iter().enumerate() {
         let mut grid: HashMap<(i64, i64), Vec<u32>> = HashMap::new();
         let mut stamp = vec![usize::MAX; feats.len()];
         for (fi, f) in feats.iter().enumerate() {
@@ -422,9 +425,15 @@ pub fn trace(board: &mut Board, extra: &Extra) {
                         }
                         if touches(f, other) {
                             if debug {
-                                report_short(board_nets(f.item), board_nets(other.item), f, other);
+                                let (ra, rb) = (uf.find(f.item), uf.find(other.item));
+                                let (la, lb) = (labels[ra].clone(), labels[rb].clone());
+                                report_short(li, la.clone(), lb.clone(), f, other);
+                                uf.union(f.item, other.item);
+                                let r = uf.find(f.item);
+                                labels[r] = la.or(lb);
+                            } else {
+                                uf.union(f.item, other.item);
                             }
-                            uf.union(f.item, other.item);
                         }
                     }
                     cell.push(fi as u32);

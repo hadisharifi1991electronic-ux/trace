@@ -51,6 +51,11 @@ pub struct Via {
     pub at: Point,
     pub diameter: Length,
     pub hole: Length,
+    /// Pad diameter on each copper layer of the span when it differs from
+    /// layer to layer; a diameter equal to the hole means no pad there.
+    /// Empty when the via has `diameter` on every layer it spans.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub rings: Vec<(u8, Length)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -72,6 +77,30 @@ pub struct Pad {
     pub hole: Length,
     pub shape: PadShape,
     pub rotation_deg: f64,
+    /// Exact copper outline (board coordinates) when the pad is not a plain
+    /// circle, oval or rectangle, such as a solder-jumper half or a custom
+    /// pad. Empty otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outline: Vec<Point>,
+    /// Through-hole pads whose copper differs from layer to layer: the land
+    /// on each copper layer that has one. A copper layer missing from the
+    /// list has only the plated hole there. Empty when the pad has the same
+    /// shape on every layer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub stack: Vec<Land>,
+}
+
+/// The copper of a through-hole pad on one layer.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Land {
+    pub layer: u8,
+    pub shape: PadShape,
+    pub size_x: Length,
+    pub size_y: Length,
+    pub rotation_deg: f64,
+    /// Exact outline in board coordinates for irregular lands; empty otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outline: Vec<Point>,
 }
 
 /// A filled copper area (pour, plane or fill) with its cut-outs.
@@ -94,4 +123,84 @@ pub struct Geometry {
     pub pads: Vec<Pad>,
     #[serde(default)]
     pub polygons: Vec<Polygon>,
+    /// True when pads and vias carry their copper layer by layer (`stack`,
+    /// `rings`), as boards rebuilt from fabrication data do: a pad or via
+    /// without that list then has the same copper on every layer it spans.
+    /// False when the source did not say, and unused inner pads may be gone.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub per_layer_copper: bool,
+}
+
+fn ring_area(v: &[[f64; 2]]) -> f64 {
+    let n = v.len();
+    (0..n)
+        .map(|i| {
+            let (a, b) = (v[i], v[(i + 1) % n]);
+            a[0] * b[1] - b[0] * a[1]
+        })
+        .sum::<f64>()
+        / 2.0
+}
+
+/// Points in mm, closing point dropped, turned counter-clockwise.
+fn ccw(pts: &[Point]) -> Vec<[f64; 2]> {
+    let mut v: Vec<[f64; 2]> = pts.iter().map(|p| [p.x.mm(), p.y.mm()]).collect();
+    if v.len() > 1 && v.first() == v.last() {
+        v.pop();
+    }
+    if ring_area(&v) < 0.0 {
+        v.reverse();
+    }
+    v
+}
+
+/// One outline with its holes joined in through zero-width cuts, the form
+/// KiCad keeps zone fills in.
+pub fn fracture(outline: &[Point], holes: &[Vec<Point>]) -> Vec<[f64; 2]> {
+    let mut out = ccw(outline);
+    let mut hs: Vec<Vec<[f64; 2]>> = holes
+        .iter()
+        .filter(|h| h.len() >= 3)
+        .map(|h| {
+            let mut v = ccw(h);
+            v.reverse(); // holes run clockwise
+            v
+        })
+        .collect();
+    // Leftmost holes first, so a cut drawn to the left never crosses a hole
+    // that has not been joined yet.
+    let left = |h: &Vec<[f64; 2]>| h.iter().map(|p| p[0]).fold(f64::MAX, f64::min);
+    hs.sort_by(|a, b| left(a).total_cmp(&left(b)));
+    for h in hs {
+        let (hi, p) = h
+            .iter()
+            .enumerate()
+            .min_by(|a, b| a.1[0].total_cmp(&b.1[0]))
+            .map(|(i, p)| (i, *p))
+            .unwrap();
+        // Nearest edge of the current outline straight to the left of p.
+        let mut best: Option<(f64, usize, [f64; 2])> = None;
+        for i in 0..out.len() {
+            let (a, b) = (out[i], out[(i + 1) % out.len()]);
+            if (a[1] > p[1]) == (b[1] > p[1]) {
+                continue;
+            }
+            let t = (p[1] - a[1]) / (b[1] - a[1]);
+            let x = a[0] + t * (b[0] - a[0]);
+            if x <= p[0] && best.is_none_or(|bb| p[0] - x < bb.0) {
+                best = Some((p[0] - x, i, [x, p[1]]));
+            }
+        }
+        let Some((_, i, q)) = best else { continue };
+        let mut joined = Vec::with_capacity(out.len() + h.len() + 3);
+        joined.extend_from_slice(&out[..=i]);
+        joined.push(q);
+        for k in 0..=h.len() {
+            joined.push(h[(hi + k) % h.len()]);
+        }
+        joined.push(q);
+        joined.extend_from_slice(&out[i + 1..]);
+        out = joined;
+    }
+    out
 }

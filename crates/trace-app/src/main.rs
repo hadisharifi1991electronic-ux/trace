@@ -18,7 +18,12 @@ fn main() -> eframe::Result {
             .with_title("Trace")
             .with_inner_size([1400.0, 900.0])
             .with_min_inner_size([800.0, 500.0])
-            .with_drag_and_drop(true),
+            .with_drag_and_drop(true)
+            .with_icon(std::sync::Arc::new(egui::IconData {
+                rgba: include_bytes!("../assets/icon-128.rgba").to_vec(),
+                width: 128,
+                height: 128,
+            })),
         ..Default::default()
     };
     eframe::run_native(

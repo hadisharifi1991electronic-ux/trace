@@ -11,6 +11,7 @@ pub mod detect;
 pub mod excellon;
 mod geom;
 pub mod gerber;
+pub mod ipc356;
 #[doc(hidden)]
 pub mod nets;
 pub mod odb;
@@ -48,9 +49,9 @@ const MAX_FILE: u64 = 512 * 1024 * 1024;
 pub fn is_fab_file(name: &str) -> bool {
     let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     let fixed = [
-        "tgz", "tar", "gbr", "ger", "grb", "gbx", "pho", "art", "gtl", "gbl", "gto", "gbo", "gts",
-        "gbs", "gtp", "gbp", "gko", "gml", "gm", "cmp", "sol", "stc", "sts", "plc", "pls", "crc",
-        "crs", "dim", "drl", "xln", "exc", "drd", "ncd", "tap", "nc",
+        "tgz", "tar", "ipc", "gbr", "ger", "grb", "gbx", "pho", "art", "gtl", "gbl", "gto", "gbo",
+        "gts", "gbs", "gtp", "gbp", "gko", "gml", "gm", "cmp", "sol", "stc", "sts", "plc", "pls",
+        "crc", "crs", "dim", "drl", "xln", "exc", "drd", "ncd", "tap", "nc",
     ];
     if fixed.contains(&ext.as_str()) {
         return true;
@@ -257,7 +258,22 @@ pub fn read_files(files: Vec<SourceFile>) -> Result<Import> {
         if detect::skip_by_name(&base) {
             continue;
         }
-        let (role, reason, data) = if excellon::sniff(&f.data) {
+        let (role, reason, data) = if ipc356::sniff(&f.data) {
+            let n = ipc356::parse(&f.data);
+            if n.points.is_empty() {
+                (
+                    Role::Ignore,
+                    "IPC-356 file without test points".into(),
+                    LayerData::None,
+                )
+            } else {
+                (
+                    Role::Netlist,
+                    format!("{} test points", n.points.len()),
+                    LayerData::Netlist(n),
+                )
+            }
+        } else if excellon::sniff(&f.data) {
             match excellon::parse(&f.data) {
                 Ok(d) => {
                     let (r, why) = detect::detect(&base, Content::Drill(&d));

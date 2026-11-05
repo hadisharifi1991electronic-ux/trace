@@ -5,7 +5,18 @@ use std::collections::{HashMap, HashSet};
 fn main() {
     let a: Vec<String> = std::env::args().skip(1).collect();
     let imp = trace_gerber::read_path(&a[0]).unwrap();
-    let truth = imp.board;
+    let mut truth = imp.board;
+    if std::env::var_os("NETCHECK_RETRACE").is_some() {
+        // Compare with the source's own copper rather than its netlist.
+        let g = &mut truth.geometry;
+        g.tracks.iter_mut().for_each(|x| x.net = None);
+        g.arcs.iter_mut().for_each(|x| x.net = None);
+        g.pads.iter_mut().for_each(|x| x.net = None);
+        g.vias.iter_mut().for_each(|x| x.net = None);
+        g.polygons.iter_mut().for_each(|x| x.net = None);
+        truth.nets.clear();
+        trace_gerber::nets::trace(&mut truth, &imp.trace_input);
+    }
     if std::env::var_os("TRACE_NET_DEBUG").is_some() {
         let mut t = truth.clone();
         trace_gerber::nets::trace(&mut t, &imp.trace_input);
@@ -47,13 +58,18 @@ fn main() {
             }
         }
     }
-    let vmap: HashMap<(i64, i64), Option<u32>> = g2
+    let vmap: HashMap<(i64, i64, u8, u8), Option<u32>> = g2
         .vias
         .iter()
-        .map(|v| ((v.at.x.0 / 1000, v.at.y.0 / 1000), v.net))
+        .map(|v| {
+            (
+                (v.at.x.0 / 1000, v.at.y.0 / 1000, v.from_layer, v.to_layer),
+                v.net,
+            )
+        })
         .collect();
     for (i, x) in g1.vias.iter().enumerate() {
-        if let Some(n) = vmap.get(&(x.at.x.0 / 1000, x.at.y.0 / 1000)) {
+        if let Some(n) = vmap.get(&(x.at.x.0 / 1000, x.at.y.0 / 1000, x.from_layer, x.to_layer)) {
             pairs.push((
                 x.net,
                 *n,
@@ -61,18 +77,28 @@ fn main() {
             ));
         }
     }
-    let key2: HashMap<(String, i64, i64), Option<u32>> = g2
+    let key2: HashMap<(String, i64, i64, i64), Option<u32>> = g2
         .pads
         .iter()
         .map(|p| {
             (
-                (format!("{:?}", p.layer), p.at.x.0 / 1000, p.at.y.0 / 1000),
+                (
+                    format!("{:?}", p.layer),
+                    p.at.x.0 / 1000,
+                    p.at.y.0 / 1000,
+                    p.size_x.0.max(p.size_y.0) / 10000,
+                ),
                 p.net,
             )
         })
         .collect();
     for p in &g1.pads {
-        if let Some(n) = key2.get(&(format!("{:?}", p.layer), p.at.x.0 / 1000, p.at.y.0 / 1000)) {
+        if let Some(n) = key2.get(&(
+            format!("{:?}", p.layer),
+            p.at.x.0 / 1000,
+            p.at.y.0 / 1000,
+            p.size_x.0.max(p.size_y.0) / 10000,
+        )) {
             pairs.push((
                 p.net,
                 *n,

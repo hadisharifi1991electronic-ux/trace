@@ -419,7 +419,18 @@ pub fn difference(subject: &[Vec<Pt>], clip: &[Vec<Pt>]) -> Vec<Vec<Vec<Pt>>> {
     use i_overlay::core::overlay_rule::OverlayRule;
     use i_overlay::float::single::SingleFloatOverlay;
     let subj: Vec<Vec<Pt>> = subject.to_vec();
-    let clip: Vec<Vec<Pt>> = clip.to_vec();
+    // Every cut removes copper, whichever way it was drawn: with mixed
+    // directions two overlapping cuts would cancel under the non-zero rule.
+    let clip: Vec<Vec<Pt>> = clip
+        .iter()
+        .map(|r| {
+            let mut r = r.clone();
+            if area(&r) < 0.0 {
+                r.reverse();
+            }
+            r
+        })
+        .collect();
     subj.overlay(&clip, OverlayRule::Difference, FillRule::NonZero)
 }
 
@@ -444,6 +455,21 @@ mod tests {
         let (_, w, h, deg) = min_rect(&pts);
         assert!((w - 2.0).abs() < 1e-6 && (h - 1.0).abs() < 1e-6, "{w} {h}");
         assert!((deg - 30.0).abs() < 1e-6, "{deg}");
+    }
+
+    #[test]
+    fn overlapping_cuts_both_cut() {
+        let mut cw = circle([0.0, 0.0], 2.0);
+        cw.reverse();
+        let out = difference(
+            &[rect([0.0, 0.0], 10.0, 10.0)],
+            &[rect([0.0, 0.0], 1.5, 1.5), cw],
+        );
+        let total: f64 = out
+            .iter()
+            .map(|s| s.iter().map(|r| area(r)).sum::<f64>())
+            .sum();
+        assert!(total.abs() < 100.0 - 3.0, "{total}");
     }
 
     #[test]

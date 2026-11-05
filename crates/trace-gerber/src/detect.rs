@@ -46,6 +46,8 @@ pub enum Role {
         span: Option<(u32, u32)>,
     },
     DrillDrawing,
+    /// IPC-D-356 test netlist: net names and part pins.
+    Netlist,
     /// Not board data: reports, aperture lists, pad masters.
     Ignore,
     Unknown,
@@ -86,6 +88,7 @@ impl Role {
                 }
             }
             Role::DrillDrawing => "Drill drawing".into(),
+            Role::Netlist => "IPC-356 netlist".into(),
             Role::Ignore => "Not used (report or helper file)".into(),
             Role::Unknown => "Unknown".into(),
         }
@@ -147,6 +150,9 @@ pub fn detect(name: &str, content: Content) -> (Role, String) {
                 if let Some(r) = from_file_function(f) {
                     return (r, format!("X2 attribute {f}"));
                 }
+            }
+            if let Some(r) = from_allegro_comments(&g.comments) {
+                return (r, "Allegro layer list in the file".into());
             }
             let order = g.comments.iter().find_map(|c| {
                 c.strip_prefix("Layer_Physical_Order=")
@@ -242,8 +248,6 @@ pub fn skip_by_name(name: &str) -> bool {
             | "json"
             | "gbrjob"
             | "pos"
-            | "ipc"
-            | "d356"
             | "xml"
             | "log"
             | "dri"
@@ -286,6 +290,83 @@ fn layer_pair(stem: &str) -> Option<(u32, u32)> {
         }
     }
     None
+}
+
+/// Allegro lists the class/subclass pairs plotted on a film, such as
+/// `Layer:  ETCH/TOP` or `Layer:  PIN/SOLDERMASK_BOTTOM`.
+fn from_allegro_comments(comments: &[String]) -> Option<Role> {
+    use CuPos::*;
+    let pairs: Vec<(String, String)> = comments
+        .iter()
+        .filter_map(|c| {
+            let v = c.trim().strip_prefix("Layer:")?.trim();
+            let (class, sub) = v.split_once('/')?;
+            Some((
+                class.trim().to_ascii_uppercase(),
+                sub.trim().to_ascii_uppercase(),
+            ))
+        })
+        .collect();
+    if pairs.is_empty() {
+        return None;
+    }
+    let side = |sub: &str| {
+        if sub.ends_with("BOTTOM") || sub.ends_with("_BOT") {
+            Side::Bottom
+        } else {
+            Side::Top
+        }
+    };
+    if let Some((_, sub)) = pairs.iter().find(|(c, _)| c == "ETCH") {
+        if sub == "TOP" {
+            return Some(copper(Top, None, false));
+        }
+        if sub == "BOTTOM" {
+            return Some(copper(Bottom, None, false));
+        }
+        // Layer number from BOARD GEOMETRY/LYR_10 or the subclass (L10_MIX).
+        let number = pairs
+            .iter()
+            .find_map(|(c, s)| {
+                (c == "BOARD GEOMETRY")
+                    .then(|| s.strip_prefix("LYR_").and_then(|n| n.parse::<u32>().ok()))
+                    .flatten()
+            })
+            .or_else(|| {
+                let t = tokens(sub);
+                t.iter().find_map(|w| {
+                    split_num(w)
+                        .filter(|(p, _)| matches!(*p, "l" | "lyr" | "layer" | "in" | "inner"))
+                        .map(|(_, n)| n)
+                })
+            });
+        let words = tokens(sub);
+        let plane = has(&words, &["gnd", "pwr", "plane", "ground", "power", "vcc"])
+            || words
+                .iter()
+                .any(|w| w.ends_with("gnd") || w.ends_with("pwr"));
+        return Some(copper(Inner, number, plane));
+    }
+    let any = |f: &dyn Fn(&str, &str) -> bool| pairs.iter().find(|(c, s)| f(c, s));
+    if any(&|c, s| c == "MANUFACTURING" && (s.starts_with("NC") || s.contains("DRILL"))).is_some() {
+        return Some(Role::DrillDrawing);
+    }
+    if any(&|_, s| s.starts_with("ASSEMBLY")).is_some() {
+        return Some(Role::Mechanical(0));
+    }
+    if let Some((_, s)) = any(&|_, s| s.starts_with("SOLDERMASK")) {
+        return Some(Role::Mask(side(s)));
+    }
+    if let Some((_, s)) = any(&|_, s| s.starts_with("PASTEMASK")) {
+        return Some(Role::Paste(side(s)));
+    }
+    if let Some((_, s)) = any(&|_, s| s.starts_with("SILKSCREEN")) {
+        return Some(Role::Silk(side(s)));
+    }
+    if any(&|c, s| c == "BOARD GEOMETRY" && (s == "OUTLINE" || s == "DESIGN_OUTLINE")).is_some() {
+        return Some(Role::Outline);
+    }
+    Some(Role::Mechanical(0))
 }
 
 fn from_file_function(f: &str) -> Option<Role> {
@@ -379,7 +460,11 @@ fn from_extension(ext: &str) -> Option<Role> {
             } else if num("gd").or_else(|| num("gg")).is_some() {
                 Role::DrillDrawing
             } else {
-                let n = num("gl").or_else(|| num("g")).or_else(|| num("ly")).or_else(|| num("l")).or_else(|| num("in"))?;
+                let n = num("gl")
+                    .or_else(|| num("g"))
+                    .or_else(|| num("ly"))
+                    .or_else(|| num("l"))
+                    .or_else(|| num("in"))?;
                 copper(Inner, Some(n), false)
             }
         }
@@ -429,10 +514,11 @@ fn side_of(words: &[String], copper_context: bool) -> Option<Side> {
     // Layer words come last in most names; project names come first.
     for w in words.iter().rev() {
         match w.as_str() {
-            "top" | "front" | "f" | "t" | "upper" | "cmp" | "component" | "comp" | "primary" => {
-                return Some(Side::Top)
+            "top" | "front" | "f" | "t" | "upper" | "cmp" | "component" | "comp" | "primary"
+            | "prm" | "pri" => return Some(Side::Top),
+            "bottom" | "bot" | "back" | "b" | "lower" | "secondary" | "sec" => {
+                return Some(Side::Bottom)
             }
-            "bottom" | "bot" | "back" | "b" | "lower" | "secondary" => return Some(Side::Bottom),
             "sol" | "solder" if copper_context => return Some(Side::Bottom),
             "smt" | "sst" | "spt" | "plc" | "stc" | "crc" | "tsm" | "tsp" => {
                 return Some(Side::Top)
@@ -578,7 +664,13 @@ fn from_words(words: &[String]) -> Option<Role> {
             match prefix {
                 "in" | "inner" | "mid" | "l" | "layer" | "lyr" | "ly" | "sig" | "signal"
                 | "art" | "g" | "gl" | "int" | "internal" | "inr" => {
-                    return Some(copper(Inner, Some(n), false));
+                    // "l1_primary", "L16_BOTTOM": the side word wins.
+                    let pos = match side_of(words, true) {
+                        Some(Side::Top) => Top,
+                        Some(Side::Bottom) => Bottom,
+                        None => Inner,
+                    };
+                    return Some(copper(pos, Some(n), false));
                 }
                 "plane" | "gnd" | "pwr" | "power" | "vcc" | "gp" | "pln" => {
                     return Some(copper(Inner, Some(n), true))

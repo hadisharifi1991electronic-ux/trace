@@ -185,6 +185,8 @@ mod tests {
             hole: Length(0),
             shape: PadShape::Rect,
             rotation_deg: 0.0,
+            outline: Vec::new(),
+            stack: Vec::new(),
         });
         b
     }

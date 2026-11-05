@@ -32,6 +32,10 @@ fn main() -> ExitCode {
         .collect::<Vec<_>>()
         .as_slice()
     {
+        ["--version" | "-V" | "version"] => {
+            println!("trace {}", env!("CARGO_PKG_VERSION"));
+            return ExitCode::SUCCESS;
+        }
         ["inspect", file] => inspect(file),
         ["pairs", file] => pairs(file, "5mil"),
         ["pairs", file, skew] => pairs(file, skew),

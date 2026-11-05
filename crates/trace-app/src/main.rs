@@ -17,7 +17,7 @@ fn main() -> eframe::Result {
     let start_file = std::env::args().nth(1).map(PathBuf::from);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title("Trace")
+            .with_title(concat!("Trace ", env!("CARGO_PKG_VERSION")))
             .with_inner_size([1400.0, 900.0])
             .with_min_inner_size([800.0, 500.0])
             .with_drag_and_drop(true)
@@ -476,8 +476,8 @@ impl App {
                 }
             });
             ui.menu_button("Help", |ui| {
-                ui.label("Trace 0.1, open-source PCB design");
-                ui.label("Opens Altium .PcbDoc and Allegro .brd (16.0 and newer) boards,\nand rebuilds boards from Gerber and drill files (a folder, a .zip,\nor several files picked or dropped together). Each file's layer is\nrecognised automatically and nets are traced through the copper.");
+                ui.label(concat!("Trace ", env!("CARGO_PKG_VERSION"), ", open-source PCB design"));
+                ui.label("Opens Altium .PcbDoc and Allegro .brd (16.0 and newer) boards,\nGerber and drill files and ODB++ jobs. Saves KiCad and Altium\nboards. 3D view (3) and Constraint Manager (C).");
                 ui.label(RichText::new("Scroll to zoom, drag to pan, click to select a net.\nM measures: click two points (they snap to pads, vias and track ends).\nF fits the board, B flips to the bottom, Esc clears.").weak());
             });
         });

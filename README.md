@@ -137,7 +137,11 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   not package pin delays. Nets joined through copper pours are not checked
   for completeness yet.
 - Routing checks clearance to tracks, pads, vias and drill holes of other
-  nets, but not to copper pours, and pours are not re-poured after edits.
+  nets. Pours on Altium boards are poured again after edits, close to
+  Altium's own result (within a few percent of copper area on the test
+  boards; unused inner via pads are not removed first, and rules scoped to
+  parts, rooms or layers are not applied). Pours from Gerber, ODB++ and
+  Allegro files are not poured again.
   Vias are through vias. There is no push-and-shove or walk-around yet.
 - Length tuning places one row of square meanders on one straight track
   at a time; pick another track if one is too short for the length needed.

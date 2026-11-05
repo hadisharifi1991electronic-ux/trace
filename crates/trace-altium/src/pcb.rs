@@ -158,6 +158,7 @@ fn parse_region(b: &[u8], layers: &LayerMap) -> Option<Polygon> {
         net: net(b),
         outline,
         holes,
+        pour: u16_at(b, 5).filter(|&i| i != u16::MAX).map(u32::from),
     })
 }
 
@@ -247,6 +248,84 @@ pub(crate) fn parse_outline(p: &Props) -> Vec<Point> {
             Some(Point { x, y })
         })
         .collect()
+}
+
+/// A polygon pour as drawn (`Polygons6` / ASCII `Polygon`): its outline,
+/// with arc vertices flattened, net, layer and fill order. Pours Trace
+/// cannot fill again (hatched, shelved, not on copper) get no outline.
+pub(crate) fn parse_pour(p: &Props, layers: &LayerMap) -> Pour {
+    let layer = layers.get(crate::pcb_ascii::layer_id(&p.str("LAYER")));
+    let digits: String = p
+        .str("NET")
+        .trim()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    let net = digits.parse::<u32>().ok();
+    let solid = p
+        .get("HATCHSTYLE")
+        .is_none_or(|h| h.eq_ignore_ascii_case("Solid"));
+    let poured = p
+        .get("POLYGONTYPE")
+        .is_none_or(|t| t.eq_ignore_ascii_case("Polygon"));
+    let mut outline: Vec<Point> = Vec::new();
+    if solid && poured && !p.bool("SHELVED") && matches!(layer, LayerRef::Copper(_)) {
+        for i in 0.. {
+            let (Some(x), Some(y)) = (
+                p.get(&format!("VX{i}")).and_then(Length::parse),
+                p.get(&format!("VY{i}")).and_then(Length::parse),
+            ) else {
+                break;
+            };
+            let r = p
+                .get(&format!("R{i}"))
+                .and_then(Length::parse)
+                .unwrap_or_default();
+            if p.int(&format!("KIND{i}")) == Some(1) && r.0 > 0 {
+                let c = |k: &str| {
+                    p.get(&format!("{k}{i}"))
+                        .and_then(Length::parse)
+                        .unwrap_or_default()
+                };
+                let (cx, cy, r) = (c("CX").0 as f64, c("CY").0 as f64, r.0 as f64);
+                let (mut a0, mut a1) = (
+                    p.float(&format!("SA{i}")).unwrap_or(0.0),
+                    p.float(&format!("EA{i}")).unwrap_or(0.0),
+                );
+                if a1 <= a0 {
+                    a1 += 360.0;
+                }
+                let at = |a: f64| Point {
+                    x: Length((cx + r * a.to_radians().cos()).round() as i64),
+                    y: Length((cy + r * a.to_radians().sin()).round() as i64),
+                };
+                // Walk the arc from whichever end the outline is at.
+                let from = outline.last().copied().unwrap_or(Point { x, y });
+                let d = |q: Point| ((q.x.0 - from.x.0) as f64).hypot((q.y.0 - from.y.0) as f64);
+                if d(at(a1)) < d(at(a0)) {
+                    std::mem::swap(&mut a0, &mut a1);
+                }
+                let n = (((a1 - a0).abs() / 5.0).ceil() as usize).max(2);
+                for k in 0..=n {
+                    outline.push(at(a0 + (a1 - a0) * k as f64 / n as f64));
+                }
+            } else {
+                outline.push(Point { x, y });
+            }
+        }
+        if outline.len() > 1 && outline.first() == outline.last() {
+            outline.pop();
+        }
+    }
+    Pour {
+        layer,
+        net,
+        outline,
+        remove_dead: p
+            .get("REMOVEDEAD")
+            .is_none_or(|v| v.eq_ignore_ascii_case("TRUE")),
+        order: p.int("POURINDEX").unwrap_or(0) as i32,
+    }
 }
 
 /// Reads a `.PcbDoc`: stack-up, nets with routed lengths, classes, differential
@@ -370,6 +449,7 @@ pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
     trace_core::connectivity::analyse(&mut board);
     let polygons = text(&mut c, "/Polygons6/Data", 0)?;
     board.stats.polygons = polygons.len();
+    board.geometry.pours = polygons.iter().map(|p| parse_pour(p, &layers)).collect();
     for p in &polygons {
         let digits: String = p
             .str("NET")

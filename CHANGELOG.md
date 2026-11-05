@@ -3,6 +3,21 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.12.0 (2026-11-05)
+
+- Copper pours are poured again after every edit that touches them:
+  routing, deleting, length tuning and unrouting. A new track gets its
+  clearance cut out of other nets' pours; a deleted one leaves no void.
+  Gaps follow the board's clearance rules (per object: track, pad, via,
+  pour), pads and vias join their own net's pour as the polygon connect
+  rule says (direct or thermal relief spokes), pours keep the board
+  outline clearance, and islands without their own net's copper are
+  removed. It runs in the background; Ctrl+Z takes the pour back with
+  the edit. Works for Altium boards (binary and ASCII), which keep each
+  pour's outline; Gerber, ODB++ and Allegro pours stay as read.
+- ASCII PcbDoc files now take their design rules from the `DXPRule`
+  records, as Altium does.
+
 ## 0.11.0 (2026-11-05)
 
 - Toolbars in the manner of Altium Designer, with icons:

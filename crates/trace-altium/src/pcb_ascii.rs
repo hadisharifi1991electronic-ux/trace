@@ -2,7 +2,7 @@
 //! line per object, the same properties the binary format keeps in its text
 //! streams, with primitives spelled out as text too.
 
-use crate::pcb::{parse_outline, parse_rule, parse_stackup, LayerMap};
+use crate::pcb::{parse_outline, parse_pour, parse_rule, parse_stackup, LayerMap};
 use crate::records::Props;
 use crate::{Error, Result};
 use std::io::Read;
@@ -25,7 +25,7 @@ pub(crate) fn is_ascii(path: &Path) -> bool {
 }
 
 /// Altium layer id from the layer names ASCII files use.
-fn layer_id(name: &str) -> u8 {
+pub(crate) fn layer_id(name: &str) -> u8 {
     let n = name.trim().to_ascii_uppercase();
     let num = |prefix: &str| n.strip_prefix(prefix).and_then(|d| d.parse::<u8>().ok());
     match n.as_str() {
@@ -189,7 +189,12 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
             sheet: p.get("SOURCEHIERARCHICALPATH").map(str::to_string),
         })
         .collect();
-    board.rules = of("Rule").map(parse_rule).collect();
+    // `DXPRule` records hold the rules as Altium uses them; `Rule` records
+    // are an older form, kept for files without the newer ones.
+    board.rules = of("DXPRule").map(parse_rule).collect();
+    if board.rules.is_empty() {
+        board.rules = of("Rule").map(parse_rule).collect();
+    }
 
     let layers = LayerMap::new(&board.stackup);
     let layer = |p: &Props| layers.get(layer_id(&p.str("LAYER")));
@@ -298,6 +303,7 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
     // Pour fills carry their polygon's net rather than their own; custom
     // pad shapes carry their pad's.
     let pour_nets: Vec<Option<u32>> = of("Polygon").map(|p| index(p, "NET")).collect();
+    g.pours = of("Polygon").map(|p| parse_pour(p, &layers)).collect();
     let pad_nets: Vec<Option<u32>> = of("Pad").map(|p| index(p, "NET")).collect();
     for p in of("Region") {
         let layer = layer(p);
@@ -337,6 +343,7 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
             net,
             outline,
             holes,
+            pour: index(p, "POLYGON"),
         });
     }
     // Copper fills: rectangles, turned about their centre.
@@ -366,6 +373,7 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
             net: index(p, "NET"),
             outline,
             holes: Vec::new(),
+            pour: None,
         });
     }
     g.outline = parse_outline(&board_props);

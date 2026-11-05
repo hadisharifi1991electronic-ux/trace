@@ -786,6 +786,7 @@ impl Builder {
                         .into_iter()
                         .map(|h| h.into_iter().map(pt).collect())
                         .collect(),
+                    pour: None,
                 });
                 self.named(ObjRef::Poly(i), g, attrs);
             }

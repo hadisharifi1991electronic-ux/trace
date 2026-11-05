@@ -110,6 +110,24 @@ pub struct Polygon {
     pub net: Option<u32>,
     pub outline: Vec<Point>,
     pub holes: Vec<Vec<Point>>,
+    /// The pour (`Geometry::pours`) this area was poured from, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pour: Option<u32>,
+}
+
+/// A copper pour as drawn: the area it may fill, its net and layer. Its
+/// poured copper is in `Geometry::polygons`, tagged with the pour's index.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Pour {
+    pub layer: LayerRef,
+    pub net: Option<u32>,
+    pub outline: Vec<Point>,
+    /// Islands not touching copper of the pour's net are left out.
+    #[serde(default)]
+    pub remove_dead: bool,
+    /// Pours are filled in this order; a later pour keeps clear of earlier ones.
+    #[serde(default)]
+    pub order: i32,
 }
 
 /// Physical content of a board.
@@ -123,6 +141,9 @@ pub struct Geometry {
     pub pads: Vec<Pad>,
     #[serde(default)]
     pub polygons: Vec<Polygon>,
+    /// Pour outlines, for pouring again after edits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pours: Vec<Pour>,
     /// True when pads and vias carry their copper layer by layer (`stack`,
     /// `rings`), as boards rebuilt from fabrication data do: a pad or via
     /// without that list then has the same copper on every layer it spans.

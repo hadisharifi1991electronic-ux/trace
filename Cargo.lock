@@ -3399,7 +3399,7 @@ dependencies = [
 
 [[package]]
 name = "trace"
-version = "0.10.1"
+version = "0.12.0"
 dependencies = [
  "serde_json",
  "trace-allegro",
@@ -3411,7 +3411,7 @@ dependencies = [
 
 [[package]]
 name = "trace-allegro"
-version = "0.10.1"
+version = "0.12.0"
 dependencies = [
  "thiserror 1.0.69",
  "trace-core",
@@ -3419,7 +3419,7 @@ dependencies = [
 
 [[package]]
 name = "trace-altium"
-version = "0.10.1"
+version = "0.12.0"
 dependencies = [
  "cfb",
  "flate2",
@@ -3430,7 +3430,7 @@ dependencies = [
 
 [[package]]
 name = "trace-app"
-version = "0.10.1"
+version = "0.12.0"
 dependencies = [
  "eframe",
  "image",
@@ -3448,15 +3448,16 @@ dependencies = [
 
 [[package]]
 name = "trace-core"
-version = "0.10.1"
+version = "0.12.0"
 dependencies = [
+ "i_overlay",
  "serde",
  "serde_json",
 ]
 
 [[package]]
 name = "trace-export"
-version = "0.10.1"
+version = "0.12.0"
 dependencies = [
  "cfb",
  "trace-allegro",
@@ -3479,7 +3480,7 @@ dependencies = [
 
 [[package]]
 name = "trace-step"
-version = "0.10.1"
+version = "0.12.0"
 dependencies = [
  "truck-meshalgo",
  "truck-stepio",

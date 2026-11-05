@@ -89,6 +89,13 @@ pub struct App {
     /// Where the board view should go on its next frame: a point and zoom,
     /// or an area to fit.
     focus: Option<Focus>,
+    /// Counts edits, so a re-pour started before the latest one is dropped.
+    generation: u64,
+    /// A re-pour running in the background, and the edit count it is for.
+    repour: Option<(
+        u64,
+        std::sync::mpsc::Receiver<Option<trace_core::edit::Edit>>,
+    )>,
     /// Single layer mode: which layers were shown before it was turned on.
     single: Option<Vec<(Slot, bool)>>,
     /// Scroll the layer tabs to the current layer on the next frame.
@@ -150,6 +157,8 @@ impl App {
             ctx: cc.egui_ctx.clone(),
             focus: None,
             single: None,
+            generation: 0,
+            repour: None,
             scroll_tab: false,
         };
         if let Some(f) = start_file {
@@ -508,9 +517,60 @@ impl App {
         if edits.is_empty() {
             return;
         }
-        self.router.history.apply(&mut scene.board, label, edits);
+        // Pours are poured again in the background from a copy of the
+        // board; the result joins this step of the history when it comes.
+        let mut models = std::mem::take(&mut scene.board.geometry.models);
+        let before = scene.board.clone();
+        std::mem::swap(&mut scene.board.geometry.models, &mut models);
+        self.router
+            .history
+            .apply(&mut scene.board, label, edits.clone());
         self.after_edit();
         self.message = Some((format!("{label}. Ctrl+Z undoes it."), false));
+        let mut copy = before;
+        for e in &edits {
+            e.apply(&mut copy);
+        }
+        let generation = self.generation;
+        let (tx, rx) = std::sync::mpsc::channel();
+        let ctx = self.ctx.clone();
+        std::thread::spawn(move || {
+            let result = trace_core::pour::repour_after(&copy, &edits);
+            let _ = tx.send(result);
+            ctx.request_repaint();
+        });
+        self.repour = Some((generation, rx));
+    }
+
+    /// Takes in pours poured again in the background, if they are ready and
+    /// the board has not changed since.
+    fn poll_repour(&mut self) {
+        let Some((generation, rx)) = &self.repour else {
+            return;
+        };
+        let result = match rx.try_recv() {
+            Ok(r) => r,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return,
+            Err(_) => None,
+        };
+        let generation = *generation;
+        self.repour = None;
+        let (Some(edit), true) = (result, generation == self.generation) else {
+            return;
+        };
+        let Some(scene) = self.scene.as_mut() else {
+            return;
+        };
+        self.router.history.append(&mut scene.board, edit);
+        scene.rebuild();
+        self.router.board_changed();
+        self.cm.board_changed();
+        self.imp.board_changed();
+        if let Some((text, false)) = &mut self.message {
+            if !text.contains("pours") {
+                *text = text.replace(". Ctrl+Z", ", pours poured again. Ctrl+Z");
+            }
+        }
     }
 
     fn after_edit(&mut self) {
@@ -523,6 +583,7 @@ impl App {
         self.imp.board_changed();
         self.picked = None;
         self.dirty = true;
+        self.generation += 1;
     }
 
     fn undo(&mut self) {
@@ -592,7 +653,14 @@ impl App {
             _ => None,
         };
         match edit {
-            Some(e) => self.apply_edits("Deleted a track", vec![e]),
+            Some(e) => {
+                let what = match e {
+                    trace_core::edit::Edit::RemoveVia { .. } => "Deleted a via",
+                    trace_core::edit::Edit::RemoveArc { .. } => "Deleted an arc",
+                    _ => "Deleted a track segment",
+                };
+                self.apply_edits(what, vec![e])
+            }
             None => {
                 self.message = Some((
                     "Click a track, arc or via first, then press Delete.".into(),
@@ -1766,6 +1834,7 @@ fn pair_rows(scene: &Scene) -> Vec<PairRow> {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.poll_repour();
         // Files dropped on the window.
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw

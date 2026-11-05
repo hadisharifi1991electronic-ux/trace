@@ -1,6 +1,6 @@
 //! Reversible changes to a board, and an undo history built from them.
 
-use crate::{Arc, Board, Length, Track, Via};
+use crate::{Arc, Board, Length, Polygon, Track, Via};
 
 #[derive(Clone, Debug)]
 pub enum Edit {
@@ -33,6 +33,11 @@ pub enum Edit {
     RemoveVia {
         index: usize,
         via: Via,
+    },
+    /// Replaces every copper area, as pouring again does.
+    SetPolygons {
+        before: Vec<Polygon>,
+        after: Vec<Polygon>,
     },
 }
 
@@ -70,6 +75,7 @@ impl Edit {
             Edit::RemoveArc { index, .. } => remove(&mut board.geometry.arcs, *index),
             Edit::InsertVia { index, via } => insert(&mut board.geometry.vias, *index, via),
             Edit::RemoveVia { index, .. } => remove(&mut board.geometry.vias, *index),
+            Edit::SetPolygons { after, .. } => board.geometry.polygons = after.clone(),
         }
     }
 
@@ -104,6 +110,10 @@ impl Edit {
                 index: *index,
                 via: via.clone(),
             },
+            Edit::SetPolygons { before, after } => Edit::SetPolygons {
+                before: after.clone(),
+                after: before.clone(),
+            },
         }
     }
 }
@@ -126,6 +136,15 @@ impl History {
         }
         self.undo.push((label.into(), edits));
         self.redo.clear();
+    }
+
+    /// Applies one more edit as part of the last step, so one undo takes
+    /// both back.
+    pub fn append(&mut self, board: &mut Board, edit: Edit) {
+        edit.apply(board);
+        if let Some((_, edits)) = self.undo.last_mut() {
+            edits.push(edit);
+        }
     }
 
     pub fn undo(&mut self, board: &mut Board) -> Option<String> {

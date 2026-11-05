@@ -617,7 +617,7 @@ impl Scene {
         for &i in self.grid.get(&cell)? {
             let p = &self.prims[i];
             let on_layer = match layer {
-                Some(l) => p.slot == l || p.all_layers,
+                Some(l) => p.slot == l || p.all_layers || p.slot == Slot::Vias,
                 None => self.shows(p),
             };
             if !on_layer || p.geom.distance(x, y) > tolerance {

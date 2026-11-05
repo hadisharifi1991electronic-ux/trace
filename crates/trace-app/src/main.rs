@@ -6,6 +6,7 @@
 mod canvas;
 mod cm;
 mod imp;
+mod router;
 mod scene;
 mod schview;
 mod view3d;
@@ -42,6 +43,7 @@ fn main() -> eframe::Result {
 pub enum Tool {
     Select,
     Measure,
+    Route,
 }
 
 /// A distance measurement: first point, and second once placed.
@@ -55,6 +57,14 @@ pub struct App {
     scene: Option<Scene>,
     tool: Tool,
     measure: Option<Measure>,
+    pub router: router::Router,
+    /// The track, arc or via last clicked, for Delete.
+    pub picked: Option<scene::Source>,
+    /// The board has edits not yet saved.
+    pub dirty: bool,
+    ask_close: bool,
+    allow_close: bool,
+    title_dirty: bool,
     view: canvas::View,
     active: Slot,
     selected: Option<u32>,
@@ -107,6 +117,12 @@ impl App {
             scene: None,
             tool: Tool::Select,
             measure: None,
+            router: router::Router::new(),
+            picked: None,
+            dirty: false,
+            ask_close: false,
+            allow_close: false,
+            title_dirty: false,
             view: canvas::View::default(),
             active: Slot::Copper(0),
             selected: None,
@@ -293,7 +309,11 @@ impl App {
         else {
             return;
         };
-        self.message = Some(match trace_core::file::save(&scene.board, &path) {
+        let result = trace_core::file::save(&scene.board, &path);
+        if result.is_ok() {
+            self.dirty = false;
+        }
+        self.message = Some(match result {
             Ok(()) => (format!("Saved {}", path.display()), false),
             Err(e) => (format!("Could not save: {e}"), true),
         });
@@ -463,6 +483,106 @@ impl App {
         if let Some(s) = &self.scene {
             self.cm.load(s.path.display().to_string(), &s.board);
             self.imp.load(s.path.display().to_string(), &s.board);
+            self.router.load(&s.board);
+        }
+        self.dirty = false;
+        self.picked = None;
+    }
+
+    /// Applies edits as one undoable step and refreshes everything derived
+    /// from the board.
+    pub fn apply_edits(&mut self, label: &str, edits: Vec<trace_core::edit::Edit>) {
+        let Some(scene) = self.scene.as_mut() else {
+            return;
+        };
+        if edits.is_empty() {
+            return;
+        }
+        self.router.history.apply(&mut scene.board, label, edits);
+        self.after_edit();
+        self.message = Some((format!("{label}. Ctrl+Z undoes it."), false));
+    }
+
+    fn after_edit(&mut self) {
+        if let Some(scene) = self.scene.as_mut() {
+            trace_core::connectivity::analyse(&mut scene.board);
+            scene.rebuild();
+        }
+        self.router.board_changed();
+        self.cm.board_changed();
+        self.imp.board_changed();
+        self.picked = None;
+        self.dirty = true;
+    }
+
+    fn undo(&mut self) {
+        let Some(scene) = self.scene.as_mut() else {
+            return;
+        };
+        if let Some(l) = self.router.history.undo(&mut scene.board) {
+            self.after_edit();
+            self.message = Some((format!("Undid: {l}"), false));
+        }
+    }
+
+    fn redo(&mut self) {
+        let Some(scene) = self.scene.as_mut() else {
+            return;
+        };
+        if let Some(l) = self.router.history.redo(&mut scene.board) {
+            self.after_edit();
+            self.message = Some((format!("Redid: {l}"), false));
+        }
+    }
+
+    /// Next visible copper layer after (or before) the given one.
+    fn next_copper(&self, from: u8, up: bool) -> Option<u8> {
+        let scene = self.scene.as_ref()?;
+        let n = scene.copper_count as i32;
+        (1..n)
+            .map(|k| {
+                let i = from as i32 + if up { -k } else { k };
+                i.rem_euclid(n) as u8
+            })
+            .find(|&i| scene.layer_visible(Slot::Copper(i)))
+    }
+
+    fn delete_picked(&mut self) {
+        let Some(scene) = self.scene.as_ref() else {
+            return;
+        };
+        let g = &scene.board.geometry;
+        let edit = match self.picked {
+            Some(scene::Source::Track(i)) => {
+                g.tracks
+                    .get(i)
+                    .map(|t| trace_core::edit::Edit::RemoveTrack {
+                        index: i,
+                        track: t.clone(),
+                    })
+            }
+            Some(scene::Source::Arc(i)) => {
+                g.arcs.get(i).map(|a| trace_core::edit::Edit::RemoveArc {
+                    index: i,
+                    arc: a.clone(),
+                })
+            }
+            Some(scene::Source::Via(i)) => {
+                g.vias.get(i).map(|v| trace_core::edit::Edit::RemoveVia {
+                    index: i,
+                    via: v.clone(),
+                })
+            }
+            _ => None,
+        };
+        match edit {
+            Some(e) => self.apply_edits("Deleted a track", vec![e]),
+            None => {
+                self.message = Some((
+                    "Click a track, arc or via first, then press Delete.".into(),
+                    false,
+                ))
+            }
         }
     }
 
@@ -557,6 +677,73 @@ impl App {
                     ctx.send_viewport_cmd(egui::ViewportCommand::Close);
                 }
             });
+            ui.menu_button("Edit", |ui| {
+                let has = self.scene.is_some();
+                let undo = self
+                    .router
+                    .history
+                    .undo_label()
+                    .map(|l| format!("Undo {l}"));
+                if ui
+                    .add_enabled(
+                        undo.is_some(),
+                        egui::Button::new(undo.unwrap_or_else(|| "Undo".into()))
+                            .shortcut_text("Ctrl+Z"),
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.undo();
+                }
+                let redo = self
+                    .router
+                    .history
+                    .redo_label()
+                    .map(|l| format!("Redo {l}"));
+                if ui
+                    .add_enabled(
+                        redo.is_some(),
+                        egui::Button::new(redo.unwrap_or_else(|| "Redo".into()))
+                            .shortcut_text("Ctrl+Y"),
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.redo();
+                }
+                ui.separator();
+                if ui
+                    .add_enabled(has, egui::Button::new("Route").shortcut_text("X"))
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.set_tool(Tool::Route);
+                }
+                if ui
+                    .add_enabled(
+                        self.picked.is_some(),
+                        egui::Button::new("Delete clicked track").shortcut_text("Del"),
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.delete_picked();
+                }
+                if ui
+                    .add_enabled(
+                        self.selected.is_some() && has,
+                        egui::Button::new("Unroute selected net").shortcut_text("Shift+Del"),
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    if let (Some(n), Some(scene)) = (self.selected, &self.scene) {
+                        let edits = router::unroute(&scene.board, n);
+                        let name = scene.board.nets[n as usize].name.clone();
+                        self.apply_edits(&format!("Unrouted {name}"), edits);
+                    }
+                }
+            });
             ui.menu_button("View", |ui| {
                 if ui
                     .add_enabled(
@@ -624,6 +811,7 @@ impl App {
     fn set_tool(&mut self, tool: Tool) {
         self.tool = tool;
         self.measure = None;
+        self.router.cancel();
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
@@ -716,7 +904,18 @@ impl App {
             {
                 self.set_tool(Tool::Measure);
             }
+            if ui
+                .selectable_label(self.tool == Tool::Route, "Route (X)")
+                .on_hover_text("Click a pad, via or track end to start routing its net")
+                .clicked()
+            {
+                self.set_tool(Tool::Route);
+            }
             ui.separator();
+            if self.tool == Tool::Route {
+                self.route_bar(ui);
+                return;
+            }
             let hint = match (self.tool, self.measure) {
                 (Tool::Measure, None) => "Click the first point.",
                 (Tool::Measure, Some(Measure { b: None, .. })) => "Click the second point.",
@@ -725,6 +924,48 @@ impl App {
             };
             ui.label(RichText::new(hint).weak());
         });
+    }
+
+    fn route_bar(&mut self, ui: &mut egui::Ui) {
+        let r = &mut self.router;
+        let mm = |ui: &mut egui::Ui, v: &mut f64, label: &str, tip: &str| {
+            ui.label(label);
+            ui.add(
+                egui::DragValue::new(v)
+                    .speed(0.1)
+                    .range(1.0..=500.0)
+                    .max_decimals(2)
+                    .suffix(" mil"),
+            )
+            .on_hover_text(tip);
+        };
+        mm(ui, &mut r.width, "Width", "Track width");
+        mm(
+            ui,
+            &mut r.clearance,
+            "Clearance",
+            "Gap kept to copper of other nets",
+        );
+        mm(ui, &mut r.via_d, "Via", "Via pad diameter");
+        mm(ui, &mut r.via_hole, "hole", "Via drill");
+        ui.separator();
+        let layer = r.active.as_ref().map(|a| a.layer()).or(match self.active {
+            Slot::Copper(i) => Some(i),
+            _ => None,
+        });
+        if let (Some(l), Some(scene)) = (layer, &self.scene) {
+            if let Some(name) = scene.board.stackup.copper_layers().nth(l as usize) {
+                ui.label(RichText::new(&name.name).strong());
+            }
+        }
+        let hint = match &self.router.active {
+            None => "Click a pad, via or track end to start.",
+            Some(_) => "Click: corner · V / Shift+V: via down / up · /: corner style · Backspace: undo corner · Enter: finish · Esc: cancel",
+        };
+        match &self.router.message {
+            Some(m) => ui.label(RichText::new(m).color(Color32::from_rgb(255, 120, 100))),
+            None => ui.label(RichText::new(hint).weak()),
+        };
     }
 
     fn side_panel(&mut self, ui: &mut egui::Ui) {
@@ -1205,6 +1446,47 @@ impl eframe::App for App {
         } else if let Some(p) = dropped.into_iter().next() {
             self.open(p);
         }
+        // Unsaved edits: mark the title, and ask before closing.
+        if self.dirty != self.title_dirty {
+            self.title_dirty = self.dirty;
+            let name = self
+                .scene
+                .as_ref()
+                .and_then(|s| s.path.file_name())
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(if self.dirty {
+                format!("● {name} (edited) - Trace {}", env!("CARGO_PKG_VERSION"))
+            } else {
+                concat!("Trace ", env!("CARGO_PKG_VERSION")).to_string()
+            }));
+        }
+        if ctx.input(|i| i.viewport().close_requested()) && self.dirty && !self.allow_close {
+            ctx.send_viewport_cmd(egui::ViewportCommand::CancelClose);
+            self.ask_close = true;
+        }
+        if self.ask_close {
+            egui::Window::new("Unsaved changes")
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_CENTER, [0.0, 0.0])
+                .show(ctx, |ui| {
+                    ui.label("This board has edits that are not saved. The original design file is never changed; save the edits as a new file.");
+                    ui.horizontal(|ui| {
+                        if ui.button("Save as Trace board…").clicked() {
+                            self.ask_close = false;
+                            self.save_as();
+                        }
+                        if ui.button("Close without saving").clicked() {
+                            self.allow_close = true;
+                            ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+                        }
+                        if ui.button("Cancel").clicked() {
+                            self.ask_close = false;
+                        }
+                    });
+                });
+        }
         let typing = ctx.wants_keyboard_input();
         let board2d = !self.mode3d && !self.mode_sch;
         let (open_shortcut, fit, flip, esc, measure_key, toggle3d, cm_key, sch_key) = ctx
@@ -1220,6 +1502,80 @@ impl eframe::App for App {
                     !typing && i.key_pressed(egui::Key::S),
                 )
             });
+        // Editing and routing keys.
+        if board2d && self.scene.is_some() && !typing {
+            let (undo, redo, route_key, del, via_dn, via_up, back, enter, corner, unroute) = ctx
+                .input_mut(|i| {
+                    (
+                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z),
+                        i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y)
+                            || i.consume_key(
+                                egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                                egui::Key::Z,
+                            ),
+                        i.key_pressed(egui::Key::X),
+                        i.key_pressed(egui::Key::Delete),
+                        i.consume_key(egui::Modifiers::NONE, egui::Key::V),
+                        i.consume_key(egui::Modifiers::SHIFT, egui::Key::V),
+                        i.key_pressed(egui::Key::Backspace),
+                        i.key_pressed(egui::Key::Enter),
+                        i.key_pressed(egui::Key::Slash),
+                        i.consume_key(egui::Modifiers::SHIFT, egui::Key::Delete),
+                    )
+                });
+            if undo && self.router.active.is_none() {
+                self.undo();
+            }
+            if redo && self.router.active.is_none() {
+                self.redo();
+            }
+            if route_key {
+                self.set_tool(if self.tool == Tool::Route {
+                    Tool::Select
+                } else {
+                    Tool::Route
+                });
+            }
+            if unroute {
+                if let (Some(n), Some(scene)) = (self.selected, &self.scene) {
+                    let edits = router::unroute(&scene.board, n);
+                    let name = scene.board.nets[n as usize].name.clone();
+                    self.apply_edits(&format!("Unrouted {name}"), edits);
+                }
+            } else if del && self.tool == Tool::Select {
+                self.delete_picked();
+            }
+            if self.tool == Tool::Route {
+                if corner {
+                    self.router.diagonal_first = !self.router.diagonal_first;
+                }
+                if let Some(layer) = self.router.active.as_ref().map(|a| a.layer()) {
+                    if via_dn || via_up {
+                        if let Some(next) = self.next_copper(layer, via_up) {
+                            let scene = self.scene.as_ref().unwrap();
+                            self.router.via(&scene.board, next);
+                            if self
+                                .router
+                                .active
+                                .as_ref()
+                                .is_some_and(|a| a.layer() == next)
+                            {
+                                self.active = Slot::Copper(next);
+                            }
+                        }
+                    }
+                    if back {
+                        self.router.back();
+                    }
+                    if enter {
+                        let scene = self.scene.as_ref().unwrap();
+                        if let Some(edits) = self.router.finish(&scene.board) {
+                            self.apply_edits("Routed a track", edits);
+                        }
+                    }
+                }
+            }
+        }
         if !typing && ctx.input(|i| i.key_pressed(egui::Key::I)) && self.scene.is_some() {
             self.imp.open = !self.imp.open;
         }
@@ -1257,7 +1613,11 @@ impl eframe::App for App {
             self.needs_fit = true;
         }
         if esc {
-            if self.measure.is_some() {
+            if self.router.active.is_some() {
+                self.router.cancel();
+            } else if self.tool == Tool::Route {
+                self.set_tool(Tool::Select);
+            } else if self.measure.is_some() {
                 self.measure = None;
             } else if self.tool == Tool::Measure {
                 self.set_tool(Tool::Select);

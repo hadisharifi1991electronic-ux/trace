@@ -115,6 +115,11 @@ impl Imp {
         }
     }
 
+    /// The board's copper changed; results are worked out again.
+    pub fn board_changed(&mut self) {
+        self.rows = None;
+    }
+
     pub fn to_store(&self) -> String {
         serde_json::to_string(&self.saved).unwrap_or_default()
     }

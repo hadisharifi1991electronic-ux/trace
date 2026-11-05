@@ -154,6 +154,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
 
     let view = app.view;
+    if let Some(layer) = app.router.active.as_ref().map(|a| a.layer()) {
+        app.active = Slot::Copper(layer);
+    }
     let pointer = resp.hover_pos().map(|p| view.to_board(p));
     app.cursor = pointer;
     app.hover = None;
@@ -180,9 +183,49 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             .map(|(p, _)| p)
             .unwrap_or([x, y])
     });
+    // Routing follows the cursor, landing on copper of its own net.
+    let route_snap = |x: f32, y: f32, layer: u8| -> Option<([f64; 2], Option<u32>)> {
+        let slot = Slot::Copper(layer);
+        scene
+            .snap(x, y, 8.0 / view.scale, Some(slot))
+            .map(|(p, n)| ([p[0] as f64, p[1] as f64], n))
+            .or_else(|| {
+                scene
+                    .pick(x, y, tol, slot, true)
+                    .map(|i| ([x as f64, y as f64], scene.prims[i].net))
+            })
+    };
+    if let (Some(layer), Some([x, y])) = (app.router.active.as_ref().map(|a| a.layer()), pointer) {
+        let snap = route_snap(x, y, layer);
+        app.router.update(&scene.board, [x as f64, y as f64], snap);
+    }
+    let mut pending: Option<Vec<trace_core::edit::Edit>> = None;
     if resp.clicked() {
         if let (Some([x, y]), Some(at)) = (pointer, snapped) {
             match app.tool {
+                Tool::Route => {
+                    if app.router.active.is_some() {
+                        pending = app.router.click(&scene.board);
+                    } else if let Slot::Copper(layer) = app.active {
+                        match route_snap(x, y, layer) {
+                            Some((p, Some(net))) => {
+                                app.router.start(p, Some(net), layer);
+                                app.selected = Some(net);
+                            }
+                            Some((_, None)) => {
+                                app.router.message = Some("That copper has no net to route.".into())
+                            }
+                            None => {
+                                app.router.message = Some(
+                                    "Start on a pad, via or track of the layer you route on."
+                                        .into(),
+                                )
+                            }
+                        }
+                    } else {
+                        app.router.message = Some("Choose a copper layer to route on.".into());
+                    }
+                }
                 Tool::Measure => {
                     app.measure = match app.measure {
                         Some(Measure { a, b: None }) => Some(Measure { a, b: Some(at) }),
@@ -191,6 +234,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
                 Tool::Select => {
                     app.marker = None;
+                    app.picked = scene
+                        .pick(x, y, tol, app.active, true)
+                        .or_else(|| scene.pick(x, y, tol, app.active, false))
+                        .map(|i| scene.prims[i].source);
                     match net_at(x, y).0 {
                         Some(n) => {
                             app.selected = Some(n);
@@ -370,6 +417,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if app.tool == Tool::Measure || app.measure.is_some() {
         draw_measure(ui, &mut shapes, &view, app.measure, snapped);
     }
+    if resp.double_clicked() && app.tool == Tool::Route && pending.is_none() {
+        pending = app.router.finish(&scene.board);
+    }
+    if let Some(a) = &app.router.active {
+        draw_route(&mut shapes, &view, &app.router, a);
+    }
 
     if let Some([x, y]) = app.marker {
         shapes.push(Shape::circle_stroke(
@@ -379,6 +432,76 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ));
     }
     painter.extend(shapes);
+    if let Some(edits) = pending {
+        app.selected = None;
+        app.apply_edits("Routed a track", edits);
+    }
+}
+
+/// The route being drawn: fixed corners in amber, the part following the
+/// cursor lighter (red where it breaks clearance), with its clearance halo.
+fn draw_route(
+    shapes: &mut Vec<Shape>,
+    view: &View,
+    r: &crate::router::Router,
+    a: &crate::router::Active,
+) {
+    let amber = Color32::from_rgb(255, 196, 64);
+    let seg = |shapes: &mut Vec<Shape>, p: [f64; 2], q: [f64; 2], w: f64, c: Color32| {
+        draw(
+            shapes,
+            view,
+            &Geom::Seg {
+                x1: p[0] as f32,
+                y1: p[1] as f32,
+                x2: q[0] as f32,
+                y2: q[1] as f32,
+                w: w as f32,
+            },
+            c,
+        );
+    };
+    let halo = Color32::from_white_alpha(28);
+    for (_, p, q) in a.fixed() {
+        seg(shapes, p, q, r.width, amber);
+    }
+    let bad = a.hit.is_some();
+    let mut prev = a.last_point();
+    for &p in &a.preview {
+        seg(shapes, prev, p, r.width + 2.0 * r.clearance, halo);
+        seg(
+            shapes,
+            prev,
+            p,
+            r.width,
+            if bad {
+                Color32::from_rgb(240, 70, 70)
+            } else {
+                Color32::from_rgba_unmultiplied(255, 220, 120, 200)
+            },
+        );
+        prev = p;
+    }
+    for &v in a.via_points() {
+        let c = view.to_screen(v[0] as f32, v[1] as f32);
+        shapes.push(Shape::circle_filled(
+            c,
+            (r.via_d / 2.0) as f32 * view.scale,
+            amber,
+        ));
+        shapes.push(Shape::circle_filled(
+            c,
+            (r.via_hole / 2.0) as f32 * view.scale,
+            Color32::from_rgb(20, 20, 24),
+        ));
+    }
+    if let Some(h) = &a.hit {
+        shapes.push(Shape::circle_stroke(
+            view.to_screen(h.near[0] as f32, h.near[1] as f32),
+            14.0,
+            Stroke::new(2.0_f32, Color32::from_rgb(240, 70, 70)),
+        ));
+    }
 }
 
 /// Adds the visible pours that `color_of` gives a colour to, as one mesh.

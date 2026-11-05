@@ -54,6 +54,12 @@ checker and simulator all read.
   nets are listed with how far off they are, and clicking one selects it on
   the board. Your groups are kept per board in Trace's settings; the design
   file is never changed
+- route tracks (the Route button, or X): click a pad, via or track end to
+  start, click to place 45° corners, V / Shift+V for a via to the next
+  layer down / up, Backspace to take back a corner, and the route ends on
+  copper of its own net. A route that breaks clearance to another net is
+  drawn red and is not placed. Ctrl+Z / Ctrl+Y undo and redo; Delete
+  removes the clicked track or via; Shift+Delete unroutes the selected net
 - check impedance (the Impedance button, or I): the board's stack-up with
   editable thickness and Er per layer, the trace width for the single-ended
   target and the width and gap for the differential target on each copper
@@ -120,6 +126,9 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
 - Lengths include tracks, arcs and via barrels between the layers used, but
   not package pin delays. Nets joined through copper pours are not checked
   for completeness yet.
+- Routing checks clearance to tracks, pads, vias and drill holes of other
+  nets, but not to copper pours, and pours are not re-poured after edits.
+  Vias are through vias. There is no push-and-shove or walk-around yet.
 - Impedance uses closed-form models (Hammerstad–Jensen microstrip, Wheeler
   stripline, IPC-2141 coupling). Every copper layer is taken as a reference
   plane and solder mask is ignored, so expect a few percent against a field

@@ -3,6 +3,24 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.8.0 (2026-11-05)
+
+- Routing (X): click a pad, via or track end to start a track on the
+  active layer, click to fix 45° corners (/ swaps which run comes first),
+  V or Shift+V drops a through via and carries on one layer down or up,
+  Backspace takes back a corner or via, and the route finishes by itself
+  on a pad, via or track of the same net (or with Enter or a double-click).
+  Width, clearance and via size start from the board's rules and most used
+  via, and can be changed in the toolbar.
+- Clearance is checked as you move: a route closer to another net than the
+  clearance, or shorting to it, is drawn red, the copper it hits is
+  circled, and it is not placed.
+- Edit menu with Undo and Redo (Ctrl+Z, Ctrl+Y), Delete for the clicked
+  track or via, and Unroute selected net (Shift+Delete).
+- Edited boards show "(edited)" in the title and ask before closing. Save
+  them as a Trace, KiCad or Altium board; the original file is never
+  changed.
+
 ## 0.7.1 (2026-11-05)
 
 - Clicking a track now selects that track's net. Before, copper on a hidden

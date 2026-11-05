@@ -77,6 +77,13 @@ checker and simulator all read.
   Zdiff of every routed net and pair against its target. Per-net rules set
   other targets by name pattern (USB pairs start at 90 Ω, PCIe at 85 Ω).
   Stack-up edits and rules are kept per board in Trace's settings
+- check design rules (the DRC button, or D): clearance, short circuits,
+  track width and unrouted nets, from the board's own Altium rules (per
+  object type, by priority, net and class scopes). Live is on by default:
+  the board is checked again in the background after every edit, the
+  count shows in the status bar, and markers on the board show where.
+  Click a violation to zoom to it. Boards without rules (Gerber, ODB++,
+  Allegro) are checked for overlapping copper of different nets only
 
 ## Command-line tool
 
@@ -87,6 +94,7 @@ trace pairs board.PcbDoc [5mil]  length of each differential pair (tracks, arcs,
 trace view board.PcbDoc          open the board viewer in your browser
 trace rules board.PcbDoc         design rules grouped by kind
 trace check board.PcbDoc         check the board's length and matched-length rules; lists failing nets
+trace drc board.PcbDoc           design rule check: clearance, short circuits, width, unrouted nets
 trace impedance board.PcbDoc     stack-up widths for 50 Ω and 100 Ω pairs, and each pair's Zdiff
 trace convert <file> out.json    export to Trace's open JSON model
 trace convert <file> out.kicad_pcb   write a KiCad board
@@ -139,10 +147,15 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
 - Routing checks clearance to tracks, pads, vias and drill holes of other
   nets. Pours on Altium boards are poured again after edits, close to
   Altium's own result (within a few percent of copper area on the test
-  boards; unused inner via pads are not removed first, and rules scoped to
-  parts, rooms or layers are not applied). Pours from Gerber, ODB++ and
+  boards; rules scoped to parts, rooms or layers are not applied). Pours
+  from Gerber, ODB++ and
   Allegro files are not poured again.
   Vias are through vias. There is no push-and-shove or walk-around yet.
+- The design rule check takes a rule whose scope it cannot judge (rooms,
+  footprints, hole sizes) as possibly applying, and uses the smaller gap of
+  it and the rule that surely applies, so it errs towards fewer reports.
+  Silkscreen, solder mask, hole-to-hole and component clearance rules are
+  not checked yet.
 - Length tuning places one row of square meanders on one straight track
   at a time; pick another track if one is too short for the length needed.
 - Impedance uses closed-form models (Hammerstad–Jensen microstrip, Wheeler

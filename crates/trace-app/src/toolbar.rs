@@ -19,6 +19,7 @@ pub enum Icon {
     Schematic,
     Constraints,
     Impedance,
+    Drc,
     Select,
     Measure,
     Route,
@@ -268,6 +269,17 @@ fn draw(p: &egui::Painter, icon: Icon, r: Rect, fg: Color32, enabled: bool) {
             line(
                 &[(0.7, 0.55), (0.78, 0.35), (0.86, 0.75), (0.94, 0.55)],
                 s(1.5, tint(GOLD)),
+            );
+        }
+        Icon::Drc => {
+            // A board with a check mark: design rule check.
+            let st = s(1.0, fg);
+            p.rect_stroke(Rect::from_min_max(at(0.0, 0.1), at(0.8, 0.9)), 1.0, st);
+            line(&[(0.15, 0.3), (0.45, 0.3)], st);
+            line(&[(0.15, 0.5), (0.35, 0.5)], st);
+            line(
+                &[(0.42, 0.62), (0.62, 0.85), (1.0, 0.3)],
+                s(2.0, tint(GREEN)),
             );
         }
         Icon::Select => {

@@ -526,7 +526,10 @@ fn center(s: &Shape) -> P {
     }
 }
 
-fn copper(board: &Board) -> (Vec<Copper>, Vec<(u8, usize, Vec<Vec<P>>, [f64; 4])>) {
+/// A copper area: layer, polygon index, outline then holes, bounding box.
+type Area = (u8, usize, Vec<Vec<P>>, [f64; 4]);
+
+fn copper(board: &Board) -> (Vec<Copper>, Vec<Area>) {
     let n = board.stackup.copper_layers().count().max(1) as u8;
     let g = &board.geometry;
     let mut out = Vec::new();
@@ -916,7 +919,8 @@ pub fn check(board: &Board, limit: usize) -> Vec<Violation> {
         .filter(|r| r.enabled && r.kind.eq_ignore_ascii_case("Width"))
         .collect();
     widths.sort_by_key(|r| r.priority);
-    let mut width_rule: HashMap<(Option<u32>, Obj), Option<(f64, f64, String)>> = HashMap::new();
+    type Limits = Option<(f64, f64, String)>;
+    let mut width_rule: HashMap<(Option<u32>, Obj), Limits> = HashMap::new();
     let mut width_of = |net: Option<u32>, obj: Obj| {
         width_rule
             .entry((net, obj))

@@ -5,6 +5,7 @@
 
 mod canvas;
 mod cm;
+mod drc;
 mod imp;
 mod router;
 mod scene;
@@ -100,6 +101,7 @@ pub struct App {
     single: Option<Vec<(Slot, bool)>>,
     /// Scroll the layer tabs to the current layer on the next frame.
     scroll_tab: bool,
+    pub drc: drc::Drc,
 }
 
 #[derive(Clone, Copy)]
@@ -160,6 +162,7 @@ impl App {
             generation: 0,
             repour: None,
             scroll_tab: false,
+            drc: drc::Drc::default(),
         };
         if let Some(f) = start_file {
             app.open(f);
@@ -218,6 +221,7 @@ impl App {
         match loaded {
             Ok(scene) => {
                 self.scene = Some(scene);
+                self.drc.reset();
                 self.view3d.reset();
                 self.load_constraints();
                 self.selected = None;
@@ -572,6 +576,7 @@ impl App {
         };
         self.router.history.append(&mut scene.board, edit);
         scene.rebuild();
+        self.drc.invalidate();
         self.router.board_changed();
         self.cm.board_changed();
         self.imp.board_changed();
@@ -689,6 +694,36 @@ impl App {
                 self.needs_fit = false;
             }
         }
+    }
+
+    /// Takes the board view to a design rule violation: its layer, its
+    /// net selected, a ring around the spot.
+    fn show_violation(&mut self, i: usize) {
+        let Some(v) = self.drc.list.get(i) else {
+            return;
+        };
+        let (at, layer, net) = (v.at, v.layer, v.nets[0]);
+        self.mode3d = false;
+        self.mode_sch = false;
+        match net {
+            Some(n) => self.select_net(n, false),
+            None => self.selected = None,
+        }
+        if let Some(l) = layer {
+            self.active = Slot::Copper(l);
+            self.scroll_tab = true;
+        }
+        let p = [at[0] as f32, at[1] as f32];
+        self.marker = Some(p);
+        self.focus = Some(Focus::Point(p, self.view.scale.max(4.0)));
+        self.needs_fit = false;
+        self.message = Some((
+            self.scene
+                .as_ref()
+                .map(|s| trace_core::drc::describe(&s.board, &self.drc.list[i]))
+                .unwrap_or_default(),
+            false,
+        ));
     }
 
     fn menu(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
@@ -964,6 +999,9 @@ impl App {
             }
             if button(ui, Icon::Impedance, self.imp.open, has_board, "Impedance: stack-up, widths for target impedance, and each pair's impedance (I)").clicked() {
                 self.imp.open = !self.imp.open;
+            }
+            if button(ui, Icon::Drc, self.drc.open, has_board, "Design Rule Check: clearance, short circuits, width and unrouted nets, live as you edit (D)").clicked() {
+                self.drc.open = !self.drc.open;
             }
             divider(ui);
             ui.spacing_mut().item_spacing.x = 8.0;
@@ -1844,6 +1882,13 @@ fn pair_rows(scene: &Scene) -> Vec<PairRow> {
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         self.poll_repour();
+        // The design rule check follows the board in the background; not
+        // while a re-pour is still to come, which would change it again.
+        if self.repour.is_none() {
+            if let Some(scene) = self.scene.as_mut() {
+                self.drc.tick(&mut scene.board, self.generation, ctx);
+            }
+        }
         // Files dropped on the window.
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
@@ -2026,6 +2071,12 @@ impl eframe::App for App {
         if !typing && ctx.input(|i| i.key_pressed(egui::Key::I)) && self.scene.is_some() {
             self.imp.open = !self.imp.open;
         }
+        if !typing
+            && ctx.input(|i| i.key_pressed(egui::Key::D) && !i.modifiers.any())
+            && self.scene.is_some()
+        {
+            self.drc.open = !self.drc.open;
+        }
         if sch_key && !self.schem.is_empty() {
             self.mode_sch = !self.mode_sch || self.scene.is_none();
             if self.mode_sch {
@@ -2113,6 +2164,29 @@ impl eframe::App for App {
                         {
                             self.imp.open = true;
                         }
+                        if self.drc.checking() {
+                            ui.label(RichText::new("checking rules…").weak());
+                        } else if let Some(n) = self.drc.count() {
+                            let (text, c) = if n == 0 {
+                                (
+                                    "No DRC violations".to_string(),
+                                    Color32::from_rgb(96, 200, 120),
+                                )
+                            } else if n == 1 {
+                                (
+                                    "1 DRC violation".to_string(),
+                                    Color32::from_rgb(240, 96, 96),
+                                )
+                            } else {
+                                (
+                                    format!("{n} DRC violations"),
+                                    Color32::from_rgb(240, 96, 96),
+                                )
+                            };
+                            if ui.link(RichText::new(text).color(c)).clicked() {
+                                self.drc.open = true;
+                            }
+                        }
                         let failing = self.cm.failing(&scene.board);
                         if failing > 0
                             && ui
@@ -2155,6 +2229,15 @@ impl eframe::App for App {
                 .resizable(true)
                 .default_height(220.0)
                 .show(ctx, |ui| self.pairs_panel(ui));
+        }
+        if !self.mode_sch {
+            let hit = match &self.scene {
+                Some(scene) => self.drc.show(ctx, &scene.board),
+                None => None,
+            };
+            if let Some(i) = hit {
+                self.show_violation(i);
+            }
         }
         let board2d = self.scene.is_some() && !self.mode3d && !self.mode_sch;
         if board2d {

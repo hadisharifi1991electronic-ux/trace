@@ -3,6 +3,31 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.13.0 (2026-11-05)
+
+- Live design rule check (DRC button, or D). Clearance between copper of
+  different nets, short circuits, track and arc width, and unrouted nets,
+  from the board's own Altium rules: per object type (track, arc, via,
+  SMD pad, through-hole pad, pour, region, hole), first rule by priority,
+  net, class and pair scopes. Rooms and footprints in a scope count as
+  "may apply", and the smaller gap wins. It runs in the background on
+  open and after every edit and re-pour; the status bar shows the count,
+  markers show each spot, and a click in the list zooms there and selects
+  the net. Matches Altium on the test boards: no false reports on
+  Fastino, LimeSDR-USB, video and pic_programmer, and only real overlaps
+  (alternate parts on the same pads) on the DAC39RF12 EVM.
+- `trace drc <board>` on the command line.
+- Altium boards read more exactly:
+  - unused inner pads that Altium removed, on vias and through-hole pads,
+    are gone (also tightening re-pour on plane layers);
+  - rounded-rectangle pads keep their rounded corners;
+  - shape-based regions in ASCII files (custom pad shapes) are read, and
+    take the net of the right pad (PADINDEX counts from 1);
+  - poured copper without a net of its own takes its polygon's net.
+- Connectivity follows copper regions and pours, so nets joined through a
+  region are no longer reported as open.
+- Plated slots from Gerbers only have copper on the layers that show it.
+
 ## 0.12.1 (2026-11-05)
 
 - Opens fab packages that wrap the real data in another archive, such as

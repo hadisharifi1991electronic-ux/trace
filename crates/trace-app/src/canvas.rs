@@ -525,6 +525,35 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
+    // Design rule violations on the layers shown: an X in the colour of
+    // its kind, the one picked in the list larger.
+    if app.drc.markers {
+        for (i, v) in app.drc.list.iter().enumerate() {
+            if v.layer
+                .is_some_and(|l| !scene.layer_visible(Slot::Copper(l)))
+            {
+                continue;
+            }
+            let p = view.to_screen(v.at[0] as f32, v.at[1] as f32);
+            if !rect.expand(10.0).contains(p) {
+                continue;
+            }
+            let big = app.drc.current == Some(i);
+            let r = if big { 9.0 } else { 5.0 };
+            let st = Stroke::new(
+                if big { 2.5_f32 } else { 1.8_f32 },
+                crate::drc::color(v.kind),
+            );
+            shapes.push(Shape::line_segment(
+                [p + egui::vec2(-r, -r), p + egui::vec2(r, r)],
+                st,
+            ));
+            shapes.push(Shape::line_segment(
+                [p + egui::vec2(-r, r), p + egui::vec2(r, -r)],
+                st,
+            ));
+        }
+    }
     if let Some([x, y]) = app.marker {
         shapes.push(Shape::circle_stroke(
             view.to_screen(x, y),

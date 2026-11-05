@@ -2949,7 +2949,9 @@ dependencies = [
 name = "trace-export"
 version = "0.1.0"
 dependencies = [
+ "cfb",
  "trace-allegro",
+ "trace-altium",
  "trace-core",
  "trace-gerber",
 ]

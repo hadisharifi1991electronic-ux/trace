@@ -19,6 +19,7 @@ USAGE:
     trace view <board> [out.html]               Open the board in the viewer (in your browser)
     trace convert <file> <out.json>             Export to Trace's open JSON model
     trace convert <file> <out.kicad_pcb>        Write a KiCad board (KiCad 7 and later)
+    trace convert <file> <out.PcbDoc>           Write an Altium Designer board
     trace layers <gerber folder|zip>            Show which layer each Gerber or drill file was taken as
 ";
 
@@ -349,6 +350,18 @@ fn convert(file: &str, out: &str) -> Res {
             return Err("only boards can be written as .kicad_pcb".into());
         };
         std::fs::write(out, trace_export::to_kicad(&b))?;
+        println!("wrote {out}");
+        return Ok(());
+    }
+    if out.to_ascii_lowercase().ends_with(".pcbdoc") {
+        let Design::Board(b) = load(file)? else {
+            return Err("only boards can be written as .PcbDoc".into());
+        };
+        let name = std::path::Path::new(out)
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        std::fs::write(out, trace_export::to_altium(&b, &name)?)?;
         println!("wrote {out}");
         return Ok(());
     }

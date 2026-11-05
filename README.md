@@ -21,7 +21,8 @@ checker and simulator all read.
   vias, silkscreen, outline and nets; "Rebuilt from N files" shows what each
   file was taken as and why. File → Save as Trace board keeps the result
 - save any open board as a KiCad board (File → Save as KiCad board), to keep
-  working on it in KiCad 7 or later
+  working on it in KiCad 7 or later, or as an Altium board (File → Save as
+  Altium board), which writes a `.PcbDoc`
 - see tracks, pads, vias, copper pours, silkscreen and the board outline
 - see each via's hole, layer span (such as 1-4) and net, coloured by span,
   and net names on tracks and pads as you zoom in
@@ -44,6 +45,7 @@ trace view board.PcbDoc          open the board viewer in your browser
 trace rules board.PcbDoc         design rules grouped by kind
 trace convert <file> out.json    export to Trace's open JSON model
 trace convert <file> out.kicad_pcb   write a KiCad board
+trace convert <file> out.PcbDoc      write an Altium Designer board
 ```
 
 Every command also takes an Allegro `.brd` (versions 16.0 to 23.x), a Gerber
@@ -72,6 +74,13 @@ by KiCad from the exported board were traced again: the nets match the
 source on 15 boards from Gerber, ODB++ and Allegro files, including a
 16-layer board with 25,700 blind and buried vias.
 
+Altium export writes a `.PcbDoc` with the layer stack, outline, nets, parts,
+tracks, arcs, vias and pads (full-stack where the copper differs by layer),
+and pours as copper regions. Each exported board was read back with Trace's
+own Altium reader and matched the source on 12 boards; opening the files in
+Altium Designer itself has not been checked yet. Designators, classes and
+rules are not written.
+
 Tested on an 18-layer Altium board with 2,370 parts, 2,252 nets and 137 differential
 pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
 1.07 million records reads in about 0.7 s.
@@ -83,8 +92,8 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   for completeness yet.
 - Schematic pins stored as binary records are counted against the previous
   symbol; the text form is exact.
-- Altium copper pours and regions are counted but not drawn yet; Allegro
-  pours are drawn.
+- Altium solid regions are drawn; Altium polygon pours are counted but not
+  drawn yet. Allegro pours are drawn.
 - Traced Gerber nets get names like `Net-042`, since bare Gerber files do not
   carry net names. Parts are only known when the files carry X2 component
   attributes or come from ODB++.
@@ -97,7 +106,7 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
 | `crates/trace-altium` | Altium `.PcbDoc` / `.SchDoc` reader (OLE compound files) |
 | `crates/trace-allegro` | Allegro `.brd` reader, ported from KiCad's Allegro importer |
 | `crates/trace-gerber` | Gerber, Excellon, IPC-356 and ODB++ import with layer detection and net tracing |
-| `crates/trace-export` | Writes boards in other tools' formats (KiCad) |
+| `crates/trace-export` | Writes boards in other tools' formats (KiCad, Altium) |
 | `crates/trace-cli` | The `trace` command |
 | `crates/trace-app` | The desktop app (egui) |
 

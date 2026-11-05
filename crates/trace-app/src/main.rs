@@ -217,6 +217,32 @@ impl App {
         });
     }
 
+    fn save_altium(&mut self) {
+        let Some(scene) = &self.scene else { return };
+        let stem = scene
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "board".into());
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Altium board", &["PcbDoc"])
+            .set_file_name(format!("{stem}.PcbDoc"))
+            .save_file()
+        else {
+            return;
+        };
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let result = trace_export::to_altium(&scene.board, &name)
+            .and_then(|bytes| std::fs::write(&path, bytes));
+        self.message = Some(match result {
+            Ok(()) => (format!("Saved {}", path.display()), false),
+            Err(e) => (format!("Could not save: {e}"), true),
+        });
+    }
+
     fn export_pairs(&mut self) {
         let Some(scene) = &self.scene else { return };
         let Some(path) = rfd::FileDialog::new()
@@ -358,6 +384,16 @@ impl App {
                 {
                     ui.close_menu();
                     self.save_kicad();
+                }
+                if ui
+                    .add_enabled(
+                        self.scene.is_some(),
+                        egui::Button::new("Save as Altium board…"),
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.save_altium();
                 }
                 if ui
                     .add_enabled(

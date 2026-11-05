@@ -30,6 +30,11 @@ impl LayerMap {
         LayerMap { copper }
     }
 
+    /// Altium layer byte of copper layer `i` (counted from the top).
+    fn id_of(&self, i: u8) -> Option<u8> {
+        (1..=32u8).find(|&id| self.copper[id as usize] == Some(i))
+    }
+
     fn get(&self, id: u8) -> LayerRef {
         match id {
             1..=32 => self.copper[id as usize]
@@ -94,14 +99,65 @@ fn parse_via(b: &[u8], layers: &LayerMap) -> Option<Via> {
         LayerRef::Copper(i) => Some(i),
         _ => None,
     };
+    let (from, to) = (copper(*b.get(29)?)?, copper(*b.get(30)?)?);
+    let hole = len_at(b, 25)?;
+    // Full-stack vias carry a diameter for each layer: slot 0 is the top,
+    // 1 to 30 the mid layers and 31 the bottom.
+    let mut rings = Vec::new();
+    if b.get(74) == Some(&2) && b.len() >= 75 + 32 * 4 {
+        for l in from.min(to)..=from.max(to) {
+            let Some(id) = layers.id_of(l) else { continue };
+            if let Some(d) = len_at(b, 75 + 4 * (id as usize - 1)) {
+                rings.push((l, d));
+            }
+        }
+    }
     Some(Via {
         net: net(b),
-        from_layer: copper(*b.get(29)?)?,
-        to_layer: copper(*b.get(30)?)?,
+        from_layer: from,
+        to_layer: to,
         at: point(b, 13)?,
         diameter: len_at(b, 21)?,
-        hole: len_at(b, 25)?,
-        rings: Vec::new(),
+        hole,
+        rings,
+    })
+}
+
+/// Copper regions: an 18-byte header, a property block, then the outline
+/// and each hole as a vertex count and (x, y) pairs of doubles.
+fn parse_region(b: &[u8], layers: &LayerMap) -> Option<Polygon> {
+    let layer = layers.get(*b.first()?);
+    if !matches!(layer, LayerRef::Copper(_)) {
+        return None;
+    }
+    let holes = u16_at(b, 14)? as usize;
+    let plen = i32_at(b, 18)? as usize;
+    let props = Props::parse(&String::from_utf8_lossy(b.get(22..22 + plen)?));
+    if props.int("KIND").unwrap_or(0) != 0 || props.bool("ISBOARDCUTOUT") {
+        return None;
+    }
+    let mut i = 22 + plen;
+    let mut ring = || -> Option<Vec<Point>> {
+        let n = i32_at(b, i)? as usize;
+        i += 4;
+        let mut pts = Vec::with_capacity(n.min(100_000));
+        for _ in 0..n {
+            let (x, y) = (f64_at(b, i)?, f64_at(b, i + 8)?);
+            i += 16;
+            pts.push(Point {
+                x: Length::from_mil(x / 10_000.0),
+                y: Length::from_mil(y / 10_000.0),
+            });
+        }
+        Some(pts)
+    };
+    let outline = ring()?;
+    let holes = (0..holes).map(|_| ring()).collect::<Option<Vec<_>>>()?;
+    (outline.len() >= 3).then_some(Polygon {
+        layer,
+        net: net(b),
+        outline,
+        holes,
     })
 }
 
@@ -119,8 +175,54 @@ fn parse_pad(blocks: &[&[u8]], layers: &LayerMap) -> Option<Pad> {
         3 => PadShape::Octagon,
         _ => PadShape::Round,
     };
+    let layer = layers.get(*b.first()?);
+    let hole = len_at(b, 45)?;
+    let shape_of = |v: u8| match v {
+        2 => PadShape::Rect,
+        3 => PadShape::Octagon,
+        _ => PadShape::Round,
+    };
+    // Full-stack pads: top, mid layer 1 and bottom in the main block, mid
+    // layers 2 to 30 in the sixth block. A land no bigger than the hole is
+    // no land at all.
+    let mut stack = Vec::new();
+    if layer == LayerRef::AllCopper && b.get(62) == Some(&2) {
+        let rot = f64_at(b, 52).filter(|r| r.is_finite()).unwrap_or(0.0);
+        let extra = blocks.get(5).copied().unwrap_or(&[]);
+        for i in 0..32u8 {
+            let Some(id) = layers.id_of(i) else { continue };
+            let (sx, sy, sh) = match id {
+                1 => (len_at(b, 21), len_at(b, 25), b.get(49).copied()),
+                2 => (len_at(b, 29), len_at(b, 33), b.get(50).copied()),
+                32 => (len_at(b, 37), len_at(b, 41), b.get(51).copied()),
+                m if extra.len() >= 596 => {
+                    let k = m as usize - 3;
+                    (
+                        len_at(extra, 4 * k),
+                        len_at(extra, 116 + 4 * k),
+                        extra.get(232 + k).copied(),
+                    )
+                }
+                _ => (len_at(b, 29), len_at(b, 33), b.get(50).copied()),
+            };
+            let (Some(sx), Some(sy)) = (sx, sy) else {
+                continue;
+            };
+            if sx.0.min(sy.0) <= hole.0 + 100 {
+                continue;
+            }
+            stack.push(Land {
+                layer: i,
+                shape: shape_of(sh.unwrap_or(1)),
+                size_x: sx,
+                size_y: sy,
+                rotation_deg: rot,
+                outline: Vec::new(),
+            });
+        }
+    }
     Some(Pad {
-        layer: layers.get(*b.first()?),
+        layer,
         net: net(b),
         component: u16_at(b, 7).filter(|&c| c != u16::MAX).map(u32::from),
         name,
@@ -131,7 +233,7 @@ fn parse_pad(blocks: &[&[u8]], layers: &LayerMap) -> Option<Pad> {
         shape,
         rotation_deg: f64_at(b, 52).filter(|r| r.is_finite()).unwrap_or(0.0),
         outline: Vec::new(),
-        stack: Vec::new(),
+        stack,
     })
 }
 
@@ -247,6 +349,12 @@ pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
         g.pads = split_binary(&d, 6)
             .iter()
             .filter_map(|r| parse_pad(r, &layers))
+            .collect();
+    }
+    if let Some(d) = c.stream("/Regions6/Data")? {
+        g.polygons = split_binary(&d, 1)
+            .iter()
+            .filter_map(|r| parse_region(r[0], &layers))
             .collect();
     }
     g.outline = parse_outline(&board_props);

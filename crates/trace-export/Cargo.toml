@@ -8,6 +8,8 @@ license.workspace = true
 [dev-dependencies]
 trace-gerber.workspace = true
 trace-allegro.workspace = true
+trace-altium.workspace = true
 
 [dependencies]
 trace-core.workspace = true
+cfb = "0.10"

@@ -3,6 +3,23 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.14.0 (2026-11-05)
+
+- Walkaround and push-and-shove in the route tool, as in Altium. Shift+R
+  (or the list on the route bar) cycles Walkaround, Push and walkaround,
+  and Stop at obstacle.
+  - Walkaround finds a 45° path round pads, vias and tracks of other
+    nets, hugging them at the clearance; when the cursor is on something
+    it cannot get round, the route stops just short of it.
+  - Push moves tracks of other nets out of the way, each re-routed between
+    its own ends; the moved tracks show in blue while routing and go in
+    with the route. Vias and pads are not pushed.
+  - Both work for differential pairs.
+- Clearance searches are about three times quicker on many-layer boards
+  (obstacles are indexed by layer), which also speeds up routing checks.
+- A clearance marker points at the spot where a long track is in the
+  way, not at its middle.
+
 ## 0.13.0 (2026-11-05)
 
 - Live design rule check (DRC button, or D). Clearance between copper of

@@ -8,6 +8,7 @@
 
 use trace_core::edit::{Edit, History};
 use trace_core::route::{self, Corner, Hit, Obstacles, Piece, P};
+use trace_core::walk::{self, Ask, Shove};
 use trace_core::{Arc, Board, LayerRef, Length, Point, Track, Via};
 
 /// One run of track on one layer; runs are joined by vias. Each click adds
@@ -43,6 +44,35 @@ pub struct PairInfo {
     pub sizes: Vec<(f64, f64)>,
 }
 
+/// What the route does with copper of other nets in its way, cycled with
+/// Shift+R as in Altium.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// Finds a way round it.
+    Walkaround,
+    /// Pushes tracks aside, and goes round what cannot be pushed.
+    Push,
+    /// Stops: the route turns red and is not placed.
+    Stop,
+}
+
+impl Mode {
+    pub fn next(self) -> Self {
+        match self {
+            Mode::Walkaround => Mode::Push,
+            Mode::Push => Mode::Stop,
+            Mode::Stop => Mode::Walkaround,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Walkaround => "Walkaround",
+            Mode::Push => "Push and walkaround",
+            Mode::Stop => "Stop at obstacle",
+        }
+    }
+}
+
 pub struct Active {
     pub net: Option<u32>,
     pub pair: Option<PairInfo>,
@@ -56,6 +86,9 @@ pub struct Active {
     pub lands: bool,
     landing: Option<(P, P)>,
     pub hit: Option<Hit>,
+    /// Tracks the preview pushes aside, shown moved and placed with the
+    /// next click.
+    pub shove: Option<Shove>,
 }
 
 /// A piece of copper the route will place.
@@ -235,6 +268,13 @@ pub struct Router {
     pub history: History,
     pub message: Option<String>,
     obstacles: Option<Obstacles>,
+    pub mode: Mode,
+    /// Edits that push tracks aside, fixed by a click before the route is
+    /// placed; the app applies them as their own step.
+    pub shoved: Option<Vec<Edit>>,
+    /// What the last update was worked out for; the same again (the
+    /// cursor still) needs no new search.
+    seen: Option<String>,
 }
 
 impl Router {
@@ -259,15 +299,18 @@ impl Router {
             history: History::default(),
             message: None,
             obstacles: None,
+            mode: Mode::Walkaround,
+            shoved: None,
+            seen: None,
         }
     }
 
     /// New board: sizes from its rules and vias, empty history. The corner
     /// style is kept.
     pub fn load(&mut self, board: &Board) {
-        let (corner, arc, pairs) = (self.corner, self.arc, self.pairs);
+        let (corner, arc, pairs, mode) = (self.corner, self.arc, self.pairs, self.mode);
         *self = Router::new();
-        (self.corner, self.arc, self.pairs) = (corner, arc, pairs);
+        (self.corner, self.arc, self.pairs, self.mode) = (corner, arc, pairs, mode);
         self.width = route::board_width(board);
         self.clearance = route::board_clearance(board);
         (self.via_d, self.via_hole) = route::common_via(board);
@@ -276,6 +319,7 @@ impl Router {
     /// The board changed; obstacles are rebuilt on next use.
     pub fn board_changed(&mut self) {
         self.obstacles = None;
+        self.seen = None;
     }
 
     pub fn obstacles(&mut self, board: &Board) -> &Obstacles {
@@ -285,6 +329,7 @@ impl Router {
     /// Starts a route at `at`. For a pair, `partner_pad` is where the
     /// partner's track starts.
     pub fn start(&mut self, at: P, net: Option<u32>, layer: u8, pair: Option<(PairInfo, P)>) {
+        self.seen = None;
         self.message = None;
         let (pair, from, start) = match pair {
             Some((info, b)) => (
@@ -309,10 +354,12 @@ impl Router {
             lands: false,
             landing: None,
             hit: None,
+            shove: None,
         });
     }
 
     pub fn cancel(&mut self) {
+        self.seen = None;
         self.active = None;
         self.message = None;
     }
@@ -340,6 +387,17 @@ impl Router {
         let Some(a) = &self.active else { return };
         let (net, from) = (a.net, a.last_point());
         let partner = a.pair.as_ref().map(|p| p.partner);
+        let clicks: usize = a.runs.iter().map(|r| r.clicks.len()).sum();
+        let key = format!(
+            "{cursor:?} {snap:?} {from:?} {} {} {clicks} {:?} {corner:?} {flip} {arc} {width} {clearance}",
+            a.layer(),
+            a.runs.len(),
+            self.mode,
+        );
+        if self.seen.as_deref() == Some(key.as_str()) {
+            return;
+        }
+        self.seen = Some(key);
         let mut landing = None;
         let (target, lands) = match (snap, partner) {
             (Some((p, n)), None) if n.is_some() && n == net => (p, true),
@@ -361,7 +419,87 @@ impl Router {
         a.lands = lands && (target[0] - from[0]).hypot(target[1] - from[1]) > 0.01;
         a.landing = landing;
         let nets = [net, partner.flatten()];
-        let placed: Vec<(u8, P, P, f64)> = a
+        let mode = self.mode;
+        let mut hit = self.live_hit(board, nets, clearance);
+        let a = self.active.as_mut().unwrap();
+        a.shove = None;
+        if hit.is_none() || mode == Mode::Stop {
+            self.active.as_mut().unwrap().hit = hit;
+            return;
+        }
+        let layer = a.layer();
+        let (w, gap) = a.size(layer, width);
+        let half = if a.pair.is_some() {
+            w + gap / 2.0
+        } else {
+            w / 2.0
+        };
+        // Push: move the tracks in the way, if nothing else is.
+        if mode == Mode::Push {
+            let caps: Vec<walk::Capsule> = a
+                .layout(width)
+                .into_iter()
+                .filter(|p| p.live)
+                .flat_map(|p| {
+                    let r = p.width / 2.0;
+                    p.piece.chords().into_iter().map(move |(x, y)| (x, y, r))
+                })
+                .collect();
+            let obstacles = self.obstacles(board);
+            if let Some(s) = walk::shove(board, obstacles, layer, &caps, nets, clearance) {
+                let skip = |t: usize| s.remove.contains(&t);
+                let clear = caps
+                    .iter()
+                    .all(|&(x, y, r)| obstacles.clear(layer, x, y, r, nets, clearance, &skip));
+                if clear {
+                    let a = self.active.as_mut().unwrap();
+                    a.shove = Some(s);
+                    a.hit = None;
+                    return;
+                }
+            }
+        }
+        // Walkaround: a 45° path round what is in the way.
+        let obstacles = self.obstacles(board);
+        let ask = Ask {
+            obstacles,
+            layer,
+            r: half,
+            nets,
+            clearance,
+            extra: &[],
+            skip: &[],
+        };
+        // When there is no way round, as far as it goes: the route stops
+        // short of what is in the way, as in Altium.
+        if let Some((path, reached)) = walk::walk_toward(&ask, from, target) {
+            let pieces: Vec<Piece> = path.windows(2).map(|w| Piece::Line(w[0], w[1])).collect();
+            let a = self.active.as_mut().unwrap();
+            let keep = std::mem::replace(&mut a.preview, pieces);
+            let (lands, landing) = (a.lands, a.landing);
+            if !reached {
+                a.lands = false;
+                a.landing = None;
+            }
+            let again = self.live_hit(board, nets, clearance);
+            let a = self.active.as_mut().unwrap();
+            if again.is_none() {
+                hit = None;
+            } else {
+                a.preview = keep;
+                (a.lands, a.landing) = (lands, landing);
+            }
+        }
+        self.active.as_mut().unwrap().hit = hit;
+    }
+
+    /// The worst clearance break of the part of the route that follows the
+    /// cursor.
+    fn live_hit(&mut self, board: &Board, nets: [Option<u32>; 2], clearance: f64) -> Option<Hit> {
+        let width = self.width;
+        let placed: Vec<(u8, P, P, f64)> = self
+            .active
+            .as_ref()?
             .layout(width)
             .into_iter()
             .filter(|p| p.live)
@@ -379,17 +517,19 @@ impl Router {
                 }
             }
         }
-        self.active.as_mut().unwrap().hit = hit;
+        hit
     }
 
     /// Fixes the corners up to the cursor. Returns the edits that place the
     /// route when it has reached copper of its own net.
     pub fn click(&mut self, board: &Board) -> Option<Vec<Edit>> {
+        self.seen = None;
         let a = self.active.as_mut()?;
         if let Some(h) = &a.hit {
             self.message = Some(too_close(board, h, self.clearance));
             return None;
         }
+        let shove = a.shove.take();
         let lands = a.lands;
         if lands {
             let landing = a.landing;
@@ -400,7 +540,19 @@ impl Router {
         a.fix_preview();
         self.message = None;
         if lands {
-            return self.finish(board);
+            let mut edits = self.finish(board)?;
+            if let Some(s) = shove {
+                // The pushed tracks go in after the route's own.
+                let added = edits
+                    .iter()
+                    .filter(|e| matches!(e, Edit::InsertTrack { .. }))
+                    .count();
+                edits.extend(s.edits(board, board.geometry.tracks.len() + added));
+            }
+            return Some(edits);
+        }
+        if let Some(s) = shove {
+            self.shoved = Some(s.edits(board, board.geometry.tracks.len()));
         }
         None
     }
@@ -408,6 +560,7 @@ impl Router {
     /// Places a via (a pair of vias for a pair) at the last fixed point,
     /// after fixing the preview, and carries on on `next` layer.
     pub fn via(&mut self, board: &Board, next: u8) {
+        self.seen = None;
         let (d, clearance) = (self.via_d, self.clearance);
         if self.active.as_ref().is_some_and(|a| a.layer() == next) {
             return;
@@ -492,6 +645,7 @@ impl Router {
 
     /// Takes back the last click, or the last via.
     pub fn back(&mut self) {
+        self.seen = None;
         let Some(a) = self.active.as_mut() else {
             return;
         };
@@ -728,5 +882,57 @@ mod tests {
         assert!(ends
             .iter()
             .any(|(_, _, l, w)| **l == LayerRef::Copper(1) && (w.mil() - 4.0).abs() < 1e-3));
+    }
+
+    #[test]
+    fn pair_walks_round_a_pad_in_the_way() {
+        let mut b = Board::default();
+        b.stackup.layers.push(StackLayer {
+            name: "L0".into(),
+            altium_id: None,
+            kind: LayerKind::Copper,
+            thickness: Length::from_mil(1.4),
+            dielectric_constant: None,
+            material: None,
+        });
+        b.nets = ["D_P", "D_N", "X"]
+            .iter()
+            .map(|n| Net {
+                name: (*n).into(),
+                ..Default::default()
+            })
+            .collect();
+        let mut block = pad(2, 150.0, 0.0);
+        block.size_x = Length::from_mil(30.0);
+        block.size_y = Length::from_mil(30.0);
+        b.geometry.pads = vec![pad(0, 0.0, 10.0), pad(1, 0.0, -10.0), block];
+        let mut r = Router::new();
+        r.clearance = 5.0;
+        let info = PairInfo {
+            name: "D".into(),
+            partner: Some(1),
+            sizes: vec![(5.0, 5.0)],
+        };
+        r.start([0.0, 10.0], Some(0), 0, Some((info, [0.0, -10.0])));
+        let no_pad = |_: P, _: Option<u32>| None;
+        r.mode = Mode::Stop;
+        r.update(&b, [300.0, 0.0], None, no_pad);
+        assert!(
+            r.active.as_ref().unwrap().hit.is_some(),
+            "straight through the pad"
+        );
+        r.mode = Mode::Walkaround;
+        r.update(&b, [300.0, 0.0], None, no_pad);
+        let a = r.active.as_ref().unwrap();
+        assert!(a.hit.is_none());
+        assert!(a.preview.len() > 1, "goes round");
+        // Both tracks keep clear of the pad.
+        let obs = Obstacles::new(&b);
+        for p in a.layout(r.width).iter().filter(|p| p.live) {
+            for (x, y) in p.piece.chords() {
+                let hit = obs.check_pair_track(0, x, y, p.width, [Some(0), Some(1)], 5.0);
+                assert!(hit.is_none(), "{x:?} {y:?}");
+            }
+        }
     }
 }

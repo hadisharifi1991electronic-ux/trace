@@ -58,8 +58,12 @@ checker and simulator all read.
   start, click to place corners (Shift+Space cycles 45°, 45° arc, 90°,
   90° arc and any angle; Space flips the bend), V / Shift+V for a via to the next
   layer down / up, Backspace to take back a corner, and the route ends on
-  copper of its own net. A route that breaks clearance to another net is
-  drawn red and is not placed. Starting on a net of a differential pair
+  copper of its own net. Obstacles are handled as in Altium (Shift+R or
+  the list on the route bar): Walkaround hugs what is in the way at 45°
+  and stops short when there is no way round; Push and walkaround moves
+  tracks of other nets aside first (shown in blue, placed with the
+  route; Ctrl+Z puts them back); Stop at obstacle draws a route that breaks
+  clearance red and does not place it. Starting on a net of a differential pair
   routes both nets together at the width and gap the Impedance window
   works out for the pair. Ctrl+Z / Ctrl+Y undo and redo; Delete
   removes the clicked track or via; Shift+Delete unroutes the selected net
@@ -150,7 +154,8 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   boards; rules scoped to parts, rooms or layers are not applied). Pours
   from Gerber, ODB++ and
   Allegro files are not poured again.
-  Vias are through vias. There is no push-and-shove or walk-around yet.
+  Vias are through vias. Push moves tracks only (not vias or pads), one
+  track deep: a track that would have to push another is not moved.
 - The design rule check takes a rule whose scope it cannot judge (rooms,
   footprints, hole sizes) as possibly applying, and uses the smaller gap of
   it and the rule that surely applies, so it errs towards fewer reports.

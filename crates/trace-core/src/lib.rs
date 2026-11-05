@@ -15,6 +15,7 @@ pub mod pour;
 pub mod route;
 pub mod schematic;
 pub mod units;
+pub mod walk;
 
 pub use board::*;
 pub use geometry::*;

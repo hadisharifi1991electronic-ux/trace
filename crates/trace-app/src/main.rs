@@ -1397,6 +1397,20 @@ impl App {
             .response
             .on_hover_text("Corner style: Shift+Space cycles, Space flips the bend, , and . size round corners");
         ui.separator();
+        egui::ComboBox::from_id_salt("route_mode")
+            .width(150.0)
+            .selected_text(r.mode.label())
+            .show_ui(ui, |ui| {
+                use crate::router::Mode;
+                for m in [Mode::Walkaround, Mode::Push, Mode::Stop] {
+                    ui.selectable_value(&mut r.mode, m, m.label());
+                }
+            })
+            .response
+            .on_hover_text(
+                "What the route does with copper of other nets in its way: Shift+R cycles",
+            );
+        ui.separator();
         let layer = r.active.as_ref().map(|a| a.layer()).or(match self.active {
             Slot::Copper(i) => Some(i),
             _ => None,
@@ -1408,7 +1422,7 @@ impl App {
         }
         let hint = match &self.router.active {
             None => "Click a pad, via or track end to start.",
-            Some(_) => "Click: corner · Shift+Space: corner style · Space: flip bend · V / Shift+V: via · Backspace: undo · Enter: finish · Esc: cancel",
+            Some(_) => "Click: corner · Shift+Space: corner style · Space: flip bend · Shift+R: obstacles · V / Shift+V: via · Backspace: undo · Enter: finish · Esc: cancel",
         };
         match &self.router.message {
             Some(m) => ui.label(RichText::new(m).color(Color32::from_rgb(255, 120, 100))),
@@ -1983,14 +1997,20 @@ impl eframe::App for App {
             });
         // Editing and routing keys.
         if board2d && self.scene.is_some() && !typing {
-            let (cycle, smaller, larger) = ctx.input_mut(|i| {
+            let (cycle, smaller, larger, mode_key) = ctx.input_mut(|i| {
                 (
                     i.consume_key(egui::Modifiers::SHIFT, egui::Key::Space),
                     i.key_pressed(egui::Key::Comma),
                     i.key_pressed(egui::Key::Period),
+                    i.consume_key(egui::Modifiers::SHIFT, egui::Key::R),
                 )
             });
             if self.tool == Tool::Route {
+                if mode_key {
+                    self.router.mode = self.router.mode.next();
+                    self.message =
+                        Some((format!("Obstacles: {}", self.router.mode.label()), false));
+                }
                 if cycle {
                     self.router.corner = self.router.corner.next();
                     self.message =

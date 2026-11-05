@@ -464,6 +464,8 @@ struct Obstacle {
     layer: Option<u8>,
     net: Option<u32>,
     shape: Shape,
+    /// The board track it is, for shoving.
+    track: Option<usize>,
 }
 
 const CELL: f64 = 100.0;
@@ -471,8 +473,16 @@ const CELL: f64 = 100.0;
 /// Other copper a route must keep clear of, indexed for quick lookups.
 pub struct Obstacles {
     items: Vec<Obstacle>,
-    grid: HashMap<(i32, i32), Vec<usize>>,
+    /// Each item's bounding box, to skip far ones before the exact gap.
+    boxes: Vec<[f64; 4]>,
+    /// Items by layer (`ALL` for every layer) and cell.
+    grid: HashMap<(u8, i32, i32), Vec<usize>>,
+    /// The highest copper layer an item is on.
+    top: u8,
 }
+
+/// The grid layer of items on every copper layer.
+const ALL: u8 = u8::MAX;
 
 pub(crate) fn pt(p: crate::Point) -> P {
     [p.x.mil(), p.y.mil()]
@@ -527,7 +537,7 @@ impl Obstacles {
             LayerRef::AllCopper => Some(None),
             _ => None,
         };
-        for t in &g.tracks {
+        for (ti, t) in g.tracks.iter().enumerate() {
             if let Some(layer) = layer_of(&t.layer) {
                 items.push(Obstacle {
                     layer,
@@ -537,6 +547,7 @@ impl Obstacles {
                         b: pt(t.end),
                         r: t.width.mil() / 2.0,
                     },
+                    track: Some(ti),
                 });
             }
         }
@@ -563,6 +574,7 @@ impl Obstacles {
                         b: at(i + 1),
                         r: a.width.mil() / 2.0,
                     },
+                    track: None,
                 });
             }
         }
@@ -587,6 +599,7 @@ impl Obstacles {
                         b: c,
                         r: d.max(v.hole.mil()) / 2.0,
                     },
+                    track: None,
                 });
             }
         }
@@ -607,6 +620,7 @@ impl Obstacles {
                         p.rotation_deg,
                         &p.outline,
                     ),
+                    track: None,
                 });
             } else {
                 for l in &p.stack {
@@ -621,6 +635,7 @@ impl Obstacles {
                             l.rotation_deg,
                             &l.outline,
                         ),
+                        track: None,
                     });
                 }
             }
@@ -634,19 +649,31 @@ impl Obstacles {
                         b: c,
                         r: p.hole.mil() / 2.0,
                     },
+                    track: None,
                 });
             }
         }
-        let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
-        for (i, o) in items.iter().enumerate() {
-            let b = o.shape.bbox();
+        let mut grid: HashMap<(u8, i32, i32), Vec<usize>> = HashMap::new();
+        let top = items
+            .iter()
+            .filter_map(|o: &Obstacle| o.layer)
+            .max()
+            .unwrap_or(0);
+        let boxes: Vec<[f64; 4]> = items.iter().map(|o: &Obstacle| o.shape.bbox()).collect();
+        for (i, &b) in boxes.iter().enumerate() {
             for gx in (b[0] / CELL).floor() as i32..=(b[2] / CELL).floor() as i32 {
                 for gy in (b[1] / CELL).floor() as i32..=(b[3] / CELL).floor() as i32 {
-                    grid.entry((gx, gy)).or_default().push(i);
+                    let l = items[i].layer.unwrap_or(ALL);
+                    grid.entry((l, gx, gy)).or_default().push(i);
                 }
             }
         }
-        Obstacles { items, grid }
+        Obstacles {
+            items,
+            boxes,
+            grid,
+            top,
+        }
     }
 
     /// The worst clearance break for a track from `a` to `b` of width `w`
@@ -703,52 +730,176 @@ impl Obstacles {
         nets: [Option<u32>; 2],
         clearance: f64,
     ) -> Option<Hit> {
+        self.check_skip(layer, a, b, r, nets, clearance, &|_| false)
+    }
+
+    /// Whether a capsule on `layer` keeps clearance, leaving out the board
+    /// tracks `skip` names (tracks being shoved).
+    #[allow(clippy::too_many_arguments)]
+    pub fn clear(
+        &self,
+        layer: u8,
+        a: P,
+        b: P,
+        r: f64,
+        nets: [Option<u32>; 2],
+        clearance: f64,
+        skip: &dyn Fn(usize) -> bool,
+    ) -> bool {
+        self.check_skip(Some(layer), a, b, r, nets, clearance, skip)
+            .is_none()
+    }
+
+    /// Board tracks on `layer` of nets other than `nets` closer than
+    /// `clearance` to a capsule: the tracks a shove would move.
+    #[allow(clippy::too_many_arguments)]
+    pub fn tracks_hit(
+        &self,
+        layer: u8,
+        a: P,
+        b: P,
+        r: f64,
+        nets: [Option<u32>; 2],
+        clearance: f64,
+        out: &mut Vec<usize>,
+    ) -> bool {
+        // True when everything in the way is a track.
+        let mut only_tracks = true;
+        self.visit(
+            Some(layer),
+            a,
+            b,
+            r,
+            nets,
+            clearance,
+            &mut |o: &Obstacle, _| match o.track {
+                Some(t) => {
+                    if !out.contains(&t) {
+                        out.push(t);
+                    }
+                }
+                None => only_tracks = false,
+            },
+        );
+        only_tracks
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn check_skip(
+        &self,
+        layer: Option<u8>,
+        a: P,
+        b: P,
+        r: f64,
+        nets: [Option<u32>; 2],
+        clearance: f64,
+        skip: &dyn Fn(usize) -> bool,
+    ) -> Option<Hit> {
+        let mut worst: Option<Hit> = None;
+        self.visit(layer, a, b, r, nets, clearance, &mut |o: &Obstacle, gap| {
+            if o.track.is_some_and(skip) {
+                return;
+            }
+            if worst.as_ref().is_none_or(|w| gap < w.gap) {
+                let near = match &o.shape {
+                    Shape::Capsule { a: c, b: d, .. } => closest_on(a, b, *c, *d),
+                    Shape::Poly(v) => {
+                        let n = v.len().max(1) as f64;
+                        v.iter()
+                            .fold([0.0, 0.0], |s, p| [s[0] + p[0] / n, s[1] + p[1] / n])
+                    }
+                };
+                worst = Some(Hit {
+                    gap,
+                    net: o.net,
+                    near,
+                });
+            }
+        });
+        worst
+    }
+
+    /// Calls `f` with each obstacle closer than `clearance` and its gap.
+    #[allow(clippy::too_many_arguments)]
+    fn visit(
+        &self,
+        layer: Option<u8>,
+        a: P,
+        b: P,
+        r: f64,
+        nets: [Option<u32>; 2],
+        clearance: f64,
+        f: &mut dyn FnMut(&Obstacle, f64),
+    ) {
         let reach = r + clearance;
         let (x0, y0) = (a[0].min(b[0]) - reach, a[1].min(b[1]) - reach);
         let (x1, y1) = (a[0].max(b[0]) + reach, a[1].max(b[1]) + reach);
+        let (gx0, gx1) = ((x0 / CELL).floor() as i32, (x1 / CELL).floor() as i32);
+        let (gy0, gy1) = ((y0 / CELL).floor() as i32, (y1 / CELL).floor() as i32);
+        // An item in several cells is seen once; one cell needs no check
+        // (the walkaround asks about short steps by the thousand).
+        let one = gx0 == gx1 && gy0 == gy1;
         let mut seen = std::collections::HashSet::new();
-        let mut worst: Option<Hit> = None;
-        for gx in (x0 / CELL).floor() as i32..=(x1 / CELL).floor() as i32 {
-            for gy in (y0 / CELL).floor() as i32..=(y1 / CELL).floor() as i32 {
-                let Some(list) = self.grid.get(&(gx, gy)) else {
-                    continue;
-                };
-                for &i in list {
-                    if !seen.insert(i) {
+        let layers = match layer {
+            Some(l) => l..=l,
+            None => 0..=self.top,
+        };
+        for l in layers.chain([ALL]) {
+            for gx in gx0..=gx1 {
+                for gy in gy0..=gy1 {
+                    let Some(list) = self.grid.get(&(l, gx, gy)) else {
                         continue;
-                    }
-                    let o = &self.items[i];
-                    if o.net.is_some() && nets.contains(&o.net) {
-                        continue;
-                    }
-                    if let (Some(l), Some(ol)) = (layer, o.layer) {
-                        if l != ol {
+                    };
+                    for &i in list {
+                        if !one && !seen.insert(i) {
                             continue;
                         }
-                    }
-                    let gap = o.shape.gap(a, b, r);
-                    if gap < clearance - 1e-3 && worst.as_ref().is_none_or(|w| gap < w.gap) {
-                        let near = match &o.shape {
-                            Shape::Capsule { a, b, .. } => {
-                                [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0]
+                        let o = &self.items[i];
+                        if o.net.is_some() && nets.contains(&o.net) {
+                            continue;
+                        }
+                        if let (Some(l), Some(ol)) = (layer, o.layer) {
+                            if l != ol {
+                                continue;
                             }
-                            Shape::Poly(v) => {
-                                let n = v.len().max(1) as f64;
-                                v.iter()
-                                    .fold([0.0, 0.0], |s, p| [s[0] + p[0] / n, s[1] + p[1] / n])
-                            }
-                        };
-                        worst = Some(Hit {
-                            gap,
-                            net: o.net,
-                            near,
-                        });
+                        }
+                        let bb = self.boxes[i];
+                        if bb[0] > x1 || bb[2] < x0 || bb[1] > y1 || bb[3] < y0 {
+                            continue;
+                        }
+                        let gap = o.shape.gap(a, b, r);
+                        if gap < clearance - 1e-3 {
+                            f(o, gap);
+                        }
                     }
                 }
             }
         }
-        worst
     }
+}
+
+/// The point of segment c-d nearest segment a-b, to mark where a long
+/// track is in the way rather than its middle.
+fn closest_on(a: P, b: P, c: P, d: P) -> P {
+    let foot = |p: P| {
+        let (dx, dy) = (d[0] - c[0], d[1] - c[1]);
+        let l = dx * dx + dy * dy;
+        let t = if l > 0.0 {
+            (((p[0] - c[0]) * dx + (p[1] - c[1]) * dy) / l).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        [c[0] + t * dx, c[1] + t * dy]
+    };
+    if seg_seg(a, b, c, d) == 0.0 {
+        if let Some(x) = line_cross(a, b, c, d) {
+            return x;
+        }
+    }
+    [foot(a), foot(b), c, d]
+        .into_iter()
+        .min_by(|p, q| point_seg(*p, a, b).total_cmp(&point_seg(*q, a, b)))
+        .unwrap_or(c)
 }
 
 pub(crate) fn point_seg(p: P, a: P, b: P) -> f64 {

@@ -335,6 +335,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     };
     order.sort_by_key(|(s, _)| if view.flip { -rank(*s) } else { rank(*s) });
     let dim = if app.selected.is_some() { 0.2 } else { 1.0 };
+    // Tracks the route is pushing aside are drawn where they will go.
+    let shoved_away: Vec<usize> = app
+        .router
+        .active
+        .as_ref()
+        .and_then(|a| a.shove.as_ref())
+        .map(|s| s.remove.clone())
+        .unwrap_or_default();
     let tiny = 0.6 / view.scale; // skip shapes smaller than a fraction of a pixel
     let any_copper = scene
         .layers
@@ -358,6 +366,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             .prims
             .iter()
             .filter(|p| p.slot == *slot && !(p.all_layers && p.slot != Slot::Vias))
+            .filter(|p| !matches!(p.source, Source::Track(t) if shoved_away.contains(&t)))
         {
             let b = p.geom.bbox();
             if !overlaps(b, visible) || (b[2] - b[0] < tiny && b[3] - b[1] < tiny) {
@@ -567,7 +576,19 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             app.selected = None;
         }
         app.router.tune.preview = None;
+        app.router.shoved = None;
         app.apply_edits(&pending_label, edits);
+    } else if let Some(edits) = app.router.shoved.take() {
+        let n = edits
+            .iter()
+            .filter(|e| matches!(e, trace_core::edit::Edit::RemoveTrack { .. }))
+            .count();
+        let label = if n == 1 {
+            "Pushed a track aside".to_string()
+        } else {
+            format!("Pushed {n} tracks aside")
+        };
+        app.apply_edits(&label, edits);
     }
 }
 
@@ -618,6 +639,19 @@ fn draw_route(
     for p in &layout {
         for (x, y) in p.piece.chords() {
             seg(shapes, x, y, p.width, if p.live { live } else { amber });
+        }
+    }
+    // Tracks pushed aside, where they will go.
+    if let Some(s) = &a.shove {
+        let pushed = Color32::from_rgb(110, 200, 255);
+        for t in &s.add {
+            seg(
+                shapes,
+                [t.start.x.mil(), t.start.y.mil()],
+                [t.end.x.mil(), t.end.y.mil()],
+                t.width.mil(),
+                pushed,
+            );
         }
     }
     for v in a.via_points() {

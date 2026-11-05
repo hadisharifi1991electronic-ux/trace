@@ -2933,6 +2933,7 @@ dependencies = [
  "trace-allegro",
  "trace-altium",
  "trace-core",
+ "trace-export",
  "trace-gerber",
 ]
 

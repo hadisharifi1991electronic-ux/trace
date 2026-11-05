@@ -193,6 +193,30 @@ impl App {
         });
     }
 
+    fn save_kicad(&mut self) {
+        let Some(scene) = &self.scene else { return };
+        let stem = scene
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "board".into());
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("KiCad board", &["kicad_pcb"])
+            .set_file_name(format!("{stem}.kicad_pcb"))
+            .save_file()
+        else {
+            return;
+        };
+        let text = trace_export::to_kicad(&scene.board);
+        self.message = Some(match std::fs::write(&path, text) {
+            Ok(()) => (
+                format!("Saved {} (opens in KiCad 7 or later)", path.display()),
+                false,
+            ),
+            Err(e) => (format!("Could not save: {e}"), true),
+        });
+    }
+
     fn export_pairs(&mut self) {
         let Some(scene) = &self.scene else { return };
         let Some(path) = rfd::FileDialog::new()
@@ -324,6 +348,16 @@ impl App {
                 {
                     ui.close_menu();
                     self.save_as();
+                }
+                if ui
+                    .add_enabled(
+                        self.scene.is_some(),
+                        egui::Button::new("Save as KiCad board…"),
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.save_kicad();
                 }
                 if ui
                     .add_enabled(

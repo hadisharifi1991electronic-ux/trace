@@ -20,7 +20,11 @@ checker and simulator all read.
   is recognised automatically and the board is rebuilt with copper, holes,
   vias, silkscreen, outline and nets; "Rebuilt from N files" shows what each
   file was taken as and why. File → Save as Trace board keeps the result
+- save any open board as a KiCad board (File → Save as KiCad board), to keep
+  working on it in KiCad 7 or later
 - see tracks, pads, vias, copper pours, silkscreen and the board outline
+- see each via's hole, layer span (such as 1-4) and net, coloured by span,
+  and net names on tracks and pads as you zoom in
 - zoom (scroll), pan (drag), flip to the bottom (B), fit (F)
 - show or hide each copper layer; double-click a layer to show only that one
 - measure (M): click two points to get the distance and the x/y offsets in
@@ -39,6 +43,7 @@ trace pairs board.PcbDoc [5mil]  length of each differential pair (tracks, arcs,
 trace view board.PcbDoc          open the board viewer in your browser
 trace rules board.PcbDoc         design rules grouped by kind
 trace convert <file> out.json    export to Trace's open JSON model
+trace convert <file> out.kicad_pcb   write a KiCad board
 ```
 
 Every command also takes an Allegro `.brd` (versions 16.0 to 23.x), a Gerber
@@ -54,8 +59,18 @@ recognised from X2 file functions, Altium layer comments, the extension
 conventions of Altium/Protel, Eagle and OrCAD, KiCad file names, and finally
 the content itself. Without X2 net attributes, nets are traced through the
 copper: on six KiCad demo boards (about 19,000 objects) the traced nets match
-KiCad's own netlist exactly. ODB++ jobs take their nets and parts from the
-job's netlist and component files.
+KiCad's own netlist exactly. When an IPC-356 netlist comes with the
+Gerbers, as Allegro and most other tools write one, it names the nets and
+parts. Allegro artwork and drill files are recognised from Allegro's own
+layer comments and tool tables. ODB++ jobs take their nets and parts from
+the job's netlist and component files.
+
+KiCad export writes copper, pads, vias (including blind and buried), pours,
+silkscreen and the outline, with nets and parts. Pads and vias whose copper
+changes from layer to layer keep that copper. To check it, Gerbers plotted
+by KiCad from the exported board were traced again: the nets match the
+source on 15 boards from Gerber, ODB++ and Allegro files, including a
+16-layer board with 25,700 blind and buried vias.
 
 Tested on an 18-layer Altium board with 2,370 parts, 2,252 nets and 137 differential
 pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
@@ -81,7 +96,8 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
 | `crates/trace-core` | Format-neutral design model (lengths in nanometres) |
 | `crates/trace-altium` | Altium `.PcbDoc` / `.SchDoc` reader (OLE compound files) |
 | `crates/trace-allegro` | Allegro `.brd` reader, ported from KiCad's Allegro importer |
-| `crates/trace-gerber` | Gerber, Excellon and ODB++ import with layer detection and net tracing |
+| `crates/trace-gerber` | Gerber, Excellon, IPC-356 and ODB++ import with layer detection and net tracing |
+| `crates/trace-export` | Writes boards in other tools' formats (KiCad) |
 | `crates/trace-cli` | The `trace` command |
 | `crates/trace-app` | The desktop app (egui) |
 

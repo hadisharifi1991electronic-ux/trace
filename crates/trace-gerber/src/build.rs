@@ -253,7 +253,23 @@ pub fn build_with(
             _ => None,
         })
         .reduce(geom::bbox_union);
-    let outline = find_outline(&layers, copper_box);
+    let holes_box = layers
+        .iter()
+        .filter_map(|l| match &l.data {
+            LayerData::Drill(d) => d
+                .holes
+                .iter()
+                .map(|h| {
+                    let r = h.diameter / 2.0;
+                    [h.at[0] - r, h.at[1] - r, h.at[0] + r, h.at[1] + r]
+                })
+                .reduce(geom::bbox_union),
+            _ => None,
+        })
+        .reduce(geom::bbox_union);
+    let outline = holes_box
+        .and_then(|h| outline_around(&layers, h))
+        .unwrap_or_else(|| find_outline(&layers, copper_box));
     b.board.geometry.outline = outline.iter().map(|&p| pt(p)).collect();
 
     // ---- mask openings (to tell vias from pins) -------------------------
@@ -1254,6 +1270,18 @@ impl Builder {
     /// short in the rebuilt copper, reported as a warning.
     fn apply_ipc(&mut self, nl: &crate::ipc356::Netlist, file: &str, extra: &nets::Extra) {
         use crate::ipc356::TestPoint;
+        let shifted;
+        let nl = match ipc_offset(&self.board.geometry, nl) {
+            Some(d) => {
+                let mut n = nl.clone();
+                for t in &mut n.points {
+                    t.at = [t.at[0] + d[0], t.at[1] + d[1]];
+                }
+                shifted = n;
+                &shifted
+            }
+            None => nl,
+        };
         let g = &self.board.geometry;
         let last = self.copper.saturating_sub(1);
         let key = |p: Pt| ((p[0] / 1.0).floor() as i64, (p[1] / 1.0).floor() as i64);
@@ -1668,6 +1696,53 @@ fn find_outline(layers: &[Layer], copper: Option<[f64; 4]>) -> Vec<Pt> {
     }
 }
 
+/// The smallest closed loop on an outline or mechanical layer that holds
+/// every drill hole. Altium plots its drawing frame on every film, so the
+/// copper extent alone can take the frame for the board edge.
+fn outline_around(layers: &[Layer], holes: [f64; 4]) -> Option<Vec<Pt>> {
+    let rank = |r: &Role| match r {
+        Role::Outline => Some(0),
+        Role::Keepout => Some(1),
+        Role::Mechanical(_) => Some(2),
+        _ => None,
+    };
+    let mut cands: Vec<(u32, &Gerber)> = layers
+        .iter()
+        .filter_map(|l| match (&l.data, rank(&l.role)) {
+            (LayerData::Gerber(g), Some(r)) => Some((r, g)),
+            _ => None,
+        })
+        .collect();
+    cands.sort_by_key(|c| c.0);
+    let holes_area = (holes[2] - holes[0]) * (holes[3] - holes[1]);
+    for (_, g) in cands {
+        let best = closed_loops(g)
+            .into_iter()
+            .filter(|l| {
+                let b = l
+                    .iter()
+                    .fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |b, p| {
+                        [
+                            b[0].min(p[0]),
+                            b[1].min(p[1]),
+                            b[2].max(p[0]),
+                            b[3].max(p[1]),
+                        ]
+                    });
+                b[0] <= holes[0] + 0.01
+                    && b[1] <= holes[1] + 0.01
+                    && b[2] >= holes[2] - 0.01
+                    && b[3] >= holes[3] - 0.01
+                    && geom::area(l).abs() >= holes_area * 0.9
+            })
+            .min_by(|a, b| geom::area(a).abs().total_cmp(&geom::area(b).abs()));
+        if best.is_some() {
+            return best;
+        }
+    }
+    None
+}
+
 /// Closed loops formed by the draws and arcs of a layer (centre lines).
 fn closed_loops(g: &Gerber) -> Vec<Vec<Pt>> {
     let mut paths: Vec<Vec<Pt>> = Vec::new();
@@ -1775,4 +1850,50 @@ fn single_outline(rings: &[Vec<Pt>]) -> Option<Vec<Point>> {
             Some(f.iter().map(|&p| pt(p)).collect())
         }
     }
+}
+
+/// Altium writes IPC-356 coordinates from the board's own origin while the
+/// Gerbers use the absolute origin, so the test points can sit off the pads
+/// by a fixed amount. Finds that shift by voting over test point to via and
+/// pad distances; `None` when the points already land.
+fn ipc_offset(g: &Geometry, nl: &crate::ipc356::Netlist) -> Option<Pt> {
+    let targets: Vec<Pt> = g
+        .vias
+        .iter()
+        .map(|v| [v.at.x.mm(), v.at.y.mm()])
+        .chain(g.pads.iter().map(|p| [p.at.x.mm(), p.at.y.mm()]))
+        .collect();
+    if targets.is_empty() || nl.points.is_empty() {
+        return None;
+    }
+    let key = |p: Pt| ((p[0] * 100.0).round() as i64, (p[1] * 100.0).round() as i64);
+    let spots: std::collections::HashSet<(i64, i64)> = targets.iter().map(|&p| key(p)).collect();
+    let lands = |d: Pt| {
+        nl.points
+            .iter()
+            .filter(|t| {
+                let (x, y) = key([t.at[0] + d[0], t.at[1] + d[1]]);
+                (-1..=1).any(|a| (-1..=1).any(|b| spots.contains(&(x + a, y + b))))
+            })
+            .count()
+    };
+    let here = lands([0.0, 0.0]);
+    if here * 2 >= nl.points.len() {
+        return None;
+    }
+    // Vote with a spread-out sample of test points against every target.
+    let step = (nl.points.len() / 150).max(1);
+    let mut votes: HashMap<(i64, i64), u32> = HashMap::new();
+    for t in nl.points.iter().step_by(step) {
+        for q in &targets {
+            *votes
+                .entry(key([q[0] - t.at[0], q[1] - t.at[1]]))
+                .or_default() += 1;
+        }
+    }
+    let (best, _) = votes
+        .into_iter()
+        .max_by_key(|(k, n)| (*n, std::cmp::Reverse(*k)))?;
+    let d = [best.0 as f64 / 100.0, best.1 as f64 / 100.0];
+    (lands(d) > here * 2 && lands(d) * 2 >= nl.points.len()).then_some(d)
 }

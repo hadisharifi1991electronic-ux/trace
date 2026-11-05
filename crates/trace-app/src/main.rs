@@ -206,7 +206,16 @@ impl App {
 
     /// Loads a board; true when it opened.
     fn load_board(&mut self, path: PathBuf) -> bool {
-        match Scene::load(path.clone()) {
+        // A reader bug on an odd file must not take the app down with it.
+        let loaded = std::panic::catch_unwind(|| Scene::load(path.clone())).unwrap_or_else(|p| {
+            let why = p
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| p.downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_default();
+            Err(format!("the reader failed on this file ({why})"))
+        });
+        match loaded {
             Ok(scene) => {
                 self.scene = Some(scene);
                 self.view3d.reset();

@@ -3,6 +3,21 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.12.1 (2026-11-05)
+
+- Opens fab packages that wrap the real data in another archive, such as
+  TI's `ODB++.zip` holding the ODB++ `.tgz` (and a `.zip` of it). Before,
+  Trace read the inner archive as a Gerber and crashed.
+- IPC-356 netlists from Altium now land on the copper: the space Altium
+  writes for a plus sign is read, and the shift between the netlist's
+  board origin and the Gerbers' absolute origin is found and taken out.
+  Nets and part pins come from the netlist again.
+- The board edge from Gerbers is the smallest outline that holds every
+  drill hole, so the drawing frame Altium plots on every film is no
+  longer taken for the board.
+- A file that makes a reader fail now gives a message instead of closing
+  the app.
+
 ## 0.12.0 (2026-11-05)
 
 - Copper pours are poured again after every edit that touches them:

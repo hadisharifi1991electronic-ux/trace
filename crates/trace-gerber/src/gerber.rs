@@ -344,7 +344,12 @@ impl Parser {
     }
 
     fn ext_block(&mut self, b: &str) {
-        let (cmd, arg) = b.split_at(b.len().min(2));
+        // Byte 2 can fall inside a non-ASCII character in a garbled block.
+        let cut = (0..=b.len().min(2))
+            .rev()
+            .find(|&i| b.is_char_boundary(i))
+            .unwrap_or(0);
+        let (cmd, arg) = b.split_at(cut);
         match cmd {
             "FS" => self.format(arg),
             "MO" => {

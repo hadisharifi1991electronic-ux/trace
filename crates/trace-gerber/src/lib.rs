@@ -87,37 +87,73 @@ pub fn read_path(path: impl AsRef<Path>) -> Result<Import> {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let entries = if data.starts_with(b"PK") {
-        Some(unzip(&data)?)
-    } else if data.starts_with(&[0x1f, 0x8b]) || is_tar(&data) {
-        Some(untar(&data)?)
-    } else {
-        None
-    };
-    if let Some(entries) = entries {
-        let raw: Vec<(String, Vec<u8>)> = entries.into_iter().map(|f| (f.name, f.data)).collect();
-        if raw.iter().any(|(n, _)| {
-            let n = n.to_ascii_lowercase();
-            n.ends_with("matrix/matrix") || n.ends_with("matrix/matrix.z")
-        }) {
-            let job = odb::Job::from_entries(raw)
-                .ok_or_else(|| Error::Format("incomplete ODB++ job".into()))?;
-            return odb::read(&job);
-        }
-        let files = raw
-            .into_iter()
-            .filter(|(n, _)| {
-                let base = n.rsplit('/').next().unwrap_or(n);
-                !n.contains("__MACOSX")
-                    && !n.contains("__Previews")
-                    && !base.starts_with('.')
-                    && !detect::skip_by_name(base)
-            })
-            .map(|(name, data)| SourceFile { name, data })
-            .collect();
-        return read_files(files);
+    read_bytes(name, data, 0)
+}
+
+fn is_archive(data: &[u8]) -> bool {
+    data.starts_with(b"PK") || data.starts_with(&[0x1f, 0x8b]) || is_tar(data)
+}
+
+fn has_odb_matrix(raw: &[(String, Vec<u8>)]) -> bool {
+    raw.iter().any(|(n, _)| {
+        let n = n.to_ascii_lowercase();
+        n.ends_with("matrix/matrix") || n.ends_with("matrix/matrix.z")
+    })
+}
+
+/// Reads one file's bytes: an archive (zip, tar, tgz, also nested one level
+/// or two, as fab packages often wrap the ODB++ .tgz in a .zip) or a single
+/// Gerber or drill file.
+fn read_bytes(name: String, data: Vec<u8>, depth: u32) -> Result<Import> {
+    if !is_archive(&data) {
+        return read_files(vec![SourceFile { name, data }]);
     }
-    read_files(vec![SourceFile { name, data }])
+    let entries = if data.starts_with(b"PK") {
+        unzip(&data)?
+    } else {
+        untar(&data)?
+    };
+    let raw: Vec<(String, Vec<u8>)> = entries.into_iter().map(|f| (f.name, f.data)).collect();
+    if has_odb_matrix(&raw) {
+        let job = odb::Job::from_entries(raw)
+            .ok_or_else(|| Error::Format("incomplete ODB++ job".into()))?;
+        return odb::read(&job);
+    }
+    let (inner, raw): (Vec<_>, Vec<_>) = raw.into_iter().partition(|(_, d)| is_archive(d));
+    let files: Vec<SourceFile> = raw
+        .into_iter()
+        .filter(|(n, _)| {
+            let base = n.rsplit('/').next().unwrap_or(n);
+            !n.contains("__MACOSX")
+                && !n.contains("__Previews")
+                && !base.starts_with('.')
+                && !detect::skip_by_name(base)
+        })
+        .map(|(name, data)| SourceFile { name, data })
+        .collect();
+    let has_layers = files.iter().any(|f| {
+        let base = f.name.rsplit('/').next().unwrap_or(&f.name);
+        is_fab_file(base)
+    });
+    if !inner.is_empty() && !has_layers && depth < 2 {
+        // Archives inside the archive: take the first one that reads, the
+        // ODB++ .tgz before a .zip of the same job.
+        let mut inner = inner;
+        inner.sort_by_key(|(n, d)| (!(d.starts_with(&[0x1f, 0x8b]) || is_tar(d)), n.clone()));
+        let mut first_err = None;
+        for (n, d) in inner {
+            match read_bytes(n, d, depth + 1) {
+                Ok(i) => return Ok(i),
+                Err(e) => {
+                    first_err.get_or_insert(e);
+                }
+            }
+        }
+        if files.is_empty() {
+            return Err(first_err.unwrap_or_else(|| Error::Format("empty archive".into())));
+        }
+    }
+    read_files(files)
 }
 
 /// The folder holding `matrix/matrix`, if `dir` is (or contains) an ODB++ job.

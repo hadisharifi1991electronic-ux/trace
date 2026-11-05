@@ -104,11 +104,19 @@ pub fn parse(data: &[u8]) -> Netlist {
             let mut j = start;
             if j < b.len() && (b[j] == b'+' || b[j] == b'-') {
                 j += 1;
+            } else if matches!(c, 'X' | 'Y')
+                && xy.len() < 2
+                && j + 1 < b.len()
+                && b[j] == b' '
+                && b[j + 1].is_ascii_digit()
+            {
+                // Altium writes a space for the plus sign: "X 075373Y 046151".
+                j += 1;
             }
             while j < b.len() && b[j].is_ascii_digit() {
                 j += 1;
             }
-            let num = &tail[start..j];
+            let num = tail[start..j].trim_start();
             match c {
                 'D' if !num.is_empty() && hole.is_none() && xy.is_empty() => {
                     hole = num.parse::<f64>().ok()
@@ -159,5 +167,16 @@ C  NNAMEm0001 UNNAMED_7_CAP_I328_N2\n\
         let v = &n.points[1];
         assert!(v.via && v.net == "GND" && (v.hole.unwrap() - 0.2032).abs() < 1e-9);
         assert!((v.at[0] - 20.32).abs() < 1e-9 && (v.at[1] + 143.51).abs() < 1e-9);
+    }
+
+    #[test]
+    fn reads_altium_records_with_a_space_for_plus() {
+        let f = b"P  UNITS CUST 1\n\
+327N/C              T5    -4         UA01X 075373Y 046151X0890Y0790R180 S0\n\
+999\n";
+        let n = parse(f);
+        assert_eq!(n.points.len(), 1);
+        let p = &n.points[0];
+        assert!((p.at[0] - 75.373).abs() < 1e-9 && (p.at[1] - 46.151).abs() < 1e-9);
     }
 }

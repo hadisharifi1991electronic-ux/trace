@@ -99,6 +99,27 @@ fn draw(shapes: &mut Vec<Shape>, view: &View, g: &Geom, color: Color32) {
     }
 }
 
+/// A shape made larger by `e` on every side.
+fn grow(g: &Geom, e: f32) -> Geom {
+    match *g {
+        Geom::Seg { x1, y1, x2, y2, w } => Geom::Seg {
+            x1,
+            y1,
+            x2,
+            y2,
+            w: w + 2.0 * e,
+        },
+        Geom::Circle { x, y, r } => Geom::Circle { x, y, r: r + e },
+        Geom::Rect { x, y, sx, sy, rot } => Geom::Rect {
+            x,
+            y,
+            sx: sx + 2.0 * e,
+            sy: sy + 2.0 * e,
+            rot,
+        },
+    }
+}
+
 pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let (rect, resp) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
     app.view.rect = rect;
@@ -137,18 +158,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     app.cursor = pointer;
     app.hover = None;
     let tol = 3.0 / view.scale;
-    // The net under the pointer: copper first, then pours.
-    let net_at = |x: f32, y: f32| -> (Option<u32>, Option<u32>) {
-        match scene.pick(x, y, tol, app.active) {
-            Some(i) => (scene.prims[i].net, scene.prims[i].component),
-            None => (
-                scene
-                    .pick_fill(x, y, app.active)
-                    .and_then(|f| scene.fills[f].net),
-                None,
-            ),
-        }
-    };
+    // The net under the pointer, as drawn: the active layer first.
+    let net_at = |x: f32, y: f32| scene.net_at(x, y, tol, app.active);
     if let Some([x, y]) = pointer {
         let (net, component) = net_at(x, y);
         app.hover = net
@@ -281,17 +292,36 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
-    // Selected net on top, in white.
+    // Selected net on top, in white with a dark edge, over a veil that
+    // darkens the rest; stacked pours on many-layer boards can make the
+    // board so pale that white alone would not show.
     if let Some(n) = app.selected {
+        shapes.push(Shape::rect_filled(
+            rect,
+            0.0,
+            Color32::from_black_alpha(150),
+        ));
         draw_fills(&mut shapes, scene, &view, visible, |f| {
-            (f.net == Some(n)).then_some(Color32::from_white_alpha(70))
+            (f.net == Some(n)).then_some(Color32::from_rgba_unmultiplied(255, 255, 255, 110))
         });
         if let Some(list) = scene.by_net.get(&n) {
-            for &i in list {
-                let p = &scene.prims[i];
-                if scene.shows(p) || p.slot == Slot::Vias {
-                    draw(&mut shapes, &view, &p.geom, Color32::WHITE);
-                }
+            let shown: Vec<&Geom> = list
+                .iter()
+                .map(|&i| &scene.prims[i])
+                .filter(|p| scene.shows(p) || p.slot == Slot::Vias)
+                .map(|p| &p.geom)
+                .collect();
+            let edge = 1.5 / view.scale;
+            for g in &shown {
+                draw(
+                    &mut shapes,
+                    &view,
+                    &grow(g, edge),
+                    Color32::from_rgb(20, 20, 28),
+                );
+            }
+            for g in &shown {
+                draw(&mut shapes, &view, g, Color32::WHITE);
             }
         }
     }

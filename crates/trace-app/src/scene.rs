@@ -28,7 +28,7 @@ pub struct Fill {
     pub tris: std::ops::Range<usize>,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum Geom {
     /// Segment with full width.
     Seg {
@@ -517,45 +517,60 @@ impl Scene {
         self.layer_visible(Slot::Pours) && self.layer_visible(f.slot)
     }
 
-    /// The topmost visible pour containing a point, preferring the active layer.
-    pub fn pick_fill(&self, x: f32, y: f32, active: Slot) -> Option<usize> {
-        let mut found = None;
-        for (i, f) in self.fills.iter().enumerate() {
+    /// A visible pour containing a point: on the active layer only, or on
+    /// any other layer.
+    pub fn pick_fill(&self, x: f32, y: f32, active: Slot, on_active: bool) -> Option<usize> {
+        self.fills.iter().position(|f| {
             let b = f.bbox;
-            if x < b[0] || x > b[2] || y < b[1] || y > b[3] || !self.fill_shows(f) {
-                continue;
+            if x < b[0]
+                || x > b[2]
+                || y < b[1]
+                || y > b[3]
+                || (f.slot == active) != on_active
+                || !self.fill_shows(f)
+            {
+                return false;
             }
             let v = &self.fill_verts[f.verts.clone()];
-            let hit = self.fill_tris[f.tris.clone()].chunks_exact(3).any(|t| {
+            self.fill_tris[f.tris.clone()].chunks_exact(3).any(|t| {
                 inside_triangle([x, y], v[t[0] as usize], v[t[1] as usize], v[t[2] as usize])
-            });
-            if hit {
-                if f.slot == active {
-                    return Some(i);
-                }
-                found.get_or_insert(i);
-            }
-        }
-        found
+            })
+        })
     }
 
-    /// The primitive under a board point, preferring the active layer.
-    pub fn pick(&self, x: f32, y: f32, tolerance: f32, active: Slot) -> Option<usize> {
+    /// Whether a primitive is drawn with the active layer: on it, or a via
+    /// or through-hole pad, which show on every layer.
+    fn on_active(&self, p: &Prim, active: Slot) -> bool {
+        p.slot == active || p.slot == Slot::Vias || p.all_layers
+    }
+
+    /// The primitive under a board point, on the active layer only or on
+    /// any other visible layer. Copper the point is inside of beats copper
+    /// merely near it; part pads win ties so a click can select the part.
+    pub fn pick(
+        &self,
+        x: f32,
+        y: f32,
+        tolerance: f32,
+        active: Slot,
+        on_active: bool,
+    ) -> Option<usize> {
         let cell = ((x / CELL).floor() as i32, (y / CELL).floor() as i32);
         let mut best: Option<(f32, usize)> = None;
         for &i in self.grid.get(&cell)? {
             let p = &self.prims[i];
-            if !self.shows(p) {
+            if self.on_active(p, active) != on_active || !self.shows(p) {
                 continue;
             }
             let d = p.geom.distance(x, y);
             if d > tolerance {
                 continue;
             }
-            let score = d
-                - if p.slot == active { tolerance } else { 0.0 }
-                - if p.component.is_some() {
-                    tolerance * 0.5
+            // Inside counts the same however deep, so a narrow track is
+            // not lost to a wide one or a pad it runs into.
+            let score = d.max(0.0)
+                - if p.component.is_some() && d <= 0.0 {
+                    0.01
                 } else {
                     0.0
                 };
@@ -564,6 +579,27 @@ impl Scene {
             }
         }
         best.map(|(_, i)| i)
+    }
+
+    /// What a click at a board point lands on, as the person sees it: the
+    /// active layer's copper, then its pours, then other layers' copper,
+    /// then their pours. Returns the net and the part (for pads).
+    pub fn net_at(
+        &self,
+        x: f32,
+        y: f32,
+        tolerance: f32,
+        active: Slot,
+    ) -> (Option<u32>, Option<u32>) {
+        for on_active in [true, false] {
+            if let Some(i) = self.pick(x, y, tolerance, active, on_active) {
+                return (self.prims[i].net, self.prims[i].component);
+            }
+            if let Some(f) = self.pick_fill(x, y, active, on_active) {
+                return (self.fills[f].net, None);
+            }
+        }
+        (None, None)
     }
 
     /// A point to start or end a route at: the centre of a pad or via, or
@@ -707,4 +743,48 @@ fn triangulate(
         });
     }
     (fills, verts, tris)
+}
+
+#[cfg(test)]
+mod pick_tests {
+    use super::*;
+
+    /// Clicks the middle of every track on the boards in TRACE_PICK_BOARDS
+    /// (separated by ';') and reports tracks whose own net is not picked.
+    #[test]
+    fn every_track_is_pickable() {
+        let Ok(list) = std::env::var("TRACE_PICK_BOARDS") else {
+            return;
+        };
+        for path in list.split(';').filter(|s| !s.is_empty()) {
+            let scene = Scene::load(PathBuf::from(path)).expect(path);
+            let (mut total, mut bad) = (0, Vec::new());
+            for (i, p) in scene.prims.iter().enumerate() {
+                let (Source::Track(_), Geom::Seg { x1, y1, x2, y2, .. }, Some(net)) =
+                    (p.source, p.geom, p.net)
+                else {
+                    continue;
+                };
+                total += 1;
+                let (x, y) = ((x1 + x2) / 2.0, (y1 + y2) / 2.0);
+                let tol = 3.0 / 0.24;
+                let got = scene.net_at(x, y, tol, p.slot).0;
+                if got != Some(net) {
+                    bad.push((i, got, net));
+                }
+            }
+            eprintln!("{path}: {} of {total} tracks not pickable", bad.len());
+            for (i, got, net) in bad.iter().take(8) {
+                let p = &scene.prims[*i];
+                eprintln!(
+                    "  {:?} {:?} net {} got {:?} shows={}",
+                    p.slot,
+                    p.geom,
+                    scene.board.nets[*net as usize].name,
+                    got.map(|g| scene.board.nets[g as usize].name.clone()),
+                    scene.shows(p)
+                );
+            }
+        }
+    }
 }

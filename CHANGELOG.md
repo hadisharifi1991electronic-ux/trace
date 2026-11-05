@@ -3,6 +3,18 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.7.1 (2026-11-05)
+
+- Clicking a track now selects that track's net. Before, copper on a hidden
+  or lower layer (a wide plane track or a pad under the click) could win,
+  so some tracks could not be selected, most often when zoomed in. Clicks
+  now follow what is drawn: the active layer's copper, then its pours, then
+  the other layers. Checked by clicking every track on eight boards (about
+  57,000 tracks).
+- The selected net is drawn in white with a dark edge over a darkened
+  board, so it shows on many-layer boards where stacked pours make the
+  view pale.
+
 ## 0.7.0 (2026-11-05)
 
 - Impedance window (I): the board's stack-up with editable thickness and Er,

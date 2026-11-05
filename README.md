@@ -24,6 +24,9 @@ checker and simulator all read.
   working on it in KiCad 7 or later, or as an Altium board (File → Save as
   Altium board), which writes a `.PcbDoc`
 - see tracks, pads, vias, copper pours, silkscreen and the board outline
+- turn the board in 3D (the 3D button, or 3): solder mask, exposed pads,
+  silkscreen, holes and a simple body for each part, sized from its pads;
+  drag to turn, right-drag to pan, B to flip over, choice of mask colour
 - see each via's hole, layer span (such as 1-4) and net, coloured by span,
   and net names on tracks and pads as you zoom in
 - zoom (scroll), pan (drag), flip to the bottom (B), fit (F)

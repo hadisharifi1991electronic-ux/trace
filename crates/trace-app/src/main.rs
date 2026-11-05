@@ -5,6 +5,7 @@
 
 mod canvas;
 mod scene;
+mod view3d;
 
 use eframe::egui::{self, Color32, RichText};
 use scene::{Scene, Slot};
@@ -24,6 +25,7 @@ fn main() -> eframe::Result {
                 width: 128,
                 height: 128,
             })),
+        depth_buffer: 24,
         ..Default::default()
     };
     eframe::run_native(
@@ -62,6 +64,8 @@ pub struct App {
     hover: Option<String>,
     cursor: Option<[f32; 2]>,
     needs_fit: bool,
+    mode3d: bool,
+    view3d: view3d::View3d,
 }
 
 const RECENT_KEY: &str = "recent_files";
@@ -98,6 +102,8 @@ impl App {
             hover: None,
             cursor: None,
             needs_fit: false,
+            mode3d: false,
+            view3d: view3d::View3d::default(),
         };
         if let Some(f) = start_file {
             app.open(f);
@@ -109,6 +115,7 @@ impl App {
         match Scene::load(path.clone()) {
             Ok(scene) => {
                 self.scene = Some(scene);
+                self.view3d.reset();
                 self.selected = None;
                 self.marker = None;
                 self.measure = None;
@@ -162,6 +169,7 @@ impl App {
         match Scene::load_files(paths) {
             Ok(scene) => {
                 self.scene = Some(scene);
+                self.view3d.reset();
                 self.selected = None;
                 self.marker = None;
                 self.measure = None;
@@ -412,6 +420,17 @@ impl App {
             });
             ui.menu_button("View", |ui| {
                 if ui
+                    .add_enabled(
+                        self.scene.is_some(),
+                        egui::Button::new(if self.mode3d { "2D view" } else { "3D view" })
+                            .shortcut_text("3"),
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.mode3d = !self.mode3d;
+                }
+                if ui
                     .add(egui::Button::new("Fit board").shortcut_text("F"))
                     .clicked()
                 {
@@ -450,6 +469,30 @@ impl App {
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
+            if ui
+                .selectable_label(!self.mode3d, "2D")
+                .on_hover_text("Board view (3 switches)")
+                .clicked()
+            {
+                self.mode3d = false;
+            }
+            if ui
+                .selectable_label(self.mode3d, "3D")
+                .on_hover_text("3D view of the assembled board (3 switches)")
+                .clicked()
+            {
+                self.mode3d = true;
+            }
+            ui.separator();
+            if self.mode3d {
+                ui.label(
+                    RichText::new(
+                        "Drag to turn, right-drag to pan, scroll to zoom. T top, B flip, F reset.",
+                    )
+                    .weak(),
+                );
+                return;
+            }
             if ui
                 .selectable_label(self.tool == Tool::Select, "Select")
                 .on_hover_text("Click copper to select its net")
@@ -903,15 +946,19 @@ impl eframe::App for App {
             self.open(p);
         }
         let typing = ctx.wants_keyboard_input();
-        let (open_shortcut, fit, flip, esc, measure_key) = ctx.input_mut(|i| {
+        let (open_shortcut, fit, flip, esc, measure_key, toggle3d) = ctx.input_mut(|i| {
             (
                 i.consume_key(egui::Modifiers::COMMAND, egui::Key::O),
-                !typing && i.key_pressed(egui::Key::F),
-                !typing && i.key_pressed(egui::Key::B),
+                !typing && !self.mode3d && i.key_pressed(egui::Key::F),
+                !typing && !self.mode3d && i.key_pressed(egui::Key::B),
                 i.key_pressed(egui::Key::Escape),
-                !typing && i.key_pressed(egui::Key::M),
+                !typing && !self.mode3d && i.key_pressed(egui::Key::M),
+                !typing && i.key_pressed(egui::Key::Num3),
             )
         });
+        if toggle3d && self.scene.is_some() {
+            self.mode3d = !self.mode3d;
+        }
         if measure_key {
             self.set_tool(if self.tool == Tool::Measure {
                 Tool::Select
@@ -1000,8 +1047,20 @@ impl eframe::App for App {
                 });
                 return;
             }
-            canvas::show(self, ui);
+            if self.mode3d {
+                if let Some(scene) = &self.scene {
+                    view3d::show(&mut self.view3d, scene, ui);
+                }
+            } else {
+                canvas::show(self, ui);
+            }
         });
+    }
+
+    fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
+        if let Some(gl) = gl {
+            self.view3d.destroy(gl);
+        }
     }
 
     fn save(&mut self, storage: &mut dyn eframe::Storage) {

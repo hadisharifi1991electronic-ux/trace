@@ -178,6 +178,79 @@ pub fn corner_path(a: P, b: P, mode: Corner, flip: bool, arc: f64) -> Vec<Piece>
     v
 }
 
+/// A route shifted sideways by `d` (positive = to the left of the way it
+/// runs), as for one track of a differential pair along a centre line.
+/// Sharp corners between straight runs meet at their mitre; other breaks
+/// are joined with a short straight piece.
+pub fn offset(pieces: &[Piece], d: f64) -> Vec<Piece> {
+    let shifted: Vec<Piece> = pieces
+        .iter()
+        .filter(|p| p.length() > 1e-9)
+        .map(|p| match *p {
+            Piece::Line(a, b) => {
+                let l = (b[0] - a[0]).hypot(b[1] - a[1]);
+                let n = [-(b[1] - a[1]) / l * d, (b[0] - a[0]) / l * d];
+                Piece::Line([a[0] + n[0], a[1] + n[1]], [b[0] + n[0], b[1] + n[1]])
+            }
+            Piece::Arc {
+                c,
+                r,
+                start_deg,
+                end_deg,
+                from,
+                to,
+            } => {
+                let at_start = {
+                    let t = start_deg.to_radians();
+                    let q = [c[0] + r * t.cos(), c[1] + r * t.sin()];
+                    (q[0] - from[0]).hypot(q[1] - from[1]) < 1e-6 * r.max(1.0)
+                };
+                // Counter-clockwise travel has the centre on its left.
+                let r2 = if at_start { r - d } else { r + d }.max(1e-6);
+                let k = r2 / r;
+                let sc = |p: P| [c[0] + (p[0] - c[0]) * k, c[1] + (p[1] - c[1]) * k];
+                Piece::Arc {
+                    c,
+                    r: r2,
+                    start_deg,
+                    end_deg,
+                    from: sc(from),
+                    to: sc(to),
+                }
+            }
+        })
+        .collect();
+    let mut out: Vec<Piece> = Vec::with_capacity(shifted.len());
+    for p in shifted {
+        if let Some(last) = out.last_mut() {
+            let (e, s) = (last.end(), p.start());
+            if (e[0] - s[0]).hypot(e[1] - s[1]) > 1e-6 {
+                if let (Piece::Line(a, b), Piece::Line(c, dd)) = (*last, p) {
+                    if let Some(x) = line_cross(a, b, c, dd) {
+                        *last = Piece::Line(a, x);
+                        out.push(Piece::Line(x, dd));
+                        continue;
+                    }
+                }
+                out.push(Piece::Line(e, s));
+            }
+        }
+        out.push(p);
+    }
+    out
+}
+
+/// Where the infinite lines through a-b and c-d meet, unless parallel.
+fn line_cross(a: P, b: P, c: P, d: P) -> Option<P> {
+    let (r, s) = ([b[0] - a[0], b[1] - a[1]], [d[0] - c[0], d[1] - c[1]]);
+    let den = r[0] * s[1] - r[1] * s[0];
+    if den.abs() < 1e-9 {
+        return None;
+    }
+    let t = ((c[0] - a[0]) * s[1] - (c[1] - a[1]) * s[0]) / den;
+    Some([a[0] + t * r[0], a[1] + t * r[1]])
+}
+
 /// Rounds the corner at `m` between legs to `a` and `b`.
 fn fillet(a: P, m: P, b: P, frac: f64) -> Option<Vec<Piece>> {
     let (la, lb) = (
@@ -536,12 +609,37 @@ impl Obstacles {
         net: Option<u32>,
         clearance: f64,
     ) -> Option<Hit> {
-        self.check(Some(layer), a, b, w / 2.0, net, clearance)
+        self.check(Some(layer), a, b, w / 2.0, [net, None], clearance)
+    }
+
+    /// As [`Obstacles::check_track`] for one track of a pair: copper of
+    /// either net of the pair is not an obstacle.
+    pub fn check_pair_track(
+        &self,
+        layer: u8,
+        a: P,
+        b: P,
+        w: f64,
+        nets: [Option<u32>; 2],
+        clearance: f64,
+    ) -> Option<Hit> {
+        self.check(Some(layer), a, b, w / 2.0, nets, clearance)
+    }
+
+    /// A through via of a pair.
+    pub fn check_pair_via(
+        &self,
+        c: P,
+        d: f64,
+        nets: [Option<u32>; 2],
+        clearance: f64,
+    ) -> Option<Hit> {
+        self.check(None, c, c, d / 2.0, nets, clearance)
     }
 
     /// The same for a through via of diameter `d` at `c`.
     pub fn check_via(&self, c: P, d: f64, net: Option<u32>, clearance: f64) -> Option<Hit> {
-        self.check(None, c, c, d / 2.0, net, clearance)
+        self.check(None, c, c, d / 2.0, [net, None], clearance)
     }
 
     fn check(
@@ -550,7 +648,7 @@ impl Obstacles {
         a: P,
         b: P,
         r: f64,
-        net: Option<u32>,
+        nets: [Option<u32>; 2],
         clearance: f64,
     ) -> Option<Hit> {
         let reach = r + clearance;
@@ -568,7 +666,7 @@ impl Obstacles {
                         continue;
                     }
                     let o = &self.items[i];
-                    if net.is_some() && o.net == net {
+                    if o.net.is_some() && nets.contains(&o.net) {
                         continue;
                     }
                     if let (Some(l), Some(ol)) = (layer, o.layer) {
@@ -685,6 +783,38 @@ mod tests {
             corner_path([0.0, 0.0], [10.0, 30.0], Corner::Line90, true, 1.0)[0],
             Piece::Line([0.0, 0.0], [0.0, 30.0])
         );
+    }
+
+    #[test]
+    fn pair_offsets() {
+        // An L: right then up. The left track (+d) runs inside the corner.
+        let c = vec![
+            Piece::Line([0.0, 0.0], [100.0, 0.0]),
+            Piece::Line([100.0, 0.0], [100.0, 100.0]),
+        ];
+        let l = offset(&c, 5.0);
+        assert_eq!(
+            l,
+            vec![
+                Piece::Line([0.0, 5.0], [95.0, 5.0]),
+                Piece::Line([95.0, 5.0], [95.0, 100.0]),
+            ]
+        );
+        let r = offset(&c, -5.0);
+        assert_eq!(r[0].end(), [105.0, -5.0]);
+        // Round corners keep their centre: the inner track has the smaller radius.
+        let arc = corner_path([0.0, 0.0], [100.0, 40.0], Corner::Arc90, false, 1.0);
+        let inner = offset(&arc, 5.0);
+        let Piece::Arc { r, .. } = inner[1] else {
+            panic!()
+        };
+        assert!((r - 35.0).abs() < 1e-9);
+        assert!((inner[0].end()[0] - inner[1].start()[0]).abs() < 1e-9);
+        let outer = offset(&arc, -5.0);
+        let Piece::Arc { r, .. } = outer[1] else {
+            panic!()
+        };
+        assert!((r - 45.0).abs() < 1e-9);
     }
 
     #[test]

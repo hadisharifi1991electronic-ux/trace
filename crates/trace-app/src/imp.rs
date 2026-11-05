@@ -187,6 +187,23 @@ impl Imp {
             .unwrap_or(if pair { self.diff } else { self.se })
     }
 
+    /// Width and gap for a pair carrying `net` on each copper layer, from
+    /// the stack-up and the pair's target, where they can be worked out.
+    pub fn pair_sizes(&mut self, net: &str, copper: usize) -> Vec<Option<(f64, f64)>> {
+        if self.geo.is_empty() {
+            self.geo = layer_geometry(&self.stackup);
+        }
+        let t = self.target(net, true);
+        (0..copper)
+            .map(|i| {
+                let g = self.geo.iter().find(|g| g.copper as usize == i)?;
+                let w = g.width_for(t / 2.0)? * 0.8;
+                let s = g.gap_for(w, t)?;
+                Some((w, s))
+            })
+            .collect()
+    }
+
     /// Pair nets off target, for the status bar.
     pub fn failing(&mut self, board: &Board) -> usize {
         self.rows(board);

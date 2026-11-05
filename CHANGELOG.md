@@ -3,6 +3,17 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.9.0 (2026-11-05)
+
+- Differential pair routing: starting a route on a net of a pair routes
+  both nets together, the partner from its pad next to the one clicked,
+  along one centre line. Width and gap on each layer come from the
+  Impedance window (the pair's target, e.g. 90 Ω for USB). Corners,
+  round corners and Space / Shift+Space work as for one track; V places
+  a via for each net, spaced for the via pads, and the route lands on the
+  pair's pads at the far end. Both tracks are checked for clearance. The
+  Pairs box in the routing toolbar turns this off.
+
 ## 0.8.1 (2026-11-05)
 
 - Corner styles while routing, as in Altium: Shift+Space cycles 45°,

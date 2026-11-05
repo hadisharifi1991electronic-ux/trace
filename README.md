@@ -59,7 +59,9 @@ checker and simulator all read.
   90° arc and any angle; Space flips the bend), V / Shift+V for a via to the next
   layer down / up, Backspace to take back a corner, and the route ends on
   copper of its own net. A route that breaks clearance to another net is
-  drawn red and is not placed. Ctrl+Z / Ctrl+Y undo and redo; Delete
+  drawn red and is not placed. Starting on a net of a differential pair
+  routes both nets together at the width and gap the Impedance window
+  works out for the pair. Ctrl+Z / Ctrl+Y undo and redo; Delete
   removes the clicked track or via; Shift+Delete unroutes the selected net
 - check impedance (the Impedance button, or I): the board's stack-up with
   editable thickness and Er per layer, the trace width for the single-ended

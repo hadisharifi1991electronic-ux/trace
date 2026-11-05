@@ -197,7 +197,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     };
     if let (Some(layer), Some([x, y])) = (app.router.active.as_ref().map(|a| a.layer()), pointer) {
         let snap = route_snap(x, y, layer);
-        app.router.update(&scene.board, [x as f64, y as f64], snap);
+        let board = &scene.board;
+        app.router
+            .update(board, [x as f64, y as f64], snap, |p, net| {
+                partner_pad(board, p, net, layer)
+            });
     }
     let mut pending: Option<Vec<trace_core::edit::Edit>> = None;
     if resp.clicked() {
@@ -209,7 +213,18 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     } else if let Slot::Copper(layer) = app.active {
                         match route_snap(x, y, layer) {
                             Some((p, Some(net))) => {
-                                app.router.start(p, Some(net), layer);
+                                let pair = if app.router.pairs {
+                                    pair_start(&app.router, &mut app.imp, scene, p, net, layer)
+                                } else {
+                                    None
+                                };
+                                if let Some((info, _)) = &pair {
+                                    app.message = Some((
+                                        format!("Routing pair {} together", info.name),
+                                        false,
+                                    ));
+                                }
+                                app.router.start(p, Some(net), layer, pair);
                                 app.selected = Some(net);
                             }
                             Some((_, None)) => {
@@ -462,33 +477,32 @@ fn draw_route(
         );
     };
     let halo = Color32::from_white_alpha(28);
-    for (_, piece) in a.fixed() {
-        for (p, q) in piece.chords() {
-            seg(shapes, p, q, r.width, amber);
-        }
-    }
     let bad = a.hit.is_some();
-    let chords: Vec<_> = a.preview.iter().flat_map(|p| p.chords()).collect();
-    if let Some(first) = chords.first() {
-        // The clearance halo as one joined line, so overlaps do not show.
-        let mut pts = vec![view.to_screen(first.0[0] as f32, first.0[1] as f32)];
-        pts.extend(
-            chords
-                .iter()
-                .map(|(_, q)| view.to_screen(q[0] as f32, q[1] as f32)),
-        );
-        let w = ((r.width + 2.0 * r.clearance) as f32 * view.scale).max(1.0);
-        shapes.push(Shape::line(pts, Stroke::new(w, halo)));
-    }
-    let color = if bad {
+    let live = if bad {
         Color32::from_rgb(240, 70, 70)
     } else {
         Color32::from_rgb(255, 220, 120)
     };
-    for &(p, q) in &chords {
-        seg(shapes, p, q, r.width, color);
+    let layout = a.layout(r.width);
+    // Clearance halo around the part following the cursor, as joined lines
+    // so overlaps do not show.
+    for p in layout.iter().filter(|p| p.live) {
+        let ch = p.piece.chords();
+        let Some(first) = ch.first() else { continue };
+        let mut pts = vec![view.to_screen(first.0[0] as f32, first.0[1] as f32)];
+        pts.extend(
+            ch.iter()
+                .map(|(_, q)| view.to_screen(q[0] as f32, q[1] as f32)),
+        );
+        let w = ((p.width + 2.0 * r.clearance) as f32 * view.scale).max(1.0);
+        shapes.push(Shape::line(pts, Stroke::new(w, halo)));
     }
-    for &v in a.via_points() {
+    for p in &layout {
+        for (x, y) in p.piece.chords() {
+            seg(shapes, x, y, p.width, if p.live { live } else { amber });
+        }
+    }
+    for v in a.via_points() {
         let c = view.to_screen(v[0] as f32, v[1] as f32);
         shapes.push(Shape::circle_filled(
             c,
@@ -817,4 +831,61 @@ fn draw_labels(
             _ => {}
         }
     }
+}
+
+/// The partner's pad nearest a pad of a pair, on the routing layer.
+fn partner_pad(
+    board: &trace_core::Board,
+    at: [f64; 2],
+    net: Option<u32>,
+    layer: u8,
+) -> Option<[f64; 2]> {
+    let net = net?;
+    board
+        .geometry
+        .pads
+        .iter()
+        .filter(|p| {
+            p.net == Some(net)
+                && match p.layer {
+                    trace_core::LayerRef::Copper(l) => l == layer,
+                    trace_core::LayerRef::AllCopper => true,
+                    _ => false,
+                }
+        })
+        .map(|p| [p.at.x.mil(), p.at.y.mil()])
+        .map(|p| ((p[0] - at[0]).hypot(p[1] - at[1]), p))
+        .filter(|(d, _)| *d < 400.0)
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+        .map(|(_, p)| p)
+}
+
+/// When `net` belongs to a differential pair whose partner has a pad next
+/// to `at`, the pair's sizes per layer and where the partner starts.
+fn pair_start(
+    router: &crate::router::Router,
+    imp: &mut crate::imp::Imp,
+    scene: &Scene,
+    at: [f64; 2],
+    net: u32,
+    layer: u8,
+) -> Option<(crate::router::PairInfo, [f64; 2])> {
+    let name = &scene.board.nets.get(net as usize)?.name;
+    let (pair, partner) = scene.pair_of.get(name)?;
+    let partner = *scene.net_by_name.get(partner)?;
+    let b = partner_pad(&scene.board, at, Some(partner), layer)?;
+    let fallback = (router.width, router.width.max(router.clearance));
+    let sizes = imp
+        .pair_sizes(name, scene.copper_count as usize)
+        .into_iter()
+        .map(|s| s.unwrap_or(fallback))
+        .collect();
+    Some((
+        crate::router::PairInfo {
+            name: pair.clone(),
+            partner: Some(partner),
+            sizes,
+        },
+        b,
+    ))
 }

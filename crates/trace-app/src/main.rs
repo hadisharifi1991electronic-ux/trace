@@ -939,7 +939,17 @@ impl App {
             )
             .on_hover_text(tip);
         };
-        mm(ui, &mut r.width, "Width", "Track width");
+        ui.checkbox(&mut r.pairs, "Pairs")
+            .on_hover_text("Starting on a net of a differential pair routes both nets together, at the width and gap the Impedance window works out for the pair");
+        let pair = r.active.as_ref().and_then(|a| {
+            let (w, g) = a.pair.as_ref()?.sizes.get(a.layer() as usize).copied()?;
+            Some((a.pair.as_ref()?.name.clone(), w, g))
+        });
+        if let Some((name, w, g)) = pair {
+            ui.label(RichText::new(format!("{name}: {w:.2} mil, gap {g:.2} mil")).strong());
+        } else {
+            mm(ui, &mut r.width, "Width", "Track width");
+        }
         mm(
             ui,
             &mut r.clearance,

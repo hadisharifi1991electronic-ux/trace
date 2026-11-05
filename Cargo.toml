@@ -16,3 +16,6 @@ trace-allegro = { path = "crates/trace-allegro" }
 trace-gerber = { path = "crates/trace-gerber" }
 trace-export = { path = "crates/trace-export" }
 trace-step = { path = "crates/trace-step" }
+
+[profile.release]
+strip = true

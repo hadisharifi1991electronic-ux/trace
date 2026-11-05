@@ -3,6 +3,13 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.10.1 (2026-11-05)
+
+- Opens Altium boards saved as ASCII (`.PcbDoc` written with "PCB ASCII
+  File"): stack-up, nets, classes, pairs, parts, rules, tracks, arcs,
+  vias, pads, pours and copper fills. Before, these failed with "Invalid
+  CFB file".
+
 ## 0.10.0 (2026-11-05)
 
 - Length tuning (T): point at a straight track of a net and click to add

@@ -11,12 +11,12 @@ fn internal(v: i32) -> f64 {
 
 /// Maps Altium layer ids (1 top copper ... 32 bottom copper, 33+ other
 /// layers) onto Trace layers, numbering copper from the top as stacked.
-struct LayerMap {
+pub(crate) struct LayerMap {
     copper: [Option<u8>; 33],
 }
 
 impl LayerMap {
-    fn new(stackup: &Stackup) -> Self {
+    pub(crate) fn new(stackup: &Stackup) -> Self {
         let mut copper = [None; 33];
         let ids: Vec<u8> = stackup
             .copper_layers()
@@ -31,11 +31,11 @@ impl LayerMap {
     }
 
     /// Altium layer byte of copper layer `i` (counted from the top).
-    fn id_of(&self, i: u8) -> Option<u8> {
+    pub(crate) fn id_of(&self, i: u8) -> Option<u8> {
         (1..=32u8).find(|&id| self.copper[id as usize] == Some(i))
     }
 
-    fn get(&self, id: u8) -> LayerRef {
+    pub(crate) fn get(&self, id: u8) -> LayerRef {
         match id {
             1..=32 => self.copper[id as usize]
                 .map(LayerRef::Copper)
@@ -239,7 +239,7 @@ fn parse_pad(blocks: &[&[u8]], layers: &LayerMap) -> Option<Pad> {
 
 /// The board outline is stored as numbered vertices `VX0`, `VY0`, ...;
 /// arcs between vertices are flattened to their end points for now.
-fn parse_outline(p: &Props) -> Vec<Point> {
+pub(crate) fn parse_outline(p: &Props) -> Vec<Point> {
     (0..)
         .map_while(|i| {
             let x = p.get(&format!("VX{i}")).and_then(Length::parse)?;
@@ -251,7 +251,11 @@ fn parse_outline(p: &Props) -> Vec<Point> {
 
 /// Reads a `.PcbDoc`: stack-up, nets with routed lengths, classes, differential
 /// pairs, components and design rules.
+/// Also reads boards saved as ASCII (`File > Save As`, "PCB ASCII File").
 pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
+    if crate::pcb_ascii::is_ascii(path.as_ref()) {
+        return crate::pcb_ascii::read(path.as_ref());
+    }
     let mut c = Container::open(path.as_ref())?;
     let board_data = c
         .stream("/Board6/Data")?
@@ -452,7 +456,7 @@ fn read_models<R: std::io::Read + std::io::Seek>(
     Ok(())
 }
 
-fn parse_stackup(p: &Props) -> Stackup {
+pub(crate) fn parse_stackup(p: &Props) -> Stackup {
     let mut layers = Vec::new();
     for i in 0.. {
         let key = |f: &str| format!("V9_STACK_LAYER{i}_{f}");
@@ -513,7 +517,7 @@ const BOILERPLATE: &[&str] = &[
     "DEFINEDBYLOGICALDOCUMENT",
 ];
 
-fn parse_rule(p: &Props) -> Rule {
+pub(crate) fn parse_rule(p: &Props) -> Rule {
     let params: BTreeMap<String, String> = p
         .keys()
         .filter(|(k, _)| !BOILERPLATE.contains(&k.as_str()))

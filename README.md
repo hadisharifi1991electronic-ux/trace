@@ -13,7 +13,7 @@ checker and simulator all read.
 
 `trace-app` (or `trace-app.exe` on Windows) opens a window where you can:
 
-- open any Altium `.PcbDoc` or Allegro `.brd` from File → Open, the recent
+- open any Altium `.PcbDoc` (binary or ASCII) or Allegro `.brd` from File → Open, the recent
   list, or by dropping it on the window
 - read the schematic (the Schematic button, or S): open an Altium `.PrjPcb`
   for all its sheets and its board, or a single `.SchDoc`. Opening a board

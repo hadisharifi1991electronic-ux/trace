@@ -5,6 +5,7 @@
 //! Altium importer was used as a behaviour reference.
 
 mod pcb;
+mod pcb_ascii;
 pub mod records;
 mod sch;
 

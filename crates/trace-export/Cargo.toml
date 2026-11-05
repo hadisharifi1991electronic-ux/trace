@@ -1,0 +1,13 @@
+[package]
+name = "trace-export"
+description = "Writes Trace boards in other tools' formats (KiCad, Altium)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dev-dependencies]
+trace-gerber.workspace = true
+trace-allegro.workspace = true
+
+[dependencies]
+trace-core.workspace = true

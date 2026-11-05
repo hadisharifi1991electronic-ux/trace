@@ -2901,6 +2901,7 @@ dependencies = [
  "trace-allegro",
  "trace-altium",
  "trace-core",
+ "trace-export",
  "trace-gerber",
 ]
 
@@ -2941,6 +2942,15 @@ version = "0.1.0"
 dependencies = [
  "serde",
  "serde_json",
+]
+
+[[package]]
+name = "trace-export"
+version = "0.1.0"
+dependencies = [
+ "trace-allegro",
+ "trace-core",
+ "trace-gerber",
 ]
 
 [[package]]

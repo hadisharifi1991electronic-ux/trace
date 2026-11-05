@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 members = ["crates/trace-core", "crates/trace-altium", "crates/trace-allegro",
-    "crates/trace-gerber", "crates/trace-cli", "crates/trace-app"]
+    "crates/trace-gerber", "crates/trace-export", "crates/trace-cli", "crates/trace-app"]
 
 [workspace.package]
 version = "0.1.0"
@@ -14,3 +14,4 @@ trace-core = { path = "crates/trace-core" }
 trace-altium = { path = "crates/trace-altium" }
 trace-allegro = { path = "crates/trace-allegro" }
 trace-gerber = { path = "crates/trace-gerber" }
+trace-export = { path = "crates/trace-export" }

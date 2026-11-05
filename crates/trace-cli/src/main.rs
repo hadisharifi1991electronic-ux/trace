@@ -18,6 +18,7 @@ USAGE:
     trace rules <board>                         Design rules, grouped by kind
     trace view <board> [out.html]               Open the board in the viewer (in your browser)
     trace convert <file> <out.json>             Export to Trace's open JSON model
+    trace convert <file> <out.kicad_pcb>        Write a KiCad board (KiCad 7 and later)
     trace layers <gerber folder|zip>            Show which layer each Gerber or drill file was taken as
 ";
 
@@ -343,6 +344,14 @@ fn view_board(file: &str, out: Option<&str>) -> Res {
 }
 
 fn convert(file: &str, out: &str) -> Res {
+    if out.to_ascii_lowercase().ends_with(".kicad_pcb") {
+        let Design::Board(b) = load(file)? else {
+            return Err("only boards can be written as .kicad_pcb".into());
+        };
+        std::fs::write(out, trace_export::to_kicad(&b))?;
+        println!("wrote {out}");
+        return Ok(());
+    }
     let json = match load(file)? {
         Design::Board(b) => serde_json::to_string_pretty(&b)?,
         Design::Sheet(s) => serde_json::to_string_pretty(&s)?,

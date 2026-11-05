@@ -3,6 +3,18 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.10.0 (2026-11-05)
+
+- Length tuning (T): point at a straight track of a net and click to add
+  meanders until the net reaches its target length. The target comes from
+  the Constraint Manager (match group, minimum length, or the pair's
+  skew), else from the other net of a differential pair, or from the
+  Target box in the toolbar. The toolbar shows the net's length now, the
+  length after tuning and where the target came from. Height and Spacing
+  set the meander size (Spacing auto is 4 × track width); Space puts the
+  meanders on the other side of the track. The meanders are checked for
+  clearance before they are placed, and Ctrl+Z takes them back.
+
 ## 0.9.0 (2026-11-05)
 
 - Differential pair routing: starting a route on a net of a pair routes

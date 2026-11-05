@@ -105,6 +105,44 @@ impl Cm {
         self.saved.insert(self.board_key.clone(), self.set.clone());
     }
 
+    /// The length a net should be tuned to, and why: the longest member
+    /// of a matched group, a minimum length, or its pair partner when the
+    /// group limits skew. The largest of these wins.
+    pub fn tune_target(&mut self, board: &Board, net: u32) -> Option<(f64, String)> {
+        let groups = self.set.groups.clone();
+        let results = self.results(board).clone();
+        let mut best: Option<(f64, String)> = None;
+        let mut offer = |v: f64, why: String| {
+            if best.as_ref().is_none_or(|(b, _)| v > *b) {
+                best = Some((v, why));
+            }
+        };
+        for (g, r) in groups.iter().zip(&results) {
+            if !g.enabled {
+                continue;
+            }
+            let Some(me) = r.nets.iter().find(|n| n.net == net) else {
+                continue;
+            };
+            if let (Some(_), Some(t)) = (g.limits.match_tolerance, r.target) {
+                offer(t.mil(), format!("longest in {}", g.name));
+            }
+            if let Some(m) = g.limits.min_length {
+                offer(m.mil(), format!("minimum of {}", g.name));
+            }
+            if g.limits.max_skew.is_some() {
+                if let Some(p) = r
+                    .nets
+                    .iter()
+                    .find(|n| n.net != net && n.pair.is_some() && n.pair == me.pair)
+                {
+                    offer(p.length.mil(), format!("partner {}", p.name));
+                }
+            }
+        }
+        best
+    }
+
     /// Failing nets over all groups, for the status bar.
     pub fn failing(&mut self, board: &Board) -> usize {
         self.results(board).iter().map(|r| r.failing).sum()

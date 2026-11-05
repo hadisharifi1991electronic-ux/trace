@@ -162,7 +162,64 @@ impl Active {
     }
 }
 
+/// Length tuning settings and the meander following the cursor.
+pub struct Tune {
+    /// Length to reach, mil; `None` takes it from the Constraint Manager.
+    pub target: Option<f64>,
+    pub amp: f64,
+    pub space: f64,
+    pub flip: bool,
+    pub preview: Option<TunePreview>,
+}
+
+pub struct TunePreview {
+    pub track: usize,
+    pub layer: u8,
+    pub net: u32,
+    pub width: f64,
+    pub pieces: Vec<Piece>,
+    pub added: f64,
+    pub length: f64,
+    pub target: f64,
+    pub why: String,
+    pub hit: Option<Hit>,
+}
+
+impl TunePreview {
+    /// Removes the straight track and puts the meander in its place.
+    pub fn edits(&self, board: &Board) -> Vec<Edit> {
+        let Some(old) = board.geometry.tracks.get(self.track) else {
+            return Vec::new();
+        };
+        let mut edits = vec![Edit::RemoveTrack {
+            index: self.track,
+            track: old.clone(),
+        }];
+        let start = board.geometry.tracks.len() - 1;
+        for (k, p) in self.pieces.iter().enumerate() {
+            edits.push(Edit::InsertTrack {
+                index: start + k,
+                track: Track {
+                    layer: old.layer.clone(),
+                    net: old.net,
+                    start: Point {
+                        x: Length::from_mil(p.start()[0]),
+                        y: Length::from_mil(p.start()[1]),
+                    },
+                    end: Point {
+                        x: Length::from_mil(p.end()[0]),
+                        y: Length::from_mil(p.end()[1]),
+                    },
+                    width: old.width,
+                },
+            });
+        }
+        edits
+    }
+}
+
 pub struct Router {
+    pub tune: Tune,
     pub width: f64,
     pub via_d: f64,
     pub via_hole: f64,
@@ -183,6 +240,13 @@ pub struct Router {
 impl Router {
     pub fn new() -> Self {
         Router {
+            tune: Tune {
+                target: None,
+                amp: 40.0,
+                space: 0.0,
+                flip: false,
+                preview: None,
+            },
             width: route::DEFAULT_WIDTH,
             via_d: 20.0,
             via_hole: 10.0,
@@ -214,7 +278,7 @@ impl Router {
         self.obstacles = None;
     }
 
-    fn obstacles(&mut self, board: &Board) -> &Obstacles {
+    pub fn obstacles(&mut self, board: &Board) -> &Obstacles {
         self.obstacles.get_or_insert_with(|| Obstacles::new(board))
     }
 

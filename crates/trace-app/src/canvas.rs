@@ -204,9 +204,35 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             });
     }
     let mut pending: Option<Vec<trace_core::edit::Edit>> = None;
+    let mut pending_label = "Routed a track".to_string();
+    // Length tuning: meanders on the straight track under the cursor.
+    if app.tool == Tool::Tune {
+        app.router.tune.preview = None;
+        if let Some([x, y]) = pointer {
+            let picked = scene
+                .pick(x, y, tol, app.active, true)
+                .map(|i| &scene.prims[i])
+                .and_then(|p| match (p.source, p.slot) {
+                    (Source::Track(t), Slot::Copper(l)) => Some((t, l)),
+                    _ => None,
+                });
+            if let Some((ti, layer)) = picked {
+                tune_preview(&mut app.router, &mut app.cm, scene, ti, layer);
+            }
+        }
+    }
     if resp.clicked() {
         if let (Some([x, y]), Some(at)) = (pointer, snapped) {
             match app.tool {
+                Tool::Tune => {
+                    if let Some(p) = &app.router.tune.preview {
+                        if p.hit.is_none() && p.added > 0.0 {
+                            let name = scene.board.nets[p.net as usize].name.clone();
+                            pending_label = format!("Tuned {name} (+{:.1} mil)", p.added);
+                            pending = Some(p.edits(&scene.board));
+                        }
+                    }
+                }
                 Tool::Route => {
                     if app.router.active.is_some() {
                         pending = app.router.click(&scene.board);
@@ -438,6 +464,28 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if let Some(a) = &app.router.active {
         draw_route(&mut shapes, &view, &app.router, a);
     }
+    if let Some(p) = &app.router.tune.preview {
+        let color = if p.hit.is_some() {
+            Color32::from_rgb(240, 70, 70)
+        } else {
+            Color32::from_rgb(255, 220, 120)
+        };
+        for piece in &p.pieces {
+            let (a, b) = (piece.start(), piece.end());
+            draw(
+                &mut shapes,
+                &view,
+                &Geom::Seg {
+                    x1: a[0] as f32,
+                    y1: a[1] as f32,
+                    x2: b[0] as f32,
+                    y2: b[1] as f32,
+                    w: p.width as f32,
+                },
+                color,
+            );
+        }
+    }
 
     if let Some([x, y]) = app.marker {
         shapes.push(Shape::circle_stroke(
@@ -448,8 +496,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     painter.extend(shapes);
     if let Some(edits) = pending {
-        app.selected = None;
-        app.apply_edits("Routed a track", edits);
+        if app.tool == Tool::Route {
+            app.selected = None;
+        }
+        app.router.tune.preview = None;
+        app.apply_edits(&pending_label, edits);
     }
 }
 
@@ -888,4 +939,85 @@ fn pair_start(
         },
         b,
     ))
+}
+
+/// Works out the meander for track `ti` that brings its net to the target.
+fn tune_preview(
+    router: &mut crate::router::Router,
+    cm: &mut crate::cm::Cm,
+    scene: &Scene,
+    ti: usize,
+    layer: u8,
+) {
+    let board = &scene.board;
+    let Some(t) = board.geometry.tracks.get(ti) else {
+        return;
+    };
+    let Some(net) = t.net else {
+        router.message = Some("That track has no net.".into());
+        return;
+    };
+    let length = board.net_length(net).mil();
+    let (target, why) = match router.tune.target {
+        Some(v) => (v, "your target".to_string()),
+        None => match cm.tune_target(board, net).or_else(|| {
+            // A pair net with no rule: match its partner.
+            let (_, partner) = scene.pair_of.get(&board.nets[net as usize].name)?;
+            let p = *scene.net_by_name.get(partner)?;
+            Some((board.net_length(p).mil(), format!("partner {partner}")))
+        }) {
+            Some(t) => t,
+            None => {
+                router.message = Some(format!(
+                    "No Constraint Manager group gives {} a length; tick Target and type one.",
+                    board.nets[net as usize].name
+                ));
+                return;
+            }
+        },
+    };
+    let extra = target - length;
+    if extra <= 0.5 {
+        router.message = Some(format!(
+            "{} is {:.1} mil, already at its target of {:.1} mil ({why}).",
+            board.nets[net as usize].name, length, target
+        ));
+        return;
+    }
+    router.message = None;
+    let width = t.width.mil();
+    let tune = &router.tune;
+    let space = if tune.space > 0.0 {
+        tune.space
+    } else {
+        4.0 * width
+    };
+    let (a, b) = (
+        [t.start.x.mil(), t.start.y.mil()],
+        [t.end.x.mil(), t.end.y.mil()],
+    );
+    let (pieces, added) = trace_core::route::meander(a, b, extra, tune.amp, space, tune.flip);
+    let clearance = router.clearance;
+    let obstacles = router.obstacles(board);
+    let mut hit = None;
+    for p in &pieces {
+        if let Some(h) =
+            obstacles.check_track(layer, p.start(), p.end(), width, Some(net), clearance)
+        {
+            hit = Some(h);
+            break;
+        }
+    }
+    router.tune.preview = Some(crate::router::TunePreview {
+        track: ti,
+        layer,
+        net,
+        width,
+        pieces,
+        added,
+        length,
+        target,
+        why,
+        hit,
+    });
 }

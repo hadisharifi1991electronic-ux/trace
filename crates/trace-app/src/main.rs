@@ -44,6 +44,7 @@ pub enum Tool {
     Select,
     Measure,
     Route,
+    Tune,
 }
 
 /// A distance measurement: first point, and second once placed.
@@ -812,6 +813,7 @@ impl App {
         self.tool = tool;
         self.measure = None;
         self.router.cancel();
+        self.router.tune.preview = None;
     }
 
     fn toolbar(&mut self, ui: &mut egui::Ui) {
@@ -911,9 +913,20 @@ impl App {
             {
                 self.set_tool(Tool::Route);
             }
+            if ui
+                .selectable_label(self.tool == Tool::Tune, "Tune (T)")
+                .on_hover_text("Add meanders to a track to bring its net to a target length")
+                .clicked()
+            {
+                self.set_tool(Tool::Tune);
+            }
             ui.separator();
             if self.tool == Tool::Route {
                 self.route_bar(ui);
+                return;
+            }
+            if self.tool == Tool::Tune {
+                self.tune_bar(ui);
                 return;
             }
             let hint = match (self.tool, self.measure) {
@@ -924,6 +937,91 @@ impl App {
             };
             ui.label(RichText::new(hint).weak());
         });
+    }
+
+    fn tune_bar(&mut self, ui: &mut egui::Ui) {
+        let t = &mut self.router.tune;
+        let mut own = t.target.is_some();
+        ui.checkbox(&mut own, "Target")
+            .on_hover_text("Off: the target comes from the Constraint Manager (matched groups, minimum lengths, pair partners)");
+        if own != t.target.is_some() {
+            t.target = own.then(|| t.preview.as_ref().map(|p| p.target).unwrap_or(1000.0));
+        }
+        if let Some(v) = t.target.as_mut() {
+            ui.add(
+                egui::DragValue::new(v)
+                    .speed(1.0)
+                    .range(1.0..=100_000.0)
+                    .max_decimals(1)
+                    .suffix(" mil"),
+            );
+        } else {
+            ui.label(RichText::new("from constraints").weak());
+        }
+        ui.label("Height");
+        ui.add(
+            egui::DragValue::new(&mut t.amp)
+                .speed(0.5)
+                .range(2.0..=1000.0)
+                .max_decimals(1)
+                .suffix(" mil"),
+        )
+        .on_hover_text("Largest height of a meander bump");
+        ui.label("Spacing");
+        ui.add(
+            egui::DragValue::new(&mut t.space)
+                .speed(0.5)
+                .range(0.0..=1000.0)
+                .max_decimals(1)
+                .custom_formatter(|v, _| {
+                    if v <= 0.0 {
+                        "auto".into()
+                    } else {
+                        format!("{v:.1} mil")
+                    }
+                }),
+        )
+        .on_hover_text(
+            "Centre-to-centre distance between bump sides; auto is 4 × the track width (a 3W gap)",
+        );
+        ui.separator();
+        let text = match (&t.preview, &self.router.message) {
+            (Some(p), _) => {
+                let name = self
+                    .scene
+                    .as_ref()
+                    .and_then(|s| s.board.nets.get(p.net as usize))
+                    .map(|n| n.name.clone())
+                    .unwrap_or_default();
+                let short = p.target - p.length - p.added;
+                let mut s = format!(
+                    "{name}: {:.1} to {:.1} mil, target {:.1} ({})",
+                    p.length,
+                    p.length + p.added,
+                    p.target,
+                    p.why
+                );
+                if p.added <= 0.0 {
+                    s.push_str(" · this track is too short for a meander at this spacing; lower Spacing or pick a longer track");
+                } else if short > 0.5 {
+                    s.push_str(&format!(" · {short:.1} mil short, tune another track too"));
+                }
+                if p.hit.is_some() {
+                    s.push_str(" · too close to other copper");
+                }
+                RichText::new(s).color(if p.hit.is_some() {
+                    Color32::from_rgb(255, 120, 100)
+                } else {
+                    Color32::from_rgb(255, 220, 120)
+                })
+            }
+            (None, Some(m)) => RichText::new(m).color(Color32::from_rgb(255, 120, 100)),
+            (None, None) => RichText::new(
+                "Point at a straight track of the net and click to add meanders · Space: other side",
+            )
+            .weak(),
+        };
+        ui.label(text);
     }
 
     fn route_bar(&mut self, ui: &mut egui::Ui) {
@@ -1569,6 +1667,16 @@ impl eframe::App for App {
             if redo && self.router.active.is_none() {
                 self.redo();
             }
+            if ctx.input(|i| i.key_pressed(egui::Key::T)) {
+                self.set_tool(if self.tool == Tool::Tune {
+                    Tool::Select
+                } else {
+                    Tool::Tune
+                });
+            }
+            if corner && self.tool == Tool::Tune {
+                self.router.tune.flip = !self.router.tune.flip;
+            }
             if route_key {
                 self.set_tool(if self.tool == Tool::Route {
                     Tool::Select
@@ -1655,7 +1763,7 @@ impl eframe::App for App {
         if esc {
             if self.router.active.is_some() {
                 self.router.cancel();
-            } else if self.tool == Tool::Route {
+            } else if self.tool == Tool::Route || self.tool == Tool::Tune {
                 self.set_tool(Tool::Select);
             } else if self.measure.is_some() {
                 self.measure = None;

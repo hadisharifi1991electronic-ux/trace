@@ -63,6 +63,9 @@ checker and simulator all read.
   routes both nets together at the width and gap the Impedance window
   works out for the pair. Ctrl+Z / Ctrl+Y undo and redo; Delete
   removes the clicked track or via; Shift+Delete unroutes the selected net
+- tune lengths (the Tune button, or T): click a straight track to add
+  meanders until the net meets its target from the Constraint Manager, its
+  pair partner or the Target box; Space puts them on the other side
 - check impedance (the Impedance button, or I): the board's stack-up with
   editable thickness and Er per layer, the trace width for the single-ended
   target and the width and gap for the differential target on each copper
@@ -132,6 +135,8 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
 - Routing checks clearance to tracks, pads, vias and drill holes of other
   nets, but not to copper pours, and pours are not re-poured after edits.
   Vias are through vias. There is no push-and-shove or walk-around yet.
+- Length tuning places one row of square meanders on one straight track
+  at a time; pick another track if one is too short for the length needed.
 - Impedance uses closed-form models (Hammerstad–Jensen microstrip, Wheeler
   stripline, IPC-2141 coupling). Every copper layer is taken as a reference
   plane and solder mask is ignored, so expect a few percent against a field

@@ -178,6 +178,51 @@ pub fn corner_path(a: P, b: P, mode: Corner, flip: bool, arc: f64) -> Vec<Piece>
     v
 }
 
+/// Meanders (an accordion of bumps to one side) that replace the straight
+/// track from `a` to `b` and add `extra` mil of length. Bumps are
+/// `space` apart and at most `amp` high; `flip` puts them on the other
+/// side. Returns the pieces and the length actually added, which is less
+/// than asked when the track is too short for enough bumps.
+pub fn meander(a: P, b: P, extra: f64, amp: f64, space: f64, flip: bool) -> (Vec<Piece>, f64) {
+    let len = (b[0] - a[0]).hypot(b[1] - a[1]);
+    if extra <= 0.0 || len < 2.0 * space || amp <= 0.0 || space <= 0.0 {
+        return (vec![Piece::Line(a, b)], 0.0);
+    }
+    let u = [(b[0] - a[0]) / len, (b[1] - a[1]) / len];
+    let k = if flip { -1.0 } else { 1.0 };
+    let n = [-u[1] * k, u[0] * k];
+    // Each bump: up, across, down, across = 2 * space along the track.
+    let room = ((len - space) / (2.0 * space)).floor().max(0.0) as usize;
+    let want = (extra / (2.0 * amp)).ceil() as usize;
+    let bumps = want.min(room);
+    if bumps == 0 {
+        return (vec![Piece::Line(a, b)], 0.0);
+    }
+    let h = (extra / (2.0 * bumps as f64)).min(amp);
+    let used = 2.0 * space * bumps as f64 - space;
+    let lead = (len - used) / 2.0;
+    let at = |t: f64, up: f64| [a[0] + u[0] * t + n[0] * up, a[1] + u[1] * t + n[1] * up];
+    let mut pts = vec![a, at(lead, 0.0)];
+    let mut t = lead;
+    for i in 0..bumps {
+        pts.push(at(t, h));
+        t += space;
+        pts.push(at(t, h));
+        pts.push(at(t, 0.0));
+        if i + 1 < bumps {
+            t += space;
+            pts.push(at(t, 0.0));
+        }
+    }
+    pts.push(b);
+    let pieces: Vec<Piece> = pts
+        .windows(2)
+        .filter(|w| (w[0][0] - w[1][0]).hypot(w[0][1] - w[1][1]) > 1e-9)
+        .map(|w| Piece::Line(w[0], w[1]))
+        .collect();
+    (pieces, 2.0 * h * bumps as f64)
+}
+
 /// A route shifted sideways by `d` (positive = to the left of the way it
 /// runs), as for one track of a differential pair along a centre line.
 /// Sharp corners between straight runs meet at their mitre; other breaks
@@ -783,6 +828,19 @@ mod tests {
             corner_path([0.0, 0.0], [10.0, 30.0], Corner::Line90, true, 1.0)[0],
             Piece::Line([0.0, 0.0], [0.0, 30.0])
         );
+    }
+
+    #[test]
+    fn meanders_add_the_length_asked() {
+        let (v, added) = meander([0.0, 0.0], [1000.0, 0.0], 150.0, 40.0, 30.0, false);
+        let total: f64 = v.iter().map(|p| p.length()).sum();
+        assert!((added - 150.0).abs() < 1e-9);
+        assert!((total - 1150.0).abs() < 1e-6);
+        assert_eq!(v.first().unwrap().start(), [0.0, 0.0]);
+        assert_eq!(v.last().unwrap().end(), [1000.0, 0.0]);
+        // Too short a track: as much as fits.
+        let (_, added) = meander([0.0, 0.0], [100.0, 0.0], 500.0, 40.0, 30.0, true);
+        assert!((added - 80.0).abs() < 1e-9);
     }
 
     #[test]

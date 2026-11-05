@@ -25,6 +25,25 @@ pub(crate) fn is_ascii(path: &Path) -> bool {
 }
 
 /// Altium layer id from the layer names ASCII files use.
+/// Layer ids from a `REMOVEDPADS` layer hash such as
+/// `SerializeLayerHash.Version=2,ClassName=...,16777218=1,16777219=1,`:
+/// keys are V7 layer ids (0x01000001 top, 0x0100FFFF bottom).
+pub(crate) fn removed_pads(hash: &str) -> Vec<u8> {
+    hash.split(',')
+        .filter_map(|kv| {
+            let (k, v) = kv.split_once('=')?;
+            if v.trim() != "1" {
+                return None;
+            }
+            match k.trim().parse::<u32>().ok()? {
+                0x0100_FFFF => Some(32),
+                k if (0x0100_0001..=0x0100_001F).contains(&k) => Some((k - 0x0100_0000) as u8),
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 pub(crate) fn layer_id(name: &str) -> u8 {
     let n = name.trim().to_ascii_uppercase();
     let num = |prefix: &str| n.strip_prefix(prefix).and_then(|d| d.parse::<u8>().ok());
@@ -231,14 +250,26 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
         .collect();
     g.vias = of("Via")
         .filter_map(|p| {
+            let (from_layer, to_layer) =
+                (copper(&p.str("STARTLAYER"))?, copper(&p.str("ENDLAYER"))?);
+            let diameter = len(p, "DIAMETER")?;
+            let hole = len(p, "HOLESIZE").unwrap_or_default();
+            let rings = crate::pcb::with_removed_pads(
+                Vec::new(),
+                &removed_pads(&p.str("REMOVEDPADS")),
+                &layers,
+                (from_layer, to_layer),
+                diameter,
+                hole,
+            );
             Some(Via {
                 net: index(p, "NET"),
-                from_layer: copper(&p.str("STARTLAYER"))?,
-                to_layer: copper(&p.str("ENDLAYER"))?,
+                from_layer,
+                to_layer,
                 at: pt(p, "X", "Y")?,
-                diameter: len(p, "DIAMETER")?,
-                hole: len(p, "HOLESIZE").unwrap_or_default(),
-                rings: Vec::new(),
+                diameter,
+                hole,
+                rings,
             })
         })
         .collect();
@@ -283,6 +314,43 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
                 (Some(x), Some(y)) => (x, y),
                 _ => (len(p, "TOPXSIZE")?, len(p, "TOPYSIZE")?),
             };
+            // Unused inner lands Altium removed: a stack without them.
+            let gone: Vec<u8> = removed_pads(&p.str("REMOVEDPADS"))
+                .into_iter()
+                .filter_map(|id| match layers.get(id) {
+                    LayerRef::Copper(l) => Some(l),
+                    _ => None,
+                })
+                .collect();
+            if layer == LayerRef::AllCopper && !gone.is_empty() {
+                if stack.is_empty() {
+                    stack = (0..ncopper)
+                        .map(|i| Land {
+                            layer: i,
+                            shape,
+                            size_x,
+                            size_y,
+                            rotation_deg,
+                            outline: Vec::new(),
+                        })
+                        .collect();
+                }
+                stack.retain(|l| !gone.contains(&l.layer));
+            }
+            // Rounded corners: radius as a percentage of half the short side.
+            let mut outline = Vec::new();
+            if stack.is_empty() && p.str("SHAPE").eq_ignore_ascii_case("ROUNDEDRECTANGLE") {
+                let key = if layer == LayerRef::Copper(ncopper.saturating_sub(1)) && ncopper > 1 {
+                    "BOTTOMLAYERCRPCT"
+                } else {
+                    "TOPLAYERCRPCT"
+                };
+                let pct = p.float(key).unwrap_or(0.0).clamp(0.0, 100.0);
+                if pct > 0.0 {
+                    let r = Length((size_x.0.min(size_y.0) as f64 / 2.0 * pct / 100.0) as i64);
+                    outline = trace_core::geometry::round_rect(at, size_x, size_y, rotation_deg, r);
+                }
+            }
             Some(Pad {
                 layer,
                 net: index(p, "NET"),
@@ -294,7 +362,7 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
                 hole,
                 shape,
                 rotation_deg,
-                outline: Vec::new(),
+                outline,
                 stack,
             })
         })
@@ -314,7 +382,12 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
             continue;
         }
         let n = p.int("MAINCONTOURVERTEXCOUNT").unwrap_or(0).max(0) as usize;
-        let outline = contour(p, "MVX", "MVY", n);
+        // Shape-based regions give their outline as VX/VY in mil, with arcs.
+        let outline = if p.bool("ISSHAPEBASED") && p.get("MVX0").is_none() {
+            crate::pcb::vertices(p)
+        } else {
+            contour(p, "MVX", "MVY", n)
+        };
         if outline.len() < 3 {
             continue;
         }
@@ -333,8 +406,9 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
                     .flatten()
             })
             .or_else(|| {
+                // PADINDEX counts pads from 1.
                 pad_nets
-                    .get(index(p, "PADINDEX")? as usize)
+                    .get((index(p, "PADINDEX")? as usize).checked_sub(1)?)
                     .copied()
                     .flatten()
             });
@@ -394,6 +468,12 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn removed_pad_hash() {
+        let h = "SerializeLayerHash.Version=2,ClassName=class CustomLayerHash * __ptr64,16777226=1,16777218=1,16842751=1,16777219=0,";
+        assert_eq!(removed_pads(h), vec![10, 2, 32]);
+    }
 
     #[test]
     fn layer_names() {

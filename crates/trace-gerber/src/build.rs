@@ -1018,15 +1018,40 @@ impl Builder {
                 let c = [(h.at[0] + end[0]) / 2.0, (h.at[1] + end[1]) / 2.0];
                 let deg = (end[1] - h.at[1]).atan2(end[0] - h.at[0]).to_degrees();
                 let mut size = h.diameter;
+                // Layers with copper around the slot; the others (inner
+                // pads removed as unused) get no land.
+                let mut with_land: Vec<u8> = Vec::new();
                 if plated {
-                    for l in [0, last] {
-                        for i in self.pads_at(l, c, 0.05) {
-                            let p = &self.board.geometry.pads[i];
-                            size = size.max(p.size_x.mm().min(p.size_y.mm()));
-                            self.dead.insert(i);
+                    for l in 0..self.copper {
+                        let found = self.pads_at(l, c, 0.05);
+                        if !found.is_empty() {
+                            with_land.push(l);
+                        }
+                        if l == 0 || l == last {
+                            for i in found {
+                                let p = &self.board.geometry.pads[i];
+                                size = size.max(p.size_x.mm().min(p.size_y.mm()));
+                                self.dead.insert(i);
+                            }
                         }
                     }
                 }
+                let stack =
+                    if plated && !with_land.is_empty() && with_land.len() < self.copper as usize {
+                        with_land
+                            .iter()
+                            .map(|&l| Land {
+                                layer: l,
+                                shape: PadShape::Round,
+                                size_x: mm(len + size),
+                                size_y: mm(size),
+                                rotation_deg: deg,
+                                outline: Vec::new(),
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
                 self.board.geometry.pads.push(Pad {
                     layer: LayerRef::AllCopper,
                     net: None,
@@ -1039,7 +1064,7 @@ impl Builder {
                     shape: PadShape::Round,
                     rotation_deg: deg,
                     outline: Vec::new(),
-                    stack: Vec::new(),
+                    stack,
                 });
                 continue;
             }

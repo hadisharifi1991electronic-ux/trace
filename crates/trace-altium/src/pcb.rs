@@ -112,15 +112,56 @@ fn parse_via(b: &[u8], layers: &LayerMap) -> Option<Via> {
             }
         }
     }
+    // "Remove unused pads": one flag per layer id from byte 209 (top first).
+    let removed: Vec<u8> = match b.get(209..241) {
+        Some(flags) => (1..=32u8)
+            .filter(|id| flags[*id as usize - 1] == 1)
+            .collect(),
+        None => Vec::new(),
+    };
+    let diameter = len_at(b, 21)?;
+    let rings = with_removed_pads(rings, &removed, layers, (from, to), diameter, hole);
     Some(Via {
         net: net(b),
         from_layer: from,
         to_layer: to,
         at: point(b, 13)?,
-        diameter: len_at(b, 21)?,
+        diameter,
         hole,
         rings,
     })
+}
+
+/// Marks the layers whose via pad Altium removed (unused inner pads) with a
+/// ring the size of the hole, which means no pad there.
+pub(crate) fn with_removed_pads(
+    rings: Vec<(u8, Length)>,
+    removed: &[u8],
+    layers: &LayerMap,
+    (from, to): (u8, u8),
+    diameter: Length,
+    hole: Length,
+) -> Vec<(u8, Length)> {
+    let gone: Vec<u8> = removed
+        .iter()
+        .filter_map(|&id| match layers.get(id) {
+            LayerRef::Copper(l) => Some(l),
+            _ => None,
+        })
+        .collect();
+    if gone.is_empty() {
+        return rings;
+    }
+    (from.min(to)..=from.max(to))
+        .map(|l| {
+            let d = if gone.contains(&l) {
+                hole
+            } else {
+                rings.iter().find(|r| r.0 == l).map_or(diameter, |r| r.1)
+            };
+            (l, d)
+        })
+        .collect()
 }
 
 /// Copper regions: an 18-byte header, a property block, then the outline
@@ -222,18 +263,37 @@ fn parse_pad(blocks: &[&[u8]], layers: &LayerMap) -> Option<Pad> {
             });
         }
     }
+    let at = point(b, 13)?;
+    let (size_x, size_y) = (len_at(b, 21)?, len_at(b, 25)?);
+    let rotation_deg = f64_at(b, 52).filter(|r| r.is_finite()).unwrap_or(0.0);
+    // Rounded rectangles: the extended block's alternate shape 9, with the
+    // corner radius as a percentage of half the short side.
+    let mut outline = Vec::new();
+    let extra = blocks.get(5).copied().unwrap_or(&[]);
+    let id = match *b.first()? {
+        id @ 1..=32 => id as usize,
+        _ => 1,
+    };
+    if stack.is_empty() && shape == PadShape::Rect && extra.len() >= 596 && extra[532 + id - 1] == 9
+    {
+        let pct = extra[564 + id - 1].min(100) as f64;
+        if pct > 0.0 {
+            let r = Length((size_x.0.min(size_y.0) as f64 / 2.0 * pct / 100.0) as i64);
+            outline = trace_core::geometry::round_rect(at, size_x, size_y, rotation_deg, r);
+        }
+    }
     Some(Pad {
         layer,
         net: net(b),
         component: u16_at(b, 7).filter(|&c| c != u16::MAX).map(u32::from),
         name,
-        at: point(b, 13)?,
-        size_x: len_at(b, 21)?,
-        size_y: len_at(b, 25)?,
+        at,
+        size_x,
+        size_y,
         hole: len_at(b, 45)?,
         shape,
-        rotation_deg: f64_at(b, 52).filter(|r| r.is_finite()).unwrap_or(0.0),
-        outline: Vec::new(),
+        rotation_deg,
+        outline,
         stack,
     })
 }
@@ -250,26 +310,12 @@ pub(crate) fn parse_outline(p: &Props) -> Vec<Point> {
         .collect()
 }
 
-/// A polygon pour as drawn (`Polygons6` / ASCII `Polygon`): its outline,
-/// with arc vertices flattened, net, layer and fill order. Pours Trace
-/// cannot fill again (hatched, shelved, not on copper) get no outline.
-pub(crate) fn parse_pour(p: &Props, layers: &LayerMap) -> Pour {
-    let layer = layers.get(crate::pcb_ascii::layer_id(&p.str("LAYER")));
-    let digits: String = p
-        .str("NET")
-        .trim()
-        .chars()
-        .take_while(|c| c.is_ascii_digit())
-        .collect();
-    let net = digits.parse::<u32>().ok();
-    let solid = p
-        .get("HATCHSTYLE")
-        .is_none_or(|h| h.eq_ignore_ascii_case("Solid"));
-    let poured = p
-        .get("POLYGONTYPE")
-        .is_none_or(|t| t.eq_ignore_ascii_case("Polygon"));
+/// An outline given as `VX0`/`VY0`... vertices, `KIND{i}=1` marking an arc
+/// (centre `CX`/`CY`, radius `R`, angles `SA`/`EA`), arcs flattened in 5°
+/// steps. Polygons and shape-based regions use it.
+pub(crate) fn vertices(p: &Props) -> Vec<Point> {
     let mut outline: Vec<Point> = Vec::new();
-    if solid && poured && !p.bool("SHELVED") && matches!(layer, LayerRef::Copper(_)) {
+    {
         for i in 0.. {
             let (Some(x), Some(y)) = (
                 p.get(&format!("VX{i}")).and_then(Length::parse),
@@ -317,6 +363,32 @@ pub(crate) fn parse_pour(p: &Props, layers: &LayerMap) -> Pour {
             outline.pop();
         }
     }
+    outline
+}
+
+/// A polygon pour as drawn (`Polygons6` / ASCII `Polygon`): its outline,
+/// with arc vertices flattened, net, layer and fill order. Pours Trace
+/// cannot fill again (hatched, shelved, not on copper) get no outline.
+pub(crate) fn parse_pour(p: &Props, layers: &LayerMap) -> Pour {
+    let layer = layers.get(crate::pcb_ascii::layer_id(&p.str("LAYER")));
+    let digits: String = p
+        .str("NET")
+        .trim()
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect();
+    let net = digits.parse::<u32>().ok();
+    let solid = p
+        .get("HATCHSTYLE")
+        .is_none_or(|h| h.eq_ignore_ascii_case("Solid"));
+    let poured = p
+        .get("POLYGONTYPE")
+        .is_none_or(|t| t.eq_ignore_ascii_case("Polygon"));
+    let outline = if solid && poured && !p.bool("SHELVED") && matches!(layer, LayerRef::Copper(_)) {
+        vertices(p)
+    } else {
+        Vec::new()
+    };
     Pour {
         layer,
         net,
@@ -446,7 +518,6 @@ pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
     board.stats.vias = g.vias.len();
     board.stats.pads = g.pads.len();
 
-    trace_core::connectivity::analyse(&mut board);
     let polygons = text(&mut c, "/Polygons6/Data", 0)?;
     board.stats.polygons = polygons.len();
     board.geometry.pours = polygons.iter().map(|p| parse_pour(p, &layers)).collect();
@@ -464,6 +535,17 @@ pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
             n.has_pour = true;
         }
     }
+    // Poured copper can carry no net of its own: it takes its polygon's.
+    let g = &mut board.geometry;
+    for poly in &mut g.polygons {
+        if poly.net.is_none() {
+            poly.net = poly
+                .pour
+                .and_then(|i| g.pours.get(i as usize))
+                .and_then(|p| p.net);
+        }
+    }
+    trace_core::connectivity::analyse(&mut board);
 
     Ok(board)
 }

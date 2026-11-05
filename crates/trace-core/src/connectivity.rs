@@ -89,6 +89,7 @@ enum Kind {
     Wire,
     Via(usize),
     Pad,
+    Area,
 }
 
 struct Feature {
@@ -161,10 +162,10 @@ pub fn analyse(board: &mut Board) {
 
     // Features grouped by net; each source item gets one union-find slot.
     let mut by_net: HashMap<u32, (Vec<Feature>, usize)> = HashMap::new();
-    let mut add = |net: Option<u32>, layers: Vec<u8>, shapes: Vec<Capsule>, kind: Kind| {
-        let Some(net) = net else { return };
+    let mut add = |net: Option<u32>, layers: Vec<u8>, shapes: Vec<Capsule>, kind: Kind| -> usize {
+        let Some(net) = net else { return 0 };
         if layers.is_empty() {
-            return;
+            return 0;
         }
         let entry = by_net.entry(net).or_insert_with(|| (Vec::new(), 0));
         let item = entry.1;
@@ -179,6 +180,7 @@ pub fn analyse(board: &mut Board) {
                 });
             }
         }
+        item
     };
 
     for t in &g.tracks {
@@ -258,6 +260,51 @@ pub fn analyse(board: &mut Board) {
         add(p.net, layers_of(&p.layer), vec![shape], Kind::Pad);
     }
 
+    // Copper areas (regions and poured fills): their edges join what they
+    // cross; what sits inside them is joined in a second pass below.
+    let mut areas: HashMap<u32, Vec<(usize, u8, usize)>> = HashMap::new();
+    for (pi, p) in g.polygons.iter().enumerate() {
+        let (Some(net), &LayerRef::Copper(layer)) = (p.net, &p.layer) else {
+            continue;
+        };
+        if p.outline.len() < 3 {
+            continue;
+        }
+        let ring = |r: &[crate::Point]| -> Vec<Capsule> {
+            (0..r.len())
+                .map(|i| {
+                    let (a, b) = (r[i], r[(i + 1) % r.len()]);
+                    Capsule {
+                        x1: a.x.mil(),
+                        y1: a.y.mil(),
+                        x2: b.x.mil(),
+                        y2: b.y.mil(),
+                        r: 0.0,
+                    }
+                })
+                .collect()
+        };
+        let mut shapes = ring(&p.outline);
+        for h in &p.holes {
+            shapes.extend(ring(h));
+        }
+        let item = add(Some(net), vec![layer], shapes, Kind::Area);
+        areas.entry(net).or_default().push((item, layer, pi));
+    }
+    let inside = |x: f64, y: f64, ring: &[crate::Point]| {
+        let mut c = false;
+        let mut j = ring.len() - 1;
+        for i in 0..ring.len() {
+            let (a, b) = (ring[i], ring[j]);
+            let (ax, ay, bx, by) = (a.x.mil(), a.y.mil(), b.x.mil(), b.y.mil());
+            if (ay > y) != (by > y) && x < (bx - ax) * (y - ay) / (by - ay) + ax {
+                c = !c;
+            }
+            j = i;
+        }
+        c
+    };
+
     let mut via_layers: HashMap<usize, (u8, u8)> = HashMap::new();
     let mut results: HashMap<u32, (usize, usize)> = HashMap::new(); // net -> (pieces, pads)
     for (net, (features, items)) in &by_net {
@@ -281,6 +328,28 @@ pub fn analyse(board: &mut Board) {
                         }
                     }
                     cell.push(fi);
+                }
+            }
+        }
+        for &(area, layer, pi) in areas.get(net).map(Vec::as_slice).unwrap_or(&[]) {
+            let p = &g.polygons[pi];
+            let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+            for q in &p.outline {
+                x0 = x0.min(q.x.mil());
+                y0 = y0.min(q.y.mil());
+                x1 = x1.max(q.x.mil());
+                y1 = y1.max(q.y.mil());
+            }
+            for f in features
+                .iter()
+                .filter(|f| f.layer == layer && f.kind != Kind::Area)
+            {
+                let (x, y) = (f.shape.x1, f.shape.y1);
+                if x < x0 || x > x1 || y < y0 || y > y1 || uf.find(f.item) == uf.find(area) {
+                    continue;
+                }
+                if inside(x, y, &p.outline) && !p.holes.iter().any(|h| inside(x, y, h)) {
+                    uf.union(f.item, area);
                 }
             }
         }

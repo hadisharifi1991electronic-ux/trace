@@ -260,3 +260,38 @@ pub fn fracture(outline: &[Point], holes: &[Vec<Point>]) -> Vec<[f64; 2]> {
     }
     out
 }
+
+/// A rounded rectangle centred on `at`, as an outline in board coordinates
+/// with each corner flattened to short chords (for pads Altium draws with
+/// rounded corners).
+pub fn round_rect(
+    at: Point,
+    sx: Length,
+    sy: Length,
+    rotation_deg: f64,
+    radius: Length,
+) -> Vec<Point> {
+    let (hx, hy) = (sx.0 as f64 / 2.0, sy.0 as f64 / 2.0);
+    let r = (radius.0 as f64).clamp(0.0, hx.min(hy));
+    let (s, c) = rotation_deg.to_radians().sin_cos();
+    let mut out = Vec::with_capacity(28);
+    // Corner centres counter-clockwise from the top right.
+    let corners = [
+        (hx - r, hy - r, 0.0),
+        (-(hx - r), hy - r, 90.0),
+        (-(hx - r), -(hy - r), 180.0),
+        (hx - r, -(hy - r), 270.0),
+    ];
+    for (cx, cy, a0) in corners {
+        for k in 0..=6 {
+            let a = (a0 + 15.0 * k as f64).to_radians();
+            let (x, y) = (cx + r * a.cos(), cy + r * a.sin());
+            out.push(Point {
+                x: Length(at.x.0 + (x * c - y * s).round() as i64),
+                y: Length(at.y.0 + (x * s + y * c).round() as i64),
+            });
+        }
+    }
+    out.dedup();
+    out
+}

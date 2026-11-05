@@ -6,6 +6,7 @@
 pub mod board;
 pub mod connectivity;
 pub mod constraints;
+pub mod drc;
 pub mod edit;
 pub mod file;
 pub mod geometry;

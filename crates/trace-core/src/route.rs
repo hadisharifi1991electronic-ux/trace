@@ -406,7 +406,7 @@ pub enum Shape {
 }
 
 impl Shape {
-    fn bbox(&self) -> [f64; 4] {
+    pub(crate) fn bbox(&self) -> [f64; 4] {
         match self {
             Shape::Capsule { a, b, r } => [
                 a[0].min(b[0]) - r,
@@ -428,7 +428,7 @@ impl Shape {
     }
 
     /// Gap between this shape and a capsule (negative when they overlap).
-    fn gap(&self, a: P, b: P, r: f64) -> f64 {
+    pub(crate) fn gap(&self, a: P, b: P, r: f64) -> f64 {
         match self {
             Shape::Capsule { a: c, b: d, r: s } => seg_seg(a, b, *c, *d) - r - s,
             Shape::Poly(v) => {
@@ -474,11 +474,11 @@ pub struct Obstacles {
     grid: HashMap<(i32, i32), Vec<usize>>,
 }
 
-fn pt(p: crate::Point) -> P {
+pub(crate) fn pt(p: crate::Point) -> P {
     [p.x.mil(), p.y.mil()]
 }
 
-fn rect(c: P, sx: f64, sy: f64, rot: f64) -> Vec<P> {
+pub(crate) fn rect(c: P, sx: f64, sy: f64, rot: f64) -> Vec<P> {
     let (s, co) = rot.to_radians().sin_cos();
     [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
         .iter()
@@ -489,7 +489,14 @@ fn rect(c: P, sx: f64, sy: f64, rot: f64) -> Vec<P> {
         .collect()
 }
 
-fn land(c: P, shape: PadShape, sx: f64, sy: f64, rot: f64, outline: &[crate::Point]) -> Shape {
+pub(crate) fn land(
+    c: P,
+    shape: PadShape,
+    sx: f64,
+    sy: f64,
+    rot: f64,
+    outline: &[crate::Point],
+) -> Shape {
     if outline.len() >= 3 {
         return Shape::Poly(outline.iter().map(|&p| pt(p)).collect());
     }
@@ -744,7 +751,7 @@ impl Obstacles {
     }
 }
 
-fn point_seg(p: P, a: P, b: P) -> f64 {
+pub(crate) fn point_seg(p: P, a: P, b: P) -> f64 {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
     let l = dx * dx + dy * dy;
     let t = if l > 0.0 {
@@ -759,7 +766,7 @@ fn cross(o: P, a: P, b: P) -> f64 {
     (a[0] - o[0]) * (b[1] - o[1]) - (a[1] - o[1]) * (b[0] - o[0])
 }
 
-fn seg_seg(a: P, b: P, c: P, d: P) -> f64 {
+pub(crate) fn seg_seg(a: P, b: P, c: P, d: P) -> f64 {
     let (d1, d2) = (cross(c, d, a), cross(c, d, b));
     let (d3, d4) = (cross(a, b, c), cross(a, b, d));
     if d1 * d2 < 0.0 && d3 * d4 < 0.0 {
@@ -771,7 +778,7 @@ fn seg_seg(a: P, b: P, c: P, d: P) -> f64 {
         .min(point_seg(d, a, b))
 }
 
-fn inside(p: P, v: &[P]) -> bool {
+pub(crate) fn inside(p: P, v: &[P]) -> bool {
     let mut odd = false;
     let mut j = v.len() - 1;
     for i in 0..v.len() {

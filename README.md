@@ -63,6 +63,10 @@ checker and simulator all read.
   routes both nets together at the width and gap the Impedance window
   works out for the pair. Ctrl+Z / Ctrl+Y undo and redo; Delete
   removes the clicked track or via; Shift+Delete unroutes the selected net
+- toolbars as in Altium: icons for files, undo, zoom and views under the
+  menu, an Active Bar over the board for the tools, and layer tabs under
+  it (click to make a layer current, right-click to hide; LS or Shift+S
+  single layer mode; + / - next and previous layer)
 - tune lengths (the Tune button, or T): click a straight track to add
   meanders until the net meets its target from the Constraint Manager, its
   pair partner or the Target box; Space puts them on the other side

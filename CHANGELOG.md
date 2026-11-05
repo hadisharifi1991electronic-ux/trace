@@ -3,6 +3,23 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.11.0 (2026-11-05)
+
+- Toolbars in the manner of Altium Designer, with icons:
+  - a standard bar under the menu: open, save, undo, redo, fit, zoom in
+    and out, bottom view, board / 3D / schematic, Constraint Manager and
+    Impedance; the options of the current tool follow it;
+  - an Active Bar floating over the top of the board: select, measure,
+    route one track, route a differential pair, length tuning, place a
+    via (while routing) and unroute the selected net;
+  - layer tabs under the board: click a copper tab to make it the
+    current layer, right-click any tab to show or hide it. LS (or
+    Shift+S) is single layer mode, and + / - step through the copper
+    layers.
+- Clicking a track now marks that one segment in yellow, with handles at
+  its ends, apart from the rest of its net in white. Delete removes only
+  that segment; Shift+Delete unroutes the whole net.
+
 ## 0.10.1 (2026-11-05)
 
 - Opens Altium boards saved as ASCII (`.PcbDoc` written with "PCB ASCII

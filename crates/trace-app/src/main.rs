@@ -9,9 +9,10 @@ mod imp;
 mod router;
 mod scene;
 mod schview;
+mod toolbar;
 mod view3d;
 
-use eframe::egui::{self, Color32, RichText};
+use eframe::egui::{self, Color32, RichText, Stroke};
 use scene::{Scene, Slot};
 use std::path::PathBuf;
 use trace_core::Side;
@@ -88,6 +89,10 @@ pub struct App {
     /// Where the board view should go on its next frame: a point and zoom,
     /// or an area to fit.
     focus: Option<Focus>,
+    /// Single layer mode: which layers were shown before it was turned on.
+    single: Option<Vec<(Slot, bool)>>,
+    /// Scroll the layer tabs to the current layer on the next frame.
+    scroll_tab: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -144,6 +149,8 @@ impl App {
             schem: schview::Schematics::default(),
             ctx: cc.egui_ctx.clone(),
             focus: None,
+            single: None,
+            scroll_tab: false,
         };
         if let Some(f) = start_file {
             app.open(f);
@@ -199,6 +206,7 @@ impl App {
                 self.marker = None;
                 self.measure = None;
                 self.active = Slot::Copper(0);
+                self.single = None;
                 self.needs_fit = true;
                 self.message = None;
                 true
@@ -289,6 +297,7 @@ impl App {
                 self.marker = None;
                 self.measure = None;
                 self.active = Slot::Copper(0);
+                self.single = None;
                 self.needs_fit = true;
                 self.message = None;
             }
@@ -545,7 +554,13 @@ impl App {
                 let i = from as i32 + if up { -k } else { k };
                 i.rem_euclid(n) as u8
             })
-            .find(|&i| scene.layer_visible(Slot::Copper(i)))
+            .find(|&i| self.single.is_some() || scene.layer_visible(Slot::Copper(i)))
+    }
+
+    /// Next copper layer after (or before) the given one, shown or not.
+    fn next_copper_any(&self, from: u8, up: bool) -> Option<u8> {
+        let n = self.scene.as_ref()?.copper_count as i32;
+        (n > 1).then(|| (from as i32 + if up { -1 } else { 1 }).rem_euclid(n) as u8)
     }
 
     fn delete_picked(&mut self) {
@@ -816,62 +831,65 @@ impl App {
         self.router.tune.preview = None;
     }
 
+    /// The standard bar: files, undo, zoom, views and the analysis windows.
     fn toolbar(&mut self, ui: &mut egui::Ui) {
+        use toolbar::{button, divider, Icon};
         ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
             let has_board = self.scene.is_some();
-            if !self.schem.is_empty()
-                && ui
-                    .selectable_label(self.mode_sch, "Schematic")
-                    .on_hover_text("Schematic sheets (S switches)")
-                    .clicked()
-            {
-                self.mode_sch = true;
-                self.mode3d = false;
+            let board2d = has_board && !self.mode3d && !self.mode_sch;
+            if button(ui, Icon::Open, false, true, "Open a board or schematic (Ctrl+O)").clicked() {
+                self.open_dialog();
             }
-            if has_board
-                && ui
-                    .selectable_label(!self.mode3d && !self.mode_sch, "Board")
-                    .on_hover_text("Board view")
-                    .clicked()
-            {
+            if button(ui, Icon::Save, false, has_board, "Save as a Trace board").clicked() {
+                self.save_as();
+            }
+            divider(ui);
+            let idle = self.router.active.is_none();
+            let undo = self.router.history.undo_label().map(|l| format!("Undo: {l} (Ctrl+Z)"));
+            let redo = self.router.history.redo_label().map(|l| format!("Redo: {l} (Ctrl+Y)"));
+            if button(ui, Icon::Undo, false, idle && undo.is_some(), undo.as_deref().unwrap_or("Undo (Ctrl+Z)")).clicked() {
+                self.undo();
+            }
+            if button(ui, Icon::Redo, false, idle && redo.is_some(), redo.as_deref().unwrap_or("Redo (Ctrl+Y)")).clicked() {
+                self.redo();
+            }
+            divider(ui);
+            if button(ui, Icon::Fit, false, board2d, "Fit the board in the window (F)").clicked() {
+                self.needs_fit = true;
+            }
+            if button(ui, Icon::ZoomIn, false, board2d, "Zoom in (scroll up)").clicked() {
+                self.zoom_by(1.5);
+            }
+            if button(ui, Icon::ZoomOut, false, board2d, "Zoom out (scroll down)").clicked() {
+                self.zoom_by(1.0 / 1.5);
+            }
+            if button(ui, Icon::Flip, self.view.flip, board2d, "View from the bottom (B)").clicked() {
+                self.view.flip = !self.view.flip;
+                self.needs_fit = true;
+            }
+            divider(ui);
+            if button(ui, Icon::Board, board2d, has_board, "Board view (2D)").clicked() {
                 self.mode3d = false;
                 self.mode_sch = false;
             }
-            if has_board
-                && ui
-                    .selectable_label(self.mode3d && !self.mode_sch, "3D")
-                    .on_hover_text("3D view of the assembled board (3 switches)")
-                    .clicked()
-            {
+            if button(ui, Icon::View3d, has_board && self.mode3d && !self.mode_sch, has_board, "3D view of the assembled board (3)").clicked() {
                 self.mode3d = true;
                 self.mode_sch = false;
             }
-            if !has_board {
-                ui.separator();
-                ui.label(
-                    RichText::new(
-                        "Click a wire or pin to select its net. Double-click a sheet symbol to open its sheet. F fits.",
-                    )
-                    .weak(),
-                );
-                return;
+            if button(ui, Icon::Schematic, self.mode_sch, !self.schem.is_empty(), "Schematic sheets (S)").clicked() {
+                self.mode_sch = true;
+                self.mode3d = false;
             }
-            ui.separator();
-            if ui
-                .selectable_label(self.cm.open, "Constraints")
-                .on_hover_text("Constraint Manager: length, match, skew and via limits (C)")
-                .clicked()
-            {
+            divider(ui);
+            if button(ui, Icon::Constraints, self.cm.open, has_board, "Constraint Manager: length, match, skew and via limits (C)").clicked() {
                 self.cm.open = !self.cm.open;
             }
-            if ui
-                .selectable_label(self.imp.open, "Impedance")
-                .on_hover_text("Stack-up, widths for target impedance, and each pair's impedance (I)")
-                .clicked()
-            {
+            if button(ui, Icon::Impedance, self.imp.open, has_board, "Impedance: stack-up, widths for target impedance, and each pair's impedance (I)").clicked() {
                 self.imp.open = !self.imp.open;
             }
-            ui.separator();
+            divider(ui);
+            ui.spacing_mut().item_spacing.x = 8.0;
             if self.mode_sch {
                 ui.label(
                     RichText::new(
@@ -890,37 +908,10 @@ impl App {
                 );
                 return;
             }
-            if ui
-                .selectable_label(self.tool == Tool::Select, "Select")
-                .on_hover_text("Click copper to select its net")
-                .clicked()
-            {
-                self.set_tool(Tool::Select);
+            if !has_board {
+                return;
             }
-            if ui
-                .selectable_label(self.tool == Tool::Measure, "Measure (M)")
-                .on_hover_text(
-                    "Click two points to measure; they snap to pads, vias and track ends",
-                )
-                .clicked()
-            {
-                self.set_tool(Tool::Measure);
-            }
-            if ui
-                .selectable_label(self.tool == Tool::Route, "Route (X)")
-                .on_hover_text("Click a pad, via or track end to start routing its net")
-                .clicked()
-            {
-                self.set_tool(Tool::Route);
-            }
-            if ui
-                .selectable_label(self.tool == Tool::Tune, "Tune (T)")
-                .on_hover_text("Add meanders to a track to bring its net to a target length")
-                .clicked()
-            {
-                self.set_tool(Tool::Tune);
-            }
-            ui.separator();
+            // Options of the current tool, as Altium's Properties panel shows them.
             if self.tool == Tool::Route {
                 self.route_bar(ui);
                 return;
@@ -937,6 +928,228 @@ impl App {
             };
             ui.label(RichText::new(hint).weak());
         });
+    }
+
+    fn zoom_by(&mut self, k: f32) {
+        let c = self.view.to_board(self.view.rect.center());
+        self.view
+            .center_on(c, (self.view.scale * k).clamp(0.002, 50.0));
+    }
+
+    /// The Active Bar floating over the top of the board: the tools.
+    fn active_bar(&mut self, ctx: &egui::Context) {
+        use toolbar::{button, divider, Icon};
+        let rect = self.view.rect;
+        egui::Area::new(egui::Id::new("active_bar"))
+            .order(egui::Order::Middle)
+            .pivot(egui::Align2::CENTER_TOP)
+            .fixed_pos(egui::pos2(rect.center().x, rect.top() + 8.0))
+            .show(ctx, |ui| {
+                egui::Frame::none()
+                    .fill(Color32::from_rgba_unmultiplied(28, 31, 37, 236))
+                    .stroke(Stroke::new(1.0f32, Color32::from_gray(62)))
+                    .rounding(6.0)
+                    .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+                    .shadow(egui::epaint::Shadow {
+                        offset: egui::vec2(0.0, 2.0),
+                        blur: 8.0,
+                        spread: 0.0,
+                        color: Color32::from_black_alpha(90),
+                    })
+                    .show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().item_spacing.x = 2.0;
+                            let t = self.tool;
+                            if button(
+                                ui,
+                                Icon::Select,
+                                t == Tool::Select,
+                                true,
+                                "Select: click copper to select its net",
+                            )
+                            .clicked()
+                            {
+                                self.set_tool(Tool::Select);
+                            }
+                            if button(
+                                ui,
+                                Icon::Measure,
+                                t == Tool::Measure,
+                                true,
+                                "Measure distance (M)",
+                            )
+                            .clicked()
+                            {
+                                self.set_tool(Tool::Measure);
+                            }
+                            divider(ui);
+                            let pairs = self.router.pairs;
+                            if button(
+                                ui,
+                                Icon::Route,
+                                t == Tool::Route && !pairs,
+                                true,
+                                "Interactive routing, one track (X)",
+                            )
+                            .clicked()
+                            {
+                                self.set_tool(Tool::Route);
+                                self.router.pairs = false;
+                            }
+                            if button(
+                                ui,
+                                Icon::Pair,
+                                t == Tool::Route && pairs,
+                                true,
+                                "Differential pair routing: both nets of a pair together",
+                            )
+                            .clicked()
+                            {
+                                self.set_tool(Tool::Route);
+                                self.router.pairs = true;
+                            }
+                            if button(
+                                ui,
+                                Icon::Tune,
+                                t == Tool::Tune,
+                                true,
+                                "Length tuning: meanders to the target length (T)",
+                            )
+                            .clicked()
+                            {
+                                self.set_tool(Tool::Tune);
+                            }
+                            divider(ui);
+                            let routing = self.router.active.is_some();
+                            if button(
+                                ui,
+                                Icon::Via,
+                                false,
+                                routing,
+                                "Place a via and carry on one layer down (V; Shift+V up)",
+                            )
+                            .clicked()
+                            {
+                                self.place_via(false);
+                            }
+                            if button(
+                                ui,
+                                Icon::Unroute,
+                                false,
+                                self.selected.is_some() && !routing,
+                                "Unroute the selected net (Shift+Delete)",
+                            )
+                            .clicked()
+                            {
+                                self.unroute_selected();
+                            }
+                        });
+                    });
+            });
+    }
+
+    /// Layer tabs under the board, as in Altium: click a copper tab to make
+    /// it the current layer, right-click any tab to show or hide it.
+    fn layer_tabs(&mut self, ui: &mut egui::Ui) {
+        let single = self.single.is_some();
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            if toolbar::text_toggle(ui, "LS", single, "Single layer mode: show only the current layer (Shift+S)").clicked() {
+                self.set_single(!single);
+            }
+            ui.add_space(4.0);
+            let Some(scene) = &mut self.scene else { return };
+            let mut new_active = None;
+            egui::ScrollArea::horizontal()
+                .id_salt("layer_tabs")
+                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysHidden)
+                .show(ui, |ui| {
+                    ui.horizontal(|ui| {
+                        ui.spacing_mut().item_spacing.x = 2.0;
+                        for l in scene.layers.iter_mut() {
+                            let current = l.slot == self.active;
+                            let copper = matches!(l.slot, Slot::Copper(_));
+                            let r = toolbar::layer_tab(ui, &l.name, l.color, current, l.visible)
+                                .on_hover_text(if copper {
+                                    "Click: make this the current layer. Right-click: show or hide. + / - change layer."
+                                } else {
+                                    "Click or right-click: show or hide"
+                                });
+                            if current && r.rect.width() > 0.0 && self.scroll_tab {
+                                r.scroll_to_me(None);
+                            }
+                            if r.clicked() && copper {
+                                new_active = Some(l.slot);
+                                l.visible = true;
+                            } else if (r.clicked() && !copper) || r.secondary_clicked() {
+                                l.visible = !l.visible;
+                            }
+                        }
+                    });
+                });
+            self.scroll_tab = false;
+            if let Some(slot) = new_active {
+                self.active = slot;
+            }
+        });
+    }
+
+    /// Turns single layer mode on (only the current copper layer, its pours
+    /// and vias shown) or off (the layers shown before come back).
+    fn set_single(&mut self, on: bool) {
+        let Some(scene) = &mut self.scene else { return };
+        if on {
+            if self.single.is_none() {
+                self.single = Some(scene.layers.iter().map(|l| (l.slot, l.visible)).collect());
+            }
+        } else if let Some(saved) = self.single.take() {
+            for l in scene.layers.iter_mut() {
+                if let Some((_, v)) = saved.iter().find(|(s, _)| *s == l.slot) {
+                    l.visible = *v;
+                }
+            }
+        }
+    }
+
+    /// Keeps single layer mode showing the current layer as it changes.
+    fn apply_single(&mut self) {
+        if self.single.is_none() {
+            return;
+        }
+        let Some(scene) = &mut self.scene else { return };
+        for l in scene.layers.iter_mut() {
+            l.visible = l.slot == self.active || l.slot == Slot::Vias || l.slot == Slot::Pours;
+        }
+    }
+
+    /// Drops a via while routing and carries on one layer down (or up).
+    fn place_via(&mut self, up: bool) {
+        let Some(layer) = self.router.active.as_ref().map(|a| a.layer()) else {
+            return;
+        };
+        let Some(next) = self.next_copper(layer, up) else {
+            return;
+        };
+        let Some(scene) = self.scene.as_ref() else {
+            return;
+        };
+        self.router.via(&scene.board, next);
+        if self
+            .router
+            .active
+            .as_ref()
+            .is_some_and(|a| a.layer() == next)
+        {
+            self.active = Slot::Copper(next);
+        }
+    }
+
+    fn unroute_selected(&mut self) {
+        if let (Some(n), Some(scene)) = (self.selected, &self.scene) {
+            let edits = router::unroute(&scene.board, n);
+            let name = scene.board.nets[n as usize].name.clone();
+            self.apply_edits(&format!("Unrouted {name}"), edits);
+        }
     }
 
     fn tune_bar(&mut self, ui: &mut egui::Ui) {
@@ -1609,6 +1822,29 @@ impl eframe::App for App {
         }
         let typing = ctx.wants_keyboard_input();
         let board2d = !self.mode3d && !self.mode_sch;
+        // Layer keys, as in Altium: Shift+S single layer mode, + and - the
+        // next and previous copper layer.
+        if board2d && self.scene.is_some() && !typing {
+            let (single, next, prev) = ctx.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::SHIFT, egui::Key::S),
+                    i.key_pressed(egui::Key::Plus) || i.key_pressed(egui::Key::Equals),
+                    i.key_pressed(egui::Key::Minus),
+                )
+            });
+            if single {
+                self.set_single(self.single.is_none());
+            }
+            if (next || prev) && self.router.active.is_none() {
+                if let Slot::Copper(l) = self.active {
+                    if let Some(n) = self.next_copper_any(l, prev) {
+                        self.active = Slot::Copper(n);
+                        self.scroll_tab = true;
+                    }
+                }
+            }
+        }
+        self.apply_single();
         let (open_shortcut, fit, flip, esc, measure_key, toggle3d, cm_key, sch_key) = ctx
             .input_mut(|i| {
                 (
@@ -1619,7 +1855,7 @@ impl eframe::App for App {
                     !typing && board2d && i.key_pressed(egui::Key::M),
                     !typing && i.key_pressed(egui::Key::Num3),
                     !typing && i.key_pressed(egui::Key::C),
-                    !typing && i.key_pressed(egui::Key::S),
+                    !typing && !i.modifiers.shift && i.key_pressed(egui::Key::S),
                 )
             });
         // Editing and routing keys.
@@ -1685,11 +1921,7 @@ impl eframe::App for App {
                 });
             }
             if unroute {
-                if let (Some(n), Some(scene)) = (self.selected, &self.scene) {
-                    let edits = router::unroute(&scene.board, n);
-                    let name = scene.board.nets[n as usize].name.clone();
-                    self.apply_edits(&format!("Unrouted {name}"), edits);
-                }
+                self.unroute_selected();
             } else if del && self.tool == Tool::Select {
                 self.delete_picked();
             }
@@ -1697,20 +1929,9 @@ impl eframe::App for App {
                 if corner {
                     self.router.flip = !self.router.flip;
                 }
-                if let Some(layer) = self.router.active.as_ref().map(|a| a.layer()) {
+                if self.router.active.is_some() {
                     if via_dn || via_up {
-                        if let Some(next) = self.next_copper(layer, via_up) {
-                            let scene = self.scene.as_ref().unwrap();
-                            self.router.via(&scene.board, next);
-                            if self
-                                .router
-                                .active
-                                .as_ref()
-                                .is_some_and(|a| a.layer() == next)
-                            {
-                                self.active = Slot::Copper(next);
-                            }
-                        }
+                        self.place_via(via_up);
                     }
                     if back {
                         self.router.back();
@@ -1857,6 +2078,16 @@ impl eframe::App for App {
                 .default_height(220.0)
                 .show(ctx, |ui| self.pairs_panel(ui));
         }
+        let board2d = self.scene.is_some() && !self.mode3d && !self.mode_sch;
+        if board2d {
+            egui::TopBottomPanel::bottom("layer_tabs")
+                .frame(
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(22, 24, 29))
+                        .inner_margin(egui::Margin::symmetric(6.0, 3.0)),
+                )
+                .show(ctx, |ui| self.layer_tabs(ui));
+        }
         egui::CentralPanel::default().frame(egui::Frame::none().fill(Color32::from_rgb(15, 17, 21))).show(ctx, |ui| {
             if self.mode_sch && !self.schem.is_empty() {
                 match self.schem.show(ui, self.selected, self.scene.as_ref()) {
@@ -1886,6 +2117,9 @@ impl eframe::App for App {
                 canvas::show(self, ui);
             }
         });
+        if self.scene.is_some() && !self.mode3d && !self.mode_sch {
+            self.active_bar(ctx);
+        }
         let pick = match &self.scene {
             Some(scene) => self
                 .cm

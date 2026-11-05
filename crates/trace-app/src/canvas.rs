@@ -282,7 +282,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     match net_at(x, y).0 {
                         Some(n) => {
                             app.selected = Some(n);
-                            app.message = None;
+                            app.message = matches!(
+                                app.picked,
+                                Some(Source::Track(_) | Source::Arc(_) | Source::Via(_))
+                            )
+                            .then(|| {
+                                (
+                                    "Delete removes just the segment in yellow; Shift+Delete unroutes the whole net.".to_string(),
+                                    false,
+                                )
+                            });
                         }
                         None => app.selected = None,
                     }
@@ -410,6 +419,35 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
             for g in &shown {
                 draw(&mut shapes, &view, g, Color32::WHITE);
+            }
+        }
+    }
+    // The clicked segment, arc or via: what Delete removes. Drawn apart
+    // from its net, with handles at segment ends, as Altium shows it.
+    if let Some(src @ (Source::Track(_) | Source::Arc(_) | Source::Via(_))) = app.picked {
+        let pick = Color32::from_rgb(255, 196, 40);
+        for p in scene.prims.iter().filter(|p| p.source == src) {
+            draw(
+                &mut shapes,
+                &view,
+                &grow(&p.geom, 1.5 / view.scale),
+                Color32::from_rgb(20, 20, 28),
+            );
+            draw(&mut shapes, &view, &p.geom, pick);
+            if let (Source::Track(_), Geom::Seg { x1, y1, x2, y2, .. }) = (src, &p.geom) {
+                for (x, y) in [(*x1, *y1), (*x2, *y2)] {
+                    let c = view.to_screen(x, y);
+                    shapes.push(Shape::rect_filled(
+                        Rect::from_center_size(c, egui::vec2(7.0, 7.0)),
+                        0.0,
+                        Color32::WHITE,
+                    ));
+                    shapes.push(Shape::rect_stroke(
+                        Rect::from_center_size(c, egui::vec2(7.0, 7.0)),
+                        0.0,
+                        Stroke::new(1.0f32, Color32::from_rgb(20, 20, 28)),
+                    ));
+                }
             }
         }
     }

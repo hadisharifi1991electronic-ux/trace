@@ -121,15 +121,71 @@ impl App {
     }
 
     fn open_dialog(&mut self) {
-        if let Some(p) = rfd::FileDialog::new()
-            .add_filter("Boards", &["PcbDoc", "pcbdoc", "brd", "BRD", "tracepcb"])
+        let gerber = [
+            "zip", "tgz", "gbr", "ger", "gbx", "pho", "art", "gtl", "gbl", "gto", "gbo", "gts",
+            "gbs", "gtp", "gbp", "gko", "gm1", "g1", "g2", "g3", "g4", "drl", "xln", "txt",
+        ];
+        let mut boards: Vec<&str> = vec!["PcbDoc", "pcbdoc", "brd", "BRD", "tracepcb"];
+        boards.extend(gerber);
+        if let Some(mut picked) = rfd::FileDialog::new()
+            .add_filter("Boards and fabrication data", &boards)
             .add_filter("Altium PCB", &["PcbDoc", "pcbdoc"])
             .add_filter("Allegro board", &["brd", "BRD"])
-            .set_title("Open a board")
-            .pick_file()
+            .add_filter("Gerber, drill or ODB++", &gerber)
+            .add_filter("All files", &["*"])
+            .set_title("Open a board (pick several Gerber files to load them together)")
+            .pick_files()
+        {
+            if picked.len() == 1 {
+                self.open(picked.remove(0));
+            } else if !picked.is_empty() {
+                self.open_files(picked);
+            }
+        }
+    }
+
+    fn open_folder_dialog(&mut self) {
+        if let Some(p) = rfd::FileDialog::new()
+            .set_title("Open a folder of Gerber and drill files, or an ODB++ folder")
+            .pick_folder()
         {
             self.open(p);
         }
+    }
+
+    fn open_files(&mut self, paths: Vec<PathBuf>) {
+        match Scene::load_files(paths) {
+            Ok(scene) => {
+                self.scene = Some(scene);
+                self.selected = None;
+                self.marker = None;
+                self.measure = None;
+                self.active = Slot::Copper(0);
+                self.needs_fit = true;
+                self.message = None;
+            }
+            Err(e) => self.message = Some((format!("Could not open these files: {e}"), true)),
+        }
+    }
+
+    fn save_as(&mut self) {
+        let Some(scene) = &self.scene else { return };
+        let stem = scene
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "board".into());
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Trace board", &[trace_core::file::EXTENSION])
+            .set_file_name(format!("{stem}.{}", trace_core::file::EXTENSION))
+            .save_file()
+        else {
+            return;
+        };
+        self.message = Some(match trace_core::file::save(&scene.board, &path) {
+            Ok(()) => (format!("Saved {}", path.display()), false),
+            Err(e) => (format!("Could not save: {e}"), true),
+        });
     }
 
     fn export_pairs(&mut self) {
@@ -230,6 +286,10 @@ impl App {
                     ui.close_menu();
                     self.open_dialog();
                 }
+                if ui.button("Open Gerber or ODB++ folder…").clicked() {
+                    ui.close_menu();
+                    self.open_folder_dialog();
+                }
                 ui.menu_button("Open recent", |ui| {
                     if self.recent.is_empty() {
                         ui.label(RichText::new("No recent boards").weak());
@@ -250,6 +310,13 @@ impl App {
                     }
                 });
                 ui.separator();
+                if ui
+                    .add_enabled(self.scene.is_some(), egui::Button::new("Save as Trace board…"))
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.save_as();
+                }
                 if ui
                     .add_enabled(
                         self.scene.is_some(),
@@ -292,7 +359,7 @@ impl App {
             });
             ui.menu_button("Help", |ui| {
                 ui.label("Trace 0.1, open-source PCB design");
-                ui.label("Opens Altium .PcbDoc and Allegro .brd (16.0 and newer) boards.");
+                ui.label("Opens Altium .PcbDoc and Allegro .brd (16.0 and newer) boards,\nand rebuilds boards from Gerber and drill files (a folder, a .zip,\nor several files picked or dropped together). Each file's layer is\nrecognised automatically and nets are traced through the copper.");
                 ui.label(RichText::new("Scroll to zoom, drag to pan, click to select a net.\nM measures: click two points (they snap to pads, vias and track ends).\nF fits the board, B flips to the bottom, Esc clears.").weak());
             });
         });
@@ -339,6 +406,13 @@ impl App {
             if ui.button("Open board…").clicked() {
                 self.open_dialog();
             }
+            if ui.button("Open Gerber or ODB++ folder…").clicked() {
+                self.open_folder_dialog();
+            }
+            ui.label(
+                RichText::new("Or drop a board, a Gerber .zip, a folder or several Gerber files here.")
+                    .weak(),
+            );
             return;
         };
         let b = &scene.board;
@@ -371,6 +445,29 @@ impl App {
             ))
             .weak(),
         );
+        if let Some(imp) = &scene.import {
+            egui::CollapsingHeader::new(
+                RichText::new(format!("Rebuilt from {} files", imp.files.len())).small(),
+            )
+            .id_salt("import")
+            .show(ui, |ui| {
+                ui.label(RichText::new(format!("Nets: {}", imp.nets_from)).small().weak());
+                egui::Grid::new("import_files")
+                    .num_columns(2)
+                    .spacing([8.0, 2.0])
+                    .show(ui, |ui| {
+                        for (file, role, why) in &imp.files {
+                            let short = file.rsplit('/').next().unwrap_or(file);
+                            ui.label(RichText::new(short).small()).on_hover_text(file);
+                            ui.label(RichText::new(role).small().weak()).on_hover_text(why);
+                            ui.end_row();
+                        }
+                    });
+                for w in imp.warnings.iter().take(5) {
+                    ui.label(RichText::new(w).small().color(Color32::from_rgb(255, 180, 84)));
+                }
+            });
+        }
         ui.add_space(6.0);
         let resp = ui.add(
             egui::TextEdit::singleline(&mut self.search)
@@ -711,7 +808,9 @@ impl eframe::App for App {
                 .filter_map(|f| f.path.clone())
                 .collect()
         });
-        if let Some(p) = dropped.into_iter().next() {
+        if dropped.len() > 1 {
+            self.open_files(dropped);
+        } else if let Some(p) = dropped.into_iter().next() {
             self.open(p);
         }
         let typing = ctx.wants_keyboard_input();

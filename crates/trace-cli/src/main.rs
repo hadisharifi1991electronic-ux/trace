@@ -7,9 +7,10 @@ use std::process::ExitCode;
 use trace_core::{Board, LayerKind, Length, Sheet};
 
 const USAGE: &str = "\
-trace: read Altium and Allegro designs with the Trace engine
+trace: read Altium, Allegro and Gerber designs with the Trace engine
 
-Boards can be Altium .PcbDoc, Cadence Allegro .brd (16.0 or newer) or Trace .tracepcb.
+Boards can be Altium .PcbDoc, Cadence Allegro .brd (16.0 or newer), Trace
+.tracepcb, or Gerber and drill files: a folder, a .zip, or one file.
 
 USAGE:
     trace inspect <board|file.SchDoc>           Summary of a board or sheet
@@ -17,6 +18,7 @@ USAGE:
     trace rules <board>                         Design rules, grouped by kind
     trace view <board> [out.html]               Open the board in the viewer (in your browser)
     trace convert <file> <out.json>             Export to Trace's open JSON model
+    trace layers <gerber folder|zip>            Show which layer each Gerber or drill file was taken as
 ";
 
 fn main() -> ExitCode {
@@ -32,6 +34,7 @@ fn main() -> ExitCode {
         ["pairs", file, skew] => pairs(file, skew),
         ["rules", file] => rules(file),
         ["convert", file, out] => convert(file, out),
+        ["layers", file] => layers(file),
         ["view", file] => view_board(file, None),
         ["view", file, out] => view_board(file, Some(out)),
         _ => {
@@ -64,8 +67,45 @@ fn load(file: &str) -> Result<Design, Box<dyn std::error::Error>> {
         Some("schdoc") => Ok(Design::Sheet(trace_altium::read_schdoc(file)?)),
         Some("brd") => Ok(Design::Board(trace_allegro::read_brd(file)?)),
         Some("tracepcb") => Ok(Design::Board(trace_core::file::load(Path::new(file))?)),
-        _ => Err(format!("{file}: expected a .PcbDoc, .brd or .SchDoc file").into()),
+        _ if is_fab(file) => Ok(Design::Board(trace_gerber::read_path(file)?.board)),
+        _ => Err(format!("{file}: expected a .PcbDoc, .brd, .SchDoc, Gerber folder or .zip").into()),
     }
+}
+
+fn is_fab(file: &str) -> bool {
+    let p = Path::new(file);
+    p.is_dir() || file.to_ascii_lowercase().ends_with(".zip") || trace_gerber::is_fab_file(file)
+}
+
+fn layers(file: &str) -> Res {
+    let t = std::time::Instant::now();
+    let imp = trace_gerber::read_path(file)?;
+    println!("{:<52} {:<26} {}", "File", "Taken as", "Because of");
+    for f in &imp.files {
+        let role = match f.copper_index {
+            Some(i) => format!("{} (L{})", f.role, i + 1),
+            None => f.role.clone(),
+        };
+        println!("{:<52} {:<26} {}", f.file, role, f.reason);
+    }
+    let g = &imp.board.geometry;
+    println!();
+    println!(
+        "Board: {} copper layers, {} tracks, {} arcs, {} pads, {} vias, {} pours, outline {} points",
+        imp.board.stackup.copper_layers().count(),
+        g.tracks.iter().filter(|t| matches!(t.layer, trace_core::LayerRef::Copper(_))).count(),
+        g.arcs.iter().filter(|t| matches!(t.layer, trace_core::LayerRef::Copper(_))).count(),
+        g.pads.len(),
+        g.vias.len(),
+        g.polygons.len(),
+        g.outline.len()
+    );
+    println!("Nets: {} ({})", imp.board.nets.len(), imp.nets_from);
+    for w in imp.warnings.iter().take(10) {
+        println!("warning: {w}");
+    }
+    println!("Read in {:.2} s", t.elapsed().as_secs_f64());
+    Ok(())
 }
 
 fn board(file: &str) -> Result<Board, Box<dyn std::error::Error>> {

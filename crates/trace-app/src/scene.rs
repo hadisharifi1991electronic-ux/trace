@@ -136,6 +136,15 @@ pub struct Scene {
     pub fills: Vec<Fill>,
     pub fill_verts: Vec<[f32; 2]>,
     pub fill_tris: Vec<u32>,
+    /// How each file was read, for boards rebuilt from Gerber or ODB++.
+    pub import: Option<ImportInfo>,
+}
+
+pub struct ImportInfo {
+    /// (file, what it was taken as, why)
+    pub files: Vec<(String, String, String)>,
+    pub nets_from: String,
+    pub warnings: Vec<String>,
 }
 
 const CELL: f32 = 150.0;
@@ -169,17 +178,69 @@ impl Scene {
         let ext = path
             .extension()
             .map(|e| e.to_string_lossy().to_ascii_lowercase());
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
         let board = match ext.as_deref() {
             Some("pcbdoc") => trace_altium::read_pcbdoc(&path).map_err(|e| e.to_string())?,
             Some("brd") => trace_allegro::read_brd(&path).map_err(|e| e.to_string())?,
             Some(trace_core::file::EXTENSION) => trace_core::file::load(&path)?,
+            _ if path.is_dir()
+                || matches!(ext.as_deref(), Some("zip") | Some("tgz") | Some("gz"))
+                || trace_gerber::is_fab_file(&name) =>
+            {
+                let imp = trace_gerber::read_path(&path).map_err(|e| e.to_string())?;
+                return Ok(Self::from_import(path, imp));
+            }
             _ => {
                 return Err(
-                    "expected an Altium .PcbDoc, an Allegro .brd or a Trace .tracepcb board".into(),
+                    "expected an Altium .PcbDoc, an Allegro .brd, Gerber files (folder or .zip), ODB++ or a Trace .tracepcb board".into(),
                 )
             }
         };
         Ok(Self::from_board(path, board))
+    }
+
+    /// Several Gerber and drill files read together as one board.
+    pub fn load_files(paths: Vec<PathBuf>) -> Result<Self, String> {
+        let mut files = Vec::new();
+        for p in &paths {
+            let data = std::fs::read(p).map_err(|e| format!("{}: {e}", p.display()))?;
+            let name = p
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            files.push(trace_gerber::SourceFile { name, data });
+        }
+        let imp = trace_gerber::read_files(files).map_err(|e| e.to_string())?;
+        let dir = paths
+            .first()
+            .and_then(|p| p.parent())
+            .map(|p| p.to_path_buf())
+            .unwrap_or_default();
+        Ok(Self::from_import(dir, imp))
+    }
+
+    fn from_import(path: PathBuf, imp: trace_gerber::Import) -> Self {
+        let info = ImportInfo {
+            files: imp
+                .files
+                .iter()
+                .map(|f| {
+                    let role = match f.copper_index {
+                        Some(i) => format!("{} (L{})", f.role, i + 1),
+                        None => f.role.clone(),
+                    };
+                    (f.file.clone(), role, f.reason.clone())
+                })
+                .collect(),
+            nets_from: imp.nets_from.to_string(),
+            warnings: imp.warnings.clone(),
+        };
+        let mut scene = Self::from_board(path, imp.board);
+        scene.import = Some(info);
+        scene
     }
 
     /// Rebuilds the drawing after the board changed, keeping layer settings.
@@ -416,6 +477,7 @@ impl Scene {
             fills,
             fill_verts,
             fill_tris,
+            import: None,
             board,
             prims,
             layers,

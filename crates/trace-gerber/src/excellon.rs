@@ -46,7 +46,9 @@ pub fn sniff(data: &[u8]) -> bool {
             l == "M48"
                 || l.starts_with("METRIC")
                 || l.starts_with("INCH")
-                || (l.starts_with('T') && l.contains('C') && l[1..2].chars().all(|c| c.is_ascii_digit()))
+                || (l.starts_with('T')
+                    && l.contains('C')
+                    && l[1..2].chars().all(|c| c.is_ascii_digit()))
         })
 }
 
@@ -68,7 +70,12 @@ pub fn parse(data: &[u8]) -> Result<Drill, String> {
     let mut tool_down = false;
     let mut in_header = false;
 
-    let number = |s: &str, metric: bool, keep_leading: bool, digits: Option<(usize, usize)>, unit: f64| -> f64 {
+    let number = |s: &str,
+                  metric: bool,
+                  keep_leading: bool,
+                  digits: Option<(usize, usize)>,
+                  unit: f64|
+     -> f64 {
         if s.contains('.') {
             return s.parse::<f64>().unwrap_or(0.0) * unit;
         }
@@ -110,7 +117,10 @@ pub fn parse(data: &[u8]) -> Result<Drill, String> {
                         Some(&"NonPlated") => d.plated = Some(false),
                         _ => {}
                     }
-                    if let (Some(a), Some(b)) = (f.get(1).and_then(|s| s.parse().ok()), f.get(2).and_then(|s| s.parse().ok())) {
+                    if let (Some(a), Some(b)) = (
+                        f.get(1).and_then(|s| s.parse().ok()),
+                        f.get(2).and_then(|s| s.parse().ok()),
+                    ) {
                         d.span = Some((a, b));
                     }
                 } else if let Some(v) = attr.strip_prefix("TA.AperFunction,") {
@@ -128,7 +138,10 @@ pub fn parse(data: &[u8]) -> Result<Drill, String> {
                 if p.len() == 2 {
                     digits = Some((p[0], p[1]));
                 }
-            } else if c.contains("Holes") && c.contains("NPTH") || c.contains("NON_PLATED") || c.contains("Non-Plated") {
+            } else if c.contains("Holes") && c.contains("NPTH")
+                || c.contains("NON_PLATED")
+                || c.contains("Non-Plated")
+            {
                 plated_section = Some(false);
             }
             continue;
@@ -141,7 +154,8 @@ pub fn parse(data: &[u8]) -> Result<Drill, String> {
             in_header = false;
             continue;
         }
-        if line.starts_with("METRIC") || line.starts_with("INCH") || line == "M71" || line == "M72" {
+        if line.starts_with("METRIC") || line.starts_with("INCH") || line == "M71" || line == "M72"
+        {
             metric = line.starts_with("METRIC") || line == "M71";
             unit = if metric { 1.0 } else { 25.4 };
             if line.contains(",LZ") {
@@ -150,7 +164,10 @@ pub fn parse(data: &[u8]) -> Result<Drill, String> {
                 keep_leading = false;
             }
             // e.g. METRIC,LZ,000.000
-            if let Some(fmt) = line.split(',').find(|p| p.contains('.') && p.chars().all(|c| c == '0' || c == '.')) {
+            if let Some(fmt) = line
+                .split(',')
+                .find(|p| p.contains('.') && p.chars().all(|c| c == '0' || c == '.'))
+            {
                 let mut s = fmt.split('.');
                 digits = Some((s.next().unwrap_or("").len(), s.next().unwrap_or("").len()));
             }
@@ -190,8 +207,12 @@ pub fn parse(data: &[u8]) -> Result<Drill, String> {
             _ => {}
         }
         if let Some(rest) = line.strip_prefix('T') {
-            let n_end = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
-            let Ok(n) = rest[..n_end].parse::<u32>() else { continue };
+            let n_end = rest
+                .find(|c: char| !c.is_ascii_digit())
+                .unwrap_or(rest.len());
+            let Ok(n) = rest[..n_end].parse::<u32>() else {
+                continue;
+            };
             let def = &rest[n_end..];
             if let Some(ci) = def.find('C') {
                 let v: String = def[ci + 1..]

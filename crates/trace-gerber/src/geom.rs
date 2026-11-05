@@ -126,7 +126,10 @@ pub fn thermal_quarters(c: Pt, outer: f64, inner: f64, gap: f64) -> Vec<Vec<Pt>>
                 [c[0] + ri * t.cos(), c[1] + ri * t.sin()]
             }));
         } else {
-            pts.push([c[0] + gap / 2.0 * (base + PI / 4.0).cos() * std::f64::consts::SQRT_2, c[1] + gap / 2.0 * (base + PI / 4.0).sin() * std::f64::consts::SQRT_2]);
+            pts.push([
+                c[0] + gap / 2.0 * (base + PI / 4.0).cos() * std::f64::consts::SQRT_2,
+                c[1] + gap / 2.0 * (base + PI / 4.0).sin() * std::f64::consts::SQRT_2,
+            ]);
         }
         out.push(pts);
     }
@@ -139,7 +142,10 @@ pub fn thick_line(a: Pt, b: Pt, w: f64) -> Vec<Pt> {
     if len < 1e-12 {
         return rect(a, w, w);
     }
-    let (nx, ny) = (-(b[1] - a[1]) / len * w / 2.0, (b[0] - a[0]) / len * w / 2.0);
+    let (nx, ny) = (
+        -(b[1] - a[1]) / len * w / 2.0,
+        (b[0] - a[0]) / len * w / 2.0,
+    );
     vec![
         [a[0] + nx, a[1] + ny],
         [a[0] - nx, a[1] - ny],
@@ -185,7 +191,9 @@ pub fn stadium(a: Pt, b: Pt, r: f64) -> Vec<Pt> {
 
 /// Outline of a polyline stroked with a round pen.
 pub fn stroke_path(pts: &[Pt], w: f64) -> Vec<Vec<Pt>> {
-    pts.windows(2).map(|s| stadium(s[0], s[1], w / 2.0)).collect()
+    pts.windows(2)
+        .map(|s| stadium(s[0], s[1], w / 2.0))
+        .collect()
 }
 
 /// Convex hull (monotone chain), counter-clockwise.
@@ -243,7 +251,13 @@ pub fn min_rect(pts: &[Pt]) -> (Pt, f64, f64, f64) {
         let area = (x1 - x0) * (y1 - y0);
         if area < best.0 - 1e-9 {
             let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
-            best = (area, [cx * c - cy * s, cx * s + cy * c], x1 - x0, y1 - y0, t.to_degrees());
+            best = (
+                area,
+                [cx * c - cy * s, cx * s + cy * c],
+                x1 - x0,
+                y1 - y0,
+                t.to_degrees(),
+            );
         }
     }
     let (_, c, w, hgt, mut deg) = best;
@@ -280,7 +294,12 @@ pub fn bbox(pts: &[Pt]) -> [f64; 4] {
 }
 
 pub fn bbox_union(a: [f64; 4], b: [f64; 4]) -> [f64; 4] {
-    [a[0].min(b[0]), a[1].min(b[1]), a[2].max(b[2]), a[3].max(b[3])]
+    [
+        a[0].min(b[0]),
+        a[1].min(b[1]),
+        a[2].max(b[2]),
+        a[3].max(b[3]),
+    ]
 }
 
 pub fn bbox_overlap(a: [f64; 4], b: [f64; 4]) -> bool {
@@ -295,7 +314,9 @@ pub fn inside(rings: &[Vec<Pt>], p: Pt) -> bool {
         let mut j = n.wrapping_sub(1);
         for i in 0..n {
             let (a, b) = (ring[i], ring[j]);
-            if (a[1] > p[1]) != (b[1] > p[1]) && p[0] < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1]) + a[0] {
+            if (a[1] > p[1]) != (b[1] > p[1])
+                && p[0] < (b[0] - a[0]) * (p[1] - a[1]) / (b[1] - a[1]) + a[0]
+            {
                 odd = !odd;
             }
             j = i;
@@ -318,7 +339,12 @@ pub fn point_seg(p: Pt, a: Pt, b: Pt) -> f64 {
 
 pub fn seg_seg(a: Pt, b: Pt, c: Pt, d: Pt) -> f64 {
     let cross = |o: Pt, p: Pt, q: Pt| (p[0] - o[0]) * (q[1] - o[1]) - (p[1] - o[1]) * (q[0] - o[0]);
-    let (d1, d2, d3, d4) = (cross(c, d, a), cross(c, d, b), cross(a, b, c), cross(a, b, d));
+    let (d1, d2, d3, d4) = (
+        cross(c, d, a),
+        cross(c, d, b),
+        cross(a, b, c),
+        cross(a, b, d),
+    );
     if ((d1 > 0.0) != (d2 > 0.0)) && ((d3 > 0.0) != (d4 > 0.0)) {
         return 0.0;
     }
@@ -330,7 +356,8 @@ pub fn seg_seg(a: Pt, b: Pt, c: Pt, d: Pt) -> f64 {
 
 /// Filled outlines of a flashed aperture, as (dark, outline) pairs in order.
 pub fn flash_shapes(ap: &Aperture, at: Pt, xf: &Xform) -> Vec<(bool, Vec<Pt>)> {
-    let place = |pts: Vec<Pt>| -> Vec<Pt> { pts.into_iter().map(|p| add(xf.apply(p), at)).collect() };
+    let place =
+        |pts: Vec<Pt>| -> Vec<Pt> { pts.into_iter().map(|p| add(xf.apply(p), at)).collect() };
     let o = [0.0, 0.0];
     let mut out = match &ap.shape {
         Shape::Circle(d) => vec![(true, place(circle(o, *d)))],
@@ -410,7 +437,10 @@ mod tests {
 
     #[test]
     fn rotated_rect_is_found() {
-        let pts: Vec<Pt> = rect([1.0, 2.0], 2.0, 1.0).into_iter().map(|p| rotate(p, 30.0)).collect();
+        let pts: Vec<Pt> = rect([1.0, 2.0], 2.0, 1.0)
+            .into_iter()
+            .map(|p| rotate(p, 30.0))
+            .collect();
         let (_, w, h, deg) = min_rect(&pts);
         assert!((w - 2.0).abs() < 1e-6 && (h - 1.0).abs() < 1e-6, "{w} {h}");
         assert!((deg - 30.0).abs() < 1e-6, "{deg}");
@@ -418,7 +448,10 @@ mod tests {
 
     #[test]
     fn hole_is_cut() {
-        let out = difference(&[rect([0.0, 0.0], 10.0, 10.0)], &[rect([0.0, 0.0], 2.0, 2.0)]);
+        let out = difference(
+            &[rect([0.0, 0.0], 10.0, 10.0)],
+            &[rect([0.0, 0.0], 2.0, 2.0)],
+        );
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].len(), 2);
     }

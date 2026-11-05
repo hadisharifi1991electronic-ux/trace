@@ -55,7 +55,9 @@ impl Role {
     pub fn label(&self) -> String {
         let side = |s: &Side| if *s == Side::Top { "top" } else { "bottom" };
         match self {
-            Role::Copper { pos, number, plane, .. } => {
+            Role::Copper {
+                pos, number, plane, ..
+            } => {
                 let kind = if *plane { "plane" } else { "copper" };
                 match pos {
                     CuPos::Top => format!("Top {kind}"),
@@ -119,9 +121,16 @@ pub fn detect(name: &str, content: Content) -> (Role, String) {
             }
             let lower = stem.to_ascii_lowercase();
             if plated.is_none() || d.file_function.is_none() {
-                if has(&words, &["npth", "nonplated", "unplated", "np"]) || lower.contains("non_plated") || lower.contains("non-plated") || lower.contains("nonplated") {
+                if has(&words, &["npth", "nonplated", "unplated", "np"])
+                    || lower.contains("non_plated")
+                    || lower.contains("non-plated")
+                    || lower.contains("nonplated")
+                {
                     plated = Some(false);
-                } else if has(&words, &["pth", "plated"]) && d.file_function.is_none() && plated.is_none() {
+                } else if has(&words, &["pth", "plated"])
+                    && d.file_function.is_none()
+                    && plated.is_none()
+                {
                     plated = Some(true);
                 }
             }
@@ -145,17 +154,38 @@ pub fn detect(name: &str, content: Content) -> (Role, String) {
             });
             if let Some(r) = from_extension(&ext) {
                 let r = match r {
-                    Role::Copper { pos, number, plane, .. } => Role::Copper { pos, number, order, plane },
+                    Role::Copper {
+                        pos, number, plane, ..
+                    } => Role::Copper {
+                        pos,
+                        number,
+                        order,
+                        plane,
+                    },
                     r => r,
                 };
                 return (r, format!("file extension .{ext}"));
             }
             // KiCad and others write "<project>-<layer>"; the last part is
             // the most reliable, so try it on its own first.
-            let tail = stem.rsplit_once('-').map(|(_, t)| tokens(t)).filter(|t| !t.is_empty());
-            if let Some(r) = tail.as_deref().and_then(from_words).or_else(|| from_words(&words)) {
+            let tail = stem
+                .rsplit_once('-')
+                .map(|(_, t)| tokens(t))
+                .filter(|t| !t.is_empty());
+            if let Some(r) = tail
+                .as_deref()
+                .and_then(from_words)
+                .or_else(|| from_words(&words))
+            {
                 let r = match r {
-                    Role::Copper { pos, number, plane, .. } => Role::Copper { pos, number, order, plane },
+                    Role::Copper {
+                        pos, number, plane, ..
+                    } => Role::Copper {
+                        pos,
+                        number,
+                        order,
+                        plane,
+                    },
                     r => r,
                 };
                 return (r, "words in the file name".into());
@@ -180,11 +210,60 @@ pub fn detect(name: &str, content: Content) -> (Role, String) {
 
 /// Role for files that are clearly not layer data, decided before parsing.
 pub fn skip_by_name(name: &str) -> bool {
-    let base = name.rsplit(['/', '\\']).next().unwrap_or(name).to_ascii_lowercase();
+    let base = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .to_ascii_lowercase();
     let ext = base.rsplit('.').next().unwrap_or("");
     matches!(
         ext,
-        "rep" | "extrep" | "rul" | "apr" | "apr_lib" | "drr" | "ldp" | "pdf" | "html" | "htm" | "xls" | "xlsx" | "csv" | "step" | "stp" | "png" | "jpg" | "jpeg" | "bmp" | "zip" | "md" | "json" | "gbrjob" | "pos" | "ipc" | "d356" | "xml" | "log" | "dri" | "gpi" | "pro" | "cam" | "brd" | "sch" | "kicad_pcb" | "pcbdoc" | "schdoc" | "doc" | "docx" | "rtf" | "gvp" | "net" | "bom" | "pdb" | "dxf" | "svg"
+        "rep"
+            | "extrep"
+            | "rul"
+            | "apr"
+            | "apr_lib"
+            | "drr"
+            | "ldp"
+            | "pdf"
+            | "html"
+            | "htm"
+            | "xls"
+            | "xlsx"
+            | "csv"
+            | "step"
+            | "stp"
+            | "png"
+            | "jpg"
+            | "jpeg"
+            | "bmp"
+            | "zip"
+            | "md"
+            | "json"
+            | "gbrjob"
+            | "pos"
+            | "ipc"
+            | "d356"
+            | "xml"
+            | "log"
+            | "dri"
+            | "gpi"
+            | "pro"
+            | "cam"
+            | "brd"
+            | "sch"
+            | "kicad_pcb"
+            | "pcbdoc"
+            | "schdoc"
+            | "doc"
+            | "docx"
+            | "rtf"
+            | "gvp"
+            | "net"
+            | "bom"
+            | "pdb"
+            | "dxf"
+            | "svg"
     ) || base.starts_with("readme")
         || base.contains("pick place")
         || base.contains("pick_place")
@@ -217,7 +296,9 @@ fn from_file_function(f: &str) -> Option<Role> {
     };
     Some(match p.first().copied()? {
         "Copper" => {
-            let number = p.get(1).and_then(|l| l.trim_start_matches('L').parse().ok());
+            let number = p
+                .get(1)
+                .and_then(|l| l.trim_start_matches('L').parse().ok());
             let pos = match p.get(2).copied() {
                 Some("Top") => CuPos::Top,
                 Some("Bot") => CuPos::Bottom,
@@ -236,7 +317,9 @@ fn from_file_function(f: &str) -> Option<Role> {
         "Profile" => Role::Outline,
         "Keepout" => Role::Keepout,
         "Drillmap" | "FabricationDrawing" => Role::DrillDrawing,
-        "AssemblyDrawing" | "Component" | "Other" | "ArrayDrawing" | "Vcut" | "Depthrout" | "Pads" | "Glue" | "Carbonmask" | "Goldmask" | "Heatsinkmask" | "Peelablemask" | "Silvermask" | "Tinmask" | "Viafill" => Role::Mechanical(0),
+        "AssemblyDrawing" | "Component" | "Other" | "ArrayDrawing" | "Vcut" | "Depthrout"
+        | "Pads" | "Glue" | "Carbonmask" | "Goldmask" | "Heatsinkmask" | "Peelablemask"
+        | "Silvermask" | "Tinmask" | "Viafill" => Role::Mechanical(0),
         "Plated" | "NonPlated" => Role::Ignore,
         _ => return None,
     })
@@ -293,15 +376,11 @@ fn from_extension(ext: &str) -> Option<Role> {
                 copper(Inner, Some(n), true)
             } else if let Some(n) = num("gm") {
                 Role::Mechanical(n)
-            } else if let Some(n) = num("gd").or_else(|| num("gg")) {
-                let _ = n;
+            } else if num("gd").or_else(|| num("gg")).is_some() {
                 Role::DrillDrawing
-            } else if let Some(n) = num("gl").or_else(|| num("g")) {
-                copper(Inner, Some(n), false)
-            } else if let Some(n) = num("ly").or_else(|| num("l")).or_else(|| num("in")) {
-                copper(Inner, Some(n), false)
             } else {
-                return None;
+                let n = num("gl").or_else(|| num("g")).or_else(|| num("ly")).or_else(|| num("l")).or_else(|| num("in"))?;
+                copper(Inner, Some(n), false)
             }
         }
     })
@@ -350,11 +429,17 @@ fn side_of(words: &[String], copper_context: bool) -> Option<Side> {
     // Layer words come last in most names; project names come first.
     for w in words.iter().rev() {
         match w.as_str() {
-            "top" | "front" | "f" | "t" | "upper" | "cmp" | "component" | "comp" | "primary" => return Some(Side::Top),
+            "top" | "front" | "f" | "t" | "upper" | "cmp" | "component" | "comp" | "primary" => {
+                return Some(Side::Top)
+            }
             "bottom" | "bot" | "back" | "b" | "lower" | "secondary" => return Some(Side::Bottom),
             "sol" | "solder" if copper_context => return Some(Side::Bottom),
-            "smt" | "sst" | "spt" | "plc" | "stc" | "crc" | "tsm" | "tsp" => return Some(Side::Top),
-            "smb" | "ssb" | "spb" | "pls" | "sts" | "crs" | "bsm" | "bsp" => return Some(Side::Bottom),
+            "smt" | "sst" | "spt" | "plc" | "stc" | "crc" | "tsm" | "tsp" => {
+                return Some(Side::Top)
+            }
+            "smb" | "ssb" | "spb" | "pls" | "sts" | "crs" | "bsm" | "bsp" => {
+                return Some(Side::Bottom)
+            }
             _ => {}
         }
     }
@@ -368,41 +453,166 @@ fn from_words(words: &[String]) -> Option<Role> {
     }
     let joined = words.concat();
     let side = side_of(words, false);
-    if has(words, &["drill", "drl", "ncdrill", "drillmap", "holes", "nc", "thruhole"]) || joined.contains("drilldrawing") || joined.contains("drillmap") || joined.contains("fabdrawing") {
+    if has(
+        words,
+        &[
+            "drill", "drl", "ncdrill", "drillmap", "holes", "nc", "thruhole",
+        ],
+    ) || joined.contains("drilldrawing")
+        || joined.contains("drillmap")
+        || joined.contains("fabdrawing")
+    {
         return Some(Role::DrillDrawing);
     }
-    if has(words, &["paste", "cream", "stencil", "pastemask", "sp", "spt", "spb", "crc", "crs", "tsp", "bsp"]) {
+    if has(
+        words,
+        &[
+            "paste",
+            "cream",
+            "stencil",
+            "pastemask",
+            "sp",
+            "spt",
+            "spb",
+            "crc",
+            "crs",
+            "tsp",
+            "bsp",
+        ],
+    ) {
         return Some(Role::Paste(side.unwrap_or(Side::Top)));
     }
-    if has(words, &["mask", "soldermask", "sm", "smt", "smb", "stop", "resist", "stc", "sts", "tsm", "bsm"]) || joined.contains("soldermask") {
+    if has(
+        words,
+        &[
+            "mask",
+            "soldermask",
+            "sm",
+            "smt",
+            "smb",
+            "stop",
+            "resist",
+            "stc",
+            "sts",
+            "tsm",
+            "bsm",
+        ],
+    ) || joined.contains("soldermask")
+    {
         return Some(Role::Mask(side.unwrap_or(Side::Top)));
     }
-    if has(words, &["silk", "silks", "silkscreen", "legend", "overlay", "ss", "sst", "ssb", "plc", "pls", "slk", "screen"]) || joined.contains("silkscreen") {
+    if has(
+        words,
+        &[
+            "silk",
+            "silks",
+            "silkscreen",
+            "legend",
+            "overlay",
+            "ss",
+            "sst",
+            "ssb",
+            "plc",
+            "pls",
+            "slk",
+            "screen",
+        ],
+    ) || joined.contains("silkscreen")
+    {
         return Some(Role::Silk(side.unwrap_or(Side::Top)));
     }
-    if has(words, &["outline", "edge", "cuts", "profile", "dimension", "border", "contour", "mill", "milling", "rout", "boundary", "gko", "bo"]) || joined.contains("boardoutline") || joined.contains("edgecuts") {
+    if has(
+        words,
+        &[
+            "outline",
+            "edge",
+            "cuts",
+            "profile",
+            "dimension",
+            "border",
+            "contour",
+            "mill",
+            "milling",
+            "rout",
+            "boundary",
+            "gko",
+            "bo",
+        ],
+    ) || joined.contains("boardoutline")
+        || joined.contains("edgecuts")
+    {
         return Some(Role::Outline);
     }
     if has(words, &["keepout", "ko"]) || joined.contains("keepout") {
         return Some(Role::Keepout);
     }
-    if has(words, &["fab", "assembly", "assy", "courtyard", "crtyd", "fabrication", "drawing", "dwgs", "comments", "cmts", "eco1", "eco2", "margin", "user", "notes", "mechanical", "mech", "dimensions", "doc"]) {
+    if has(
+        words,
+        &[
+            "fab",
+            "assembly",
+            "assy",
+            "courtyard",
+            "crtyd",
+            "fabrication",
+            "drawing",
+            "dwgs",
+            "comments",
+            "cmts",
+            "eco1",
+            "eco2",
+            "margin",
+            "user",
+            "notes",
+            "mechanical",
+            "mech",
+            "dimensions",
+            "doc",
+        ],
+    ) {
         return Some(Role::Mechanical(0));
     }
     // Copper: numbered inner layers first.
     for w in words.iter().rev() {
         if let Some((prefix, n)) = split_num(w) {
             match prefix {
-                "in" | "inner" | "mid" | "l" | "layer" | "lyr" | "ly" | "sig" | "signal" | "art" | "g" | "gl" | "int" | "internal" | "inr" => {
+                "in" | "inner" | "mid" | "l" | "layer" | "lyr" | "ly" | "sig" | "signal"
+                | "art" | "g" | "gl" | "int" | "internal" | "inr" => {
                     return Some(copper(Inner, Some(n), false));
                 }
-                "plane" | "gnd" | "pwr" | "power" | "vcc" | "gp" | "pln" => return Some(copper(Inner, Some(n), true)),
+                "plane" | "gnd" | "pwr" | "power" | "vcc" | "gp" | "pln" => {
+                    return Some(copper(Inner, Some(n), true))
+                }
                 _ => {}
             }
         }
     }
     // KiCad: "In1_Cu" splits into "in1", "cu"; caught above.
-    let copperish = has(words, &["cu", "copper", "signal", "sig", "etch", "layer", "art", "plane", "gnd", "ground", "pwr", "power", "vcc", "inner", "internal", "cmp", "sol", "conductor", "routing", "trace"]);
+    let copperish = has(
+        words,
+        &[
+            "cu",
+            "copper",
+            "signal",
+            "sig",
+            "etch",
+            "layer",
+            "art",
+            "plane",
+            "gnd",
+            "ground",
+            "pwr",
+            "power",
+            "vcc",
+            "inner",
+            "internal",
+            "cmp",
+            "sol",
+            "conductor",
+            "routing",
+            "trace",
+        ],
+    );
     if let Some(s) = side_of(words, true) {
         // A bare "top" or "bottom" file is almost always copper.
         let pos = if s == Side::Top { Top } else { Bottom };
@@ -416,11 +626,17 @@ fn from_words(words: &[String]) -> Option<Role> {
 }
 
 fn from_aperture_functions(g: &Gerber) -> Option<Role> {
-    let f: Vec<&str> = g.apertures.iter().filter_map(|a| a.function.as_deref()).collect();
+    let f: Vec<&str> = g
+        .apertures
+        .iter()
+        .filter_map(|a| a.function.as_deref())
+        .collect();
     if f.is_empty() {
         return None;
     }
-    if f.iter().any(|s| s.starts_with("Conductor") || s.starts_with("ViaPad") || s.contains("CuDef")) {
+    if f.iter()
+        .any(|s| s.starts_with("Conductor") || s.starts_with("ViaPad") || s.contains("CuDef"))
+    {
         return Some(copper(CuPos::Inner, None, false));
     }
     if f.iter().all(|s| s.starts_with("Profile")) {
@@ -440,26 +656,75 @@ mod tests {
 
     #[test]
     fn tokens_split() {
-        assert_eq!(tokens("Gerber_TopSilkscreenLayer"), ["gerber", "top", "silkscreen", "layer"]);
+        assert_eq!(
+            tokens("Gerber_TopSilkscreenLayer"),
+            ["gerber", "top", "silkscreen", "layer"]
+        );
         assert_eq!(tokens("board-In2_Cu"), ["board", "in2", "cu"]);
         assert_eq!(tokens("SOLDERMASK_TOP"), ["soldermask", "top"]);
     }
 
     #[test]
     fn common_names() {
-        assert!(matches!(by_name("board.GTL"), Role::Copper { pos: CuPos::Top, .. }));
-        assert!(matches!(by_name("board.G3"), Role::Copper { pos: CuPos::Inner, number: Some(3), .. }));
-        assert!(matches!(by_name("board.GP1"), Role::Copper { plane: true, .. }));
+        assert!(matches!(
+            by_name("board.GTL"),
+            Role::Copper {
+                pos: CuPos::Top,
+                ..
+            }
+        ));
+        assert!(matches!(
+            by_name("board.G3"),
+            Role::Copper {
+                pos: CuPos::Inner,
+                number: Some(3),
+                ..
+            }
+        ));
+        assert!(matches!(
+            by_name("board.GP1"),
+            Role::Copper { plane: true, .. }
+        ));
         assert_eq!(by_name("board.GM1"), Role::Mechanical(1));
-        assert!(matches!(by_name("proj-F_Cu.gbr"), Role::Copper { pos: CuPos::Top, .. }));
-        assert!(matches!(by_name("proj-B_Cu.gbr"), Role::Copper { pos: CuPos::Bottom, .. }));
-        assert!(matches!(by_name("proj-In2_Cu.gbr"), Role::Copper { number: Some(2), .. }));
+        assert!(matches!(
+            by_name("proj-F_Cu.gbr"),
+            Role::Copper {
+                pos: CuPos::Top,
+                ..
+            }
+        ));
+        assert!(matches!(
+            by_name("proj-B_Cu.gbr"),
+            Role::Copper {
+                pos: CuPos::Bottom,
+                ..
+            }
+        ));
+        assert!(matches!(
+            by_name("proj-In2_Cu.gbr"),
+            Role::Copper {
+                number: Some(2),
+                ..
+            }
+        ));
         assert_eq!(by_name("proj-F_Mask.gbr"), Role::Mask(Side::Top));
         assert_eq!(by_name("proj-B_Silkscreen.gbr"), Role::Silk(Side::Bottom));
         assert_eq!(by_name("proj-Edge_Cuts.gbr"), Role::Outline);
         assert_eq!(by_name("SOLDERMASK_BOTTOM.art"), Role::Mask(Side::Bottom));
-        assert!(matches!(by_name("TOP.art"), Role::Copper { pos: CuPos::Top, .. }));
-        assert!(matches!(by_name("L3_GND.art"), Role::Copper { number: Some(3), .. }));
+        assert!(matches!(
+            by_name("TOP.art"),
+            Role::Copper {
+                pos: CuPos::Top,
+                ..
+            }
+        ));
+        assert!(matches!(
+            by_name("L3_GND.art"),
+            Role::Copper {
+                number: Some(3),
+                ..
+            }
+        ));
         assert_eq!(by_name("Gerber_BoardOutlineLayer.GKO"), Role::Outline);
         assert_eq!(by_name("board.plc"), Role::Silk(Side::Top));
         assert_eq!(by_name("PASTEMASK_TOP.art"), Role::Paste(Side::Top));

@@ -6,7 +6,8 @@ checker and simulator all read.
 
 > Status: phase 1, board viewer. Trace opens Altium `.PcbDoc` and Cadence
 > Allegro `.brd` boards in a desktop app, measures distances and checks
-> routing and differential pairs. Editing is paused.
+> routing and differential pairs. It also rebuilds a board from Gerber and
+> drill files or an ODB++ job. Editing is paused.
 
 ## Desktop app
 
@@ -14,6 +15,11 @@ checker and simulator all read.
 
 - open any Altium `.PcbDoc` or Allegro `.brd` from File → Open, the recent
   list, or by dropping it on the window
+- open fabrication data: a folder or `.zip` of Gerber and drill files, several
+  files at once, or an ODB++ job (`.tgz`, `.zip` or folder). Each file's layer
+  is recognised automatically and the board is rebuilt with copper, holes,
+  vias, silkscreen, outline and nets; "Rebuilt from N files" shows what each
+  file was taken as and why. File → Save as Trace board keeps the result
 - see tracks, pads, vias, copper pours, silkscreen and the board outline
 - zoom (scroll), pan (drag), flip to the bottom (B), fit (F)
 - show or hide each copper layer; double-click a layer to show only that one
@@ -35,7 +41,21 @@ trace rules board.PcbDoc         design rules grouped by kind
 trace convert <file> out.json    export to Trace's open JSON model
 ```
 
-Every command also takes an Allegro `.brd` (versions 16.0 to 23.x).
+Every command also takes an Allegro `.brd` (versions 16.0 to 23.x), a Gerber
+folder or `.zip`, or an ODB++ job.
+
+```
+trace layers gerbers.zip         which layer each file was taken as, and why
+```
+
+Gerber import reads RS-274X with X2 attributes, aperture macros, step and
+repeat and block apertures, plus Excellon drill files with slots. Layers are
+recognised from X2 file functions, Altium layer comments, the extension
+conventions of Altium/Protel, Eagle and OrCAD, KiCad file names, and finally
+the content itself. Without X2 net attributes, nets are traced through the
+copper: on six KiCad demo boards (about 19,000 objects) the traced nets match
+KiCad's own netlist exactly. ODB++ jobs take their nets and parts from the
+job's netlist and component files.
 
 Tested on an 18-layer Altium board with 2,370 parts, 2,252 nets and 137 differential
 pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
@@ -50,6 +70,9 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   symbol; the text form is exact.
 - Altium copper pours and regions are counted but not drawn yet; Allegro
   pours are drawn.
+- Traced Gerber nets get names like `Net-042`, since bare Gerber files do not
+  carry net names. Parts are only known when the files carry X2 component
+  attributes or come from ODB++.
 
 ## Layout
 
@@ -58,6 +81,7 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
 | `crates/trace-core` | Format-neutral design model (lengths in nanometres) |
 | `crates/trace-altium` | Altium `.PcbDoc` / `.SchDoc` reader (OLE compound files) |
 | `crates/trace-allegro` | Allegro `.brd` reader, ported from KiCad's Allegro importer |
+| `crates/trace-gerber` | Gerber, Excellon and ODB++ import with layer detection and net tracing |
 | `crates/trace-cli` | The `trace` command |
 | `crates/trace-app` | The desktop app (egui) |
 

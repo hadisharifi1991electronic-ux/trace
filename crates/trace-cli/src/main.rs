@@ -68,7 +68,9 @@ fn load(file: &str) -> Result<Design, Box<dyn std::error::Error>> {
         Some("brd") => Ok(Design::Board(trace_allegro::read_brd(file)?)),
         Some("tracepcb") => Ok(Design::Board(trace_core::file::load(Path::new(file))?)),
         _ if is_fab(file) => Ok(Design::Board(trace_gerber::read_path(file)?.board)),
-        _ => Err(format!("{file}: expected a .PcbDoc, .brd, .SchDoc, Gerber folder or .zip").into()),
+        _ => {
+            Err(format!("{file}: expected a .PcbDoc, .brd, .SchDoc, Gerber folder or .zip").into())
+        }
     }
 }
 
@@ -80,7 +82,7 @@ fn is_fab(file: &str) -> bool {
 fn layers(file: &str) -> Res {
     let t = std::time::Instant::now();
     let imp = trace_gerber::read_path(file)?;
-    println!("{:<52} {:<26} {}", "File", "Taken as", "Because of");
+    println!("{:<52} {:<26} Because of", "File", "Taken as");
     for f in &imp.files {
         let role = match f.copper_index {
             Some(i) => format!("{} (L{})", f.role, i + 1),

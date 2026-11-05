@@ -311,7 +311,10 @@ impl App {
                 });
                 ui.separator();
                 if ui
-                    .add_enabled(self.scene.is_some(), egui::Button::new("Save as Trace board…"))
+                    .add_enabled(
+                        self.scene.is_some(),
+                        egui::Button::new("Save as Trace board…"),
+                    )
                     .clicked()
                 {
                     ui.close_menu();
@@ -410,8 +413,10 @@ impl App {
                 self.open_folder_dialog();
             }
             ui.label(
-                RichText::new("Or drop a board, a Gerber .zip, a folder or several Gerber files here.")
-                    .weak(),
+                RichText::new(
+                    "Or drop a board, a Gerber .zip, a folder or several Gerber files here.",
+                )
+                .weak(),
             );
             return;
         };
@@ -451,7 +456,11 @@ impl App {
             )
             .id_salt("import")
             .show(ui, |ui| {
-                ui.label(RichText::new(format!("Nets: {}", imp.nets_from)).small().weak());
+                ui.label(
+                    RichText::new(format!("Nets: {}", imp.nets_from))
+                        .small()
+                        .weak(),
+                );
                 egui::Grid::new("import_files")
                     .num_columns(2)
                     .spacing([8.0, 2.0])
@@ -459,12 +468,17 @@ impl App {
                         for (file, role, why) in &imp.files {
                             let short = file.rsplit('/').next().unwrap_or(file);
                             ui.label(RichText::new(short).small()).on_hover_text(file);
-                            ui.label(RichText::new(role).small().weak()).on_hover_text(why);
+                            ui.label(RichText::new(role).small().weak())
+                                .on_hover_text(why);
                             ui.end_row();
                         }
                     });
                 for w in imp.warnings.iter().take(5) {
-                    ui.label(RichText::new(w).small().color(Color32::from_rgb(255, 180, 84)));
+                    ui.label(
+                        RichText::new(w)
+                            .small()
+                            .color(Color32::from_rgb(255, 180, 84)),
+                    );
                 }
             });
         }

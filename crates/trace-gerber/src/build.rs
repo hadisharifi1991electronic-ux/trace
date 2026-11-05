@@ -53,7 +53,10 @@ fn mm(v: f64) -> Length {
 }
 
 fn pt(p: Pt) -> Point {
-    Point { x: mm(p[0]), y: mm(p[1]) }
+    Point {
+        x: mm(p[0]),
+        y: mm(p[1]),
+    }
 }
 
 /// Where a copper object came from, so nets can be given back to it.
@@ -98,10 +101,22 @@ struct Builder {
 const PAD_CELL: f64 = 0.5;
 
 fn cell(p: Pt) -> (i64, i64) {
-    ((p[0] / PAD_CELL).floor() as i64, (p[1] / PAD_CELL).floor() as i64)
+    (
+        (p[0] / PAD_CELL).floor() as i64,
+        (p[1] / PAD_CELL).floor() as i64,
+    )
 }
 
-pub fn build(mut layers: Vec<Layer>, named_source: &'static str) -> Import {
+pub fn build(layers: Vec<Layer>, named_source: &'static str) -> Import {
+    build_with(layers, named_source, Vec::new())
+}
+
+/// Like [`build`], starting from a known list of parts (ODB++ gives them).
+pub fn build_with(
+    mut layers: Vec<Layer>,
+    named_source: &'static str,
+    parts: Vec<Component>,
+) -> Import {
     let mut b = Builder {
         board: Board::default(),
         warnings: Vec::new(),
@@ -127,13 +142,20 @@ pub fn build(mut layers: Vec<Layer>, named_source: &'static str) -> Import {
     }
 
     // ---- copper order ---------------------------------------------------
-    let mut copper: Vec<usize> = (0..layers.len()).filter(|&i| layers[i].role.is_copper()).collect();
+    let mut copper: Vec<usize> = (0..layers.len())
+        .filter(|&i| layers[i].role.is_copper())
+        .collect();
     let all_ordered = copper
         .iter()
         .all(|&i| matches!(layers[i].role, Role::Copper { order: Some(_), .. }));
     let key = |i: usize| -> (u32, u32, u32, u32, usize) {
         match &layers[i].role {
-            Role::Copper { pos, number, order, plane } => {
+            Role::Copper {
+                pos,
+                number,
+                order,
+                plane,
+            } => {
                 let rank = match pos {
                     CuPos::Top => 0,
                     CuPos::Inner => 1,
@@ -227,7 +249,11 @@ pub fn build(mut layers: Vec<Layer>, named_source: &'static str) -> Import {
     // ---- silkscreen -----------------------------------------------------
     for l in &layers {
         if let (Role::Silk(side), LayerData::Gerber(g)) = (&l.role, &l.data) {
-            let layer = if *side == Side::Top { LayerRef::TopSilk } else { LayerRef::BottomSilk };
+            let layer = if *side == Side::Top {
+                LayerRef::TopSilk
+            } else {
+                LayerRef::BottomSilk
+            };
             b.silk(layer, g);
         }
     }
@@ -240,7 +266,9 @@ pub fn build(mut layers: Vec<Layer>, named_source: &'static str) -> Import {
                 _ => None,
             };
             let span = match &l.role {
-                Role::Drill { span: Some((a, z)), .. } => {
+                Role::Drill {
+                    span: Some((a, z)), ..
+                } => {
                     let a = (*a as u8).saturating_sub(1).min(b.copper.saturating_sub(1));
                     let z = (*z as u8).saturating_sub(1).min(b.copper.saturating_sub(1));
                     Some((a, z))
@@ -266,6 +294,7 @@ pub fn build(mut layers: Vec<Layer>, named_source: &'static str) -> Import {
         nets::trace(&mut b.board, &extra);
         "traced through the copper"
     };
+    b.board.components = parts;
     b.components();
 
     let g = &b.board.geometry;
@@ -277,7 +306,12 @@ pub fn build(mut layers: Vec<Layer>, named_source: &'static str) -> Import {
     };
     connectivity::analyse(&mut b.board);
     for (i, net) in b.board.nets.iter_mut().enumerate() {
-        net.has_pour = b.board.geometry.polygons.iter().any(|p| p.net == Some(i as u32));
+        net.has_pour = b
+            .board
+            .geometry
+            .polygons
+            .iter()
+            .any(|p| p.net == Some(i as u32));
     }
     Import {
         board: b.board,
@@ -302,7 +336,11 @@ fn max_extent(a: &Aperture) -> f64 {
 }
 
 fn expand_blocks(g: &mut Gerber) {
-    if !g.apertures.iter().any(|a| matches!(a.shape, Shape::Block(_))) {
+    if !g
+        .apertures
+        .iter()
+        .any(|a| matches!(a.shape, Shape::Block(_)))
+    {
         return;
     }
     let apertures = g.apertures.clone();
@@ -331,12 +369,34 @@ fn shift(it: &Item, d: Pt) -> Item {
     }
     let t = |p: Pt| geom::add(p, d);
     let obj = match &it.obj {
-        Obj::Flash { ap, at, xf } => Obj::Flash { ap: *ap, at: t(*at), xf: *xf },
-        Obj::Line { ap, a, b } => Obj::Line { ap: *ap, a: t(*a), b: t(*b) },
-        Obj::Arc { ap, a, b, c, cw } => Obj::Arc { ap: *ap, a: t(*a), b: t(*b), c: t(*c), cw: *cw },
-        Obj::Region(cs) => Obj::Region(cs.iter().map(|c| c.iter().map(|&p| t(p)).collect()).collect()),
+        Obj::Flash { ap, at, xf } => Obj::Flash {
+            ap: *ap,
+            at: t(*at),
+            xf: *xf,
+        },
+        Obj::Line { ap, a, b } => Obj::Line {
+            ap: *ap,
+            a: t(*a),
+            b: t(*b),
+        },
+        Obj::Arc { ap, a, b, c, cw } => Obj::Arc {
+            ap: *ap,
+            a: t(*a),
+            b: t(*b),
+            c: t(*c),
+            cw: *cw,
+        },
+        Obj::Region(cs) => Obj::Region(
+            cs.iter()
+                .map(|c| c.iter().map(|&p| t(p)).collect())
+                .collect(),
+        ),
     };
-    Item { obj, dark: it.dark, attrs: it.attrs }
+    Item {
+        obj,
+        dark: it.dark,
+        attrs: it.attrs,
+    }
 }
 
 fn item_bbox(g: &Gerber, it: &Item) -> [f64; 4] {
@@ -347,18 +407,30 @@ fn item_bbox(g: &Gerber, it: &Item) -> [f64; 4] {
         }
         Obj::Line { ap, a, b } => {
             let r = geom::aperture_width(g.aperture(*ap)) / 2.0;
-            [a[0].min(b[0]) - r, a[1].min(b[1]) - r, a[0].max(b[0]) + r, a[1].max(b[1]) + r]
+            [
+                a[0].min(b[0]) - r,
+                a[1].min(b[1]) - r,
+                a[0].max(b[0]) + r,
+                a[1].max(b[1]) + r,
+            ]
         }
         Obj::Arc { ap, c, a, .. } => {
             let r = geom::dist(*c, *a) + geom::aperture_width(g.aperture(*ap)) / 2.0;
             [c[0] - r, c[1] - r, c[0] + r, c[1] + r]
         }
-        Obj::Region(cs) => cs.iter().map(|c| geom::bbox(c)).reduce(geom::bbox_union).unwrap_or([0.0; 4]),
+        Obj::Region(cs) => cs
+            .iter()
+            .map(|c| geom::bbox(c))
+            .reduce(geom::bbox_union)
+            .unwrap_or([0.0; 4]),
     }
 }
 
 fn layer_bbox(g: &Gerber) -> Option<[f64; 4]> {
-    g.items.iter().map(|it| item_bbox(g, it)).reduce(geom::bbox_union)
+    g.items
+        .iter()
+        .map(|it| item_bbox(g, it))
+        .reduce(geom::bbox_union)
 }
 
 /// Outlines of an object as filled rings (dark parts only).
@@ -422,9 +494,20 @@ fn pad_geometry(a: &Aperture, xf: &Xform) -> (PadShape, f64, f64, f64, Pt) {
 fn exact_macro(a: &Aperture, xf: &Xform, rect_area: f64) -> Option<Vec<Vec<Pt>>> {
     let shapes = geom::flash_shapes(a, [0.0, 0.0], xf);
     let on: Vec<Vec<Pt>> = shapes.iter().filter(|s| s.0).map(|s| s.1.clone()).collect();
-    let off: Vec<Vec<Pt>> = shapes.iter().filter(|s| !s.0).map(|s| s.1.clone()).collect();
-    let merged = if off.is_empty() { geom::union(&on) } else { geom::difference(&on, &off) };
-    let area: f64 = merged.iter().map(|s| s.iter().map(|r| geom::area(r)).sum::<f64>().abs()).sum();
+    let off: Vec<Vec<Pt>> = shapes
+        .iter()
+        .filter(|s| !s.0)
+        .map(|s| s.1.clone())
+        .collect();
+    let merged = if off.is_empty() {
+        geom::union(&on)
+    } else {
+        geom::difference(&on, &off)
+    };
+    let area: f64 = merged
+        .iter()
+        .map(|s| s.iter().map(|r| geom::area(r)).sum::<f64>().abs())
+        .sum();
     if rect_area <= 0.0 || area >= rect_area * 0.85 {
         return None;
     }
@@ -436,7 +519,12 @@ fn core_arc(layer: LayerRef, c: Pt, a: Pt, b: Pt, cw: bool, width: f64) -> Optio
     if r < 1e-6 {
         return None;
     }
-    let ang = |p: Pt| (p[1] - c[1]).atan2(p[0] - c[0]).to_degrees().rem_euclid(360.0);
+    let ang = |p: Pt| {
+        (p[1] - c[1])
+            .atan2(p[0] - c[0])
+            .to_degrees()
+            .rem_euclid(360.0)
+    };
     let (mut s, mut e) = (ang(a), ang(b));
     if geom::dist(a, b) < 1e-9 {
         s = 0.0;
@@ -476,7 +564,11 @@ impl Builder {
             } else {
                 let bb = layer_bbox(g).unwrap_or([0.0; 4]);
                 let m = 1.0;
-                geom::rect([(bb[0] + bb[2]) / 2.0, (bb[1] + bb[3]) / 2.0], bb[2] - bb[0] + 2.0 * m, bb[3] - bb[1] + 2.0 * m)
+                geom::rect(
+                    [(bb[0] + bb[2]) / 2.0, (bb[1] + bb[3]) / 2.0],
+                    bb[2] - bb[0] + 2.0 * m,
+                    bb[3] - bb[1] + 2.0 * m,
+                )
             };
             let bb = geom::bbox(&base);
             regions.push((0, vec![base], bb, 0));
@@ -514,13 +606,24 @@ impl Builder {
                         shape,
                         rotation_deg: rot,
                     });
-                    self.pad_grid.entry((ci, cell(at).0, cell(at).1)).or_default().push(i);
+                    self.pad_grid
+                        .entry((ci, cell(at).0, cell(at).1))
+                        .or_default()
+                        .push(i);
                     self.max_pad = self.max_pad.max(w.hypot(h) / 2.0).min(5.0);
                     if let Some(f) = &a.function {
                         self.flash_function.insert(i, f.clone());
                     }
                     if let Shape::Macro(_) = a.shape {
-                        let key = (*ap, [xf.rot.to_bits(), xf.scale.to_bits(), xf.mirror_x as u64, xf.mirror_y as u64]);
+                        let key = (
+                            *ap,
+                            [
+                                xf.rot.to_bits(),
+                                xf.scale.to_bits(),
+                                xf.mirror_x as u64,
+                                xf.mirror_y as u64,
+                            ],
+                        );
                         let local = self
                             .macro_cache
                             .entry(key)
@@ -528,7 +631,13 @@ impl Builder {
                             .clone();
                         if let Some(rings) = local {
                             let flash = geom::add(at, [-off[0], -off[1]]);
-                            self.exact.insert(i, rings.iter().map(|r| r.iter().map(|&p| geom::add(p, flash)).collect()).collect());
+                            self.exact.insert(
+                                i,
+                                rings
+                                    .iter()
+                                    .map(|r| r.iter().map(|&p| geom::add(p, flash)).collect())
+                                    .collect(),
+                            );
                         }
                     }
                     self.named(ObjRef::Pad(i), g, it.attrs);
@@ -559,7 +668,11 @@ impl Builder {
                     }
                 }
                 Obj::Region(cs) => {
-                    let bb = cs.iter().map(|c| geom::bbox(c)).reduce(geom::bbox_union).unwrap_or([0.0; 4]);
+                    let bb = cs
+                        .iter()
+                        .map(|c| geom::bbox(c))
+                        .reduce(geom::bbox_union)
+                        .unwrap_or([0.0; 4]);
                     regions.push((seq, cs.clone(), bb, it.attrs));
                 }
             }
@@ -590,7 +703,10 @@ impl Builder {
                     layer: layer.clone(),
                     net: None,
                     outline: outline.into_iter().map(pt).collect(),
-                    holes: s.into_iter().map(|h| h.into_iter().map(pt).collect()).collect(),
+                    holes: s
+                        .into_iter()
+                        .map(|h| h.into_iter().map(pt).collect())
+                        .collect(),
                 });
                 self.named(ObjRef::Poly(i), g, attrs);
             }
@@ -611,7 +727,14 @@ impl Builder {
                     width: mm(geom::aperture_width(g.aperture(*ap))),
                 }),
                 Obj::Arc { ap, a, b, c, cw } => {
-                    if let Some(arc) = core_arc(layer.clone(), *c, *a, *b, *cw, geom::aperture_width(g.aperture(*ap))) {
+                    if let Some(arc) = core_arc(
+                        layer.clone(),
+                        *c,
+                        *a,
+                        *b,
+                        *cw,
+                        geom::aperture_width(g.aperture(*ap)),
+                    ) {
                         self.board.geometry.arcs.push(arc);
                     }
                 }
@@ -644,9 +767,9 @@ impl Builder {
     }
 
     fn mask_open(&self, side: Side, p: Pt) -> bool {
-        self.mask.get(&side).is_some_and(|list| {
-            list.iter().any(|(c, r)| geom::dist(*c, p) <= r.max(0.05))
-        })
+        self.mask
+            .get(&side)
+            .is_some_and(|list| list.iter().any(|(c, r)| geom::dist(*c, p) <= r.max(0.05)))
     }
 
     /// Pads flashed on a copper layer whose copper covers `p` (within `tol`).
@@ -659,8 +782,11 @@ impl Builder {
                 if let Some(list) = self.pad_grid.get(&(layer, cx + dx, cy + dy)) {
                     for &i in list {
                         let q = &self.board.geometry.pads[i];
-                        let local = geom::rotate([p[0] - q.at.x.mm(), p[1] - q.at.y.mm()], -q.rotation_deg);
-                        if local[0].abs() <= q.size_x.mm() / 2.0 + tol && local[1].abs() <= q.size_y.mm() / 2.0 + tol {
+                        let local =
+                            geom::rotate([p[0] - q.at.x.mm(), p[1] - q.at.y.mm()], -q.rotation_deg);
+                        if local[0].abs() <= q.size_x.mm() / 2.0 + tol
+                            && local[1].abs() <= q.size_y.mm() / 2.0 + tol
+                        {
                             out.push(i);
                         }
                     }
@@ -728,15 +854,26 @@ impl Builder {
             let mut found: Vec<usize> = Vec::new();
             let mut outer_size: f64 = 0.0;
             let mut outer_pad: Option<usize> = None;
-            let mut via_fn = h.function.as_deref().map(|f| f.contains("Via")).unwrap_or(false);
-            let comp_fn = h.function.as_deref().is_some_and(|f| f.contains("Component") || f.contains("PressFit"));
+            let mut via_fn = h
+                .function
+                .as_deref()
+                .map(|f| f.contains("Via"))
+                .unwrap_or(false);
+            let comp_fn = h
+                .function
+                .as_deref()
+                .is_some_and(|f| f.contains("Component") || f.contains("PressFit"));
             let mut layer_flash: Vec<(u8, usize)> = Vec::new();
             for l in from.min(to)..=from.max(to) {
                 let at = self.pads_at(l, h.at, tol);
                 let mut r: f64 = h.diameter / 2.0;
                 for &i in &at {
                     let p = &self.board.geometry.pads[i];
-                    if self.flash_function.get(&i).is_some_and(|f| f.starts_with("ViaPad")) {
+                    if self
+                        .flash_function
+                        .get(&i)
+                        .is_some_and(|f| f.starts_with("ViaPad"))
+                    {
                         via_fn = true;
                     }
                     // Only the land centred on the hole belongs to it; a pad
@@ -745,7 +882,9 @@ impl Builder {
                         continue;
                     }
                     r = r.max(p.size_x.mm().min(p.size_y.mm()) / 2.0);
-                    if (l == from.min(to) || l == from.max(to)) && p.size_x.mm().max(p.size_y.mm()) > outer_size {
+                    if (l == from.min(to) || l == from.max(to))
+                        && p.size_x.mm().max(p.size_y.mm()) > outer_size
+                    {
                         outer_size = p.size_x.mm().max(p.size_y.mm());
                         outer_pad = Some(i);
                     }
@@ -757,9 +896,12 @@ impl Builder {
             let tented = !self.mask_open(Side::Top, h.at) && !self.mask_open(Side::Bottom, h.at);
             let is_via = !comp_fn
                 && (via_fn
-                    || (h.function.is_none() && (tented || (h.diameter <= 0.4 && outer_size <= 0.9))));
+                    || (h.function.is_none()
+                        && (tented || (h.diameter <= 0.4 && outer_size <= 0.9))));
             // The hole's own copper replaces the per-layer flashes.
-            let named = found.iter().find_map(|i| self.named.get(&ObjRef::Pad(*i)).cloned());
+            let named = found
+                .iter()
+                .find_map(|i| self.named.get(&ObjRef::Pad(*i)).cloned());
             let pin = found.iter().find_map(|i| self.pins.get(i).cloned());
             let outer = outer_pad.map(|i| {
                 let p = &self.board.geometry.pads[i];
@@ -773,7 +915,11 @@ impl Builder {
                     from_layer: from.min(to),
                     to_layer: from.max(to),
                     at: pt(h.at),
-                    diameter: mm(if outer_size > 0.0 { outer_size } else { h.diameter + 0.2 }),
+                    diameter: mm(if outer_size > 0.0 {
+                        outer_size
+                    } else {
+                        h.diameter + 0.2
+                    }),
                     hole: mm(h.diameter),
                 });
                 self.via_rings.push(ring);
@@ -781,7 +927,8 @@ impl Builder {
                     self.named.insert(ObjRef::Via(vi), n);
                 }
             } else {
-                let (shape, sx, sy, rot) = outer.unwrap_or((PadShape::Round, h.diameter + 0.2, h.diameter + 0.2, 0.0));
+                let (shape, sx, sy, rot) =
+                    outer.unwrap_or((PadShape::Round, h.diameter + 0.2, h.diameter + 0.2, 0.0));
                 let pi = self.board.geometry.pads.len();
                 self.board.geometry.pads.push(Pad {
                     layer: LayerRef::AllCopper,
@@ -862,7 +1009,10 @@ impl Builder {
         for (r, name) in names {
             let next = ids.len() as u32;
             let id = *ids.entry(name.clone()).or_insert_with(|| {
-                self.board.nets.push(Net { name, ..Default::default() });
+                self.board.nets.push(Net {
+                    name,
+                    ..Default::default()
+                });
                 next
             });
             let g = &mut self.board.geometry;
@@ -882,13 +1032,38 @@ impl Builder {
         if self.pins.is_empty() {
             return;
         }
+        let mut index: HashMap<String, u32> = self
+            .board
+            .components
+            .iter()
+            .enumerate()
+            .map(|(i, c)| (c.designator.clone(), i as u32))
+            .collect();
+        let known = self.board.components.len();
         let mut by_ref: std::collections::BTreeMap<String, Vec<usize>> = Default::default();
         for (&pad, (refdes, pin)) in &self.pins {
             by_ref.entry(refdes.clone()).or_default().push(pad);
             self.board.geometry.pads[pad].name = pin.clone();
         }
         for (refdes, pads) in by_ref {
-            let ci = self.board.components.len() as u32;
+            let ci = match index.get(&refdes) {
+                Some(&i) => i,
+                None => {
+                    let i = self.board.components.len() as u32;
+                    index.insert(refdes.clone(), i);
+                    self.board.components.push(Component {
+                        designator: refdes,
+                        footprint: String::new(),
+                        library_ref: None,
+                        x: Length(0),
+                        y: Length(0),
+                        rotation_deg: 0.0,
+                        side: trace_core::Side::Top,
+                        sheet: None,
+                    });
+                    i
+                }
+            };
             let (mut sx, mut sy) = (0i64, 0i64);
             let mut bottom = 0;
             for &p in &pads {
@@ -900,17 +1075,16 @@ impl Builder {
                     bottom += 1;
                 }
             }
-            let n = pads.len() as i64;
-            self.board.components.push(Component {
-                designator: refdes,
-                footprint: String::new(),
-                library_ref: None,
-                x: Length(sx / n),
-                y: Length(sy / n),
-                rotation_deg: 0.0,
-                side: if bottom * 2 > pads.len() { trace_core::Side::Bottom } else { trace_core::Side::Top },
-                sheet: None,
-            });
+            if (ci as usize) >= known {
+                // Placed at the middle of its pads, on the side most pads are.
+                let n = pads.len() as i64;
+                let c = &mut self.board.components[ci as usize];
+                c.x = Length(sx / n);
+                c.y = Length(sy / n);
+                if bottom * 2 > pads.len() {
+                    c.side = trace_core::Side::Bottom;
+                }
+            }
         }
     }
 }
@@ -941,7 +1115,11 @@ impl Grid {
         for gx in (b[0] / self.cell).floor() as i64..=(b[2] / self.cell).floor() as i64 {
             for gy in (b[1] / self.cell).floor() as i64..=(b[3] / self.cell).floor() as i64 {
                 if let Some(list) = self.map.get(&(gx, gy)) {
-                    out.extend(list.iter().copied().filter(|&i| geom::bbox_overlap(self.boxes[i], b)));
+                    out.extend(
+                        list.iter()
+                            .copied()
+                            .filter(|&i| geom::bbox_overlap(self.boxes[i], b)),
+                    );
                 }
             }
         }
@@ -971,7 +1149,9 @@ fn find_outline(layers: &[Layer], copper: Option<[f64; 4]>) -> Vec<Pt> {
     let copper_area = copper.map(|b| (b[2] - b[0]) * (b[3] - b[1])).unwrap_or(0.0);
     for (rank, g) in cands {
         let loops = closed_loops(g);
-        let best = loops.into_iter().max_by(|a, b| geom::area(a).abs().total_cmp(&geom::area(b).abs()));
+        let best = loops
+            .into_iter()
+            .max_by(|a, b| geom::area(a).abs().total_cmp(&geom::area(b).abs()));
         if let Some(l) = best {
             let a = geom::area(&l).abs();
             if rank == 0 {
@@ -980,14 +1160,19 @@ fn find_outline(layers: &[Layer], copper: Option<[f64; 4]>) -> Vec<Pt> {
             // A mechanical frame must hold most of the copper.
             if let Some(cb) = copper {
                 let c = [(cb[0] + cb[2]) / 2.0, (cb[1] + cb[3]) / 2.0];
-                if geom::inside(&[l.clone()], c) && a >= copper_area * 0.7 && a <= copper_area * 4.0 {
+                if geom::inside(std::slice::from_ref(&l), c) && a >= copper_area * 0.7 && a <= copper_area * 4.0
+                {
                     return l;
                 }
             }
         }
     }
     match copper {
-        Some(b) if b[2] > b[0] => geom::rect([(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0], b[2] - b[0], b[3] - b[1]),
+        Some(b) if b[2] > b[0] => geom::rect(
+            [(b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0],
+            b[2] - b[0],
+            b[3] - b[1],
+        ),
         _ => Vec::new(),
     }
 }
@@ -1035,7 +1220,9 @@ fn closed_loops(g: &Gerber) -> Vec<Vec<Pt>> {
                     for &j in list {
                         if !used[j] {
                             let q = &paths[j];
-                            if geom::dist(q[0], p) <= TOL || geom::dist(*q.last().unwrap(), p) <= TOL {
+                            if geom::dist(q[0], p) <= TOL
+                                || geom::dist(*q.last().unwrap(), p) <= TOL
+                            {
                                 return Some(j);
                             }
                         }
@@ -1058,7 +1245,9 @@ fn closed_loops(g: &Gerber) -> Vec<Vec<Pt>> {
                 loops.push(chain);
                 break;
             }
-            let Some(j) = find(end, &used, &ends) else { break };
+            let Some(j) = find(end, &used, &ends) else {
+                break;
+            };
             used[j] = true;
             let mut next = paths[j].clone();
             if geom::dist(next[0], end) > TOL {

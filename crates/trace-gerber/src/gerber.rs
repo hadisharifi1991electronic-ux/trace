@@ -12,7 +12,11 @@ pub enum Shape {
     Circle(f64),
     Rect(f64, f64),
     Obround(f64, f64),
-    Polygon { d: f64, n: u32, rot: f64 },
+    Polygon {
+        d: f64,
+        n: u32,
+        rot: f64,
+    },
     Macro(Vec<Prim>),
     /// Aperture block (`%AB`): a group of objects flashed as one.
     Block(Vec<Item>),
@@ -27,7 +31,10 @@ pub struct Prim {
 
 #[derive(Clone, Debug)]
 pub enum PrimKind {
-    Circle { c: Pt, d: f64 },
+    Circle {
+        c: Pt,
+        d: f64,
+    },
     /// Closed outline (first point not repeated).
     Outline(Vec<Pt>),
 }
@@ -80,10 +87,24 @@ impl Xform {
 
 #[derive(Clone, Debug)]
 pub enum Obj {
-    Flash { ap: u32, at: Pt, xf: Xform },
-    Line { ap: u32, a: Pt, b: Pt },
+    Flash {
+        ap: u32,
+        at: Pt,
+        xf: Xform,
+    },
+    Line {
+        ap: u32,
+        a: Pt,
+        b: Pt,
+    },
     /// Circular arc from `a` to `b` around `c`; `a == b` is a full circle.
-    Arc { ap: u32, a: Pt, b: Pt, c: Pt, cw: bool },
+    Arc {
+        ap: u32,
+        a: Pt,
+        b: Pt,
+        c: Pt,
+        cw: bool,
+    },
     /// Filled region; each contour is closed and the contours are unioned.
     Region(Vec<Vec<Pt>>),
 }
@@ -340,7 +361,11 @@ impl Parser {
             "IP" => self.g.image_negative = arg.starts_with("NEG"),
             "OF" => {
                 let a = parse_letters(arg);
-                let get = |k| a.iter().find(|(c, _)| *c == k).map(|(_, v)| v.parse().unwrap_or(0.0));
+                let get = |k| {
+                    a.iter()
+                        .find(|(c, _)| *c == k)
+                        .map(|(_, v)| v.parse().unwrap_or(0.0))
+                };
                 self.offset = [
                     get('A').unwrap_or(0.0) * self.unit,
                     get('B').unwrap_or(0.0) * self.unit,
@@ -354,7 +379,11 @@ impl Parser {
                 }
                 if !arg.is_empty() {
                     let a = parse_letters(arg);
-                    let get = |k| a.iter().find(|(c, _)| *c == k).map(|(_, v)| v.parse::<f64>().unwrap_or(0.0));
+                    let get = |k| {
+                        a.iter()
+                            .find(|(c, _)| *c == k)
+                            .map(|(_, v)| v.parse::<f64>().unwrap_or(0.0))
+                    };
                     let nx = get('X').unwrap_or(1.0).max(1.0) as u32;
                     let ny = get('Y').unwrap_or(1.0).max(1.0) as u32;
                     if nx > 1 || ny > 1 {
@@ -470,7 +499,9 @@ impl Parser {
         let Some(rest) = arg.strip_prefix('D') else {
             return;
         };
-        let n = rest.find(|c: char| !c.is_ascii_digit()).unwrap_or(rest.len());
+        let n = rest
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(rest.len());
         let Ok(dcode) = rest[..n].parse::<u32>() else {
             return;
         };
@@ -569,11 +600,19 @@ impl Parser {
         let mut to = self.pos;
         if let Some(v) = x {
             let n = self.number(v);
-            to[0] = if self.incremental { to[0] + n } else { n + self.offset[0] };
+            to[0] = if self.incremental {
+                to[0] + n
+            } else {
+                n + self.offset[0]
+            };
         }
         if let Some(v) = y {
             let n = self.number(v);
-            to[1] = if self.incremental { to[1] + n } else { n + self.offset[1] };
+            to[1] = if self.incremental {
+                to[1] + n
+            } else {
+                n + self.offset[1]
+            };
         }
         let ij = [
             i.map(|v| self.number(v)).unwrap_or(0.0),
@@ -779,7 +818,11 @@ fn translate_item(it: &Item, d: Pt) -> Item {
             c: t(*c),
             cw: *cw,
         },
-        Obj::Region(cs) => Obj::Region(cs.iter().map(|c| c.iter().map(|&p| t(p)).collect()).collect()),
+        Obj::Region(cs) => Obj::Region(
+            cs.iter()
+                .map(|c| c.iter().map(|&p| t(p)).collect())
+                .collect(),
+        ),
     };
     Item {
         obj,
@@ -798,7 +841,9 @@ fn parse_letters(s: &str) -> Vec<(char, &str)> {
         if c.is_ascii_alphabetic() {
             let start = i + 1;
             let mut k = start;
-            while k < b.len() && (b[k].is_ascii_digit() || b[k] == b'.' || b[k] == b'-' || b[k] == b'+') {
+            while k < b.len()
+                && (b[k].is_ascii_digit() || b[k] == b'.' || b[k] == b'-' || b[k] == b'+')
+            {
                 k += 1;
             }
             out.push((c.to_ascii_uppercase(), &s[start..k]));
@@ -848,7 +893,8 @@ fn eval_macro(body: &[String], params: &[f64], unit: f64) -> Vec<Prim> {
         let block = block.trim();
         // Primitive 0 is a comment.
         if block.is_empty()
-            || block.starts_with('0') && !block[1..].starts_with(|c: char| c.is_ascii_digit() || c == '.')
+            || block.starts_with('0')
+                && !block[1..].starts_with(|c: char| c.is_ascii_digit() || c == '.')
         {
             continue;
         }
@@ -886,11 +932,17 @@ fn eval_macro(body: &[String], params: &[f64], unit: f64) -> Vec<Prim> {
             }
             22 => {
                 let (w, h, ll, rot) = (f(2) * u, f(3) * u, [f(4) * u, f(5) * u], f(6));
-                prims.push(outline(on, geom::rect([ll[0] + w / 2.0, ll[1] + h / 2.0], w, h), rot));
+                prims.push(outline(
+                    on,
+                    geom::rect([ll[0] + w / 2.0, ll[1] + h / 2.0], w, h),
+                    rot,
+                ));
             }
             4 => {
                 let n = f(2).max(0.0) as usize;
-                let pts: Vec<Pt> = (0..=n).map(|k| [f(3 + 2 * k) * u, f(4 + 2 * k) * u]).collect();
+                let pts: Vec<Pt> = (0..=n)
+                    .map(|k| [f(3 + 2 * k) * u, f(4 + 2 * k) * u])
+                    .collect();
                 let rot = f(5 + 2 * n);
                 let mut pts = pts;
                 if pts.len() > 1 && geom::dist(pts[0], *pts.last().unwrap()) < 1e-9 {
@@ -912,7 +964,8 @@ fn eval_macro(body: &[String], params: &[f64], unit: f64) -> Vec<Prim> {
             }
             7 => {
                 // Thermal: a ring cut by two crossing gaps, as four quarters.
-                let (c, outer, inner, gap, rot) = ([f(1) * u, f(2) * u], f(3) * u, f(4) * u, f(5) * u, f(6));
+                let (c, outer, inner, gap, rot) =
+                    ([f(1) * u, f(2) * u], f(3) * u, f(4) * u, f(5) * u, f(6));
                 for q in geom::thermal_quarters(c, outer, inner, gap) {
                     prims.push(outline(true, q, rot));
                 }
@@ -1017,7 +1070,11 @@ fn factor(t: &[char], p: &mut usize, vars: &HashMap<u32, f64>) -> f64 {
                 *p += 1;
                 return 0.0;
             }
-            t[start..*p].iter().collect::<String>().parse().unwrap_or(0.0)
+            t[start..*p]
+                .iter()
+                .collect::<String>()
+                .parse()
+                .unwrap_or(0.0)
         }
     }
 }

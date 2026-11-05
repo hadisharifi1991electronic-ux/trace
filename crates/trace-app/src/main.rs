@@ -5,6 +5,7 @@
 
 mod canvas;
 mod cm;
+mod imp;
 mod scene;
 mod schview;
 mod view3d;
@@ -69,6 +70,7 @@ pub struct App {
     mode3d: bool,
     view3d: view3d::View3d,
     cm: cm::Cm,
+    imp: imp::Imp,
     mode_sch: bool,
     schem: schview::Schematics,
     ctx: egui::Context,
@@ -120,6 +122,7 @@ impl App {
             mode3d: false,
             view3d: view3d::View3d::default(),
             cm: cm::Cm::new(cc.storage.and_then(|s| s.get_string(cm::STORE_KEY))),
+            imp: imp::Imp::new(cc.storage.and_then(|s| s.get_string(imp::STORE_KEY))),
             mode_sch: false,
             schem: schview::Schematics::default(),
             ctx: cc.egui_ctx.clone(),
@@ -459,6 +462,7 @@ impl App {
     fn load_constraints(&mut self) {
         if let Some(s) = &self.scene {
             self.cm.load(s.path.display().to_string(), &s.board);
+            self.imp.load(s.path.display().to_string(), &s.board);
         }
     }
 
@@ -598,6 +602,16 @@ impl App {
                     ui.close_menu();
                     self.cm.open = true;
                 }
+                if ui
+                    .add_enabled(
+                        self.scene.is_some(),
+                        egui::Button::new("Impedance and stack-up…").shortcut_text("I"),
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.imp.open = true;
+                }
             });
             ui.menu_button("Help", |ui| {
                 ui.label(concat!("Trace ", env!("CARGO_PKG_VERSION"), ", open-source PCB design"));
@@ -659,6 +673,13 @@ impl App {
                 .clicked()
             {
                 self.cm.open = !self.cm.open;
+            }
+            if ui
+                .selectable_label(self.imp.open, "Impedance")
+                .on_hover_text("Stack-up, widths for target impedance, and each pair's impedance (I)")
+                .clicked()
+            {
+                self.imp.open = !self.imp.open;
             }
             ui.separator();
             if self.mode_sch {
@@ -1199,6 +1220,9 @@ impl eframe::App for App {
                     !typing && i.key_pressed(egui::Key::S),
                 )
             });
+        if !typing && ctx.input(|i| i.key_pressed(egui::Key::I)) && self.scene.is_some() {
+            self.imp.open = !self.imp.open;
+        }
         if sch_key && !self.schem.is_empty() {
             self.mode_sch = !self.mode_sch || self.scene.is_none();
             if self.mode_sch {
@@ -1271,6 +1295,17 @@ impl eframe::App for App {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     if let Some(scene) = &self.scene {
+                        let off = self.imp.failing(&scene.board);
+                        if off > 0
+                            && ui
+                                .link(
+                                    RichText::new(format!("{off} pair nets off impedance"))
+                                        .color(Color32::from_rgb(255, 180, 84)),
+                                )
+                                .clicked()
+                        {
+                            self.imp.open = true;
+                        }
                         let failing = self.cm.failing(&scene.board);
                         if failing > 0
                             && ui
@@ -1344,7 +1379,10 @@ impl eframe::App for App {
             }
         });
         let pick = match &self.scene {
-            Some(scene) => self.cm.show(ctx, &scene.board),
+            Some(scene) => self
+                .cm
+                .show(ctx, &scene.board)
+                .or(self.imp.show(ctx, &scene.board)),
             None => None,
         };
         if let Some(n) = pick {
@@ -1367,5 +1405,6 @@ impl eframe::App for App {
             .collect();
         storage.set_string(RECENT_KEY, list.join("\n"));
         storage.set_string(cm::STORE_KEY, self.cm.to_store());
+        storage.set_string(imp::STORE_KEY, self.imp.to_store());
     }
 }

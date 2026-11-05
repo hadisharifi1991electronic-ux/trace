@@ -1,6 +1,18 @@
 # Changes
 
-Each release is installed as `trace-app-<version>.exe` next to the earlier ones.
+Each release is installed as `trace-app-<version>.exe`; the previous version
+is moved to the Recycle Bin.
+
+## 0.7.0 (2026-11-05)
+
+- Impedance window (I): the board's stack-up with editable thickness and Er,
+  the width for the single-ended target and width/gap for the differential
+  target on each copper layer, delay in ps/inch, and a width and gap
+  calculator (microstrip, stripline, dual stripline).
+- Every routed net and pair is checked against its target, with per-net
+  rules by name pattern (USB pairs default to 90 Ω, PCIe to 85 Ω). Click a
+  net to select it on the board. The status bar counts pair nets off target.
+- `trace impedance board` prints the same stack-up table and pair check.
 
 ## 0.6.0 (2026-11-05)
 

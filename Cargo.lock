@@ -3436,6 +3436,7 @@ dependencies = [
  "image",
  "lyon_tessellation",
  "rfd",
+ "serde",
  "serde_json",
  "trace-allegro",
  "trace-altium",

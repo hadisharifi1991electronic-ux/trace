@@ -17,6 +17,7 @@ USAGE:
     trace pairs <board> [max-skew]              Differential pair lengths and skew (default max-skew 5mil)
     trace rules <board>                         Design rules, grouped by kind
     trace check <board>                         Check length, match, skew and via limits from the board's rules
+    trace impedance <board>                     Stack-up, widths for 50/100 ohm, and the impedance of each pair
     trace view <board> [out.html]               Open the board in the viewer (in your browser)
     trace convert <file> <out.json>             Export to Trace's open JSON model
     trace convert <file> <out.kicad_pcb>        Write a KiCad board (KiCad 7 and later)
@@ -42,6 +43,7 @@ fn main() -> ExitCode {
         ["pairs", file, skew] => pairs(file, skew),
         ["rules", file] => rules(file),
         ["check", file] => check(file),
+        ["impedance", file] => impedance(file),
         ["convert", file, out] => convert(file, out),
         ["layers", file] => layers(file),
         ["view", file] => view_board(file, None),
@@ -330,6 +332,62 @@ fn rules(file: &str) -> Res {
                 "  {:<36} {}{state}",
                 clip(&r.name, 36),
                 r.scope.first().map(String::as_str).unwrap_or("")
+            );
+        }
+    }
+    Ok(())
+}
+
+fn impedance(file: &str) -> Res {
+    let Design::Board(b) = load(file)? else {
+        return Err("impedance needs a board".into());
+    };
+    let geo = b.layer_geometry();
+    println!(
+        "{:<14} {:>6} {:>8} {:>8} {:>5}  {:>9} {:>9} {:>9}",
+        "layer", "Cu mil", "above", "below", "Er", "50R w", "100R w/s", "ps/in"
+    );
+    let f = |v: Option<f64>| v.map(|x| format!("{x:.2}")).unwrap_or_else(|| "-".into());
+    for g in &geo {
+        let w50 = g.width_for(50.0);
+        let wd = g.width_for(50.0).map(|w| w * 0.75);
+        let s100 = wd.and_then(|w| g.gap_for(w, 100.0));
+        println!(
+            "{:<14} {:>6.2} {:>8} {:>8} {:>5.2}  {:>9} {:>9} {:>9.0}",
+            g.name,
+            g.t,
+            f(g.above),
+            f(g.below),
+            g.er,
+            f(w50),
+            match (wd, s100) {
+                (Some(w), Some(s)) => format!("{w:.1}/{s:.1}"),
+                _ => "-".into(),
+            },
+            g.delay_ps_per_in(w50.unwrap_or(5.0))
+        );
+    }
+    let rows = b.net_impedance();
+    let mut pairs: Vec<_> = rows.iter().filter(|r| r.zdiff.is_some()).collect();
+    pairs.sort_by(|a, b| b.length.total_cmp(&a.length));
+    if !pairs.is_empty() {
+        println!("\npair nets (longest runs first)");
+        println!(
+            "{:<28} {:<10} {:>6} {:>6} {:>7} {:>7} {:>8}",
+            "net", "layer", "w", "gap", "Z0", "Zdiff", "length"
+        );
+        for r in pairs.iter().take(40) {
+            println!(
+                "{:<28} {:<10} {:>6.2} {:>6.2} {:>7.1} {:>7.1} {:>8.0}",
+                clip(&b.nets[r.net as usize].name, 28),
+                geo.get(r.layer as usize)
+                    .map(|g| g.name.as_str())
+                    .unwrap_or("?"),
+                r.width,
+                r.gap.unwrap_or(0.0),
+                r.z0,
+                r.zdiff.unwrap_or(0.0),
+                r.length
             );
         }
     }

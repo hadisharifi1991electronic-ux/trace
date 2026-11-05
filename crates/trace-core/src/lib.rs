@@ -9,6 +9,7 @@ pub mod constraints;
 pub mod edit;
 pub mod file;
 pub mod geometry;
+pub mod impedance;
 pub mod schematic;
 pub mod units;
 

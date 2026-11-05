@@ -54,6 +54,13 @@ checker and simulator all read.
   nets are listed with how far off they are, and clicking one selects it on
   the board. Your groups are kept per board in Trace's settings; the design
   file is never changed
+- check impedance (the Impedance button, or I): the board's stack-up with
+  editable thickness and Er per layer, the trace width for the single-ended
+  target and the width and gap for the differential target on each copper
+  layer, the delay in ps/inch, a width and gap calculator, and the Z0 or
+  Zdiff of every routed net and pair against its target. Per-net rules set
+  other targets by name pattern (USB pairs start at 90 Ω, PCIe at 85 Ω).
+  Stack-up edits and rules are kept per board in Trace's settings
 
 ## Command-line tool
 
@@ -64,6 +71,7 @@ trace pairs board.PcbDoc [5mil]  length of each differential pair (tracks, arcs,
 trace view board.PcbDoc          open the board viewer in your browser
 trace rules board.PcbDoc         design rules grouped by kind
 trace check board.PcbDoc         check the board's length and matched-length rules; lists failing nets
+trace impedance board.PcbDoc     stack-up widths for 50 Ω and 100 Ω pairs, and each pair's Zdiff
 trace convert <file> out.json    export to Trace's open JSON model
 trace convert <file> out.kicad_pcb   write a KiCad board
 trace convert <file> out.PcbDoc      write an Altium Designer board
@@ -112,6 +120,10 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
 - Lengths include tracks, arcs and via barrels between the layers used, but
   not package pin delays. Nets joined through copper pours are not checked
   for completeness yet.
+- Impedance uses closed-form models (Hammerstad–Jensen microstrip, Wheeler
+  stripline, IPC-2141 coupling). Every copper layer is taken as a reference
+  plane and solder mask is ignored, so expect a few percent against a field
+  solver such as Polar Si9000.
 - Schematic pins stored as binary records are given to the part before
   them; the text form is exact. The schematic viewer uses one font for all
   text, so Altium's bold, italic and font faces are not shown. Signal

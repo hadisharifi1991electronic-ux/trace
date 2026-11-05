@@ -16,6 +16,7 @@ USAGE:
     trace inspect <board|file.SchDoc>           Summary of a board or sheet
     trace pairs <board> [max-skew]              Differential pair lengths and skew (default max-skew 5mil)
     trace rules <board>                         Design rules, grouped by kind
+    trace check <board>                         Check length, match, skew and via limits from the board's rules
     trace view <board> [out.html]               Open the board in the viewer (in your browser)
     trace convert <file> <out.json>             Export to Trace's open JSON model
     trace convert <file> <out.kicad_pcb>        Write a KiCad board (KiCad 7 and later)
@@ -35,6 +36,7 @@ fn main() -> ExitCode {
         ["pairs", file] => pairs(file, "5mil"),
         ["pairs", file, skew] => pairs(file, skew),
         ["rules", file] => rules(file),
+        ["check", file] => check(file),
         ["convert", file, out] => convert(file, out),
         ["layers", file] => layers(file),
         ["view", file] => view_board(file, None),
@@ -55,6 +57,7 @@ fn main() -> ExitCode {
 
 type Res = Result<(), Box<dyn std::error::Error>>;
 
+#[allow(clippy::large_enum_variant)]
 enum Design {
     Board(Board),
     Sheet(Sheet),
@@ -322,6 +325,49 @@ fn rules(file: &str) -> Res {
                 "  {:<36} {}{state}",
                 clip(&r.name, 36),
                 r.scope.first().map(String::as_str).unwrap_or("")
+            );
+        }
+    }
+    Ok(())
+}
+
+fn check(file: &str) -> Res {
+    let b = board(file)?;
+    let set = b.imported_constraints();
+    if set.groups.is_empty() {
+        println!("No length, matched-length or skew rules found.");
+        return Ok(());
+    }
+    let mil = |l: trace_core::Length| format!("{:.1}", l.mil());
+    let opt = |l: Option<trace_core::Length>| l.map_or("-".to_string(), mil);
+    for g in &set.groups {
+        let r = b.check(g);
+        println!(
+            "{}  [{}]  {} nets, {} failing{}",
+            g.name,
+            g.members.describe(),
+            r.nets.len(),
+            r.failing,
+            if g.enabled { "" } else { "  (disabled)" }
+        );
+        let l = &g.limits;
+        println!(
+            "  limits (mil): min {} max {} match {} skew {} vias {}",
+            opt(l.min_length),
+            opt(l.max_length),
+            opt(l.match_tolerance),
+            opt(l.max_skew),
+            l.max_vias.map_or("-".into(), |v| v.to_string())
+        );
+        for n in r.nets.iter().filter(|n| !n.problems.is_empty()).take(20) {
+            let what: Vec<&str> = n.problems.iter().map(|p| p.label()).collect();
+            println!(
+                "    {:<28} {:>9} mil  skew {:>7}  delta {:>7}  {}",
+                clip(&n.name, 28),
+                mil(n.length),
+                opt(n.skew),
+                opt(n.match_delta),
+                what.join(", ")
             );
         }
     }

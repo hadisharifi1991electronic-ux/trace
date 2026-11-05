@@ -4,6 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod canvas;
+mod cm;
 mod scene;
 mod view3d;
 
@@ -66,6 +67,7 @@ pub struct App {
     needs_fit: bool,
     mode3d: bool,
     view3d: view3d::View3d,
+    cm: cm::Cm,
 }
 
 const RECENT_KEY: &str = "recent_files";
@@ -104,6 +106,7 @@ impl App {
             needs_fit: false,
             mode3d: false,
             view3d: view3d::View3d::default(),
+            cm: cm::Cm::new(cc.storage.and_then(|s| s.get_string(cm::STORE_KEY))),
         };
         if let Some(f) = start_file {
             app.open(f);
@@ -116,6 +119,7 @@ impl App {
             Ok(scene) => {
                 self.scene = Some(scene);
                 self.view3d.reset();
+                self.load_constraints();
                 self.selected = None;
                 self.marker = None;
                 self.measure = None;
@@ -170,6 +174,7 @@ impl App {
             Ok(scene) => {
                 self.scene = Some(scene);
                 self.view3d.reset();
+                self.load_constraints();
                 self.selected = None;
                 self.marker = None;
                 self.measure = None;
@@ -328,6 +333,12 @@ impl App {
         }
     }
 
+    fn load_constraints(&mut self) {
+        if let Some(s) = &self.scene {
+            self.cm.load(s.path.display().to_string(), &s.board);
+        }
+    }
+
     fn select_net(&mut self, net: u32, zoom: bool) {
         self.selected = Some(net);
         self.marker = None;
@@ -453,6 +464,16 @@ impl App {
                     self.needs_fit = true;
                 }
                 ui.checkbox(&mut self.show_pairs, "Differential pairs panel");
+                if ui
+                    .add_enabled(
+                        self.scene.is_some(),
+                        egui::Button::new("Constraint Manager…").shortcut_text("C"),
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.cm.open = true;
+                }
             });
             ui.menu_button("Help", |ui| {
                 ui.label("Trace 0.1, open-source PCB design");
@@ -482,6 +503,14 @@ impl App {
                 .clicked()
             {
                 self.mode3d = true;
+            }
+            ui.separator();
+            if ui
+                .selectable_label(self.cm.open, "Constraints")
+                .on_hover_text("Constraint Manager: length, match, skew and via limits (C)")
+                .clicked()
+            {
+                self.cm.open = !self.cm.open;
             }
             ui.separator();
             if self.mode3d {
@@ -946,7 +975,7 @@ impl eframe::App for App {
             self.open(p);
         }
         let typing = ctx.wants_keyboard_input();
-        let (open_shortcut, fit, flip, esc, measure_key, toggle3d) = ctx.input_mut(|i| {
+        let (open_shortcut, fit, flip, esc, measure_key, toggle3d, cm_key) = ctx.input_mut(|i| {
             (
                 i.consume_key(egui::Modifiers::COMMAND, egui::Key::O),
                 !typing && !self.mode3d && i.key_pressed(egui::Key::F),
@@ -954,8 +983,12 @@ impl eframe::App for App {
                 i.key_pressed(egui::Key::Escape),
                 !typing && !self.mode3d && i.key_pressed(egui::Key::M),
                 !typing && i.key_pressed(egui::Key::Num3),
+                !typing && i.key_pressed(egui::Key::C),
             )
         });
+        if cm_key && self.scene.is_some() {
+            self.cm.open = !self.cm.open;
+        }
         if toggle3d && self.scene.is_some() {
             self.mode3d = !self.mode3d;
         }
@@ -1010,6 +1043,19 @@ impl eframe::App for App {
                     ui.label(RichText::new(h).strong());
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if let Some(scene) = &self.scene {
+                        let failing = self.cm.failing(&scene.board);
+                        if failing > 0
+                            && ui
+                                .link(
+                                    RichText::new(format!("{failing} nets fail constraints"))
+                                        .color(Color32::from_rgb(240, 96, 96)),
+                                )
+                                .clicked()
+                        {
+                            self.cm.open = true;
+                        }
+                    }
                     ui.label(
                         RichText::new(format!(
                             "zoom {:.0}%{}",
@@ -1055,6 +1101,14 @@ impl eframe::App for App {
                 canvas::show(self, ui);
             }
         });
+        let pick = match &self.scene {
+            Some(scene) => self.cm.show(ctx, &scene.board),
+            None => None,
+        };
+        if let Some(n) = pick {
+            self.mode3d = false;
+            self.select_net(n, true);
+        }
     }
 
     fn on_exit(&mut self, gl: Option<&eframe::glow::Context>) {
@@ -1070,5 +1124,6 @@ impl eframe::App for App {
             .map(|p| p.display().to_string())
             .collect();
         storage.set_string(RECENT_KEY, list.join("\n"));
+        storage.set_string(cm::STORE_KEY, self.cm.to_store());
     }
 }

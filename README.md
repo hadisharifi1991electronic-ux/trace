@@ -39,6 +39,15 @@ checker and simulator all read.
   barrels, routing state and pair skew; or search a net or part by name
 - review every differential pair in the bottom panel, sorted by problem,
   click one to zoom to it, and export the list to CSV
+- set length rules in the Constraint Manager (the Constraints button, or C),
+  in the style of Allegro's: groups of nets (all nets, a net class, a pair
+  class, a name pattern such as `DDR_DQ*`, or a list) with a minimum and
+  maximum length, a match tolerance against the longest member, a maximum
+  pair skew and a maximum via count. Altium boards start with their own
+  Length and Matched Length rules. Every net is checked as you edit, failing
+  nets are listed with how far off they are, and clicking one selects it on
+  the board. Your groups are kept per board in Trace's settings; the design
+  file is never changed
 
 ## Command-line tool
 
@@ -48,6 +57,7 @@ trace inspect sheet.SchDoc       symbols with designators, values and pin counts
 trace pairs board.PcbDoc [5mil]  length of each differential pair (tracks, arcs, via barrels), skew, and open nets
 trace view board.PcbDoc          open the board viewer in your browser
 trace rules board.PcbDoc         design rules grouped by kind
+trace check board.PcbDoc         check the board's length and matched-length rules; lists failing nets
 trace convert <file> out.json    export to Trace's open JSON model
 trace convert <file> out.kicad_pcb   write a KiCad board
 trace convert <file> out.PcbDoc      write an Altium Designer board

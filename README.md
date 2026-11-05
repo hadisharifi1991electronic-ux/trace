@@ -25,8 +25,10 @@ checker and simulator all read.
   Altium board), which writes a `.PcbDoc`
 - see tracks, pads, vias, copper pours, silkscreen and the board outline
 - turn the board in 3D (the 3D button, or 3): solder mask, exposed pads,
-  silkscreen, holes and a simple body for each part, sized from its pads;
-  drag to turn, right-drag to pan, B to flip over, choice of mask colour
+  silkscreen, holes and the parts: Altium boards show the 3D (STEP) models
+  stored in the file, loaded in the background; other parts get a simple
+  body sized from their pads. Drag to turn, right-drag to pan, B to flip
+  over, choice of mask colour
 - see each via's hole, layer span (such as 1-4) and net, coloured by span,
   and net names on tracks and pads as you zoom in
 - zoom (scroll), pan (drag), flip to the bottom (B), fit (F)
@@ -110,6 +112,7 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
 | `crates/trace-allegro` | Allegro `.brd` reader, ported from KiCad's Allegro importer |
 | `crates/trace-gerber` | Gerber, Excellon, IPC-356 and ODB++ import with layer detection and net tracing |
 | `crates/trace-export` | Writes boards in other tools' formats (KiCad, Altium) |
+| `crates/trace-step` | STEP part models to coloured triangle meshes (geometry via the `truck` crates) |
 | `crates/trace-cli` | The `trace` command |
 | `crates/trace-app` | The desktop app (egui) |
 

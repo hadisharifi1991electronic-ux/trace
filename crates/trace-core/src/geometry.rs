@@ -129,6 +129,41 @@ pub struct Geometry {
     /// False when the source did not say, and unused inner pads may be gone.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub per_layer_copper: bool,
+    /// 3D models of parts as the source stores them (STEP text). Not saved
+    /// in Trace boards.
+    #[serde(skip)]
+    pub models: Vec<Model3d>,
+    /// Where each part's 3D model sits.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bodies: Vec<Body3d>,
+}
+
+/// A part's 3D model file.
+#[derive(Clone, Debug)]
+pub struct Model3d {
+    pub name: String,
+    /// STEP file contents.
+    pub step: std::sync::Arc<Vec<u8>>,
+}
+
+/// One placement of a 3D model on the board.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Body3d {
+    pub component: Option<u32>,
+    /// Index into `Geometry::models`.
+    pub model: u32,
+    /// Model origin on the board.
+    pub at: Point,
+    /// Rotation about the board normal, degrees counter-clockwise.
+    pub rotation_deg: f64,
+    /// The model's own rotation about its x, y and z axes, degrees, applied
+    /// in that order before it is placed.
+    pub model_rotation_deg: [f64; 3],
+    /// Height of the model origin above the board surface.
+    pub standoff: Length,
+    /// On the bottom side, seen through the board.
+    pub bottom: bool,
+    pub opacity: f32,
 }
 
 fn ring_area(v: &[[f64; 2]]) -> f64 {

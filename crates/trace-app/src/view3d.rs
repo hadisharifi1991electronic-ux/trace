@@ -5,6 +5,7 @@
 use crate::scene::{Geom, Scene, Slot, Source};
 use eframe::egui::{self, Color32, RichText};
 use eframe::glow::{self, HasContext};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use trace_core::{LayerRef, PadShape, Side};
 
@@ -253,7 +254,10 @@ impl Default for Options {
 }
 
 /// Builds the board's 3D mesh, in mm with the board centred on the origin.
-pub fn build(scene: &Scene, opt: Options) -> Mesh {
+/// Tessellated part models, by index into `Geometry::models`.
+pub type Models = [Option<Arc<trace_step::Mesh>>];
+
+pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
     let b = scene.bounds;
     let (cx, cy) = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0);
     let mut bld = Builder {
@@ -450,7 +454,8 @@ pub fn build(scene: &Scene, opt: Options) -> Mesh {
     }
 
     if opt.parts {
-        bld.m.parts = bodies(&mut bld, scene, t);
+        let placed = place_models(&mut bld, scene, t, models);
+        bld.m.parts = placed.len() + bodies(&mut bld, scene, t, &placed);
     }
     bld.m
 }
@@ -478,7 +483,118 @@ fn pad_geom(x: f32, y: f32, shape: PadShape, sx: f32, sy: f32, rot: f32) -> Geom
 }
 
 /// Simple boxes for parts, sized from their pads. Returns how many.
-fn bodies(bld: &mut Builder, scene: &Scene, t: f32) -> usize {
+/// Draws every part model that loaded. Returns the components drawn.
+fn place_models(
+    bld: &mut Builder,
+    scene: &Scene,
+    t: f32,
+    models: &Models,
+) -> std::collections::HashSet<u32> {
+    let mut done = std::collections::HashSet::new();
+    let (ox, oy) = (bld.cx * MM_PER_MIL, bld.cy * MM_PER_MIL);
+    for body in &scene.board.geometry.bodies {
+        let Some(Some(mesh)) = models.get(body.model as usize) else {
+            continue;
+        };
+        if body.opacity <= 0.05 {
+            continue;
+        }
+        let [rx, ry, rz] = body.model_rotation_deg;
+        let (rx, ry) = (rx.to_radians(), ry.to_radians());
+        // Altium's z rotation already includes the part's own rotation.
+        let mut rz = (rz - body.rotation_deg).to_radians();
+        if body.bottom {
+            rz = -rz;
+        }
+        let rot = |a: f64, axis: usize| -> [[f64; 3]; 3] {
+            let (s, c) = a.sin_cos();
+            match axis {
+                0 => [[1.0, 0.0, 0.0], [0.0, c, -s], [0.0, s, c]],
+                1 => [[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]],
+                _ => [[c, -s, 0.0], [s, c, 0.0], [0.0, 0.0, 1.0]],
+            }
+        };
+        let mul = |a: [[f64; 3]; 3], b: [[f64; 3]; 3]| {
+            let mut r = [[0.0; 3]; 3];
+            for i in 0..3 {
+                for j in 0..3 {
+                    r[i][j] = (0..3).map(|k| a[i][k] * b[k][j]).sum();
+                }
+            }
+            r
+        };
+        let mut m = mul(rot(rz, 2), mul(rot(ry, 1), rot(rx, 0)));
+        let dz = body.standoff.mm();
+        let (x, y) = (body.at.x.mm() as f32 - ox, body.at.y.mm() as f32 - oy);
+        let z0;
+        if body.bottom {
+            // Turned over about the board's x axis, hanging below it.
+            m = mul([[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]], m);
+            z0 = -(t as f64) - dz;
+        } else {
+            z0 = t as f64 + dz;
+        }
+        let i0 = bld.m.verts.len() as u32;
+        let q = |v: f64| (v * 127.0).round().clamp(-127.0, 127.0) as i8;
+        for k in 0..mesh.positions.len() {
+            let p = mesh.positions[k].map(f64::from);
+            let n = mesh.normals[k].map(f64::from);
+            let tp = |v: [f64; 3]| {
+                [
+                    m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+                    m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+                    m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+                ]
+            };
+            let (wp, wn) = (tp(p), tp(n));
+            let c = mesh.colors[k];
+            bld.m.verts.push(Vert {
+                p: [wp[0] as f32 + x, wp[1] as f32 + y, (wp[2] + z0) as f32],
+                c: [c[0], c[1], c[2], 255],
+                n: [q(wn[0]), q(wn[1]), q(wn[2]), 0],
+            });
+        }
+        bld.m.idx.extend(mesh.indices.iter().map(|i| i0 + i));
+        if std::env::var_os("TRACE_DEBUG3D").is_some() {
+            let vs = &bld.m.verts[i0 as usize..];
+            let mut lo = [f32::MAX; 3];
+            let mut hi = [f32::MIN; 3];
+            for v in vs {
+                for k in 0..3 {
+                    lo[k] = lo[k].min(v.p[k]);
+                    hi[k] = hi[k].max(v.p[k]);
+                }
+            }
+            let des = body
+                .component
+                .and_then(|c| scene.board.components.get(c as usize))
+                .map_or("-", |c| c.designator.as_str());
+            eprintln!(
+                "{des} {} x {:.1}..{:.1} y {:.1}..{:.1} z {:.1}..{:.1} at {x:.1},{y:.1}",
+                scene.board.geometry.models[body.model as usize].name,
+                lo[0],
+                hi[0],
+                lo[1],
+                hi[1],
+                lo[2],
+                hi[2]
+            );
+        }
+        if let Some(c) = body.component {
+            done.insert(c);
+        }
+    }
+    done
+}
+
+/// Simple boxes for parts without a model, sized from their pads. Returns
+/// how many.
+fn bodies(
+    bld: &mut Builder,
+    scene: &Scene,
+    t: f32,
+    skip: &std::collections::HashSet<u32>,
+) -> usize {
     let board = &scene.board;
     let g = &board.geometry;
     let mut pads_of: Vec<Vec<usize>> = vec![Vec::new(); board.components.len()];
@@ -490,7 +606,7 @@ fn bodies(bld: &mut Builder, scene: &Scene, t: f32) -> usize {
     let mut count = 0;
     for (ci, comp) in board.components.iter().enumerate() {
         let pads = &pads_of[ci];
-        if pads.is_empty() {
+        if pads.is_empty() || skip.contains(&(ci as u32)) {
             continue;
         }
         let des = comp.designator.to_ascii_uppercase();
@@ -822,10 +938,80 @@ struct Shared {
     error: Option<String>,
 }
 
+/// Part models being tessellated in the background.
+struct Loader {
+    done: AtomicUsize,
+    total: usize,
+    result: Mutex<Option<Vec<Option<Arc<trace_step::Mesh>>>>>,
+}
+
+fn start_loader(models: &[trace_core::Model3d]) -> Arc<Loader> {
+    let loader = Arc::new(Loader {
+        done: AtomicUsize::new(0),
+        total: models.len(),
+        result: Mutex::new(None),
+    });
+    let steps: Arc<Vec<Arc<Vec<u8>>>> = Arc::new(models.iter().map(|m| m.step.clone()).collect());
+    let slots: Arc<Mutex<Vec<Option<Arc<trace_step::Mesh>>>>> =
+        Arc::new(Mutex::new(vec![None; steps.len()]));
+    let next = Arc::new(AtomicUsize::new(0));
+    let workers = std::thread::available_parallelism()
+        .map_or(2, |n| n.get())
+        .clamp(1, 6);
+    let finished = Arc::new(AtomicUsize::new(0));
+    for _ in 0..workers {
+        let (steps, slots, next, l, finished) = (
+            steps.clone(),
+            slots.clone(),
+            next.clone(),
+            loader.clone(),
+            finished.clone(),
+        );
+        std::thread::spawn(move || {
+            loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(step) = steps.get(i).cloned() else {
+                    break;
+                };
+                // A model the reader chokes on must not hold up the others.
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let r = std::panic::catch_unwind(|| trace_step::mesh(&step).ok())
+                        .ok()
+                        .flatten();
+                    let _ = tx.send(r);
+                });
+                let mesh = rx
+                    .recv_timeout(std::time::Duration::from_secs(30))
+                    .ok()
+                    .flatten();
+                if let Ok(mut s) = slots.lock() {
+                    s[i] = mesh.map(Arc::new);
+                }
+                l.done.fetch_add(1, Ordering::Relaxed);
+            }
+            // The last worker out hands over the results.
+            if finished.fetch_add(1, Ordering::AcqRel) + 1 == workers {
+                let out = slots
+                    .lock()
+                    .map(|mut s| std::mem::take(&mut *s))
+                    .unwrap_or_default();
+                if let Ok(mut r) = l.result.lock() {
+                    *r = Some(out);
+                }
+            }
+        });
+    }
+    loader
+}
+
 pub struct View3d {
     pub camera: Camera,
     pub options: Options,
-    built: Option<Options>,
+    built: Option<(Options, bool)>,
+    loader: Option<Arc<Loader>>,
+    models: Option<Arc<Vec<Option<Arc<trace_step::Mesh>>>>>,
+    model_count: usize,
     radius: f32,
     parts: usize,
     shared: Arc<Mutex<Shared>>,
@@ -842,6 +1028,9 @@ impl Default for View3d {
             },
             options: Options::default(),
             built: None,
+            loader: None,
+            models: None,
+            model_count: 0,
             radius: 50.0,
             parts: 0,
             shared: Arc::default(),
@@ -853,6 +1042,8 @@ impl View3d {
     /// Forget the mesh so it is rebuilt for a new board.
     pub fn reset(&mut self) {
         self.built = None;
+        self.loader = None;
+        self.models = None;
     }
 
     pub fn destroy(&self, gl: &glow::Context) {
@@ -992,9 +1183,31 @@ unsafe fn upload(gl: &glow::Context, gpu: &mut Gpu, m: &Mesh) {
 
 /// Draws the 3D view in the central panel.
 pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
-    if v.built != Some(v.options) {
+    let g = &scene.board.geometry;
+    if v.options.parts && v.loader.is_none() && v.models.is_none() && !g.bodies.is_empty() {
+        v.loader = Some(start_loader(&g.models));
+    }
+    if let Some(l) = &v.loader {
+        let res = l.result.lock().ok().and_then(|mut r| r.take());
+        if let Some(r) = res {
+            v.model_count = r.iter().filter(|m| m.is_some()).count();
+            v.models = Some(Arc::new(r));
+            v.loader = None;
+        } else {
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(300));
+        }
+    }
+    let with_models = v.models.is_some();
+    if v.built != Some((v.options, with_models)) {
         let first = v.built.is_none();
-        let mesh = build(scene, v.options);
+        let none: Vec<Option<Arc<trace_step::Mesh>>> = Vec::new();
+        let models = v.models.clone();
+        let mesh = build(
+            scene,
+            v.options,
+            models.as_deref().map_or(&none[..], |m| &m[..]),
+        );
         v.radius = mesh.radius;
         v.parts = mesh.parts;
         if first {
@@ -1003,7 +1216,7 @@ pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
         if let Ok(mut s) = v.shared.lock() {
             s.upload = Some(mesh);
         }
-        v.built = Some(v.options);
+        v.built = Some((v.options, with_models));
     }
 
     let (rect, resp) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -1132,6 +1345,26 @@ pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
                     .small()
                     .weak(),
                 );
+                if let Some(l) = &v.loader {
+                    ui.label(
+                        RichText::new(format!(
+                            "Loading 3D part models: {} of {}",
+                            l.done.load(Ordering::Relaxed),
+                            l.total
+                        ))
+                        .small(),
+                    );
+                } else if v.models.is_some() {
+                    ui.label(
+                        RichText::new(format!(
+                            "{} of {} part models loaded",
+                            v.model_count,
+                            g.models.len()
+                        ))
+                        .small()
+                        .weak(),
+                    );
+                }
                 if opt.parts && v.parts == 0 {
                     ui.label(
                         RichText::new("This board has no part placement data.")

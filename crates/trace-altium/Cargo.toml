@@ -8,6 +8,7 @@ license.workspace = true
 [dependencies]
 trace-core.workspace = true
 cfb = "0.10"
+flate2 = "1"
 thiserror = "1"
 
 [dev-dependencies]

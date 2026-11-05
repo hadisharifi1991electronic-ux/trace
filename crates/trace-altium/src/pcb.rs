@@ -357,6 +357,7 @@ pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
             .filter_map(|r| parse_region(r[0], &layers))
             .collect();
     }
+    read_models(&mut c, g)?;
     g.outline = parse_outline(&board_props);
     board.stats.tracks = g.tracks.len();
     board.stats.vias = g.vias.len();
@@ -381,6 +382,74 @@ pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
     }
 
     Ok(board)
+}
+
+/// Embedded 3D models (`Models/N`, zlib-compressed STEP) and where each
+/// part's model sits (`ComponentBodies6`).
+fn read_models<R: std::io::Read + std::io::Seek>(
+    c: &mut Container<R>,
+    g: &mut trace_core::Geometry,
+) -> Result<()> {
+    use std::io::Read;
+    let index = c
+        .stream("/Models/Data")?
+        .map(|d| split_pcb(&d, 0))
+        .unwrap_or_default();
+    let mut by_id = std::collections::HashMap::new();
+    for (i, p) in index.iter().enumerate() {
+        let Some(raw) = c.stream(&format!("/Models/{i}"))? else {
+            continue;
+        };
+        let mut step = Vec::new();
+        if flate2::read::ZlibDecoder::new(&raw[..])
+            .read_to_end(&mut step)
+            .is_err()
+        {
+            step = raw;
+        }
+        by_id.insert(p.str("ID"), g.models.len() as u32);
+        g.models.push(trace_core::Model3d {
+            name: p.str("NAME"),
+            step: std::sync::Arc::new(step),
+        });
+    }
+    let Some(d) = c.stream("/ComponentBodies6/Data")? else {
+        return Ok(());
+    };
+    for r in split_binary(&d, 1) {
+        let b = r[0];
+        let Some(len) = i32_at(b, 18) else { continue };
+        let Some(text) = b.get(22..22 + len.max(0) as usize) else {
+            continue;
+        };
+        let p = Props::parse(&String::from_utf8_lossy(text));
+        if !p.bool("MODEL.EMBED") {
+            continue;
+        }
+        let Some(&model) = by_id.get(&p.str("MODELID")) else {
+            continue;
+        };
+        let component = u16_at(b, 7).filter(|&c| c != u16::MAX).map(u32::from);
+        let len = |k: &str| p.get(k).and_then(Length::parse).unwrap_or_default();
+        g.bodies.push(trace_core::Body3d {
+            component,
+            model,
+            at: Point {
+                x: len("MODEL.2D.X"),
+                y: len("MODEL.2D.Y"),
+            },
+            rotation_deg: p.float("MODEL.2D.ROTATION").unwrap_or(0.0),
+            model_rotation_deg: [
+                p.float("MODEL.3D.ROTX").unwrap_or(0.0),
+                p.float("MODEL.3D.ROTY").unwrap_or(0.0),
+                p.float("MODEL.3D.ROTZ").unwrap_or(0.0),
+            ],
+            standoff: len("MODEL.3D.DZ"),
+            bottom: p.int("BODYPROJECTION") == Some(1),
+            opacity: p.float("BODYOPACITY3D").unwrap_or(1.0) as f32,
+        });
+    }
+    Ok(())
 }
 
 fn parse_stackup(p: &Props) -> Stackup {

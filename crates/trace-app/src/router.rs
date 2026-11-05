@@ -1,17 +1,31 @@
 //! Interactive routing: click on copper to start, click to fix corners,
 //! V for a via to the next layer, and the route ends on copper of its own
-//! net or with Enter. Copper of other nets keeps its clearance; a route
-//! that would break it is drawn red and is not placed.
+//! net or with Enter. Shift+Space cycles the corner style and Space flips
+//! the bend, as in Altium. Copper of other nets keeps its clearance; a
+//! route that would break it is drawn red and is not placed.
 
 use trace_core::edit::{Edit, History};
-use trace_core::route::{self, Hit, Obstacles, P};
-use trace_core::{Board, LayerRef, Length, Point, Track, Via};
+use trace_core::route::{self, Corner, Hit, Obstacles, Piece, P};
+use trace_core::{Arc, Board, LayerRef, Length, Point, Track, Via};
 
-/// One run of track on one layer; runs are joined by vias.
+/// One run of track on one layer; runs are joined by vias. Each click adds
+/// a group of pieces, so Backspace can take back a click at a time.
 #[derive(Clone)]
 struct Run {
     layer: u8,
-    pts: Vec<P>,
+    start: P,
+    clicks: Vec<Vec<Piece>>,
+}
+
+impl Run {
+    fn end(&self) -> P {
+        self.clicks
+            .iter()
+            .rev()
+            .find_map(|c| c.last())
+            .map(|p| p.end())
+            .unwrap_or(self.start)
+    }
 }
 
 pub struct Active {
@@ -19,8 +33,8 @@ pub struct Active {
     runs: Vec<Run>,
     /// Via centres between consecutive runs.
     vias: Vec<P>,
-    /// Corners from the last fixed point to the cursor.
-    pub preview: Vec<P>,
+    /// Pieces from the last fixed point to the cursor.
+    pub preview: Vec<Piece>,
     /// The preview ends on copper of the route's own net.
     pub lands: bool,
     pub hit: Option<Hit>,
@@ -31,16 +45,24 @@ impl Active {
         self.runs.last().map(|r| r.layer).unwrap_or(0)
     }
     pub fn last_point(&self) -> P {
-        *self.runs.last().and_then(|r| r.pts.last()).unwrap()
+        self.runs.last().map(|r| r.end()).unwrap_or([0.0, 0.0])
     }
-    /// Fixed segments, by layer, for drawing.
-    pub fn fixed(&self) -> impl Iterator<Item = (u8, P, P)> + '_ {
-        self.runs
-            .iter()
-            .flat_map(|r| r.pts.windows(2).map(move |w| (r.layer, w[0], w[1])))
+    /// Fixed pieces, by layer, for drawing.
+    pub fn fixed(&self) -> impl Iterator<Item = (u8, Piece)> + '_ {
+        self.runs.iter().flat_map(|r| {
+            r.clicks
+                .iter()
+                .flat_map(move |c| c.iter().map(move |p| (r.layer, *p)))
+        })
     }
     pub fn via_points(&self) -> &[P] {
         &self.vias
+    }
+    fn fix_preview(&mut self) {
+        let preview = std::mem::take(&mut self.preview);
+        if !preview.is_empty() {
+            self.runs.last_mut().unwrap().clicks.push(preview);
+        }
     }
 }
 
@@ -49,7 +71,11 @@ pub struct Router {
     pub via_d: f64,
     pub via_hole: f64,
     pub clearance: f64,
-    pub diagonal_first: bool,
+    pub corner: Corner,
+    /// Space: which run of a corner comes first.
+    pub flip: bool,
+    /// Round corners as a fraction of the largest that fits (, and .).
+    pub arc: f64,
     pub active: Option<Active>,
     pub history: History,
     pub message: Option<String>,
@@ -63,7 +89,9 @@ impl Router {
             via_d: 20.0,
             via_hole: 10.0,
             clearance: route::DEFAULT_CLEARANCE,
-            diagonal_first: false,
+            corner: Corner::Line45,
+            flip: false,
+            arc: 1.0,
             active: None,
             history: History::default(),
             message: None,
@@ -71,9 +99,12 @@ impl Router {
         }
     }
 
-    /// New board: sizes from its rules and vias, empty history.
+    /// New board: sizes from its rules and vias, empty history. The corner
+    /// style is kept.
     pub fn load(&mut self, board: &Board) {
+        let (corner, arc) = (self.corner, self.arc);
         *self = Router::new();
+        (self.corner, self.arc) = (corner, arc);
         self.width = route::board_width(board);
         self.clearance = route::board_clearance(board);
         (self.via_d, self.via_hole) = route::common_via(board);
@@ -94,7 +125,8 @@ impl Router {
             net,
             runs: vec![Run {
                 layer,
-                pts: vec![at],
+                start: at,
+                clicks: Vec::new(),
             }],
             vias: Vec::new(),
             preview: Vec::new(),
@@ -111,24 +143,23 @@ impl Router {
     /// Follows the cursor. `snap` is copper under the cursor on the
     /// route's layer: its centre or track end, and its net.
     pub fn update(&mut self, board: &Board, cursor: P, snap: Option<(P, Option<u32>)>) {
-        let (width, clearance, diag) = (self.width, self.clearance, self.diagonal_first);
+        let (width, clearance) = (self.width, self.clearance);
+        let (corner, flip, arc) = (self.corner, self.flip, self.arc);
         let Some(a) = &self.active else { return };
         let (net, layer, from) = (a.net, a.layer(), a.last_point());
         let (target, lands) = match snap {
             Some((p, n)) if n.is_some() && n == net => (p, true),
             _ => (cursor, false),
         };
-        let preview = route::path45(from, target, diag);
+        let preview = route::corner_path(from, target, corner, flip, arc);
         let obstacles = self.obstacles(board);
         let mut hit: Option<Hit> = None;
-        let mut prev = from;
-        for &p in &preview {
-            if let Some(h) = obstacles.check_track(layer, prev, p, width, net, clearance) {
+        for (p, q) in preview.iter().flat_map(|p| p.chords()) {
+            if let Some(h) = obstacles.check_track(layer, p, q, width, net, clearance) {
                 if hit.as_ref().is_none_or(|w| h.gap < w.gap) {
                     hit = Some(h);
                 }
             }
-            prev = p;
         }
         let a = self.active.as_mut().unwrap();
         a.preview = preview;
@@ -145,8 +176,7 @@ impl Router {
             return None;
         }
         let lands = a.lands;
-        let preview = std::mem::take(&mut a.preview);
-        a.runs.last_mut().unwrap().pts.extend(preview);
+        a.fix_preview();
         self.message = None;
         if lands {
             return self.finish(board);
@@ -161,10 +191,8 @@ impl Router {
         if self.active.as_ref().is_some_and(|a| a.layer() == next) {
             return;
         }
-        if self.active.as_ref().is_some_and(|a| a.hit.is_none()) {
-            let a = self.active.as_mut().unwrap();
-            let preview = std::mem::take(&mut a.preview);
-            a.runs.last_mut().unwrap().pts.extend(preview);
+        if let Some(a) = self.active.as_mut().filter(|a| a.hit.is_none()) {
+            a.fix_preview();
         }
         let Some((at, net)) = self.active.as_ref().map(|a| (a.last_point(), a.net)) else {
             return;
@@ -180,21 +208,21 @@ impl Router {
         a.vias.push(at);
         a.runs.push(Run {
             layer: next,
-            pts: vec![at],
+            start: at,
+            clicks: Vec::new(),
         });
         a.preview.clear();
         a.hit = None;
         self.message = None;
     }
 
-    /// Takes back the last corner, or the last via.
+    /// Takes back the last click, or the last via.
     pub fn back(&mut self) {
         let Some(a) = self.active.as_mut() else {
             return;
         };
         let run = a.runs.last_mut().unwrap();
-        if run.pts.len() > 1 {
-            run.pts.pop();
+        if run.clicks.pop().is_some() {
         } else if a.runs.len() > 1 {
             a.runs.pop();
             a.vias.pop();
@@ -211,24 +239,49 @@ impl Router {
             x: Length::from_mil(p[0]),
             y: Length::from_mil(p[1]),
         };
+        let width = Length::from_mil(self.width);
         let mut edits = Vec::new();
         let mut ti = board.geometry.tracks.len();
-        for r in &a.runs {
-            for w in r.pts.windows(2) {
-                if (w[0][0] - w[1][0]).hypot(w[0][1] - w[1][1]) < 0.01 {
-                    continue;
+        let mut ai = board.geometry.arcs.len();
+        for (layer, piece) in a.fixed() {
+            if piece.length() < 0.01 {
+                continue;
+            }
+            match piece {
+                Piece::Line(p, q) => {
+                    edits.push(Edit::InsertTrack {
+                        index: ti,
+                        track: Track {
+                            layer: LayerRef::Copper(layer),
+                            net: a.net,
+                            start: point(p),
+                            end: point(q),
+                            width,
+                        },
+                    });
+                    ti += 1;
                 }
-                edits.push(Edit::InsertTrack {
-                    index: ti,
-                    track: Track {
-                        layer: LayerRef::Copper(r.layer),
-                        net: a.net,
-                        start: point(w[0]),
-                        end: point(w[1]),
-                        width: Length::from_mil(self.width),
-                    },
-                });
-                ti += 1;
+                Piece::Arc {
+                    c,
+                    r,
+                    start_deg,
+                    end_deg,
+                    ..
+                } => {
+                    edits.push(Edit::InsertArc {
+                        index: ai,
+                        arc: Arc {
+                            layer: LayerRef::Copper(layer),
+                            net: a.net,
+                            center: point(c),
+                            radius: Length::from_mil(r),
+                            start_deg,
+                            end_deg,
+                            width,
+                        },
+                    });
+                    ai += 1;
+                }
             }
         }
         let copper = board.stackup.copper_layers().count().max(1) as u8;

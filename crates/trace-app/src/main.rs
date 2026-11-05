@@ -949,6 +949,18 @@ impl App {
         mm(ui, &mut r.via_d, "Via", "Via pad diameter");
         mm(ui, &mut r.via_hole, "hole", "Via drill");
         ui.separator();
+        egui::ComboBox::from_id_salt("corner")
+            .width(90.0)
+            .selected_text(r.corner.label())
+            .show_ui(ui, |ui| {
+                use trace_core::route::Corner;
+                for c in [Corner::Line45, Corner::Arc45, Corner::Line90, Corner::Arc90, Corner::Any] {
+                    ui.selectable_value(&mut r.corner, c, c.label());
+                }
+            })
+            .response
+            .on_hover_text("Corner style: Shift+Space cycles, Space flips the bend, , and . size round corners");
+        ui.separator();
         let layer = r.active.as_ref().map(|a| a.layer()).or(match self.active {
             Slot::Copper(i) => Some(i),
             _ => None,
@@ -960,7 +972,7 @@ impl App {
         }
         let hint = match &self.router.active {
             None => "Click a pad, via or track end to start.",
-            Some(_) => "Click: corner · V / Shift+V: via down / up · /: corner style · Backspace: undo corner · Enter: finish · Esc: cancel",
+            Some(_) => "Click: corner · Shift+Space: corner style · Space: flip bend · V / Shift+V: via · Backspace: undo · Enter: finish · Esc: cancel",
         };
         match &self.router.message {
             Some(m) => ui.label(RichText::new(m).color(Color32::from_rgb(255, 120, 100))),
@@ -1504,6 +1516,24 @@ impl eframe::App for App {
             });
         // Editing and routing keys.
         if board2d && self.scene.is_some() && !typing {
+            let (cycle, smaller, larger) = ctx.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::SHIFT, egui::Key::Space),
+                    i.key_pressed(egui::Key::Comma),
+                    i.key_pressed(egui::Key::Period),
+                )
+            });
+            if self.tool == Tool::Route {
+                if cycle {
+                    self.router.corner = self.router.corner.next();
+                    self.message =
+                        Some((format!("Corners: {}", self.router.corner.label()), false));
+                }
+                if smaller || larger {
+                    let k = if larger { 0.1 } else { -0.1 };
+                    self.router.arc = (self.router.arc + k).clamp(0.1, 1.0);
+                }
+            }
             let (undo, redo, route_key, del, via_dn, via_up, back, enter, corner, unroute) = ctx
                 .input_mut(|i| {
                     (
@@ -1519,7 +1549,7 @@ impl eframe::App for App {
                         i.consume_key(egui::Modifiers::SHIFT, egui::Key::V),
                         i.key_pressed(egui::Key::Backspace),
                         i.key_pressed(egui::Key::Enter),
-                        i.key_pressed(egui::Key::Slash),
+                        i.key_pressed(egui::Key::Slash) || i.key_pressed(egui::Key::Space),
                         i.consume_key(egui::Modifiers::SHIFT, egui::Key::Delete),
                     )
                 });
@@ -1547,7 +1577,7 @@ impl eframe::App for App {
             }
             if self.tool == Tool::Route {
                 if corner {
-                    self.router.diagonal_first = !self.router.diagonal_first;
+                    self.router.flip = !self.router.flip;
                 }
                 if let Some(layer) = self.router.active.as_ref().map(|a| a.layer()) {
                     if via_dn || via_up {

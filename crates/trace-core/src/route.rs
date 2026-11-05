@@ -32,6 +32,201 @@ pub fn path45(a: P, b: P, diagonal_first: bool) -> Vec<P> {
     vec![mid, b]
 }
 
+/// How a route bends between fixed points, cycled with Shift+Space as in
+/// Altium.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Corner {
+    Line45,
+    Arc45,
+    Line90,
+    Arc90,
+    Any,
+}
+
+impl Corner {
+    pub fn next(self) -> Self {
+        match self {
+            Corner::Line45 => Corner::Arc45,
+            Corner::Arc45 => Corner::Line90,
+            Corner::Line90 => Corner::Arc90,
+            Corner::Arc90 => Corner::Any,
+            Corner::Any => Corner::Line45,
+        }
+    }
+    pub fn label(self) -> &'static str {
+        match self {
+            Corner::Line45 => "45°",
+            Corner::Arc45 => "45° arc",
+            Corner::Line90 => "90°",
+            Corner::Arc90 => "90° arc",
+            Corner::Any => "any angle",
+        }
+    }
+}
+
+/// A straight run or a round corner of a route.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Piece {
+    Line(P, P),
+    /// Stored counter-clockwise from `start_deg` to `end_deg`; `from` and
+    /// `to` are the ends in the order the route runs through them.
+    Arc {
+        c: P,
+        r: f64,
+        start_deg: f64,
+        end_deg: f64,
+        from: P,
+        to: P,
+    },
+}
+
+impl Piece {
+    pub fn start(&self) -> P {
+        match *self {
+            Piece::Line(a, _) => a,
+            Piece::Arc { from, .. } => from,
+        }
+    }
+    pub fn end(&self) -> P {
+        match *self {
+            Piece::Line(_, b) => b,
+            Piece::Arc { to, .. } => to,
+        }
+    }
+    pub fn length(&self) -> f64 {
+        match *self {
+            Piece::Line(a, b) => (b[0] - a[0]).hypot(b[1] - a[1]),
+            Piece::Arc {
+                r,
+                start_deg,
+                end_deg,
+                ..
+            } => r * (end_deg - start_deg).rem_euclid(360.0).to_radians(),
+        }
+    }
+    /// Straight chords that follow the piece in route order, for drawing
+    /// and clearance checks.
+    pub fn chords(&self) -> Vec<(P, P)> {
+        match *self {
+            Piece::Line(a, b) => vec![(a, b)],
+            Piece::Arc {
+                c,
+                r,
+                start_deg,
+                end_deg,
+                from,
+                to,
+            } => {
+                let sweep = (end_deg - start_deg).rem_euclid(360.0);
+                let n = (sweep / 6.0).ceil().max(1.0) as usize;
+                let mut pts: Vec<P> = (0..=n)
+                    .map(|i| {
+                        let t = (start_deg + sweep * i as f64 / n as f64).to_radians();
+                        [c[0] + r * t.cos(), c[1] + r * t.sin()]
+                    })
+                    .collect();
+                let d = |p: P, q: P| (p[0] - q[0]).hypot(p[1] - q[1]);
+                if d(pts[0], from) > d(pts[n], from) {
+                    pts.reverse();
+                }
+                pts[0] = from;
+                pts[n] = to;
+                pts.windows(2).map(|w| (w[0], w[1])).collect()
+            }
+        }
+    }
+}
+
+/// The pieces of a route from `a` to `b` in the given corner mode. `flip`
+/// swaps which run comes first (Space in Altium); `arc` is the size of a
+/// round corner as a fraction of the largest that fits.
+pub fn corner_path(a: P, b: P, mode: Corner, flip: bool, arc: f64) -> Vec<Piece> {
+    let line = |p: P, q: P| -> Vec<Piece> {
+        if (q[0] - p[0]).hypot(q[1] - p[1]) < 1e-6 {
+            vec![]
+        } else {
+            vec![Piece::Line(p, q)]
+        }
+    };
+    let mid = match mode {
+        Corner::Any => return line(a, b),
+        Corner::Line45 | Corner::Arc45 => {
+            let p = path45(a, b, flip);
+            if p.len() < 2 {
+                return line(a, b);
+            }
+            p[0]
+        }
+        Corner::Line90 | Corner::Arc90 => {
+            if (b[0] - a[0]).abs() < 1e-6 || (b[1] - a[1]).abs() < 1e-6 {
+                return line(a, b);
+            }
+            if flip {
+                [a[0], b[1]]
+            } else {
+                [b[0], a[1]]
+            }
+        }
+    };
+    if matches!(mode, Corner::Arc45 | Corner::Arc90) {
+        if let Some(f) = fillet(a, mid, b, arc) {
+            return f;
+        }
+    }
+    let mut v = line(a, mid);
+    v.extend(line(mid, b));
+    v
+}
+
+/// Rounds the corner at `m` between legs to `a` and `b`.
+fn fillet(a: P, m: P, b: P, frac: f64) -> Option<Vec<Piece>> {
+    let (la, lb) = (
+        (a[0] - m[0]).hypot(a[1] - m[1]),
+        (b[0] - m[0]).hypot(b[1] - m[1]),
+    );
+    if la < 1e-6 || lb < 1e-6 {
+        return None;
+    }
+    let u1 = [(a[0] - m[0]) / la, (a[1] - m[1]) / la];
+    let u2 = [(b[0] - m[0]) / lb, (b[1] - m[1]) / lb];
+    let theta = (u1[0] * u2[0] + u1[1] * u2[1]).clamp(-1.0, 1.0).acos();
+    if theta < 1e-3 || (std::f64::consts::PI - theta) < 1e-3 {
+        return None;
+    }
+    let half = theta / 2.0;
+    let t = la.min(lb) * frac.clamp(0.05, 1.0);
+    let r = t * half.tan();
+    let p1 = [m[0] + u1[0] * t, m[1] + u1[1] * t];
+    let p2 = [m[0] + u2[0] * t, m[1] + u2[1] * t];
+    let (wx, wy) = (u1[0] + u2[0], u1[1] + u2[1]);
+    let wl = wx.hypot(wy);
+    let k = r / half.sin() / wl;
+    let c = [m[0] + wx * k, m[1] + wy * k];
+    let ang = |p: P| (p[1] - c[1]).atan2(p[0] - c[0]).to_degrees();
+    let (s1, s2) = (ang(p1), ang(p2));
+    let (start_deg, end_deg) = if (s2 - s1).rem_euclid(360.0) <= 180.0 {
+        (s1, s2)
+    } else {
+        (s2, s1)
+    };
+    let mut v = Vec::new();
+    if la - t > 1e-6 {
+        v.push(Piece::Line(a, p1));
+    }
+    v.push(Piece::Arc {
+        c,
+        r,
+        start_deg,
+        end_deg,
+        from: p1,
+        to: p2,
+    });
+    if lb - t > 1e-6 {
+        v.push(Piece::Line(p2, b));
+    }
+    Some(v)
+}
+
 /// Board-wide clearance, from an enabled Altium-style `Clearance` rule
 /// that applies to everything, else [`DEFAULT_CLEARANCE`].
 pub fn board_clearance(board: &Board) -> f64 {
@@ -461,6 +656,35 @@ mod tests {
         let p = path45([0.0, 0.0], [-30.0, -90.0], false);
         assert_eq!(p, vec![[0.0, -60.0], [-30.0, -90.0]]);
         assert_eq!(path45([0.0, 0.0], [50.0, 0.0], false).len(), 1);
+    }
+
+    #[test]
+    fn round_corners() {
+        // 90° arc: quarter circle of radius 40 tangent to both legs.
+        let v = corner_path([0.0, 0.0], [100.0, 40.0], Corner::Arc90, false, 1.0);
+        assert_eq!(v.len(), 2);
+        let Piece::Arc { c, r, from, to, .. } = v[1] else {
+            panic!("{v:?}")
+        };
+        assert!(
+            (r - 40.0).abs() < 1e-9 && (c[0] - 60.0).abs() < 1e-9 && (c[1] - 40.0).abs() < 1e-9
+        );
+        assert!((from[0] - 60.0).abs() < 1e-9 && (to[1] - 40.0).abs() < 1e-9);
+        let ch = v[1].chords();
+        assert_eq!(ch.first().unwrap().0, from);
+        assert_eq!(ch.last().unwrap().1, to);
+        assert!((v[1].length() - 40.0 * std::f64::consts::FRAC_PI_2).abs() < 1e-9);
+        // 45° arc ends where the route ends.
+        let v = corner_path([0.0, 0.0], [100.0, 40.0], Corner::Arc45, false, 1.0);
+        assert_eq!(v.last().unwrap().end(), [100.0, 40.0]);
+        assert_eq!(
+            corner_path([0.0, 0.0], [10.0, 30.0], Corner::Any, false, 1.0).len(),
+            1
+        );
+        assert_eq!(
+            corner_path([0.0, 0.0], [10.0, 30.0], Corner::Line90, true, 1.0)[0],
+            Piece::Line([0.0, 0.0], [0.0, 30.0])
+        );
     }
 
     #[test]

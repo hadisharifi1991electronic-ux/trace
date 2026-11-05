@@ -55,7 +55,8 @@ checker and simulator all read.
   the board. Your groups are kept per board in Trace's settings; the design
   file is never changed
 - route tracks (the Route button, or X): click a pad, via or track end to
-  start, click to place 45° corners, V / Shift+V for a via to the next
+  start, click to place corners (Shift+Space cycles 45°, 45° arc, 90°,
+  90° arc and any angle; Space flips the bend), V / Shift+V for a via to the next
   layer down / up, Backspace to take back a corner, and the route ends on
   copper of its own net. A route that breaks clearance to another net is
   drawn red and is not placed. Ctrl+Z / Ctrl+Y undo and redo; Delete

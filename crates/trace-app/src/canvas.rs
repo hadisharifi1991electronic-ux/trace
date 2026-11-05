@@ -462,25 +462,31 @@ fn draw_route(
         );
     };
     let halo = Color32::from_white_alpha(28);
-    for (_, p, q) in a.fixed() {
-        seg(shapes, p, q, r.width, amber);
+    for (_, piece) in a.fixed() {
+        for (p, q) in piece.chords() {
+            seg(shapes, p, q, r.width, amber);
+        }
     }
     let bad = a.hit.is_some();
-    let mut prev = a.last_point();
-    for &p in &a.preview {
-        seg(shapes, prev, p, r.width + 2.0 * r.clearance, halo);
-        seg(
-            shapes,
-            prev,
-            p,
-            r.width,
-            if bad {
-                Color32::from_rgb(240, 70, 70)
-            } else {
-                Color32::from_rgba_unmultiplied(255, 220, 120, 200)
-            },
+    let chords: Vec<_> = a.preview.iter().flat_map(|p| p.chords()).collect();
+    if let Some(first) = chords.first() {
+        // The clearance halo as one joined line, so overlaps do not show.
+        let mut pts = vec![view.to_screen(first.0[0] as f32, first.0[1] as f32)];
+        pts.extend(
+            chords
+                .iter()
+                .map(|(_, q)| view.to_screen(q[0] as f32, q[1] as f32)),
         );
-        prev = p;
+        let w = ((r.width + 2.0 * r.clearance) as f32 * view.scale).max(1.0);
+        shapes.push(Shape::line(pts, Stroke::new(w, halo)));
+    }
+    let color = if bad {
+        Color32::from_rgb(240, 70, 70)
+    } else {
+        Color32::from_rgb(255, 220, 120)
+    };
+    for &(p, q) in &chords {
+        seg(shapes, p, q, r.width, color);
     }
     for &v in a.via_points() {
         let c = view.to_screen(v[0] as f32, v[1] as f32);

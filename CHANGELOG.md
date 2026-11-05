@@ -3,6 +3,13 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.8.1 (2026-11-05)
+
+- Corner styles while routing, as in Altium: Shift+Space cycles 45°,
+  45° with an arc, 90°, 90° with an arc and any angle; Space flips which
+  way the corner bends; , and . make round corners smaller or larger. The
+  style is also in the routing toolbar. Round corners are placed as arcs.
+
 ## 0.8.0 (2026-11-05)
 
 - Routing (X): click a pad, via or track end to start a track on the

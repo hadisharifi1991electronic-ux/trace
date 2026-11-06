@@ -227,6 +227,7 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
     g.tracks = of("Track")
         .filter_map(|p| {
             Some(Track {
+                component: index(p, "COMPONENT"),
                 layer: layer(p),
                 net: index(p, "NET"),
                 start: pt(p, "X1", "Y1")?,
@@ -238,6 +239,7 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
     g.arcs = of("Arc")
         .filter_map(|p| {
             Some(Arc {
+                component: index(p, "COMPONENT"),
                 layer: layer(p),
                 net: index(p, "NET"),
                 center: pt(p, "LOCATION.X", "LOCATION.Y")?,

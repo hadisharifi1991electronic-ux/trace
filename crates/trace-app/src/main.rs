@@ -7,6 +7,7 @@ mod canvas;
 mod cm;
 mod drc;
 mod imp;
+mod placing;
 mod router;
 mod scene;
 mod schview;
@@ -102,6 +103,8 @@ pub struct App {
     /// Scroll the layer tabs to the current layer on the next frame.
     scroll_tab: bool,
     pub drc: drc::Drc,
+    /// The part being dragged.
+    moving: Option<placing::Moving>,
 }
 
 #[derive(Clone, Copy)]
@@ -163,6 +166,7 @@ impl App {
             repour: None,
             scroll_tab: false,
             drc: drc::Drc::default(),
+            moving: None,
         };
         if let Some(f) = start_file {
             app.open(f);
@@ -222,6 +226,7 @@ impl App {
             Ok(scene) => {
                 self.scene = Some(scene);
                 self.drc.reset();
+                self.moving = None;
                 self.view3d.reset();
                 self.load_constraints();
                 self.selected = None;
@@ -1039,7 +1044,7 @@ impl App {
                 (Tool::Measure, None) => "Click the first point.",
                 (Tool::Measure, Some(Measure { b: None, .. })) => "Click the second point.",
                 (Tool::Measure, Some(_)) => "Click to start a new measurement, Esc to clear.",
-                _ => "Drag to pan, scroll to zoom, click copper to select a net.",
+                _ => "Drag a part to move it (Space turns, L flips), drag elsewhere to pan, scroll to zoom, click copper to select a net.",
             };
             ui.label(RichText::new(hint).weak());
         });
@@ -1982,6 +1987,30 @@ impl eframe::App for App {
             }
         }
         self.apply_single();
+        // Keys while dragging a part, as in Altium: Space turns it, L flips
+        // it to the other side, Escape puts it back.
+        if self.moving.is_some() {
+            let (turn, flip, back) = ctx.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Space),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::L),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Escape),
+                )
+            });
+            let at = self.cursor.map(|[x, y]| [x as f64, y as f64]);
+            if let (Some(m), Some(at)) = (self.moving.as_mut(), at) {
+                if turn {
+                    m.rotate(at);
+                }
+                if flip {
+                    m.flip(at);
+                }
+            }
+            if back {
+                self.moving = None;
+                self.message = Some(("Move cancelled.".into(), false));
+            }
+        }
         let (open_shortcut, fit, flip, esc, measure_key, toggle3d, cm_key, sch_key) = ctx
             .input_mut(|i| {
                 (

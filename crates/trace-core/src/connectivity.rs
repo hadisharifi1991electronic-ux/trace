@@ -414,6 +414,7 @@ mod tests {
     }
     fn track(layer: u8, x1: f64, x2: f64) -> Track {
         Track {
+            component: None,
             layer: LayerRef::Copper(layer),
             net: Some(0),
             start: pt(x1, 0.0),

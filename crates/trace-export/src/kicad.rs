@@ -942,6 +942,7 @@ mod tests {
             ..Default::default()
         });
         b.geometry.tracks.push(Track {
+            component: None,
             layer: LayerRef::Copper(0),
             net: Some(0),
             start: p(0.0, 0.0),

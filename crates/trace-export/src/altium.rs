@@ -780,6 +780,13 @@ impl<'a> Writer<'a> {
         (self.b.components.len() as u32, out)
     }
 
+    /// A part index as Altium stores it, or none (0xFFFF).
+    fn component(&self, c: Option<u32>) -> u16 {
+        c.filter(|&c| (c as usize) < self.b.components.len() && c < u16::MAX as u32)
+            .map(|c| c as u16)
+            .unwrap_or(u16::MAX)
+    }
+
     fn tracks6(&mut self) -> (u32, Vec<u8>) {
         let mut out = Vec::new();
         let mut n = 0;
@@ -791,7 +798,7 @@ impl<'a> Writer<'a> {
             r[0] = l.v6;
             put_u16(&mut r, 3, self.net(t.net));
             put_u16(&mut r, 5, u16::MAX);
-            put_u16(&mut r, 7, u16::MAX);
+            put_u16(&mut r, 7, self.component(t.component));
             put_i32(&mut r, 13, self.x(t.start.x));
             put_i32(&mut r, 17, self.y(t.start.y));
             put_i32(&mut r, 21, self.x(t.end.x));
@@ -847,7 +854,7 @@ impl<'a> Writer<'a> {
         r[0] = l.v6;
         put_u16(&mut r, 3, self.net(a.net));
         put_u16(&mut r, 5, u16::MAX);
-        put_u16(&mut r, 7, u16::MAX);
+        put_u16(&mut r, 7, self.component(a.component));
         put_i32(&mut r, 13, self.x(a.center.x));
         put_i32(&mut r, 17, self.y(a.center.y));
         put_i32(&mut r, 21, unit(a.radius));
@@ -1145,6 +1152,7 @@ mod tests {
         let g = &mut b.geometry;
         g.outline = vec![pt(0.0, 0.0), pt(20.0, 0.0), pt(20.0, 10.0), pt(0.0, 10.0)];
         g.tracks.push(Track {
+            component: None,
             layer: LayerRef::Copper(0),
             net: Some(0),
             start: pt(1.0, 1.0),

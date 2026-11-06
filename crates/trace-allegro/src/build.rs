@@ -200,6 +200,7 @@ impl<'a> Builder<'a> {
         for b in self.db.walk(first, owner) {
             match &b.data {
                 Data::Seg { width, start, end } => self.board.geometry.tracks.push(Track {
+                    component: None,
                     layer: layer.clone(),
                     net,
                     start: self.pt(start.0 as f64, start.1 as f64),
@@ -247,6 +248,7 @@ impl<'a> Builder<'a> {
             (a, e)
         };
         Some(Arc {
+            component: None,
             layer,
             net,
             center: self.pt(center.0, center.1),

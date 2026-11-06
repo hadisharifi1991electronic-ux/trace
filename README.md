@@ -67,6 +67,11 @@ checker and simulator all read.
   routes both nets together at the width and gap the Impedance window
   works out for the pair. Ctrl+Z / Ctrl+Y undo and redo; Delete
   removes the clicked track or via; Shift+Delete unroutes the selected net
+- move parts as in Altium: press on a part and drag it; Space turns it 90°
+  about the cursor, L flips it to the other side, Escape puts it back. Its
+  pads, silk and 3D model go with it, tracks that end on its pads stretch
+  to follow, and a ratsnest shows where its unrouted pads connect. Pours
+  are poured again around it, and the design rule check runs again
 - toolbars as in Altium: icons for files, undo, zoom and views under the
   menu, an Active Bar over the board for the tools, and layer tabs under
   it (click to make a layer current, right-click to hide; LS or Shift+S
@@ -154,6 +159,10 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   boards; rules scoped to parts, rooms or layers are not applied). Pours
   from Gerber, ODB++ and
   Allegro files are not poured again.
+  Moving a part stretches only the last segment of each track on its
+  pads, so moving far leaves long diagonal segments to tidy up; tracks on
+  surface pads stay behind when the part is flipped. Silk follows parts
+  on Altium boards (other formats do not say which silk is a part's).
   Vias are through vias. Push moves tracks only (not vias or pads), one
   track deep: a track that would have to push another is not moved.
 - The design rule check takes a rule whose scope it cannot judge (rooms,

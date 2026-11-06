@@ -3,6 +3,7 @@
 use crate::scene::{Geom, Prim, Scene, Slot, Source};
 use crate::{App, Measure, Tool, MEASURE};
 use eframe::egui::{self, Color32, Pos2, Rect, Shape, Stroke};
+use trace_core::LayerRef;
 
 /// Maps board mil (y up) to screen points.
 #[derive(Clone, Copy)]
@@ -147,7 +148,56 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
         }
     }
-    if resp.dragged() {
+    // Pressing on a part and dragging moves it, as in Altium; anywhere
+    // else (or with the right button) dragging pans.
+    if resp.drag_started_by(egui::PointerButton::Primary)
+        && app.tool == Tool::Select
+        && app.router.active.is_none()
+    {
+        if let Some(o) = ui.input(|i| i.pointer.press_origin()) {
+            let [x, y] = app.view.to_board(o);
+            let tol = 3.0 / app.view.scale;
+            let hit = scene
+                .pick(x, y, tol, app.active, true)
+                .or_else(|| scene.pick(x, y, tol, app.active, false));
+            if let Some(c) = hit.and_then(|i| scene.prims[i].component) {
+                app.moving =
+                    crate::placing::Moving::start(&scene.board, c as usize, [x as f64, y as f64]);
+                if let Some(d) = scene.board.components.get(c as usize) {
+                    app.message = Some((
+                        format!(
+                            "Moving {}: Space turns it, L flips it to the other side, Escape puts it back.",
+                            d.designator
+                        ),
+                        false,
+                    ));
+                }
+            }
+        }
+    }
+    let mut placed: Option<(String, Vec<trace_core::edit::Edit>)> = None;
+    if app.moving.is_some() {
+        if let Some(p) = resp.interact_pointer_pos().or(resp.hover_pos()) {
+            let [x, y] = app.view.to_board(p);
+            if let Some(m) = app.moving.as_mut() {
+                m.follow([x as f64, y as f64]);
+            }
+        }
+        if resp.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
+            if let Some(m) = app.moving.take() {
+                if m.moved() {
+                    let name = scene
+                        .board
+                        .components
+                        .get(m.index)
+                        .map(|c| c.designator.clone())
+                        .unwrap_or_default();
+                    placed = Some((format!("Moved {name}"), m.edits(&scene.board)));
+                }
+                app.moving = None;
+            }
+        }
+    } else if resp.dragged() {
         let d = resp.drag_delta();
         app.view.tx += d.x;
         app.view.ty += d.y;
@@ -205,6 +255,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     let mut pending: Option<Vec<trace_core::edit::Edit>> = None;
     let mut pending_label = "Routed a track".to_string();
+    if let Some((label, edits)) = placed {
+        pending_label = label;
+        pending = Some(edits);
+    }
     // Length tuning: meanders on the straight track under the cursor.
     if app.tool == Tool::Tune {
         app.router.tune.preview = None;
@@ -343,6 +397,16 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .and_then(|a| a.shove.as_ref())
         .map(|s| s.remove.clone())
         .unwrap_or_default();
+    // A part being dragged, and the tracks stretching to it, are drawn
+    // where they go instead.
+    let moving = app.moving.as_ref();
+    let lifted = |p: &Prim| match moving {
+        Some(m) => {
+            p.component == Some(m.index as u32)
+                || matches!(p.source, Source::Track(t) if m.ends.iter().any(|e| e.0 == t))
+        }
+        None => false,
+    };
     let tiny = 0.6 / view.scale; // skip shapes smaller than a fraction of a pixel
     let any_copper = scene
         .layers
@@ -367,6 +431,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             .iter()
             .filter(|p| p.slot == *slot && !(p.all_layers && p.slot != Slot::Vias))
             .filter(|p| !matches!(p.source, Source::Track(t) if shoved_away.contains(&t)))
+            .filter(|p| !lifted(p))
         {
             let b = p.geom.bbox();
             if !overlaps(b, visible) || (b[2] - b[0] < tiny && b[3] - b[1] < tiny) {
@@ -390,12 +455,17 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 .prims
                 .iter()
                 .filter(|p: &&Prim| p.all_layers && p.slot != Slot::Vias && any_copper)
+                .filter(|p| !lifted(p))
             {
                 if overlaps(p.geom.bbox(), visible) {
                     draw(&mut shapes, &view, &p.geom, th);
                 }
             }
         }
+    }
+
+    if let Some(m) = moving {
+        draw_moving(&mut shapes, scene, &view, m);
     }
 
     // Selected net on top, in white with a dark edge, over a veil that
@@ -471,7 +541,12 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             if (top && !show_top) || (!top && !show_bottom) {
                 continue;
             }
-            let p = view.to_screen(c.x.mil() as f32, c.y.mil() as f32);
+            let (x, y) = match moving.filter(|m| std::ptr::eq(&scene.board.components[m.index], c))
+            {
+                Some(m) => (m.to.x.mil(), m.to.y.mil()),
+                None => (c.x.mil(), c.y.mil()),
+            };
+            let p = view.to_screen(x as f32, y as f32);
             if !rect.expand(40.0).contains(p) {
                 continue;
             }
@@ -499,8 +574,32 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
-    draw_holes(&mut shapes, scene, &view, visible);
-    draw_labels(ui, &mut shapes, scene, &view, visible, app.active);
+    let lifted_part = moving.map(|m| m.index as u32);
+    draw_holes(&mut shapes, scene, &view, visible, lifted_part);
+    if let Some(m) = moving {
+        // The moving part's holes, where it goes.
+        let t = m.transform(&scene.board);
+        for p in scene.board.geometry.pads.iter() {
+            if p.component != lifted_part || p.hole.0 <= 0 {
+                continue;
+            }
+            let c = t.xy([p.at.x.mil(), p.at.y.mil()]);
+            shapes.push(Shape::circle_filled(
+                view.to_screen(c[0] as f32, c[1] as f32),
+                (p.hole.mil() / 2.0) as f32 * view.scale,
+                Color32::from_rgb(24, 26, 31),
+            ));
+        }
+    }
+    draw_labels(
+        ui,
+        &mut shapes,
+        scene,
+        &view,
+        visible,
+        app.active,
+        lifted_part,
+    );
 
     if app.tool == Tool::Measure || app.measure.is_some() {
         draw_measure(ui, &mut shapes, &view, app.measure, snapped);
@@ -789,11 +888,21 @@ fn via_color(scene: &Scene, vi: usize) -> [u8; 3] {
 }
 
 /// Drill holes of vias and through-hole pads, once they are a few pixels across.
-fn draw_holes(shapes: &mut Vec<Shape>, scene: &Scene, view: &View, visible: [f32; 4]) {
+fn draw_holes(
+    shapes: &mut Vec<Shape>,
+    scene: &Scene,
+    view: &View,
+    visible: [f32; 4],
+    lifted: Option<u32>,
+) {
     let hole_color = Color32::from_rgb(24, 26, 31);
     let g = &scene.board.geometry;
     let vias_on = scene.layer_visible(Slot::Vias);
-    for p in &scene.prims {
+    for p in scene
+        .prims
+        .iter()
+        .filter(|p| lifted.is_none() || p.component != lifted)
+    {
         let (at, hole) = match p.source {
             Source::Via(vi) if vias_on => (g.vias[vi].at, g.vias[vi].hole),
             Source::Pad(pi) if p.all_layers && scene.shows(p) => (g.pads[pi].at, g.pads[pi].hole),
@@ -844,6 +953,7 @@ fn draw_labels(
     view: &View,
     visible: [f32; 4],
     active: Slot,
+    lifted: Option<u32>,
 ) {
     let g = &scene.board.geometry;
     let name = |n: Option<u32>| {
@@ -854,7 +964,11 @@ fn draw_labels(
     let shadow = Color32::from_black_alpha(200);
     let mut budget = 1500;
     let vias_on = scene.layer_visible(Slot::Vias);
-    for p in &scene.prims {
+    for p in scene
+        .prims
+        .iter()
+        .filter(|p| lifted.is_none() || p.component != lifted)
+    {
         if budget == 0 {
             break;
         }
@@ -1121,4 +1235,79 @@ fn tune_preview(
         why,
         hit,
     });
+}
+
+/// The part being dragged where it will go, the tracks that stretch to
+/// it, and its ratsnest.
+fn draw_moving(shapes: &mut Vec<Shape>, scene: &Scene, view: &View, m: &crate::placing::Moving) {
+    let board = &scene.board;
+    let t = m.transform(board);
+    let color_of = |slot: Slot| -> Option<Color32> {
+        let l = scene.layers.iter().find(|l| l.slot == slot)?;
+        l.visible.then(|| rgba(l.color, 0.95))
+    };
+    let slot_after = |s: Slot| match s {
+        Slot::Copper(i) => Slot::Copper(t.copper(i)),
+        Slot::TopSilk if t.flips() => Slot::BottomSilk,
+        Slot::BottomSilk if t.flips() => Slot::TopSilk,
+        other => other,
+    };
+    let at = |x: f32, y: f32| {
+        let q = t.xy([x as f64, y as f64]);
+        (q[0] as f32, q[1] as f32)
+    };
+    for p in scene
+        .prims
+        .iter()
+        .filter(|p| p.component == Some(m.index as u32))
+    {
+        let geom = match p.geom {
+            Geom::Seg { x1, y1, x2, y2, w } => {
+                let ((x1, y1), (x2, y2)) = (at(x1, y1), at(x2, y2));
+                Geom::Seg { x1, y1, x2, y2, w }
+            }
+            Geom::Circle { x, y, r } => {
+                let (x, y) = at(x, y);
+                Geom::Circle { x, y, r }
+            }
+            Geom::Rect { x, y, sx, sy, rot } => {
+                let (x, y) = at(x, y);
+                let rot = t.angle(rot as f64) as f32;
+                Geom::Rect { x, y, sx, sy, rot }
+            }
+        };
+        let color = if p.all_layers {
+            Some(rgba([201, 180, 88], 0.95))
+        } else {
+            color_of(slot_after(p.slot))
+        };
+        if let Some(c) = color {
+            draw(shapes, view, &geom, c);
+        }
+    }
+    for (_, tr) in m.stretched(board) {
+        let LayerRef::Copper(l) = tr.layer else {
+            continue;
+        };
+        if let Some(c) = color_of(Slot::Copper(l)) {
+            let g = Geom::Seg {
+                x1: tr.start.x.mil() as f32,
+                y1: tr.start.y.mil() as f32,
+                x2: tr.end.x.mil() as f32,
+                y2: tr.end.y.mil() as f32,
+                w: tr.width.mil() as f32,
+            };
+            draw(shapes, view, &g, c);
+        }
+    }
+    let rats = Stroke::new(1.0_f32, Color32::from_rgb(235, 235, 120));
+    for (a, b) in m.ratsnest(board) {
+        shapes.push(Shape::line_segment(
+            [
+                view.to_screen(a[0] as f32, a[1] as f32),
+                view.to_screen(b[0] as f32, b[1] as f32),
+            ],
+            rats,
+        ));
+    }
 }

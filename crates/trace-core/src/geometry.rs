@@ -29,6 +29,9 @@ pub struct Track {
     pub start: Point,
     pub end: Point,
     pub width: Length,
+    /// The part it belongs to (silk outline, part copper), which moves with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -40,6 +43,9 @@ pub struct Arc {
     pub start_deg: f64,
     pub end_deg: f64,
     pub width: Length,
+    /// The part it belongs to, as for tracks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

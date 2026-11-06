@@ -1099,6 +1099,7 @@ mod tests {
 
     fn track(net: u32, y: f64, w: f64) -> Track {
         Track {
+            component: None,
             layer: LayerRef::Copper(0),
             net: Some(net),
             start: p(0.0, y),
@@ -1182,6 +1183,7 @@ mod tests {
         assert!((v[0].found - 10.0).abs() < 1e-6 && v[0].need == 20.0);
         // Crossing tracks short.
         b.geometry.tracks.push(Track {
+            component: None,
             layer: LayerRef::Copper(0),
             net: Some(0),
             start: p(500.0, -100.0),

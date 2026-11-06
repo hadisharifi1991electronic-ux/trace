@@ -3,6 +3,19 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.15.0 (2026-11-06)
+
+- Move parts as in Altium: press on a part and drag it. While dragging,
+  Space turns it 90° about the cursor, L flips it to the other side
+  (mirrored, onto the other outer layer), Escape puts it back.
+  - Pads, silk, part copper and the 3D model move with it.
+  - Tracks that end on its pads stretch to stay joined.
+  - A ratsnest shows where its unrouted pads connect while it moves.
+  - Pours are poured again around the new place, the design rule check
+    runs again, and Ctrl+Z puts the part back in one step.
+- Silk and other primitives of a part read from Altium files (binary and
+  ASCII) know their part, and exported PcbDoc files keep it.
+
 ## 0.14.0 (2026-11-05)
 
 - Walkaround and push-and-shove in the route tool, as in Altium. Shift+R

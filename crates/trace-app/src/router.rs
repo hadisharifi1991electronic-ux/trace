@@ -233,6 +233,7 @@ impl TunePreview {
             edits.push(Edit::InsertTrack {
                 index: start + k,
                 track: Track {
+                    component: None,
                     layer: old.layer.clone(),
                     net: old.net,
                     start: Point {
@@ -686,6 +687,7 @@ impl Router {
                     edits.push(Edit::InsertTrack {
                         index: ti,
                         track: Track {
+                            component: None,
                             layer,
                             net: placed.net,
                             start: point(p),
@@ -705,6 +707,7 @@ impl Router {
                     edits.push(Edit::InsertArc {
                         index: ai,
                         arc: Arc {
+                            component: None,
                             layer,
                             net: placed.net,
                             center: point(c),

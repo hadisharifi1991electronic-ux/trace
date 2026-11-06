@@ -653,6 +653,10 @@ fn touched(board: &Board, e: &Edit) -> Option<([f64; 4], Vec<u8>)> {
                 (lo..=hi).collect(),
             ))
         }
+        Edit::PlaceComponent { index, from, to } => {
+            let b = crate::place::area(board, *index, *from, *to)?;
+            Some((b, (0..n).collect()))
+        }
         Edit::MoveComponent { .. } | Edit::SetPolygons { .. } => None,
     }
 }
@@ -782,6 +786,7 @@ mod tests {
         assert!((copper(&full) - 1_000_000.0).abs() < 1.0);
         b.geometry.polygons = full;
         let track = Track {
+            component: None,
             layer: LayerRef::Copper(0),
             net: Some(1),
             start: p(500.0, 200.0),
@@ -811,6 +816,7 @@ mod tests {
         // A wall of another net cuts the pour in two; only the half with
         // the GND pad stays.
         b.geometry.tracks.push(Track {
+            component: None,
             layer: LayerRef::Copper(0),
             net: Some(1),
             start: p(500.0, -100.0),

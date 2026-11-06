@@ -11,6 +11,7 @@ pub mod edit;
 pub mod file;
 pub mod geometry;
 pub mod impedance;
+pub mod place;
 pub mod pour;
 pub mod route;
 pub mod schematic;

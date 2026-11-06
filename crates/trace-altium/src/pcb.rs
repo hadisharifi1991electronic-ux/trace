@@ -70,6 +70,7 @@ fn len_at(b: &[u8], at: usize) -> Option<Length> {
 
 fn parse_track(b: &[u8], layers: &LayerMap) -> Option<Track> {
     Some(Track {
+        component: u16_at(b, 7).filter(|&c| c != u16::MAX).map(u32::from),
         layer: layers.get(*b.first()?),
         net: net(b),
         start: point(b, 13)?,
@@ -84,6 +85,7 @@ fn parse_arc(b: &[u8], layers: &LayerMap) -> Option<Arc> {
         return None;
     }
     Some(Arc {
+        component: u16_at(b, 7).filter(|&c| c != u16::MAX).map(u32::from),
         layer: layers.get(*b.first()?),
         net: net(b),
         center: point(b, 13)?,

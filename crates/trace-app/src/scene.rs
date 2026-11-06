@@ -286,7 +286,7 @@ impl Scene {
                     w: mil(t.width),
                 },
                 all_layers: false,
-                component: None,
+                component: t.component,
             });
         }
         for (ai, a) in g.arcs.iter().enumerate() {
@@ -314,7 +314,7 @@ impl Scene {
                         w: mil(a.width),
                     },
                     all_layers: false,
-                    component: None,
+                    component: a.component,
                 });
             }
         }

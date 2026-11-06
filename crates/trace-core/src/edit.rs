@@ -1,5 +1,6 @@
 //! Reversible changes to a board, and an undo history built from them.
 
+use crate::place::Placement;
 use crate::{Arc, Board, Length, Polygon, Track, Via};
 
 #[derive(Clone, Debug)]
@@ -9,6 +10,12 @@ pub enum Edit {
         index: usize,
         dx: Length,
         dy: Length,
+    },
+    /// Moves, turns or flips a part with everything it owns.
+    PlaceComponent {
+        index: usize,
+        from: Placement,
+        to: Placement,
     },
     InsertTrack {
         index: usize,
@@ -69,6 +76,9 @@ impl Edit {
                     p.at.y.0 += dy.0;
                 }
             }
+            Edit::PlaceComponent { index, from, to } => {
+                crate::place::place(board, *index, *from, *to)
+            }
             Edit::InsertTrack { index, track } => insert(&mut board.geometry.tracks, *index, track),
             Edit::RemoveTrack { index, .. } => remove(&mut board.geometry.tracks, *index),
             Edit::InsertArc { index, arc } => insert(&mut board.geometry.arcs, *index, arc),
@@ -85,6 +95,11 @@ impl Edit {
                 index: *index,
                 dx: Length(-dx.0),
                 dy: Length(-dy.0),
+            },
+            Edit::PlaceComponent { index, from, to } => Edit::PlaceComponent {
+                index: *index,
+                from: *to,
+                to: *from,
             },
             Edit::InsertTrack { index, track } => Edit::RemoveTrack {
                 index: *index,
@@ -212,6 +227,7 @@ mod tests {
 
     fn track(x: f64) -> Track {
         Track {
+            component: None,
             layer: LayerRef::Copper(0),
             net: None,
             start: Point::default(),

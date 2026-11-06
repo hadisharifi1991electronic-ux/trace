@@ -347,6 +347,7 @@ pub fn shove(
         for w in path.windows(2) {
             extra.push((w[0], w[1], r));
             add.push(Track {
+                component: None,
                 layer: LayerRef::Copper(layer),
                 net: t.net,
                 start: Point {
@@ -462,6 +463,7 @@ mod tests {
     #[test]
     fn a_track_in_the_way_is_pushed_aside() {
         let t = Track {
+            component: None,
             layer: LayerRef::Copper(0),
             net: Some(1),
             start: pt(0.0, 10.0),

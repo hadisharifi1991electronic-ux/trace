@@ -625,6 +625,7 @@ fn core_arc(layer: LayerRef, c: Pt, a: Pt, b: Pt, cw: bool, width: f64) -> Optio
         std::mem::swap(&mut s, &mut e);
     }
     Some(Arc {
+        component: None,
         layer,
         net: None,
         center: pt(c),
@@ -746,6 +747,7 @@ impl Builder {
                     let w = geom::aperture_width(g.aperture(*ap));
                     let i = self.board.geometry.tracks.len();
                     self.board.geometry.tracks.push(Track {
+                        component: None,
                         layer: layer.clone(),
                         net: None,
                         start: pt(*a),
@@ -816,6 +818,7 @@ impl Builder {
             }
             match &it.obj {
                 Obj::Line { ap, a, b } => self.board.geometry.tracks.push(Track {
+                    component: None,
                     layer: layer.clone(),
                     net: None,
                     start: pt(*a),
@@ -837,6 +840,7 @@ impl Builder {
                 Obj::Flash { ap, at, .. } => {
                     let w = geom::aperture_width(g.aperture(*ap));
                     self.board.geometry.tracks.push(Track {
+                        component: None,
                         layer: layer.clone(),
                         net: None,
                         start: pt(*at),
@@ -849,6 +853,7 @@ impl Builder {
                         // Silk fills are drawn as their outline.
                         for k in 0..c.len() {
                             self.board.geometry.tracks.push(Track {
+                                component: None,
                                 layer: layer.clone(),
                                 net: None,
                                 start: pt(c[k]),

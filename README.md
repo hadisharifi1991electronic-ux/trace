@@ -48,8 +48,14 @@ checker and simulator all read.
 - set length rules in the Constraint Manager (the Constraints button, or C),
   in the style of Allegro's: groups of nets (all nets, a net class, a pair
   class, a name pattern such as `DDR_DQ*`, or a list) with a minimum and
-  maximum length, a match tolerance against the longest member, a maximum
-  pair skew and a maximum via count. Altium boards start with their own
+  maximum length, a match tolerance, a maximum pair skew and a maximum via
+  count. A matched group matches its members to the longest one, to a
+  member you pick, or to a set value; by length, or by propagation delay
+  in ps as Allegro's relative propagation delay does (each layer at its
+  own speed, so a track on an outer layer counts as faster than the same
+  length inside); and each differential pair can count as one member.
+  The tuner (T) tunes to the group's target, delay included, and failing
+  nets also show in the design rule check list (Length). Altium boards start with their own
   Length and Matched Length rules. Every net is checked as you edit, failing
   nets are listed with how far off they are, and clicking one selects it on
   the board. Your groups are kept per board in Trace's settings; the design

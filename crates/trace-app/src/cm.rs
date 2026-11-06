@@ -4,7 +4,9 @@
 
 use eframe::egui::{self, Color32, RichText};
 use std::collections::HashMap;
-use trace_core::constraints::{ConstraintSet, Group, GroupResult, Limits, Members};
+use trace_core::constraints::{
+    ConstraintSet, Group, GroupResult, Limits, MatchTarget, Members, Problem,
+};
 use trace_core::{Board, Length};
 
 const FAIL: Color32 = Color32::from_rgb(240, 96, 96);
@@ -105,10 +107,17 @@ impl Cm {
         self.saved.insert(self.board_key.clone(), self.set.clone());
     }
 
-    /// The length a net should be tuned to, and why: the longest member
-    /// of a matched group, a minimum length, or its pair partner when the
-    /// group limits skew. The largest of these wins.
-    pub fn tune_target(&mut self, board: &Board, net: u32) -> Option<(f64, String)> {
+    /// The length a net should be tuned to by meanders on `track`, and
+    /// why: the match target of a matched group (for a delay match, the
+    /// length that brings its delay there at the speed of the track's
+    /// layer), a minimum length, or its pair partner when the group limits
+    /// skew. The largest of these wins.
+    pub fn tune_target(
+        &mut self,
+        board: &Board,
+        net: u32,
+        track: &trace_core::Track,
+    ) -> Option<(f64, String)> {
         let groups = self.set.groups.clone();
         let results = self.results(board).clone();
         let mut best: Option<(f64, String)> = None;
@@ -117,6 +126,14 @@ impl Cm {
                 best = Some((v, why));
             }
         };
+        let length = board.net_length(net).mil();
+        let ps_per_mil = match track.layer {
+            trace_core::LayerRef::Copper(l) => board
+                .layer_geometry()
+                .get(l as usize)
+                .map(|g| g.delay_ps_per_in(track.width.mil()) / 1000.0),
+            _ => None,
+        };
         for (g, r) in groups.iter().zip(&results) {
             if !g.enabled {
                 continue;
@@ -124,8 +141,22 @@ impl Cm {
             let Some(me) = r.nets.iter().find(|n| n.net == net) else {
                 continue;
             };
-            if let (Some(_), Some(t)) = (g.limits.match_tolerance, r.target) {
-                offer(t.mil(), format!("longest in {}", g.name));
+            if let Some(t) = r.target_value {
+                let what = match &g.limits.match_target {
+                    MatchTarget::Longest => "longest",
+                    MatchTarget::Member(_) => "target member",
+                    MatchTarget::Value(_) => "target",
+                };
+                if g.limits.by_delay {
+                    if let Some(k) = ps_per_mil.filter(|k| *k > 0.0) {
+                        offer(
+                            length + (t - me.delay_ps) / k,
+                            format!("{what} in {}: {t:.1} ps", g.name),
+                        );
+                    }
+                } else {
+                    offer(t, format!("{what} in {}", g.name));
+                }
             }
             if let Some(m) = g.limits.min_length {
                 offer(m.mil(), format!("minimum of {}", g.name));
@@ -141,6 +172,50 @@ impl Cm {
             }
         }
         best
+    }
+
+    /// Every failing net of every group, with what is wrong, for the
+    /// design rule check list.
+    pub fn failures(&mut self, board: &Board) -> Vec<(u32, String)> {
+        let groups = self.set.groups.clone();
+        let mut out = Vec::new();
+        for (g, r) in groups.iter().zip(self.results(board).iter()) {
+            for n in r.nets.iter().filter(|n| !n.problems.is_empty()) {
+                let mut what: Vec<String> = Vec::new();
+                for p in &n.problems {
+                    what.push(match p {
+                        Problem::Unmatched => {
+                            let o = n.off.unwrap_or(0.0);
+                            let unit = if g.limits.by_delay { "ps" } else { "mil" };
+                            let tol = if g.limits.by_delay {
+                                g.limits.match_tolerance_ps.unwrap_or(0.0)
+                            } else {
+                                g.limits.match_tolerance.map_or(0.0, |t| t.mil())
+                            };
+                            format!(
+                                "{:.1} {unit} {} the match target (± {tol:.1})",
+                                o.abs(),
+                                if o < 0.0 { "short of" } else { "over" }
+                            )
+                        }
+                        Problem::Skew => {
+                            format!("pair skew {:.1} mil", n.skew.map_or(0.0, |s| s.mil()))
+                        }
+                        other => format!(
+                            "{} ({:.1} mil, {} vias)",
+                            other.label(),
+                            n.length.mil(),
+                            n.vias
+                        ),
+                    });
+                }
+                out.push((
+                    n.net,
+                    format!("{}: {} ({})", n.name, what.join(", "), g.name),
+                ));
+            }
+        }
+        out
     }
 
     /// Failing nets over all groups, for the status bar.
@@ -240,11 +315,12 @@ impl Cm {
                         "Members".into(),
                         format!("Min ({unit})"),
                         format!("Max ({unit})"),
-                        format!("Match ± ({unit})"),
+                        format!("Match ± ({unit} or ps)"),
                         format!("Max skew ({unit})"),
                         "Max vias".into(),
                         format!("Length ({unit})"),
-                        format!("Delta ({unit})"),
+                        "Delay (ps)".into(),
+                        "Off target".into(),
                         format!("Skew ({unit})"),
                         "Vias".into(),
                         "Status".into(),
@@ -276,21 +352,37 @@ impl Cm {
                         let l = &mut g.limits;
                         edited |= limit(ui, (gi, 0), &mut l.min_length, mm);
                         edited |= limit(ui, (gi, 1), &mut l.max_length, mm);
-                        edited |= limit(ui, (gi, 2), &mut l.match_tolerance, mm);
+                        if l.by_delay {
+                            edited |= ps(ui, (gi, 2), &mut l.match_tolerance_ps);
+                        } else {
+                            edited |= limit(ui, (gi, 2), &mut l.match_tolerance, mm);
+                        }
                         edited |= limit(ui, (gi, 3), &mut l.max_skew, mm);
                         edited |= count(ui, (gi, 4), &mut l.max_vias);
-                        let target = r.target.map(|t| {
-                            if mm {
-                                format!("{:.3}", t.mm())
-                            } else {
-                                format!("{:.1}", t.mil())
+                        edited |= target_cell(ui, gi, l, r, mm);
+                        if ui
+                            .checkbox(&mut l.by_delay, "by delay")
+                            .on_hover_text(
+                                "Match propagation delay (ps) instead of length, as Allegro's relative propagation delay: outer layers are faster than inner ones",
+                            )
+                            .changed()
+                        {
+                            // A set value means mil or ps; start again.
+                            if matches!(l.match_target, MatchTarget::Value(_)) {
+                                l.match_target = MatchTarget::Longest;
                             }
-                        });
-                        ui.label(
-                            RichText::new(target.map_or(String::new(), |t| format!("longest {t}")))
-                                .weak(),
-                        );
-                        ui.label("");
+                            edited = true;
+                        }
+                        if r.nets.iter().any(|n| n.pair.is_some()) {
+                            edited |= ui
+                                .checkbox(&mut l.pairs_as_one, "pairs as one")
+                                .on_hover_text(
+                                    "Match each differential pair by the mean of its two nets, as one member",
+                                )
+                                .changed();
+                        } else {
+                            ui.label("");
+                        }
                         ui.label("");
                         ui.label(format!("{} nets", r.nets.len()));
                         if r.nets.is_empty() {
@@ -341,7 +433,17 @@ impl Cm {
                                 ui.label("");
                             }
                             ui.label(self.fmt(n.length));
-                            ui.label(n.match_delta.map_or(String::new(), |d| self.fmt(d)));
+                            ui.label(format!("{:.1}", n.delay_ps));
+                            let by_delay = self.set.groups[gi].limits.by_delay;
+                            ui.label(n.off.map_or(String::new(), |o| {
+                                if by_delay {
+                                    format!("{o:+.1} ps")
+                                } else if self.mm {
+                                    format!("{:+.3}", o * 0.0254)
+                                } else {
+                                    format!("{o:+.1}")
+                                }
+                            }));
                             ui.label(n.skew.map_or(String::new(), |s| self.fmt(s)));
                             ui.label(n.vias.to_string());
                             if !n.problems.is_empty() {
@@ -478,6 +580,98 @@ impl Cm {
     }
 }
 
+/// The match target of a group: the longest member, one member, or a
+/// set value. Returns whether it changed.
+fn target_cell(ui: &mut egui::Ui, gi: usize, l: &mut Limits, r: &GroupResult, mm: bool) -> bool {
+    let mut changed = false;
+    let value = |v: f64| {
+        if l.by_delay {
+            format!("{v:.1} ps")
+        } else if mm {
+            format!("{:.3} mm", v * 0.0254)
+        } else {
+            format!("{v:.1}")
+        }
+    };
+    let shown = match &l.match_target {
+        MatchTarget::Longest => match r.target_value {
+            Some(v) => format!("longest {}", value(v)),
+            None => "longest".into(),
+        },
+        MatchTarget::Member(m) => m.clone(),
+        MatchTarget::Value(_) => "set value".into(),
+    };
+    // Members to pick: pairs by name when pairs count as one, else nets.
+    let mut names: Vec<String> = if l.pairs_as_one {
+        let mut p: Vec<String> = r.nets.iter().filter_map(|n| n.pair.clone()).collect();
+        p.dedup();
+        p.extend(
+            r.nets
+                .iter()
+                .filter(|n| n.pair.is_none())
+                .map(|n| n.name.clone()),
+        );
+        p
+    } else {
+        r.nets.iter().map(|n| n.name.clone()).collect()
+    };
+    names.sort();
+    names.dedup();
+    ui.horizontal(|ui| {
+        egui::ComboBox::from_id_salt(("cm_target", gi))
+            .selected_text(shown)
+            .width(130.0)
+            .show_ui(ui, |ui| {
+                changed |= ui
+                    .selectable_value(&mut l.match_target, MatchTarget::Longest, "Longest member")
+                    .changed();
+                let set = MatchTarget::Value(r.target_value.unwrap_or(1000.0));
+                if ui
+                    .selectable_label(matches!(l.match_target, MatchTarget::Value(_)), "Set value")
+                    .clicked()
+                {
+                    l.match_target = set;
+                    changed = true;
+                }
+                ui.separator();
+                for n in names.iter().take(300) {
+                    changed |= ui
+                        .selectable_value(&mut l.match_target, MatchTarget::Member(n.clone()), n)
+                        .changed();
+                }
+            })
+            .response
+            .on_hover_text("What the members are matched to");
+        if let MatchTarget::Value(v) = &mut l.match_target {
+            let delay = l.by_delay;
+            let k = if delay || !mm { 1.0 } else { 0.0254 };
+            let shown = trim(format!("{:.3}", *v * k));
+            if let Some(n) = edit(ui, (gi, 9), shown, |s| s.parse::<f64>().ok()) {
+                *v = n / k;
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+/// An editable delay in ps; empty means none.
+fn ps(ui: &mut egui::Ui, id: (usize, u8), v: &mut Option<f64>) -> bool {
+    let shown = v.map_or(String::new(), |p| trim(format!("{p:.2}")));
+    edit(ui, id, shown, |s| {
+        if s.is_empty() {
+            return Some(None);
+        }
+        s.trim_end_matches("ps")
+            .trim()
+            .parse::<f64>()
+            .ok()
+            .map(Some)
+    })
+    .map(|n| *v = n)
+    .is_some()
+}
+
 /// An editable length limit; empty means no limit. Returns whether it changed.
 fn limit(ui: &mut egui::Ui, id: (usize, u8), v: &mut Option<Length>, mm: bool) -> bool {
     let shown = v.map_or(String::new(), |l| {
@@ -546,4 +740,67 @@ fn edit<T>(
         }
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trace_core::*;
+
+    #[test]
+    fn tunes_a_delay_match_by_the_speed_of_the_tracks_layer() {
+        let mut b = Board::default();
+        let layer = |name: &str, kind: LayerKind, t: f64, er: Option<f64>| StackLayer {
+            name: name.into(),
+            altium_id: None,
+            kind,
+            thickness: Length::from_mil(t),
+            dielectric_constant: er,
+            material: None,
+        };
+        b.stackup.layers = vec![
+            layer("Top", LayerKind::Copper, 1.4, None),
+            layer("D1", LayerKind::Dielectric, 4.0, Some(4.0)),
+            layer("In1", LayerKind::Copper, 0.7, None),
+            layer("D2", LayerKind::Dielectric, 4.0, Some(4.0)),
+            layer("Bottom", LayerKind::Copper, 1.4, None),
+        ];
+        for (name, len) in [("A", 1000.0), ("B", 900.0)] {
+            let n = b.nets.len() as u32;
+            b.nets.push(Net {
+                name: name.into(),
+                routed_length: Length::from_mil(len),
+                pieces: 1,
+                ..Default::default()
+            });
+            b.geometry.tracks.push(Track {
+                layer: LayerRef::Copper(1),
+                net: Some(n),
+                start: Point::default(),
+                end: Point {
+                    x: Length::from_mil(len),
+                    y: Length(0),
+                },
+                width: Length::from_mil(5.0),
+                component: None,
+            });
+        }
+        let mut cm = Cm::new(None);
+        cm.set.groups.push(Group {
+            name: "g".into(),
+            members: Members::Nets(vec!["A".into(), "B".into()]),
+            limits: Limits {
+                by_delay: true,
+                match_tolerance_ps: Some(1.0),
+                ..Default::default()
+            },
+            enabled: true,
+            source: String::new(),
+        });
+        let t = b.geometry.tracks[1].clone();
+        let (target, why) = cm.tune_target(&b, 1, &t).expect("a target");
+        // Same layer, so the same speed: B goes to A's length.
+        assert!((target - 1000.0).abs() < 0.01, "{target} {why}");
+        assert!(why.contains("ps"), "{why}");
+    }
 }

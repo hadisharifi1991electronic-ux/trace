@@ -1175,7 +1175,7 @@ fn tune_preview(
     let length = board.net_length(net).mil();
     let (target, why) = match router.tune.target {
         Some(v) => (v, "your target".to_string()),
-        None => match cm.tune_target(board, net).or_else(|| {
+        None => match cm.tune_target(board, net, t).or_else(|| {
             // A pair net with no rule: match its partner.
             let (_, partner) = scene.pair_of.get(&board.nets[net as usize].name)?;
             let p = *scene.net_by_name.get(partner)?;

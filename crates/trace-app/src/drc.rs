@@ -27,12 +27,22 @@ pub struct Drc {
     took: f64,
     /// The row last clicked.
     pub current: Option<usize>,
-    show: [bool; 4],
+    /// Which kinds are listed; the last is length constraints.
+    show: [bool; 5],
     /// The board has no clearance rules of its own.
     no_rules: bool,
 }
 
 const KINDS: [Kind; 4] = [Kind::Short, Kind::Clearance, Kind::Width, Kind::Unrouted];
+
+/// A row the user clicked: a violation, or a net that fails a length
+/// constraint.
+pub enum Pick {
+    Violation(usize),
+    Net(u32),
+}
+
+const LENGTH: Color32 = Color32::from_rgb(200, 150, 255);
 
 pub fn color(kind: Kind) -> Color32 {
     match kind {
@@ -54,7 +64,7 @@ impl Default for Drc {
             running: None,
             took: 0.0,
             current: None,
-            show: [true; 4],
+            show: [true; 5],
             no_rules: false,
         }
     }
@@ -130,7 +140,14 @@ impl Drc {
 
     /// The panel docked under the board, as Altium's Messages panel;
     /// returns the index of a violation the user clicked.
-    pub fn show(&mut self, ctx: &egui::Context, board: &Board) -> Option<usize> {
+    /// `lengths` are the nets failing the Constraint Manager's length
+    /// rules, listed with the rest.
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        board: &Board,
+        lengths: &[(u32, String)],
+    ) -> Option<Pick> {
         if !self.open {
             return None;
         }
@@ -151,12 +168,17 @@ impl Drc {
                         }
                     });
                 });
-                pick = self.body(ui, board);
+                pick = self.body(ui, board, lengths);
             });
         pick
     }
 
-    fn body(&mut self, ui: &mut egui::Ui, board: &Board) -> Option<usize> {
+    fn body(
+        &mut self,
+        ui: &mut egui::Ui,
+        board: &Board,
+        lengths: &[(u32, String)],
+    ) -> Option<Pick> {
         let mut pick = None;
         ui.horizontal(|ui| {
             ui.checkbox(&mut self.live, "Live")
@@ -194,6 +216,15 @@ impl Drc {
                 });
                 ui.toggle_value(&mut self.show[i], text);
             }
+            let n = lengths.len();
+            let text = RichText::new(format!("Length {n}")).color(if n > 0 {
+                LENGTH
+            } else {
+                Color32::GRAY
+            });
+            ui.toggle_value(&mut self.show[4], text).on_hover_text(
+                "Nets failing the Constraint Manager's length, match, skew and via rules",
+            );
         });
         if self.no_rules {
             ui.label(
@@ -204,11 +235,15 @@ impl Drc {
             );
         }
         ui.separator();
-        if self.checked.is_some() && self.list.is_empty() {
-            ui.label("Clearance, short circuit, width and unrouted net rules all pass.");
+        if self.checked.is_some() && self.list.is_empty() && lengths.is_empty() {
+            ui.label("Clearance, short circuit, width, unrouted net and length rules all pass.");
             return None;
         }
-        let rows: Vec<usize> = (0..self.list.len())
+        enum Row {
+            V(usize),
+            L(usize),
+        }
+        let mut rows: Vec<Row> = (0..self.list.len())
             .filter(|&i| {
                 let k = self.list[i].kind;
                 KINDS
@@ -216,7 +251,11 @@ impl Drc {
                     .position(|&x| x == k)
                     .is_some_and(|j| self.show[j])
             })
+            .map(Row::V)
             .collect();
+        if self.show[4] {
+            rows.extend((0..lengths.len()).map(Row::L));
+        }
         let copper: Vec<String> = board
             .stackup
             .copper_layers()
@@ -226,7 +265,28 @@ impl Drc {
         egui::ScrollArea::vertical()
             .auto_shrink([false, false])
             .show_rows(ui, row_h, rows.len(), |ui, range| {
-                for &i in &rows[range] {
+                for row in &rows[range] {
+                    let i = match *row {
+                        Row::V(i) => i,
+                        Row::L(j) => {
+                            let (net, text) = &lengths[j];
+                            ui.horizontal(|ui| {
+                                ui.add_sized(
+                                    [92.0, row_h - 4.0],
+                                    egui::Label::new(RichText::new("Length").color(LENGTH)),
+                                );
+                                ui.add_sized([92.0, row_h - 4.0], egui::Label::new(""));
+                                if ui
+                                    .selectable_label(false, text)
+                                    .on_hover_text("Select the net on the board")
+                                    .clicked()
+                                {
+                                    pick = Some(Pick::Net(*net));
+                                }
+                            });
+                            continue;
+                        }
+                    };
                     let v = &self.list[i];
                     let layer = v
                         .layer
@@ -249,7 +309,7 @@ impl Drc {
                             .clicked()
                         {
                             self.current = Some(i);
-                            pick = Some(i);
+                            pick = Some(Pick::Violation(i));
                         }
                     });
                 }

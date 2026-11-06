@@ -3,6 +3,23 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.16.0 (2026-11-06)
+
+- Length-match groups in the Constraint Manager, Allegro style:
+  - match to the longest member, to a member you pick (a net, or a pair
+    by name) or to a set value, within a tolerance either way;
+  - match propagation delay in ps instead of length: each track at the
+    speed of its layer from the stack-up (microstrip outside, stripline
+    inside), via barrels at the board's mean dielectric; a Delay column
+    shows every net's delay;
+  - "pairs as one" matches each differential pair by the mean of its two
+    nets;
+  - an "Off target" column shows how far each member is, signed.
+- The tuner (T) tunes to the group's target, working out the length a
+  delay target needs on the layer of the track being tuned.
+- Nets failing the Constraint Manager's rules are listed in the design
+  rule check panel under Length; a click selects and shows the net.
+
 ## 0.15.0 (2026-11-06)
 
 - Move parts as in Altium: press on a part and drag it. While dragging,

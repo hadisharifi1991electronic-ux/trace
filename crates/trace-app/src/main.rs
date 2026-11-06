@@ -2281,11 +2281,19 @@ impl eframe::App for App {
         }
         if !self.mode_sch {
             let hit = match &self.scene {
-                Some(scene) => self.drc.show(ctx, &scene.board),
-                None => None,
+                Some(scene) if self.drc.open => {
+                    let lengths = self.cm.failures(&scene.board);
+                    self.drc.show(ctx, &scene.board, &lengths)
+                }
+                _ => None,
             };
-            if let Some(i) = hit {
-                self.show_violation(i);
+            match hit {
+                Some(drc::Pick::Violation(i)) => self.show_violation(i),
+                Some(drc::Pick::Net(n)) => {
+                    self.mode3d = false;
+                    self.select_net(n, true);
+                }
+                None => {}
             }
         }
         let board2d = self.scene.is_some() && !self.mode3d && !self.mode_sch;

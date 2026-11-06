@@ -48,13 +48,40 @@ impl Members {
     }
 }
 
+/// What the members of a matched group are matched to, as Allegro's
+/// relative propagation delay target.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum MatchTarget {
+    /// The longest member (the slowest, when matching delay).
+    #[default]
+    Longest,
+    /// One member net, or a pair by its name.
+    Member(String),
+    /// A set value: mil, or ps when matching delay.
+    Value(f64),
+}
+
 /// Limits for one group. Unset limits are not checked.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct Limits {
     pub min_length: Option<Length>,
     pub max_length: Option<Length>,
-    /// All members within this much of the longest one.
+    /// All members within this much of the target (by default the
+    /// longest member).
     pub match_tolerance: Option<Length>,
+    #[serde(default)]
+    pub match_target: MatchTarget,
+    /// Match propagation delay (ps) instead of length: a track on an outer
+    /// layer is faster than the same length inside the board.
+    #[serde(default)]
+    pub by_delay: bool,
+    /// The match tolerance when matching delay, ps.
+    #[serde(default)]
+    pub match_tolerance_ps: Option<f64>,
+    /// Match each differential pair as one member, by the mean of its two
+    /// nets, rather than each net on its own.
+    #[serde(default)]
+    pub pairs_as_one: bool,
     /// The two nets of each pair within this much of each other.
     pub max_skew: Option<Length>,
     pub max_vias: Option<usize>,
@@ -85,8 +112,13 @@ pub struct NetResult {
     pub pair: Option<String>,
     pub length: Length,
     pub vias: usize,
-    /// Shortfall against the longest net of a matched group (always >= 0).
+    /// Shortfall against the target of a matched group, by length.
     pub match_delta: Option<Length>,
+    /// Propagation delay, ps.
+    pub delay_ps: f64,
+    /// How far the member is from the group's match target: mil, or ps
+    /// when matching delay; negative when short.
+    pub off: Option<f64>,
     /// Length difference to its pair partner.
     pub skew: Option<Length>,
     pub problems: Vec<Problem>,
@@ -118,8 +150,10 @@ impl Problem {
 #[derive(Clone, Debug)]
 pub struct GroupResult {
     pub nets: Vec<NetResult>,
-    /// Longest member, the target of a matched group.
+    /// The length members are matched to (when matching length).
     pub target: Option<Length>,
+    /// The match target: mil, or ps when matching delay.
+    pub target_value: Option<f64>,
     pub failing: usize,
 }
 
@@ -233,6 +267,50 @@ impl Board {
         out
     }
 
+    /// Propagation delay of every net, ps: each track and arc at the speed
+    /// of its layer (microstrip outside, stripline inside), via barrels at
+    /// the board's mean dielectric.
+    pub fn net_delays(&self) -> Vec<f64> {
+        let geo = self.layer_geometry();
+        let er = if geo.is_empty() {
+            crate::impedance::DEFAULT_ER
+        } else {
+            geo.iter().map(|g| g.er).sum::<f64>() / geo.len() as f64
+        };
+        // c = 11.803 in/ns: ps per mil = sqrt(er) / 11.803.
+        let inner = er.sqrt() / 11.803;
+        let per_mil = |l: &crate::LayerRef, w: f64| match l {
+            crate::LayerRef::Copper(c) => geo
+                .get(*c as usize)
+                .map_or(inner, |g| g.delay_ps_per_in(w) / 1000.0),
+            _ => inner,
+        };
+        let mut d = vec![0.0; self.nets.len()];
+        let g = &self.geometry;
+        for t in &g.tracks {
+            let Some(n) = t.net.filter(|&n| (n as usize) < d.len()) else {
+                continue;
+            };
+            let len = (t.end.x.mil() - t.start.x.mil()).hypot(t.end.y.mil() - t.start.y.mil());
+            d[n as usize] += len * per_mil(&t.layer, t.width.mil());
+        }
+        for a in &g.arcs {
+            let Some(n) = a.net.filter(|&n| (n as usize) < d.len()) else {
+                continue;
+            };
+            let mut sweep = (a.end_deg - a.start_deg).rem_euclid(360.0);
+            if sweep == 0.0 {
+                sweep = 360.0;
+            }
+            let len = a.radius.mil() * sweep.to_radians();
+            d[n as usize] += len * per_mil(&a.layer, a.width.mil());
+        }
+        for (i, n) in self.nets.iter().enumerate() {
+            d[i] += n.via_length.mil() * inner;
+        }
+        d
+    }
+
     /// Measures a group's nets and checks them against its limits.
     pub fn check(&self, g: &Group) -> GroupResult {
         let members = self.members(&g.members);
@@ -241,7 +319,8 @@ impl Board {
             .iter()
             .map(|(n, _)| (*n, self.net_length(*n)))
             .collect();
-        let target = members.iter().map(|(n, _)| len_of[n]).max();
+        let delays = self.net_delays();
+        let delay = |n: u32| delays.get(n as usize).copied().unwrap_or(0.0);
         // Partner lengths for skew.
         let mut by_pair: BTreeMap<&str, Vec<u32>> = BTreeMap::new();
         for (n, p) in &members {
@@ -249,6 +328,47 @@ impl Board {
                 by_pair.entry(p.as_str()).or_default().push(*n);
             }
         }
+        // What is matched: length or delay, of each net or each pair.
+        let value = |n: u32| {
+            if lim.by_delay {
+                delay(n)
+            } else {
+                len_of.get(&n).map_or(0.0, |l| l.mil())
+            }
+        };
+        let pair_value = |p: &str| {
+            let nets = by_pair.get(p)?;
+            Some(nets.iter().map(|&n| value(n)).sum::<f64>() / nets.len().max(1) as f64)
+        };
+        let member_value = |n: u32, pair: &Option<String>| match pair {
+            Some(p) if lim.pairs_as_one => pair_value(p).unwrap_or_else(|| value(n)),
+            _ => value(n),
+        };
+        let target_value = match &lim.match_target {
+            MatchTarget::Longest => members
+                .iter()
+                .map(|(n, p)| member_value(*n, p))
+                .max_by(f64::total_cmp),
+            MatchTarget::Member(name) => members
+                .iter()
+                .find(|(n, _)| self.nets[*n as usize].name == *name)
+                .map(|(n, p)| member_value(*n, p))
+                .or_else(|| {
+                    let nets = by_pair.get(name.as_str())?;
+                    if lim.pairs_as_one {
+                        pair_value(name)
+                    } else {
+                        nets.iter().map(|&n| value(n)).max_by(f64::total_cmp)
+                    }
+                }),
+            MatchTarget::Value(v) => Some(*v),
+        };
+        let tolerance = if lim.by_delay {
+            lim.match_tolerance_ps
+        } else {
+            lim.match_tolerance.map(|t| t.mil())
+        };
+        let target = target_value.filter(|_| !lim.by_delay).map(Length::from_mil);
         let mut nets = Vec::with_capacity(members.len());
         for (n, pair) in &members {
             let net = &self.nets[*n as usize];
@@ -257,8 +377,12 @@ impl Board {
                 let other = by_pair.get(p)?.iter().find(|o| *o != n)?;
                 Some(Length((length.0 - len_of[other].0).abs()))
             });
+            let off = tolerance
+                .and(target_value)
+                .map(|t| member_value(*n, pair) - t);
             let match_delta = lim
                 .match_tolerance
+                .filter(|_| !lim.by_delay)
                 .and(target)
                 .map(|t| Length(t.0 - length.0));
             let mut problems = Vec::new();
@@ -269,8 +393,8 @@ impl Board {
                 if lim.max_length.is_some_and(|m| length > m) {
                     problems.push(Problem::TooLong);
                 }
-                if let (Some(tol), Some(d)) = (lim.match_tolerance, match_delta) {
-                    if d > tol {
+                if let (Some(tol), Some(o)) = (tolerance, off) {
+                    if o.abs() > tol + 1e-6 {
                         problems.push(Problem::Unmatched);
                     }
                 }
@@ -290,6 +414,8 @@ impl Board {
                 length,
                 vias: net.vias,
                 match_delta,
+                delay_ps: delay(*n),
+                off,
                 skew,
                 open: net.pieces > 1 && !net.has_pour,
                 problems,
@@ -299,6 +425,7 @@ impl Board {
         GroupResult {
             nets,
             target,
+            target_value: target_value.filter(|_| tolerance.is_some()),
             failing,
         }
     }
@@ -404,5 +531,99 @@ mod tests {
             Some(Members::AllPairs)
         );
         assert_eq!(parse_scope("InNet('A') or InNet('B')"), None);
+    }
+
+    fn bus() -> Board {
+        use crate::*;
+        let mut b = Board::default();
+        let layer = |name: &str, kind: LayerKind, t: f64, er: Option<f64>| StackLayer {
+            name: name.into(),
+            altium_id: None,
+            kind,
+            thickness: Length::from_mil(t),
+            dielectric_constant: er,
+            material: None,
+        };
+        b.stackup.layers = vec![
+            layer("Top", LayerKind::Copper, 1.4, None),
+            layer("D1", LayerKind::Dielectric, 4.0, Some(4.0)),
+            layer("In1", LayerKind::Copper, 0.7, None),
+            layer("D2", LayerKind::Dielectric, 4.0, Some(4.0)),
+            layer("Bottom", LayerKind::Copper, 1.4, None),
+        ];
+        // A and B on top, C inside: all 1000 mil long, but C is slower.
+        for (name, l, len) in [("A", 0, 1000.0), ("B", 0, 990.0), ("C", 1, 1000.0)] {
+            let n = b.nets.len() as u32;
+            b.nets.push(Net {
+                name: name.into(),
+                routed_length: Length::from_mil(len),
+                pieces: 1,
+                ..Default::default()
+            });
+            b.geometry.tracks.push(Track {
+                layer: LayerRef::Copper(l),
+                net: Some(n),
+                start: Point::default(),
+                end: Point {
+                    x: Length::from_mil(len),
+                    y: Length(0),
+                },
+                width: Length::from_mil(5.0),
+                component: None,
+            });
+        }
+        b
+    }
+
+    fn group(limits: Limits) -> Group {
+        Group {
+            name: "bus".into(),
+            members: Members::Nets(vec!["A".into(), "B".into(), "C".into()]),
+            limits,
+            enabled: true,
+            source: String::new(),
+        }
+    }
+
+    #[test]
+    fn matches_length_to_a_set_target_or_a_member() {
+        let b = bus();
+        let r = b.check(&group(Limits {
+            match_tolerance: Some(Length::from_mil(5.0)),
+            ..Default::default()
+        }));
+        // Longest is 1000: B is 10 short.
+        let off: Vec<f64> = r.nets.iter().map(|n| n.off.unwrap()).collect();
+        assert!((off[1] + 10.0).abs() < 1e-6, "{off:?}");
+        assert_eq!(r.failing, 1);
+        let r = b.check(&group(Limits {
+            match_tolerance: Some(Length::from_mil(5.0)),
+            match_target: MatchTarget::Value(995.0),
+            ..Default::default()
+        }));
+        assert_eq!(r.failing, 0, "all within 5 of 995");
+        let r = b.check(&group(Limits {
+            match_tolerance: Some(Length::from_mil(5.0)),
+            match_target: MatchTarget::Member("B".into()),
+            ..Default::default()
+        }));
+        assert_eq!(r.failing, 2, "A and C are 10 over B");
+    }
+
+    #[test]
+    fn matches_delay_with_inner_layers_slower() {
+        let b = bus();
+        let d = b.net_delays();
+        // Inner (stripline, er 4) is 2 / 11.803 ps per mil; outer less.
+        assert!((d[2] - 1000.0 * 2.0 / 11.803).abs() < 0.5, "{d:?}");
+        assert!(d[0] < d[2] - 10.0, "{d:?}");
+        let r = b.check(&group(Limits {
+            by_delay: true,
+            match_tolerance_ps: Some(2.0),
+            ..Default::default()
+        }));
+        // C is the slowest; A and B are well behind it.
+        assert_eq!(r.failing, 2);
+        assert!((r.target_value.unwrap() - d[2]).abs() < 1e-9);
     }
 }

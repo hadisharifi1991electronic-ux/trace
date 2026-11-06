@@ -373,6 +373,7 @@ impl<'a> Builder<'a> {
             diameter: self.len(diameter),
             hole: self.len(ps.drill as f64),
             rings: Vec::new(),
+            fab: Default::default(),
         });
     }
 
@@ -419,6 +420,7 @@ impl<'a> Builder<'a> {
             rotation_deg: rot,
             side: if bottom { Side::Bottom } else { Side::Top },
             sheet: None,
+            params: Default::default(),
         });
 
         let (s, c) = rot.to_radians().sin_cos();
@@ -545,6 +547,7 @@ impl<'a> Builder<'a> {
             rotation_deg,
             outline: Vec::new(),
             stack: Vec::new(),
+            fab: Default::default(),
         })
     }
 

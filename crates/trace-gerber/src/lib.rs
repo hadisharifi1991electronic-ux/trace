@@ -9,7 +9,8 @@
 mod build;
 pub mod detect;
 pub mod excellon;
-mod geom;
+#[doc(hidden)]
+pub mod geom;
 pub mod gerber;
 pub mod ipc356;
 #[doc(hidden)]

@@ -733,6 +733,7 @@ impl Router {
                     diameter: Length::from_mil(self.via_d),
                     hole: Length::from_mil(self.via_hole),
                     rings: Vec::new(),
+                    fab: Default::default(),
                 },
             });
         }
@@ -810,6 +811,7 @@ mod tests {
             rotation_deg: 0.0,
             outline: Vec::new(),
             stack: Vec::new(),
+            fab: Default::default(),
         }
     }
 

@@ -410,6 +410,7 @@ mod tests {
             rotation_deg: 0.0,
             outline: Vec::new(),
             stack: Vec::new(),
+            fab: Default::default(),
         }
     }
     fn track(layer: u8, x1: f64, x2: f64) -> Track {
@@ -472,6 +473,7 @@ mod tests {
             diameter: Length::from_mil(20.0),
             hole: Length::from_mil(10.0),
             rings: Vec::new(),
+            fab: Default::default(),
         };
         // Top 0..50, via down, bottom 50..100. The far pad is on top only.
         let b = board(

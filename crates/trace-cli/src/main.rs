@@ -24,6 +24,7 @@ USAGE:
     trace convert <file> <out.kicad_pcb>        Write a KiCad board (KiCad 7 and later)
     trace convert <file> <out.PcbDoc>           Write an Altium Designer board
     trace convert <file.SchDoc> <out.svg>       Draw a schematic sheet as SVG
+    trace fab <board> <out.zip|folder>          Gerber X2, drill, IPC-356, pick-and-place and BOM files
     trace layers <gerber folder|zip>            Show which layer each Gerber or drill file was taken as
 ";
 
@@ -48,6 +49,7 @@ fn main() -> ExitCode {
         ["impedance", file] => impedance(file),
         ["convert", file, out] => convert(file, out),
         ["layers", file] => layers(file),
+        ["fab", file, out] => fab(file, out),
         ["view", file] => view_board(file, None),
         ["view", file, out] => view_board(file, Some(out)),
         _ => {
@@ -492,6 +494,41 @@ fn view_board(file: &str, out: Option<&str>) -> Res {
     std::fs::write(&out, view::render(&b, &name))?;
     println!("wrote {}", out.display());
     view::open(&out);
+    Ok(())
+}
+
+fn fab(file: &str, out: &str) -> Res {
+    let b = board(file)?;
+    let opt = trace_export::FabOptions::from_board(&b);
+    let path = Path::new(out);
+    let stem = Path::new(file)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "board".into());
+    let files = trace_export::fab_files(&b, &stem, &opt);
+    println!(
+        "mask expansion {:.3} mm, paste expansion {:.3} mm, vias {}",
+        opt.mask_expansion.mm(),
+        opt.paste_expansion.mm(),
+        match (opt.tent_top, opt.tent_bottom) {
+            (true, true) => "tented",
+            (false, false) => "open both sides",
+            (true, false) => "tented on top only",
+            (false, true) => "tented on the bottom only",
+        }
+    );
+    if out.to_ascii_lowercase().ends_with(".zip") {
+        std::fs::write(path, trace_export::fab_zip(&files)?)?;
+    } else {
+        std::fs::create_dir_all(path)?;
+        for f in &files {
+            std::fs::write(path.join(&f.name), &f.data)?;
+        }
+    }
+    for f in &files {
+        println!("  {:<40} {:>9} bytes", f.name, f.data.len());
+    }
+    println!("wrote {} files to {out}", files.len());
     Ok(())
 }
 

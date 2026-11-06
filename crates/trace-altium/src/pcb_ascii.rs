@@ -89,6 +89,84 @@ fn index(p: &Props, key: &str) -> Option<u32> {
     p.int(key).filter(|&n| n >= 0).map(|n| n as u32)
 }
 
+/// The mask and paste expansion an area asks for: its own, the rule's, or
+/// none (no opening).
+fn expansions(p: &Props, rules: &(Length, Length)) -> (Option<Length>, Option<Length>) {
+    let pick =
+        |mode: &str, manual: &str, rule: Length| match p.str(mode).to_ascii_uppercase().as_str() {
+            "MANUAL" => Some(len(p, manual).unwrap_or_default()),
+            "RULE" => Some(rule),
+            _ => None,
+        };
+    (
+        pick(
+            "SOLDERMASKEXPANSIONMODE",
+            "SOLDERMASKEXPANSION_MANUAL",
+            rules.0,
+        ),
+        pick(
+            "PASTEMASKEXPANSIONMODE",
+            "PASTEMASKEXPANSION_MANUAL",
+            rules.1,
+        ),
+    )
+}
+
+/// Mask, paste, tenting, plating and slot details a pad or via sets itself.
+fn fab_of(p: &Props, hole: Length, rotation_deg: f64) -> Fab {
+    let yes = |k: &str| p.bool(k);
+    let manual = |k: &str| p.str(k).eq_ignore_ascii_case("MANUAL");
+    let mut f = Fab {
+        tent_top: yes("TENTINGTOP") || yes("TENTING"),
+        tent_bottom: yes("TENTINGBOTTOM") || yes("TENTING"),
+        unplated: hole.0 > 0
+            && p.get("PLATED")
+                .is_some_and(|v| v.eq_ignore_ascii_case("FALSE")),
+        ..Default::default()
+    };
+    // Pads keep their own expansion in CSE and CPE (with CSEV and CPEV 2
+    // for "manual"); the *_MANUAL fields are only right for areas.
+    let own = |mode: &str, valid: &str, value: &str, old: &str| {
+        if p.int(valid) == Some(2) {
+            Some(len(p, value).unwrap_or_default())
+        } else if manual(mode) {
+            Some(len(p, old).unwrap_or_default())
+        } else {
+            None
+        }
+    };
+    if let Some(e) = own(
+        "SOLDERMASKEXPANSIONMODE",
+        "CSEV",
+        "CSE",
+        "SOLDERMASKEXPANSION_MANUAL",
+    ) {
+        // Altium covers a pad by shrinking its opening by a metre.
+        if crate::pcb::no_paste(e) {
+            f.tent_top = true;
+            f.tent_bottom = true;
+        } else {
+            f.mask = Some(e);
+        }
+    }
+    if let Some(e) = own(
+        "PASTEMASKEXPANSIONMODE",
+        "CPEV",
+        "CPE",
+        "PASTEMASKEXPANSION_MANUAL",
+    ) {
+        f.paste = Some(e);
+        f.no_paste = crate::pcb::no_paste(e);
+    }
+    if p.int("HOLETYPE") == Some(2) {
+        if let Some(l) = len(p, "HOLEWIDTH").filter(|l| l.0 > hole.0) {
+            f.slot = l;
+            f.slot_deg = rotation_deg + angle(p, "HOLEROTATION");
+        }
+    }
+    f
+}
+
 fn angle(p: &Props, key: &str) -> f64 {
     p.float(key).filter(|a| a.is_finite()).unwrap_or(0.0)
 }
@@ -206,8 +284,32 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
                 Side::Top
             },
             sheet: p.get("SOURCEHIERARCHICALPATH").map(str::to_string),
+            params: Default::default(),
         })
         .collect();
+    // Part parameters (value, part number, maker...) and description.
+    for p in of("ParamItem") {
+        let Some(i) = p
+            .str("PRIMITIVEINDEX")
+            .strip_prefix("Component#")
+            .and_then(|n| n.parse::<usize>().ok())
+        else {
+            continue;
+        };
+        if let Some(c) = board.components.get_mut(i) {
+            let name = p.str("NAME");
+            if !name.is_empty() {
+                c.params.insert(name, p.str("VALUE"));
+            }
+        }
+    }
+    for (c, p) in board.components.iter_mut().zip(of("Component")) {
+        if let Some(d) = p.get("SOURCEDESCRIPTION").filter(|d| !d.is_empty()) {
+            c.params
+                .entry("Description".into())
+                .or_insert_with(|| d.to_string());
+        }
+    }
     // `DXPRule` records hold the rules as Altium uses them; `Rule` records
     // are an older form, kept for files without the newer ones.
     board.rules = of("DXPRule").map(parse_rule).collect();
@@ -222,6 +324,10 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
         _ => None,
     };
     let ncopper = board.stackup.copper_layers().count() as u8;
+    let rules = (
+        crate::pcb::rule_expansion(&board, "SolderMaskExpansion"),
+        crate::pcb::rule_expansion(&board, "PasteMaskExpansion"),
+    );
     let g = &mut board.geometry;
 
     g.tracks = of("Track")
@@ -272,6 +378,11 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
                 diameter,
                 hole,
                 rings,
+                fab: Fab {
+                    unplated: false,
+                    slot: Length(0),
+                    ..fab_of(p, hole, 0.0)
+                },
             })
         })
         .collect();
@@ -366,6 +477,7 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
                 rotation_deg,
                 outline,
                 stack,
+                fab: fab_of(p, hole, rotation_deg),
             })
         })
         .collect();
@@ -375,9 +487,10 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
     let pour_nets: Vec<Option<u32>> = of("Polygon").map(|p| index(p, "NET")).collect();
     g.pours = of("Polygon").map(|p| parse_pour(p, &layers)).collect();
     let pad_nets: Vec<Option<u32>> = of("Pad").map(|p| index(p, "NET")).collect();
+
     for p in of("Region") {
         let layer = layer(p);
-        if !matches!(layer, LayerRef::Copper(_))
+        if matches!(layer, LayerRef::AllCopper | LayerRef::Keepout)
             || p.int("KIND").unwrap_or(0) != 0
             || p.bool("ISBOARDCUTOUT")
         {
@@ -414,45 +527,95 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
                     .copied()
                     .flatten()
             });
-        g.polygons.push(Polygon {
-            layer,
+        let poly = Polygon {
+            layer: layer.clone(),
             net,
             outline,
             holes,
             pour: index(p, "POLYGON"),
-        });
+        };
+        if matches!(layer, LayerRef::Copper(_)) {
+            let (mask, paste) = expansions(p, &rules);
+            g.areas
+                .extend(crate::pcb::openings(&poly, ncopper, mask, paste));
+            g.polygons.push(poly);
+        } else {
+            g.areas.push(poly);
+        }
     }
-    // Copper fills: rectangles, turned about their centre.
+    // Fills: rectangles, turned about their centre.
     for p in of("Fill") {
         let layer = layer(p);
         let (Some(a), Some(b)) = (pt(p, "X1", "Y1"), pt(p, "X2", "Y2")) else {
             continue;
         };
-        if !matches!(layer, LayerRef::Copper(_)) {
+        if matches!(layer, LayerRef::AllCopper | LayerRef::Keepout) || p.bool("KEEPOUT") {
             continue;
         }
-        let (cx, cy) = ((a.x.0 + b.x.0) as f64 / 2.0, (a.y.0 + b.y.0) as f64 / 2.0);
-        let (hw, hh) = (
-            (b.x.0 - a.x.0).abs() as f64 / 2.0,
-            (b.y.0 - a.y.0).abs() as f64 / 2.0,
-        );
-        let (s, c) = angle(p, "ROTATION").to_radians().sin_cos();
-        let outline = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
-            .iter()
-            .map(|&(x, y)| Point {
-                x: Length((cx + x * c - y * s).round() as i64),
-                y: Length((cy + x * s + y * c).round() as i64),
-            })
-            .collect();
-        g.polygons.push(Polygon {
-            layer,
+        let poly = Polygon {
+            layer: layer.clone(),
             net: index(p, "NET"),
-            outline,
+            outline: crate::pcb::fill_outline(a, b, angle(p, "ROTATION")),
             holes: Vec::new(),
             pour: None,
-        });
+        };
+        if matches!(layer, LayerRef::Copper(_)) {
+            let (mask, paste) = expansions(p, &rules);
+            g.areas
+                .extend(crate::pcb::openings(&poly, ncopper, mask, paste));
+            g.polygons.push(poly);
+        } else {
+            g.areas.push(poly);
+        }
+    }
+    // Text, in the stroke font, on the layers that go to manufacture.
+    let comps: Vec<&Props> = of("Component").collect();
+    let shown = crate::pcb::Shown {
+        name: comps
+            .iter()
+            .map(|p| {
+                p.get("NAMEON")
+                    .is_none_or(|v| v.eq_ignore_ascii_case("TRUE"))
+            })
+            .collect(),
+        comment: comps.iter().map(|p| p.bool("COMMENTON")).collect(),
+    };
+    let mut text_tracks = Vec::new();
+    for p in of("Text") {
+        let text = p
+            .get("WIDESTRING")
+            .map(|w| {
+                w.split(',')
+                    .filter_map(|n| n.trim().parse::<u32>().ok())
+                    .filter_map(char::from_u32)
+                    .collect::<String>()
+            })
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| p.str("TEXT"));
+        let Some(at) = pt(p, "X", "Y") else { continue };
+        let t = crate::pcb::AltText {
+            layer: layer(p),
+            component: index(p, "COMPONENT"),
+            at,
+            height: len(p, "HEIGHT").unwrap_or_default(),
+            width: len(p, "WIDTH").unwrap_or_default(),
+            rotation_deg: angle(p, "ROTATION"),
+            mirror: p.bool("MIRROR"),
+            text,
+            truetype: p.bool("USETTFONTS"),
+            bold: p.bool("BOLD"),
+            designator: p.bool("DESIGNATOR"),
+            comment: p.bool("COMMENT"),
+            bbox: pt(p, "X1", "Y1").zip(pt(p, "X2", "Y2")),
+        };
+        text_tracks.push(t);
     }
     g.outline = parse_outline(&board_props);
+    for t in &text_tracks {
+        let tracks = crate::pcb::text_tracks(t, &board, &shown);
+        board.geometry.tracks.extend(tracks);
+    }
+    let g = &mut board.geometry;
     board.stats.tracks = g.tracks.len();
     board.stats.vias = g.vias.len();
     board.stats.pads = g.pads.len();

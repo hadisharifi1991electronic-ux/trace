@@ -700,6 +700,7 @@ impl Builder {
                         rotation_deg: rot,
                         outline: Vec::new(),
                         stack: Vec::new(),
+                        fab: Default::default(),
                     });
                     self.pad_grid
                         .entry((ci, cell(at).0, cell(at).1))
@@ -1070,6 +1071,7 @@ impl Builder {
                     rotation_deg: deg,
                     outline: Vec::new(),
                     stack,
+                    fab: Default::default(),
                 });
                 continue;
             }
@@ -1087,6 +1089,7 @@ impl Builder {
                     rotation_deg: 0.0,
                     outline: Vec::new(),
                     stack: Vec::new(),
+                    fab: Default::default(),
                 });
                 continue;
             }
@@ -1172,6 +1175,7 @@ impl Builder {
                     }),
                     hole: mm(h.diameter),
                     rings: Vec::new(),
+                    fab: Default::default(),
                 });
                 // Keep each layer's ring when they differ, for example
                 // smaller inner pads or none where unused pads were removed.
@@ -1204,6 +1208,7 @@ impl Builder {
                     rotation_deg: rot,
                     outline: Vec::new(),
                     stack: Vec::new(),
+                    fab: Default::default(),
                 });
                 self.pad_rings.push((pi, ring));
                 // Keep the copper of each layer when it is not the same
@@ -1603,6 +1608,7 @@ impl Builder {
                         rotation_deg: 0.0,
                         side: trace_core::Side::Top,
                         sheet: None,
+                        params: Default::default(),
                     });
                     i
                 }

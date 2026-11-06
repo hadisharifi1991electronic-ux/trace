@@ -244,6 +244,7 @@ mod tests {
             rotation_deg: 0.0,
             side: Side::Top,
             sheet: None,
+            params: Default::default(),
         });
         b.geometry.pads.push(Pad {
             layer: LayerRef::Copper(0),
@@ -258,6 +259,7 @@ mod tests {
             rotation_deg: 0.0,
             outline: Vec::new(),
             stack: Vec::new(),
+            fab: Default::default(),
         });
         b.geometry.tracks.push(Track {
             layer: LayerRef::Copper(0),

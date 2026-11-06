@@ -398,6 +398,20 @@ fn from_file_function(f: &str) -> Option<Role> {
         "Profile" => Role::Outline,
         "Keepout" => Role::Keepout,
         "Drillmap" | "FabricationDrawing" => Role::DrillDrawing,
+        // "Other,Mechanical 13", as Trace writes mechanical layers.
+        "Other"
+            if p.get(1).is_some_and(|c| {
+                c.trim()
+                    .strip_prefix("Mechanical")
+                    .is_some_and(|n| n.trim().parse::<u32>().is_ok())
+            }) =>
+        {
+            let n = p[1].trim()["Mechanical".len()..]
+                .trim()
+                .parse()
+                .unwrap_or(0);
+            Role::Mechanical(n)
+        }
         "AssemblyDrawing" | "Component" | "Other" | "ArrayDrawing" | "Vcut" | "Depthrout"
         | "Pads" | "Glue" | "Carbonmask" | "Goldmask" | "Heatsinkmask" | "Peelablemask"
         | "Silvermask" | "Tinmask" | "Viafill" => Role::Mechanical(0),

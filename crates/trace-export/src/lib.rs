@@ -2,10 +2,12 @@
 //! ODB++, Altium or Allegro data can be carried on in another tool.
 
 pub mod altium;
+pub mod fab;
 pub mod kicad;
 pub mod svg;
 
 pub use altium::to_altium;
+pub use fab::{fab_files, fab_zip, FabFile, FabOptions};
 #[doc(hidden)]
 pub use kicad::fracture;
 pub use kicad::to_kicad;

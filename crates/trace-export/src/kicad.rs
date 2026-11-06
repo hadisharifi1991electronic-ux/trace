@@ -962,6 +962,7 @@ mod tests {
             rotation_deg: 90.0,
             outline: Vec::new(),
             stack: Vec::new(),
+            fab: Default::default(),
         });
         let s = to_kicad(&b);
         assert!(s.contains("(net 1 \"GND\")"));

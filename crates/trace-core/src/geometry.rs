@@ -62,6 +62,53 @@ pub struct Via {
     /// Empty when the via has `diameter` on every layer it spans.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub rings: Vec<(u8, Length)>,
+    /// Solder mask and tenting, where the via sets its own.
+    #[serde(default, skip_serializing_if = "Fab::is_default")]
+    pub fab: Fab,
+}
+
+/// What a pad or via says for manufacture where it does not leave it to
+/// the board's rules: its own mask and paste expansion, tenting, a
+/// non-plated hole, a slot.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Fab {
+    /// Solder mask expansion of its own; `None` takes the board's rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<Length>,
+    /// Paste expansion of its own (negative shrinks); `None` takes the rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub paste: Option<Length>,
+    /// Covered by solder mask on the top or bottom side: no opening there.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tent_top: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub tent_bottom: bool,
+    /// No paste at all.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_paste: bool,
+    /// The hole is not plated.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub unplated: bool,
+    /// Slot length, end to end, for a slotted hole; zero for a round hole.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub slot: Length,
+    /// Direction of the slot, degrees counter-clockwise.
+    #[serde(default, skip_serializing_if = "is_zero_f")]
+    pub slot_deg: f64,
+}
+
+fn is_zero(l: &Length) -> bool {
+    l.0 == 0
+}
+
+fn is_zero_f(v: &f64) -> bool {
+    *v == 0.0
+}
+
+impl Fab {
+    pub fn is_default(&self) -> bool {
+        *self == Fab::default()
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -94,6 +141,9 @@ pub struct Pad {
     /// shape on every layer.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub stack: Vec<Land>,
+    /// Mask, paste and hole details of its own.
+    #[serde(default, skip_serializing_if = "Fab::is_default")]
+    pub fab: Fab,
 }
 
 /// The copper of a through-hole pad on one layer.
@@ -147,6 +197,10 @@ pub struct Geometry {
     pub pads: Vec<Pad>,
     #[serde(default)]
     pub polygons: Vec<Polygon>,
+    /// Filled shapes on layers other than copper: solder mask and paste
+    /// openings, silkscreen and mechanical areas.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub areas: Vec<Polygon>,
     /// Pour outlines, for pouring again after edits.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pours: Vec<Pour>,
@@ -300,4 +354,84 @@ pub fn round_rect(
     }
     out.dedup();
     out
+}
+
+/// An area grown (positive `d`) or shrunk (negative) by `d`, with sharp
+/// corners: what a mask or paste opening of an area is. May split into
+/// several areas, or vanish.
+pub fn offset_area(
+    outline: &[Point],
+    holes: &[Vec<Point>],
+    d: Length,
+) -> Vec<(Vec<Point>, Vec<Vec<Point>>)> {
+    use i_overlay::mesh::outline::offset::OutlineOffset;
+    use i_overlay::mesh::style::{LineJoin, OutlineStyle};
+    let ring = |pts: &[Point], ccw: bool| -> Vec<[f64; 2]> {
+        let mut v: Vec<[f64; 2]> = pts
+            .iter()
+            .map(|p| [p.x.0 as f64 / 1000.0, p.y.0 as f64 / 1000.0])
+            .collect();
+        if v.len() > 1 && v.first() == v.last() {
+            v.pop();
+        }
+        if (ring_area(&v) > 0.0) != ccw {
+            v.reverse();
+        }
+        v
+    };
+    let back = |v: Vec<[f64; 2]>| -> Vec<Point> {
+        v.into_iter()
+            .map(|p| Point {
+                x: Length((p[0] * 1000.0).round() as i64),
+                y: Length((p[1] * 1000.0).round() as i64),
+            })
+            .collect()
+    };
+    if outline.len() < 3 {
+        return Vec::new();
+    }
+    if d.0 == 0 {
+        return vec![(outline.to_vec(), holes.to_vec())];
+    }
+    let mut shape = vec![ring(outline, true)];
+    shape.extend(
+        holes
+            .iter()
+            .filter(|h| h.len() >= 3)
+            .map(|h| ring(h, false)),
+    );
+    let style = OutlineStyle::new(d.0 as f64 / 1000.0).line_join(LineJoin::Miter(0.1));
+    shape
+        .outline(&style)
+        .into_iter()
+        .filter(|s| !s.is_empty() && s[0].len() >= 3)
+        .map(|mut s| {
+            let o = back(s.remove(0));
+            (o, s.into_iter().map(back).collect())
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod offset_tests {
+    use super::*;
+
+    #[test]
+    fn grows_and_shrinks_a_square() {
+        let p = |x: f64, y: f64| Point {
+            x: Length::from_mm(x),
+            y: Length::from_mm(y),
+        };
+        let sq = vec![p(0.0, 0.0), p(2.0, 0.0), p(2.0, 2.0), p(0.0, 2.0)];
+        let area = |v: &[Point]| {
+            let r: Vec<[f64; 2]> = v.iter().map(|q| [q.x.mm(), q.y.mm()]).collect();
+            ring_area(&r).abs()
+        };
+        let g = offset_area(&sq, &[], Length::from_mm(0.5));
+        assert_eq!(g.len(), 1);
+        assert!((area(&g[0].0) - 9.0).abs() < 1e-3, "{}", area(&g[0].0));
+        let s = offset_area(&sq, &[], Length::from_mm(-0.5));
+        assert!((area(&s[0].0) - 1.0).abs() < 1e-3);
+        assert!(offset_area(&sq, &[], Length::from_mm(-1.5)).is_empty());
+    }
 }

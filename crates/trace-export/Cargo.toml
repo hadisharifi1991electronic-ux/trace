@@ -13,3 +13,4 @@ trace-altium.workspace = true
 [dependencies]
 trace-core.workspace = true
 cfb = "0.10"
+zip = { version = "2", default-features = false, features = ["deflate"] }

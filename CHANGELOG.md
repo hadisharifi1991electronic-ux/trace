@@ -3,6 +3,31 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.17.0 (2026-11-06)
+
+- Fab outputs: File → Export fab outputs (Gerber, drill, BOM), or
+  `trace fab board out.zip`. One zip holds:
+  - Gerber X2 for every copper layer, both solder masks, both pastes, both
+    silkscreens, each mechanical layer in use and the board outline, named
+    as Altium names them (GTL, G1…, GBL, GTS, GBS, GTP, GBP, GTO, GBO, GKO,
+    GM1…). Copper carries net, part and pin attributes;
+  - Excellon drill files: plated, non-plated, and one per blind or buried
+    via span; slots are routed;
+  - an IPC-D-356A netlist for bare-board test;
+  - pick-and-place (part centre and origin, side, rotation) and a BOM
+    grouped by value, part number, maker, description and footprint.
+- Checked against TI's own Altium Gerbers for the DAC39RF12 EVM: all 16
+  copper layers, both masks and both pastes within 0.5 % of area, the same
+  drill holes, and all 375 nets when read back.
+- Altium boards (binary and ASCII) now bring in what manufacture needs:
+  each pad's own mask and paste expansion, tenting and "no paste",
+  plated or not, slotted holes, via tenting, mask and paste openings of
+  copper areas, fills and regions drawn on mask, paste and silk layers,
+  and part parameters (value, part number, manufacturer, description).
+- Silkscreen and copper text from Altium boards is drawn (stroke font,
+  placed and sized as in Altium), including designators and special
+  strings such as `.Designator` and `.Text1`, and moves with its part.
+
 ## 0.16.0 (2026-11-06)
 
 - Length-match groups in the Constraint Manager, Allegro style:

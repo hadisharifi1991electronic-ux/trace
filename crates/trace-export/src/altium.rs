@@ -1167,6 +1167,7 @@ mod tests {
             diameter: Length::from_mm(0.6),
             hole: Length::from_mm(0.3),
             rings: Vec::new(),
+            fab: Default::default(),
         });
         let bytes = to_altium(&b, "t.PcbDoc").unwrap();
         let dir = std::env::temp_dir().join(format!("trace-altium-{}", std::process::id()));

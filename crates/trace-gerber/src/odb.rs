@@ -737,6 +737,7 @@ fn parse_components(
                         trace_core::Side::Top
                     },
                     sheet: None,
+                    params: Default::default(),
                 });
                 out.push((refdes, Vec::new()));
             }

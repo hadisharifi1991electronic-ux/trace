@@ -65,6 +65,200 @@ fn len_at(b: &[u8], at: usize) -> Option<Length> {
     Some(Length::from_mil(internal(i32_at(b, at)?)))
 }
 
+/// Layers whose text is drawn as strokes: copper, silkscreen, paste and
+/// solder mask (what goes to manufacture).
+pub(crate) fn text_layer(l: &LayerRef) -> bool {
+    matches!(
+        l,
+        LayerRef::Copper(_) | LayerRef::TopSilk | LayerRef::BottomSilk | LayerRef::Other(35..=38)
+    )
+}
+
+/// A text primitive as Altium keeps it.
+pub(crate) struct AltText {
+    pub layer: LayerRef,
+    pub component: Option<u32>,
+    pub at: Point,
+    pub height: Length,
+    pub width: Length,
+    pub rotation_deg: f64,
+    pub mirror: bool,
+    pub text: String,
+    pub truetype: bool,
+    pub bold: bool,
+    pub designator: bool,
+    pub comment: bool,
+    /// Bounding box (corners), when the file gives it.
+    pub bbox: Option<(Point, Point)>,
+}
+
+/// Whether each part shows its designator and its comment.
+pub(crate) struct Shown {
+    pub name: Vec<bool>,
+    pub comment: Vec<bool>,
+}
+
+/// The text drawn in the stroke font as tracks, or nothing when it is a
+/// hidden designator or comment, or a special string that cannot be
+/// filled in.
+pub(crate) fn text_tracks(t: &AltText, board: &Board, shown: &Shown) -> Vec<Track> {
+    if !text_layer(&t.layer) || t.height.0 <= 0 {
+        return Vec::new();
+    }
+    let part = t.component.map(|c| c as usize);
+    let on = |v: &Vec<bool>| part.and_then(|c| v.get(c)).copied().unwrap_or(true);
+    if t.designator && !on(&shown.name) || t.comment && !on(&shown.comment) {
+        return Vec::new();
+    }
+    let mut text = t.text.replace("\r\n", "\n");
+    if let Some(c) = part.and_then(|c| board.components.get(c)) {
+        if text.eq_ignore_ascii_case(".Designator") {
+            text = c.designator.clone();
+        } else if let Some(v) = text.strip_prefix('.').and_then(|k| c.param(&[k])) {
+            // Special strings such as `.Comment` or `.Text1`: the part's
+            // parameter of that name.
+            text = v.to_string();
+        }
+    }
+    if text.starts_with('.') || text.trim().is_empty() {
+        return Vec::new();
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let (height, width, at) = if t.truetype {
+        // TrueType: the height is the font size; draw caps at about 70 %
+        // of it, with a stroke to match the weight.
+        let w = Length((t.height.0 as f64 * if t.bold { 0.13 } else { 0.09 }) as i64);
+        let h = Length((t.height.0 as f64 * 0.7) as i64);
+        let (s, c) = t.rotation_deg.to_radians().sin_cos();
+        let up = t.height.0 as f64 * 0.1;
+        let ox = if t.mirror { -1.0 } else { 1.0 } * w.0 as f64 / 2.0;
+        (
+            h,
+            w,
+            Point {
+                x: Length(t.at.x.0 + (ox * c - up * s) as i64),
+                y: Length(t.at.y.0 + (ox * s + up * c) as i64),
+            },
+        )
+    } else {
+        (t.height, t.width, t.at)
+    };
+    // The room the text takes in Altium, from its box (in the text's own
+    // frame, before turning), so text lands the same length.
+    let length = t.bbox.filter(|_| lines.len() == 1).and_then(|(a, b)| {
+        let span = (b.x.0 - a.x.0).abs();
+        let pad = if t.truetype { width.0 } else { 2 * width.0 };
+        (span - pad > 0).then(|| Length(span - pad))
+    });
+    let (s, c) = t.rotation_deg.to_radians().sin_cos();
+    let mut out = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        // Further lines go down the page.
+        let down = i as f64 * height.0 as f64 * 1.6;
+        let p = trace_core::font::Placing {
+            at: Point {
+                x: Length(at.x.0 + (down * s) as i64),
+                y: Length(at.y.0 - (down * c) as i64),
+            },
+            height,
+            width,
+            rotation_deg: t.rotation_deg,
+            mirror: t.mirror,
+            length,
+        };
+        out.extend(trace_core::font::text_tracks(
+            line,
+            &p,
+            t.layer.clone(),
+            t.component,
+        ));
+    }
+    out
+}
+
+/// Fills: rectangles turned about their centre.
+pub(crate) fn fill_outline(a: Point, b: Point, rotation_deg: f64) -> Vec<Point> {
+    let (cx, cy) = ((a.x.0 + b.x.0) as f64 / 2.0, (a.y.0 + b.y.0) as f64 / 2.0);
+    let (hw, hh) = (
+        (b.x.0 - a.x.0).abs() as f64 / 2.0,
+        (b.y.0 - a.y.0).abs() as f64 / 2.0,
+    );
+    let (s, c) = rotation_deg.to_radians().sin_cos();
+    [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
+        .iter()
+        .map(|&(x, y)| Point {
+            x: Length((cx + x * c - y * s).round() as i64),
+            y: Length((cy + x * s + y * c).round() as i64),
+        })
+        .collect()
+}
+
+/// The board-wide expansion rule of `kind` (`SolderMaskExpansion` or
+/// `PasteMaskExpansion`), or Altium's default.
+pub(crate) fn rule_expansion(board: &Board, kind: &str) -> Length {
+    board
+        .rules
+        .iter()
+        .filter(|r| r.enabled && r.kind.eq_ignore_ascii_case(kind))
+        .filter(|r| {
+            r.scope
+                .first()
+                .is_none_or(|s| s.eq_ignore_ascii_case("All"))
+        })
+        .min_by_key(|r| r.priority)
+        .and_then(|r| r.params.get("EXPANSION"))
+        .and_then(|v| Length::parse(v))
+        .unwrap_or(if kind.starts_with("Solder") {
+            Length::from_mil(4.0)
+        } else {
+            Length(0)
+        })
+}
+
+/// The mask and paste openings a copper area on an outer layer makes when
+/// it asks for them (Altium regions and fills with an expansion mode other
+/// than None), as areas on the mask and paste layers.
+pub(crate) fn openings(
+    copper: &Polygon,
+    ncopper: u8,
+    mask: Option<Length>,
+    paste: Option<Length>,
+) -> Vec<Polygon> {
+    let top = match copper.layer {
+        LayerRef::Copper(0) => true,
+        LayerRef::Copper(l) if l + 1 == ncopper => false,
+        _ => return Vec::new(),
+    };
+    let mut out = Vec::new();
+    for (e, id) in [
+        (mask, if top { 37 } else { 38 }),
+        (paste, if top { 35 } else { 36 }),
+    ] {
+        let Some(e) = e.filter(|e| !no_paste(*e)) else {
+            continue;
+        };
+        for (outline, holes) in trace_core::geometry::offset_area(&copper.outline, &copper.holes, e)
+        {
+            out.push(Polygon {
+                layer: LayerRef::Other(id),
+                net: None,
+                outline,
+                holes,
+                pour: None,
+            });
+        }
+    }
+    out
+}
+
+/// Mode bytes Altium uses for mask and paste expansion.
+const MODE_MANUAL: u8 = 2;
+
+/// Paste expansions this negative mean "no paste" (Altium stores -1 m).
+pub(crate) fn no_paste(e: Length) -> bool {
+    e.0 <= -Length::from_mil(1000.0).0
+}
+
 // Track, arc, via and pad records all start with: layer u8, two flag bytes,
 // net index u16 and 8 bytes of links, with geometry from offset 13.
 
@@ -123,6 +317,7 @@ fn parse_via(b: &[u8], layers: &LayerMap) -> Option<Via> {
     };
     let diameter = len_at(b, 21)?;
     let rings = with_removed_pads(rings, &removed, layers, (from, to), diameter, hole);
+    let flags = b.get(1).copied().unwrap_or(0);
     Some(Via {
         net: net(b),
         from_layer: from,
@@ -131,6 +326,11 @@ fn parse_via(b: &[u8], layers: &LayerMap) -> Option<Via> {
         diameter,
         hole,
         rings,
+        fab: Fab {
+            tent_top: flags & 0x20 != 0,
+            tent_bottom: flags & 0x40 != 0,
+            ..Default::default()
+        },
     })
 }
 
@@ -170,7 +370,7 @@ pub(crate) fn with_removed_pads(
 /// and each hole as a vertex count and (x, y) pairs of doubles.
 fn parse_region(b: &[u8], layers: &LayerMap) -> Option<Polygon> {
     let layer = layers.get(*b.first()?);
-    if !matches!(layer, LayerRef::Copper(_)) {
+    if matches!(layer, LayerRef::AllCopper | LayerRef::Keepout) {
         return None;
     }
     let holes = u16_at(b, 14)? as usize;
@@ -203,6 +403,55 @@ fn parse_region(b: &[u8], layers: &LayerMap) -> Option<Polygon> {
         holes,
         pour: u16_at(b, 5).filter(|&i| i != u16::MAX).map(u32::from),
     })
+}
+
+/// Texts: layer, part at 7, position at 13, height at 21, stroke font at
+/// 25, turn at 27, mirror at 35, stroke width at 36; in newer files the
+/// comment and designator flags at 40 and 41, the font kind at 43 (1 is
+/// TrueType), bold at 44 and the wide-string index at 115. The second
+/// block holds the text itself.
+fn parse_text(
+    r: &[&[u8]],
+    layers: &LayerMap,
+    wide: &std::collections::HashMap<u32, String>,
+) -> Option<AltText> {
+    let b = *r.first()?;
+    let layer = layers.get(*b.first()?);
+    if !text_layer(&layer) {
+        return None;
+    }
+    let long = b.len() >= 123;
+    let mut text = r
+        .get(1)
+        .and_then(|s| {
+            let n = *s.first()? as usize;
+            Some(String::from_utf8_lossy(s.get(1..1 + n)?).into_owned())
+        })
+        .unwrap_or_default();
+    if long {
+        if let Some(w) = u32_at(b, 115).and_then(|i| wide.get(&i)) {
+            text = w.clone();
+        }
+    }
+    Some(AltText {
+        layer,
+        component: u16_at(b, 7).filter(|&c| c != u16::MAX).map(u32::from),
+        at: point(b, 13)?,
+        height: len_at(b, 21)?,
+        width: len_at(b, 36)?,
+        rotation_deg: f64_at(b, 27).filter(|r| r.is_finite()).unwrap_or(0.0),
+        mirror: b.get(35).is_some_and(|&m| m != 0),
+        text,
+        truetype: long && b.get(43) == Some(&1),
+        bold: long && b.get(44).is_some_and(|&v| v != 0),
+        comment: long && b.get(40).is_some_and(|&v| v != 0),
+        designator: long && b.get(41).is_some_and(|&v| v != 0),
+        bbox: None,
+    })
+}
+
+fn u32_at(b: &[u8], at: usize) -> Option<u32> {
+    Some(u32::from_le_bytes(b.get(at..at + 4)?.try_into().ok()?))
 }
 
 /// Pads have six blocks: name, two unused, a layer-stack string, the main
@@ -284,6 +533,30 @@ fn parse_pad(blocks: &[&[u8]], layers: &LayerMap) -> Option<Pad> {
             outline = trace_core::geometry::round_rect(at, size_x, size_y, rotation_deg, r);
         }
     }
+    // Mask and paste of its own (modes at 101 and 102, values at 86 and
+    // 90), tenting flags, plating at 60, and the hole shape in the
+    // extended block: 2 is a slot, its length at 263, its turn at 267.
+    let flags = b.get(1).copied().unwrap_or(0);
+    let mut fab = Fab {
+        tent_top: flags & 0x20 != 0,
+        tent_bottom: flags & 0x40 != 0,
+        unplated: hole.0 > 0 && b.get(60) == Some(&0),
+        ..Default::default()
+    };
+    if b.get(102) == Some(&MODE_MANUAL) {
+        fab.mask = len_at(b, 90);
+    }
+    if b.get(101) == Some(&MODE_MANUAL) {
+        fab.paste = len_at(b, 86);
+        fab.no_paste = fab.paste.is_some_and(no_paste);
+    }
+    if extra.len() >= 275 && extra[262] == 2 {
+        if let Some(l) = len_at(extra, 263).filter(|l| l.0 > hole.0) {
+            fab.slot = l;
+            fab.slot_deg =
+                rotation_deg + f64_at(extra, 267).filter(|r| r.is_finite()).unwrap_or(0.0);
+        }
+    }
     Some(Pad {
         layer,
         net: net(b),
@@ -297,6 +570,7 @@ fn parse_pad(blocks: &[&[u8]], layers: &LayerMap) -> Option<Pad> {
         rotation_deg,
         outline,
         stack,
+        fab,
     })
 }
 
@@ -474,6 +748,7 @@ pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
                 Side::Top
             },
             sheet: p.get("SOURCEHIERARCHICALPATH").map(str::to_string),
+            params: Default::default(),
         })
         .collect();
 
@@ -509,16 +784,114 @@ pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
             .collect();
     }
     if let Some(d) = c.stream("/Regions6/Data")? {
-        g.polygons = split_binary(&d, 1)
+        let (copper, other): (Vec<Polygon>, Vec<Polygon>) = split_binary(&d, 1)
             .iter()
             .filter_map(|r| parse_region(r[0], &layers))
-            .collect();
+            .partition(|p| matches!(p.layer, LayerRef::Copper(_)));
+        g.polygons = copper;
+        g.areas = other;
+    }
+    // Fills: layer, net at 3, part at 7, corners at 13 and 21, turn at 29.
+    if let Some(d) = c.stream("/Fills6/Data")? {
+        for r in split_binary(&d, 1) {
+            let b = r[0];
+            let (Some(&id), Some(a), Some(e)) = (b.first(), point(b, 13), point(b, 21)) else {
+                continue;
+            };
+            let layer = layers.get(id);
+            if matches!(layer, LayerRef::AllCopper | LayerRef::Keepout) || b.get(1) == Some(&2) {
+                continue;
+            }
+            let rot = f64_at(b, 29).filter(|r| r.is_finite()).unwrap_or(0.0);
+            let poly = Polygon {
+                layer: layer.clone(),
+                net: net(b),
+                outline: fill_outline(a, e, rot),
+                holes: Vec::new(),
+                pour: None,
+            };
+            if matches!(layer, LayerRef::Copper(_)) {
+                g.polygons.push(poly);
+            } else {
+                g.areas.push(poly);
+            }
+        }
     }
     read_models(&mut c, g)?;
     g.outline = parse_outline(&board_props);
     board.stats.tracks = g.tracks.len();
     board.stats.vias = g.vias.len();
     board.stats.pads = g.pads.len();
+
+    // Text, in the stroke font, on the layers that go to manufacture.
+    let comps = text(&mut c, "/Components6/Data", 0)?;
+    let shown = Shown {
+        name: comps
+            .iter()
+            .map(|p| {
+                p.get("NAMEON")
+                    .is_none_or(|v| v.eq_ignore_ascii_case("TRUE"))
+            })
+            .collect(),
+        comment: comps.iter().map(|p| p.bool("COMMENTON")).collect(),
+    };
+    // Wide strings: index u32, byte length u32, UTF-16 text with a
+    // closing zero.
+    let mut wide: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
+    if let Some(d) = c.stream("/WideStrings6/Data")? {
+        let mut i = 0;
+        while i + 8 <= d.len() {
+            let (Some(k), Some(n)) = (u32_at(&d, i), u32_at(&d, i + 4)) else {
+                break;
+            };
+            let Some(bytes) = d.get(i + 8..i + 8 + n as usize) else {
+                break;
+            };
+            let units: Vec<u16> = bytes
+                .chunks_exact(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .take_while(|&u| u != 0)
+                .collect();
+            wide.insert(k, String::from_utf16_lossy(&units));
+            i += 8 + n as usize;
+        }
+    }
+    // Part parameters: a record naming the part (`ID=Component#N`, no
+    // variant) and then its parameters, one record each.
+    if let Some(d) = c.stream("/PrimitiveParameters/Data")? {
+        let mut owner: Option<usize> = None;
+        for p in split_pcb(&d, 0) {
+            if let Some(id) = p.get("ID") {
+                owner = id
+                    .strip_prefix("Component#")
+                    .and_then(|n| n.parse().ok())
+                    .filter(|_| p.str("VARIANTGUID").is_empty() && p.get("APPURTENANCE").is_none());
+                continue;
+            }
+            let Some(c) = owner.and_then(|i| board.components.get_mut(i)) else {
+                continue;
+            };
+            let name = p.str("NAME");
+            if !name.is_empty() {
+                c.params.insert(name, p.str("VALUE"));
+            }
+        }
+    }
+    for (c, p) in board.components.iter_mut().zip(&comps) {
+        if let Some(d) = p.get("SOURCEDESCRIPTION").filter(|d| !d.is_empty()) {
+            c.params
+                .entry("Description".into())
+                .or_insert_with(|| d.to_string());
+        }
+    }
+    if let Some(d) = c.stream("/Texts6/Data")? {
+        for r in split_binary(&d, 2) {
+            if let Some(t) = parse_text(&r, &layers, &wide) {
+                let tracks = text_tracks(&t, &board, &shown);
+                board.geometry.tracks.extend(tracks);
+            }
+        }
+    }
 
     let polygons = text(&mut c, "/Polygons6/Data", 0)?;
     board.stats.polygons = polygons.len();

@@ -406,6 +406,7 @@ mod tests {
             rotation_deg: 0.0,
             outline: Vec::new(),
             stack: Vec::new(),
+            fab: Default::default(),
         }
     }
 

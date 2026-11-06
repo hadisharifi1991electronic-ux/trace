@@ -143,6 +143,22 @@ pub struct Component {
     pub side: Side,
     /// Schematic sheet the part came from.
     pub sheet: Option<String>,
+    /// The part's parameters (value, part number, manufacturer,
+    /// description...), as the source names them.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
+}
+
+impl Component {
+    /// The first parameter present of `names`, compared without case.
+    pub fn param(&self, names: &[&str]) -> Option<&str> {
+        names.iter().find_map(|n| {
+            self.params
+                .iter()
+                .find(|(k, v)| k.eq_ignore_ascii_case(n) && !v.trim().is_empty())
+                .map(|(_, v)| v.as_str())
+        })
+    }
 }
 
 /// A design rule, kept close to its source so nothing is lost on import.

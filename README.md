@@ -92,6 +92,15 @@ checker and simulator all read.
   Zdiff of every routed net and pair against its target. Per-net rules set
   other targets by name pattern (USB pairs start at 90 Ω, PCIe at 85 Ω).
   Stack-up edits and rules are kept per board in Trace's settings
+- export fab outputs (File → Export fab outputs): one `.zip` with Gerber X2
+  for every copper layer, solder mask, paste, silkscreen, mechanical layer
+  and the board outline (Altium names: GTL, G1…, GBL, GTS, GTO, GKO…),
+  Excellon drill files (plated, non-plated, and one per blind or buried
+  span, slots routed), an IPC-D-356A test netlist, a pick-and-place file
+  and a bill of materials. Copper carries X2 net, part and pin attributes.
+  Mask and paste follow the board's expansion rules and each pad's own
+  settings (manual expansion, tenting, no paste); silkscreen text from
+  Altium boards is drawn in a stroke font
 - check design rules (the DRC button, or D): clearance, short circuits,
   track width and unrouted nets, from the board's own Altium rules (per
   object type, by priority, net and class scopes). Live is on by default:
@@ -115,6 +124,7 @@ trace convert <file> out.json    export to Trace's open JSON model
 trace convert <file> out.kicad_pcb   write a KiCad board
 trace convert <file> out.PcbDoc      write an Altium Designer board
 trace convert sheet.SchDoc out.svg   draw a schematic sheet as SVG
+trace fab board.PcbDoc out.zip   Gerber X2, drill, IPC-356, pick-and-place and BOM (or a folder)
 ```
 
 Every command also takes an Allegro `.brd` (versions 16.0 to 23.x), a Gerber
@@ -150,6 +160,11 @@ own Altium reader and matched the source on 12 boards; opening the files in
 Altium Designer itself has not been checked yet. Designators, classes and
 rules are not written.
 
+Fab outputs were checked against the Gerbers TI made in Altium for the
+16-layer DAC39RF12 EVM: drawn at 25 µm, every copper layer, both mask and
+both paste layers differ by under 0.5 % of their area, and the drill files
+hold the same holes. Reading the outputs back gives all 375 nets.
+
 Tested on an 18-layer Altium board with 2,370 parts, 2,252 nets and 137 differential
 pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
 1.07 million records reads in about 0.7 s.
@@ -169,6 +184,8 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   pads, so moving far leaves long diagonal segments to tidy up; tracks on
   surface pads stay behind when the part is flipped. Silk follows parts
   on Altium boards (other formats do not say which silk is a part's).
+  Copper, mask and paste areas drawn in a footprint (custom pad shapes,
+  mask openings) stay where they are when the part moves.
   Vias are through vias. Push moves tracks only (not vias or pads), one
   track deep: a track that would have to push another is not moved.
 - The design rule check takes a rule whose scope it cannot judge (rooms,
@@ -176,6 +193,12 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   it and the rule that surely applies, so it errs towards fewer reports.
   Silkscreen, solder mask, hole-to-hole and component clearance rules are
   not checked yet.
+- Fab outputs draw text in one stroke font, so silkscreen text is placed
+  and sized as in Altium but its letters are shaped differently (TrueType
+  text too). Text on mechanical layers and Altium special strings other
+  than part parameters are left out. The BOM groups parts by value, part
+  number, maker, description and footprint; it does not know variants or
+  parts not fitted.
 - Length tuning places one row of square meanders on one straight track
   at a time; pick another track if one is too short for the length needed.
 - Impedance uses closed-form models (Hammerstad–Jensen microstrip, Wheeler
@@ -202,7 +225,7 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
 | `crates/trace-altium` | Altium `.PcbDoc` / `.SchDoc` reader (OLE compound files) |
 | `crates/trace-allegro` | Allegro `.brd` reader, ported from KiCad's Allegro importer |
 | `crates/trace-gerber` | Gerber, Excellon, IPC-356 and ODB++ import with layer detection and net tracing |
-| `crates/trace-export` | Writes boards in other tools' formats (KiCad, Altium) |
+| `crates/trace-export` | Writes boards in other tools' formats (KiCad, Altium) and fab outputs (Gerber X2, Excellon, IPC-356, pick-and-place, BOM) |
 | `crates/trace-step` | STEP part models to coloured triangle meshes (geometry via the `truck` crates) |
 | `crates/trace-cli` | The `trace` command |
 | `crates/trace-app` | The desktop app (egui) |

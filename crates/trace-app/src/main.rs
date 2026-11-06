@@ -406,6 +406,38 @@ impl App {
         });
     }
 
+    /// Gerber X2, drill, IPC-356, pick-and-place and BOM files, in one zip.
+    fn export_fab(&mut self) {
+        let Some(scene) = &self.scene else { return };
+        let stem = scene
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "board".into());
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("Zip archive", &["zip"])
+            .set_file_name(format!("{stem}-fab.zip"))
+            .save_file()
+        else {
+            return;
+        };
+        let opt = trace_export::FabOptions::from_board(&scene.board);
+        let files = trace_export::fab_files(&scene.board, &stem, &opt);
+        let result = trace_export::fab_zip(&files).and_then(|z| std::fs::write(&path, z));
+        self.message = Some(match result {
+            Ok(()) => (
+                format!(
+                    "Saved {} fab files to {} (Gerber X2, drill, IPC-356 netlist, pick-and-place, BOM; mask {:.3} mm)",
+                    files.len(),
+                    path.display(),
+                    opt.mask_expansion.mm()
+                ),
+                false,
+            ),
+            Err(e) => (format!("Could not save: {e}"), true),
+        });
+    }
+
     fn export_pairs(&mut self) {
         let Some(scene) = &self.scene else { return };
         let Some(path) = rfd::FileDialog::new()
@@ -794,6 +826,16 @@ impl App {
                 {
                     ui.close_menu();
                     self.save_altium();
+                }
+                if ui
+                    .add_enabled(
+                        self.scene.is_some(),
+                        egui::Button::new("Export fab outputs (Gerber, drill, BOM)…"),
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.export_fab();
                 }
                 if ui
                     .add_enabled(

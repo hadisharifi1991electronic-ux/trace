@@ -9,6 +9,7 @@ pub mod constraints;
 pub mod drc;
 pub mod edit;
 pub mod file;
+pub mod font;
 pub mod geometry;
 pub mod impedance;
 pub mod place;

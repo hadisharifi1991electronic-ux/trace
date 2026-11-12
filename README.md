@@ -118,7 +118,9 @@ checker and simulator all read.
   track width and unrouted nets, from the board's own Altium rules (per
   object type, by priority, net, class, part, footprint and part class
   scopes); and the manufacturing rules: hole size, hole to hole, annular
-  ring, solder mask slivers, silkscreen over mask openings or pads, and
+  ring, solder mask slivers, silkscreen over mask openings or pads,
+  silkscreen of one part on another's, parts too close to each other
+  (component clearance, with through-hole and SMD part scopes), and
   copper near or over the board edge. Live is on by default:
   the board is checked again in the background after every edit, the
   count shows in the status bar, and markers on the board show where.
@@ -150,7 +152,8 @@ trace view board.PcbDoc          open the board viewer in your browser
 trace rules board.PcbDoc         design rules grouped by kind
 trace check board.PcbDoc         check the board's length and matched-length rules; lists failing nets
 trace drc board.PcbDoc [--all]   design rule check: clearance, shorts, width, unrouted nets, and the
-                                 manufacturing rules (holes, rings, mask slivers, silk on pads, board edge)
+                                 manufacturing rules (holes, rings, mask slivers, silk on pads, silk to silk,
+                                 part clearance, board edge)
 trace impedance board.PcbDoc     stack-up widths for 50 Ω and 100 Ω pairs, and each pair's Zdiff
 trace convert <file> out.json    export to Trace's open JSON model
 trace convert <file> out.kicad_pcb   write a KiCad board
@@ -223,8 +226,12 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   layers, hole sizes) as possibly applying, and uses the smaller gap of it
   and the rule that surely applies, so it errs towards fewer reports.
   Clearance rules do not yet tell parts apart (the manufacturing rules
-  do). Silk to silk, component clearance, height and net antennae rules
-  are not checked yet.
+  do). Component clearance takes each part as the rectangle around its
+  pads (turned with the part), not its 3D body, so a part whose pins
+  spread wide reaches further than its body does; a part wholly inside
+  another's rectangle (under a shield can) is not reported, and heights
+  are not checked. Free silkscreen is not checked against itself. Height
+  and net antennae rules are not checked yet.
 - Fab outputs draw text in one stroke font, so silkscreen text is placed
   and sized as in Altium but its letters are shaped differently (TrueType
   text too). Text on mechanical layers and Altium special strings other

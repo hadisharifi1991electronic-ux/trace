@@ -1,7 +1,8 @@
-//! Manufacturing rules, read as Altium has them: hole size, hole to hole
-//! spacing, annular ring, solder mask slivers, silkscreen over mask
-//! openings and copper near the board edge. Each runs only where the
-//! board has the rule.
+//! Manufacturing and placement rules, read as Altium has them: hole size,
+//! hole to hole spacing, annular ring, solder mask slivers, silkscreen over
+//! mask openings and over other parts' silkscreen, copper near the board
+//! edge, and parts too close together. Each runs only where the board has
+//! the rule.
 
 use super::{
     center, judge, obj_of, param, shape_gap, Copper, Item, Kind, NetInfo, Obj, Tri, Violation, CELL,
@@ -592,49 +593,7 @@ fn silk(board: &Board, info: &NetInfo, open: &[Opening], n: u8, out: &mut Vec<Vi
         .fold(0.0, f64::max)
         + 0.01;
     let grid = grid_of(open, 0.0);
-    let g = &board.geometry;
-    // Silk strokes: (side, a, b, half width, item, part).
-    let mut strokes: Vec<(u8, P, P, f64, Item, Option<u32>)> = Vec::new();
-    let side = |l: &LayerRef| match l {
-        LayerRef::TopSilk => Some(0),
-        LayerRef::BottomSilk => Some(n - 1),
-        _ => None,
-    };
-    for (i, t) in g.tracks.iter().enumerate() {
-        if let Some(s) = side(&t.layer) {
-            strokes.push((
-                s,
-                pt(t.start),
-                pt(t.end),
-                t.width.mil() / 2.0,
-                Item::Track(i),
-                t.component,
-            ));
-        }
-    }
-    for (i, a) in g.arcs.iter().enumerate() {
-        let Some(s) = side(&a.layer) else { continue };
-        let (c, r) = (pt(a.center), a.radius.mil());
-        let mut sweep = (a.end_deg - a.start_deg).rem_euclid(360.0);
-        if sweep == 0.0 {
-            sweep = 360.0;
-        }
-        let k = (sweep / 10.0).ceil().max(1.0) as usize;
-        let at = |j: usize| {
-            let t = (a.start_deg + sweep * j as f64 / k as f64).to_radians();
-            [c[0] + r * t.cos(), c[1] + r * t.sin()]
-        };
-        for j in 0..k {
-            strokes.push((
-                s,
-                at(j),
-                at(j + 1),
-                a.width.mil() / 2.0,
-                Item::Arc(i),
-                a.component,
-            ));
-        }
-    }
+    let strokes = silk_strokes(board, n);
     // One report per piece of silk (a part's silk counts as one) and
     // opening, the worst kept.
     let mut worst: HashMap<(Option<u32>, Item, Item), usize> = HashMap::new();
@@ -696,6 +655,292 @@ fn silk(board: &Board, info: &NetInfo, open: &[Opening], n: u8, out: &mut Vec<Vi
                         out.push(v);
                     }
                 }
+            }
+        }
+    }
+}
+
+/// A silkscreen stroke: side (copper layer it faces), ends, half width,
+/// the item it comes from and its part.
+type Stroke = (u8, P, P, f64, Item, Option<u32>);
+
+/// Every silkscreen stroke of the board, arcs cut into short pieces.
+fn silk_strokes(board: &Board, n: u8) -> Vec<Stroke> {
+    let g = &board.geometry;
+    // Silk strokes: (side, a, b, half width, item, part).
+    let mut strokes: Vec<Stroke> = Vec::new();
+    let side = |l: &LayerRef| match l {
+        LayerRef::TopSilk => Some(0),
+        LayerRef::BottomSilk => Some(n - 1),
+        _ => None,
+    };
+    for (i, t) in g.tracks.iter().enumerate() {
+        if let Some(s) = side(&t.layer) {
+            strokes.push((
+                s,
+                pt(t.start),
+                pt(t.end),
+                t.width.mil() / 2.0,
+                Item::Track(i),
+                t.component,
+            ));
+        }
+    }
+    for (i, a) in g.arcs.iter().enumerate() {
+        let Some(s) = side(&a.layer) else { continue };
+        let (c, r) = (pt(a.center), a.radius.mil());
+        let mut sweep = (a.end_deg - a.start_deg).rem_euclid(360.0);
+        if sweep == 0.0 {
+            sweep = 360.0;
+        }
+        let k = (sweep / 10.0).ceil().max(1.0) as usize;
+        let at = |j: usize| {
+            let t = (a.start_deg + sweep * j as f64 / k as f64).to_radians();
+            [c[0] + r * t.cos(), c[1] + r * t.sin()]
+        };
+        for j in 0..k {
+            strokes.push((
+                s,
+                at(j),
+                at(j + 1),
+                a.width.mil() / 2.0,
+                Item::Arc(i),
+                a.component,
+            ));
+        }
+    }
+    strokes
+}
+
+/// Silkscreen of one part on or too near silkscreen of another part, or
+/// of free silkscreen. Free silkscreen is not checked against itself (its
+/// lines meet by design).
+fn silk_to_silk(board: &Board, info: &NetInfo, n: u8, out: &mut Vec<Violation>) {
+    let mut rules = Rules::new(board, info, "SilkToSilkClearance");
+    if rules.list.is_empty() {
+        return;
+    }
+    let reach = (0..rules.list.len())
+        .filter_map(|r| rules.mil(r, "SILKTOSILKCLEARANCE"))
+        .fold(0.0, f64::max)
+        + 0.01;
+    let strokes = silk_strokes(board, n);
+    let mut grid: HashMap<(u8, i32, i32), Vec<usize>> = HashMap::new();
+    let bb = |k: &Stroke| {
+        let (a, b, w) = (k.1, k.2, k.3);
+        [
+            a[0].min(b[0]) - w,
+            a[1].min(b[1]) - w,
+            a[0].max(b[0]) + w,
+            a[1].max(b[1]) + w,
+        ]
+    };
+    for (i, k) in strokes.iter().enumerate() {
+        for (x, y) in cells(bb(k), 0.0) {
+            grid.entry((k.0, x, y)).or_default().push(i);
+        }
+    }
+    // The worst gap for each pair of owners: a part, or the board's free
+    // silkscreen as one (a free text is many strokes).
+    let owner = |k: &Stroke| k.5;
+    let mut worst: HashMap<(Option<u32>, Option<u32>), usize> = HashMap::new();
+    for (i, a) in strokes.iter().enumerate() {
+        let mut seen = HashSet::new();
+        for (x, y) in cells(bb(a), reach) {
+            let Some(list) = grid.get(&(a.0, x, y)) else {
+                continue;
+            };
+            for &j in list {
+                if j <= i || !seen.insert(j) {
+                    continue;
+                }
+                let b = &strokes[j];
+                if a.5 == b.5 {
+                    continue; // one part's own silk, or free against free
+                }
+                let gap = Shape::Capsule {
+                    a: a.1,
+                    b: a.2,
+                    r: a.3,
+                }
+                .gap(b.1, b.2, b.3);
+                if gap >= reach {
+                    continue;
+                }
+                let wa = (None, Obj::Track, a.5);
+                let wb = (None, Obj::Track, b.5);
+                let list = rules.deciding(|s, r| s.pair(r, wa, wb));
+                let hit = fails(&list, |r| {
+                    let need = rules.mil(r, "SILKTOSILKCLEARANCE").unwrap_or(0.0);
+                    (gap < need - 0.01).then_some(need)
+                });
+                let Some((r, need)) = hit else { continue };
+                let (oa, ob) = (owner(a), owner(b));
+                let key = if oa <= ob { (oa, ob) } else { (ob, oa) };
+                let at = closest(a.1, a.2, b.1, b.2);
+                let v = viol(
+                    Kind::SilkToSilk,
+                    Some(a.0),
+                    at,
+                    (None, a.4, Obj::Track),
+                    Some((None, b.4, Obj::Track)),
+                    gap.max(0.0),
+                    need,
+                    &rules.list[r].name,
+                );
+                match worst.get(&key) {
+                    Some(&k) if out[k].found <= v.found => {}
+                    Some(&k) => out[k] = v,
+                    None => {
+                        worst.insert(key, out.len());
+                        out.push(v);
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The middle of the closest approach of two segments, near enough.
+fn closest(a: P, b: P, c: P, d: P) -> P {
+    let mut best = (f64::MAX, a, c);
+    for p in [a, b, mid(a, b)] {
+        for q in [c, d, mid(c, d)] {
+            let k = (p[0] - q[0]).hypot(p[1] - q[1]);
+            if k < best.0 {
+                best = (k, p, q);
+            }
+        }
+    }
+    mid(best.1, best.2)
+}
+
+/// Each part's outline for placement checks: the rectangle, turned with
+/// the part, around its pads. Parts without pads have none.
+fn part_outlines(board: &Board) -> Vec<Option<(crate::Side, Vec<P>)>> {
+    use crate::place::Placement;
+    let mut corners: Vec<Vec<P>> = vec![Vec::new(); board.components.len()];
+    for p in &board.geometry.pads {
+        let Some(c) = p.component.map(|c| c as usize) else {
+            continue;
+        };
+        let Some(list) = corners.get_mut(c) else {
+            continue;
+        };
+        if p.outline.len() >= 3 {
+            list.extend(p.outline.iter().map(|&q| pt(q)));
+        } else {
+            let (sx, sy) = (
+                p.size_x.mil().max(p.hole.mil()),
+                p.size_y.mil().max(p.hole.mil()),
+            );
+            list.extend(crate::route::rect(pt(p.at), sx, sy, p.rotation_deg));
+        }
+    }
+    corners
+        .into_iter()
+        .enumerate()
+        .map(|(i, pts)| {
+            let at = Placement::of(board, i)?;
+            if pts.is_empty() {
+                return None;
+            }
+            let local: Vec<P> = pts.iter().map(|&q| at.to_local(q)).collect();
+            let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+            for q in &local {
+                lo = [lo[0].min(q[0]), lo[1].min(q[1])];
+                hi = [hi[0].max(q[0]), hi[1].max(q[1])];
+            }
+            let rect = [
+                [lo[0], lo[1]],
+                [hi[0], lo[1]],
+                [hi[0], hi[1]],
+                [lo[0], hi[1]],
+            ]
+            .iter()
+            .map(|&q| at.to_board(q))
+            .collect();
+            Some((board.components[i].side, rect))
+        })
+        .collect()
+}
+
+/// Parts closer than their ComponentClearance rule allows. Each part is
+/// the rectangle around its pads, turned with it; parts on opposite sides
+/// are only checked when the rule asks for all layers. Heights are not
+/// known, so the rule's vertical gap is not used.
+fn parts(board: &Board, info: &NetInfo, out: &mut Vec<Violation>) {
+    let mut rules = Rules::new(board, info, "ComponentClearance");
+    if rules.list.is_empty() {
+        return;
+    }
+    let reach = (0..rules.list.len())
+        .filter_map(|r| rules.mil(r, "GAP"))
+        .fold(0.0, f64::max)
+        + 0.01;
+    let outlines = part_outlines(board);
+    let boxes: Vec<Option<[f64; 4]>> = outlines
+        .iter()
+        .map(|o| o.as_ref().map(|(_, v)| bbox_of(&Shape::Poly(v.clone()))))
+        .collect();
+    let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+    for (i, b) in boxes.iter().enumerate() {
+        if let Some(b) = b {
+            for c in cells(*b, 0.0) {
+                grid.entry(c).or_default().push(i);
+            }
+        }
+    }
+    for i in 0..outlines.len() {
+        let (Some((side_a, a)), Some(ba)) = (&outlines[i], boxes[i]) else {
+            continue;
+        };
+        let mut seen = HashSet::new();
+        for c in cells(ba, reach) {
+            let Some(list) = grid.get(&c) else { continue };
+            for &j in list {
+                if j <= i || !seen.insert(j) {
+                    continue;
+                }
+                let Some((side_b, b)) = &outlines[j] else {
+                    continue;
+                };
+                let gap = shape_gap(&Shape::Poly(a.clone()), &Shape::Poly(b.clone()));
+                if gap >= reach {
+                    continue;
+                }
+                // A part wholly inside another's pads (under a shield can,
+                // inside a connector's pins) sits clear of its body; the
+                // copper clearance check covers the pads.
+                if b.iter().all(|&q| inside(q, a)) || a.iter().all(|&q| inside(q, b)) {
+                    continue;
+                }
+                let wa = (None, Obj::Part, Some(i as u32));
+                let wb = (None, Obj::Part, Some(j as u32));
+                let same_side = side_a == side_b;
+                let list = rules.deciding(|s, r| s.pair(r, wa, wb));
+                let hit = fails(&list, |r| {
+                    let all_layers = param(rules.list[r], "LAYERKIND")
+                        .is_some_and(|v| v.eq_ignore_ascii_case("AllLayers"));
+                    if !same_side && !all_layers {
+                        return None;
+                    }
+                    let need = rules.mil(r, "GAP").unwrap_or(0.0);
+                    (gap < need - 0.01).then_some(need)
+                });
+                let Some((r, need)) = hit else { continue };
+                let ca = center(&Shape::Poly(a.clone()));
+                let cb = center(&Shape::Poly(b.clone()));
+                out.push(viol(
+                    Kind::PartClearance,
+                    None,
+                    mid(ca, cb),
+                    (None, Item::Part(i), Obj::Part),
+                    Some((None, Item::Part(j), Obj::Part)),
+                    gap.max(0.0),
+                    need,
+                    &rules.list[r].name,
+                ));
             }
         }
     }
@@ -824,7 +1069,9 @@ pub(super) fn check(board: &Board, info: &NetInfo, items: &[Copper], out: &mut V
     let open = openings(board, items, n);
     slivers(board, info, &open, out);
     silk(board, info, &open, n, out);
+    silk_to_silk(board, info, n, out);
     edge(board, info, items, out);
+    parts(board, info, out);
 }
 
 /// What a board item is, for messages: "pad U3-A1", "via", "track".
@@ -862,6 +1109,7 @@ fn what(board: &Board, item: Option<Item>, obj: Option<Obj>) -> String {
         }
         Some(Item::Polygon(_)) => obj.map(Obj::label).unwrap_or("copper area").into(),
         Some(Item::Area(_)) => "mask opening".into(),
+        Some(Item::Part(i)) => part(Some(i as u32)).unwrap_or_else(|| "part".into()),
         None => String::new(),
     }
 }
@@ -950,6 +1198,38 @@ pub(super) fn describe(board: &Board, v: &Violation) -> String {
                 )
             }
         }
+        Kind::SilkToSilk => {
+            let a = what(board, v.items[0], None);
+            let b = what(board, v.items[1], None);
+            let mut c = a.chars();
+            let a: String = c
+                .next()
+                .map(|f| f.to_uppercase().chain(c).collect())
+                .unwrap_or_default();
+            if v.found <= 0.0 {
+                format!("{a} overlaps {b} ({})", v.rule)
+            } else {
+                format!(
+                    "{a} is {:.2} mil from {b}, needs {:.2} ({})",
+                    v.found, v.need, v.rule
+                )
+            }
+        }
+        Kind::PartClearance if v.found <= 0.0 => format!(
+            "Parts {} and {} overlap, need {:.2} mil apart ({})",
+            who(0),
+            who(1),
+            v.need,
+            v.rule
+        ),
+        Kind::PartClearance => format!(
+            "Parts {} and {} are {:.2} mil apart, need {:.2} ({})",
+            who(0),
+            who(1),
+            v.found,
+            v.need,
+            v.rule
+        ),
         _ => String::new(),
     }
 }
@@ -1202,5 +1482,123 @@ mod tests {
         let v = kinds(&b, Kind::BoardEdge);
         assert_eq!(v.len(), 1, "{v:?}");
         assert!((v[0].found - 10.0).abs() < 1e-6 && v[0].need == 25.0);
+    }
+
+    fn part(b: &mut Board, designator: &str, footprint: &str, x: f64, side: Side) -> u32 {
+        b.components.push(Component {
+            designator: designator.into(),
+            footprint: footprint.into(),
+            library_ref: None,
+            x: Length::from_mil(x),
+            y: Length::from_mil(500.0),
+            rotation_deg: 0.0,
+            side,
+            sheet: None,
+            params: Default::default(),
+        });
+        (b.components.len() - 1) as u32
+    }
+
+    fn silk_line(b: &mut Board, x0: f64, x1: f64, y: f64, component: Option<u32>) {
+        b.geometry.tracks.push(Track {
+            layer: LayerRef::TopSilk,
+            net: None,
+            start: p(x0, y),
+            end: p(x1, y),
+            width: Length::from_mil(6.0),
+            component,
+            text: false,
+        });
+    }
+
+    #[test]
+    fn silk_meets_silk_of_other_parts_only() {
+        let mut b = board();
+        b.rules.push(rule(
+            "SilkToSilkClearance",
+            ["All", "All"],
+            1,
+            &[("SILKTOSILKCLEARANCE", "10mil")],
+        ));
+        let r1 = part(&mut b, "R1", "0402", 100.0, Side::Top);
+        let r2 = part(&mut b, "R2", "0402", 200.0, Side::Top);
+        // R1's two lines cross each other: its own, so no fault.
+        silk_line(&mut b, 50.0, 150.0, 500.0, Some(r1));
+        silk_line(&mut b, 100.0, 100.0, 520.0, Some(r1));
+        // R2's line ends 8 mil (edge to edge) from R1's: 2 short of 10.
+        silk_line(&mut b, 164.0, 250.0, 500.0, Some(r2));
+        // Two free lines that meet: free silk is not checked against itself.
+        silk_line(&mut b, 1000.0, 1100.0, 800.0, None);
+        silk_line(&mut b, 1100.0, 1200.0, 800.0, None);
+        let v = kinds(&b, Kind::SilkToSilk);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert!(
+            (v[0].found - 8.0).abs() < 1e-6 && v[0].need == 10.0,
+            "{v:?}"
+        );
+        assert!(
+            describe(&b, &v[0]).contains("R2"),
+            "{}",
+            describe(&b, &v[0])
+        );
+    }
+
+    #[test]
+    fn parts_keep_their_clearance() {
+        let mut b = board();
+        b.rules.push(rule(
+            "ComponentClearance",
+            ["All", "All"],
+            3,
+            &[("GAP", "10mil")],
+        ));
+        // Washers may touch anything.
+        b.rules.push(rule(
+            "ComponentClearance",
+            ["Name Like 'WASHER*'", "All"],
+            1,
+            &[("GAP", "0mil")],
+        ));
+        // Through-hole parts keep 30 mil from each other.
+        b.rules.push(rule(
+            "ComponentClearance",
+            ["IsThruComponent", "IsThruComponent"],
+            2,
+            &[("GAP", "30mil")],
+        ));
+        let add = |b: &mut Board, d: &str, x: f64, side: Side, hole: f64| {
+            let c = part(b, d, "PART", x, side);
+            let mut q = pad(x, 500.0, 20.0, Some(c));
+            q.hole = Length::from_mil(hole);
+            b.geometry.pads.push(q);
+            c
+        };
+        // R1 and R2 are 5 mil apart edge to edge.
+        add(&mut b, "R1", 100.0, Side::Top, 0.0);
+        add(&mut b, "R2", 125.0, Side::Top, 0.0);
+        // The same gap to a washer, and to a part on the bottom.
+        add(&mut b, "WASHER1", 400.0, Side::Top, 0.0);
+        add(&mut b, "R3", 425.0, Side::Top, 0.0);
+        add(&mut b, "R4", 700.0, Side::Top, 0.0);
+        add(&mut b, "R5", 725.0, Side::Bottom, 0.0);
+        // Two through-hole parts 20 mil apart, inside 30.
+        add(&mut b, "J1", 1000.0, Side::Top, 10.0);
+        add(&mut b, "J2", 1040.0, Side::Top, 10.0);
+        let v = kinds(&b, Kind::PartClearance);
+        assert_eq!(v.len(), 2, "{v:?}");
+        assert_eq!(v[0].items, [Some(Item::Part(1)), Some(Item::Part(2))]);
+        assert!(
+            (v[0].found - 5.0).abs() < 1e-6 && v[0].need == 10.0,
+            "{v:?}"
+        );
+        assert_eq!(v[1].items, [Some(Item::Part(7)), Some(Item::Part(8))]);
+        assert!(
+            (v[1].found - 20.0).abs() < 1e-6 && v[1].need == 30.0,
+            "{v:?}"
+        );
+        assert_eq!(
+            describe(&b, &v[0]),
+            "Parts R1 and R2 are 5.00 mil apart, need 10.00 (ComponentClearance3)"
+        );
     }
 }

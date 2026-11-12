@@ -3,6 +3,27 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.23.0 (2026-11-12)
+
+- Two more manufacturing checks in the DRC, from the board's own Altium
+  rules:
+  - Silk to silk: one part's silkscreen on or too near another part's,
+    or the board's free silkscreen (SilkToSilkClearance). A part's own
+    lines are not checked against each other, and each pair of parts is
+    reported once, at its worst spot.
+  - Part clearance: parts closer than their ComponentClearance rule
+    allows. Each part is the rectangle around its pads, turned with it;
+    parts on opposite sides count only when the rule asks for all
+    layers; a part wholly inside another (under a shield can) is left
+    alone.
+- Rule scopes understand IsThruComponent, IsSMTComponent, Name Like and
+  ObjectKind for parts, so per-footprint and through-hole clearance rules
+  apply as in Altium.
+- Clicking a part clearance fault zooms to both parts.
+- Tried on Clocker (12 silk to silk, 1 part clearance) and the DAC39RF12
+  EVM (23 silk to silk, 119 part clearance, most between 0402 parts
+  under the SmallPassives rule).
+
 ## 0.22.0 (2026-11-12)
 
 - Blind, buried and micro vias when routing. The route bar's Via list

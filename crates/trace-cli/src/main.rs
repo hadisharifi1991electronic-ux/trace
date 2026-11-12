@@ -18,7 +18,8 @@ USAGE:
     trace rules <board>                         Design rules, grouped by kind
     trace check <board>                         Check length, match, skew and via limits from the board's rules
     trace drc <board> [--all]                   Design rule check: clearance, shorts, width, unrouted nets,
-                                                holes, annular rings, mask slivers, silk on pads, board edge
+                                                holes, annular rings, mask slivers, silk on pads, silk to silk,
+                                                part clearance, board edge
     trace impedance <board>                     Stack-up, widths for 50/100 ohm, and the impedance of each pair
     trace view <board> [out.html]               Open the board in the viewer (in your browser)
     trace convert <file> <out.json>             Export to Trace's open JSON model

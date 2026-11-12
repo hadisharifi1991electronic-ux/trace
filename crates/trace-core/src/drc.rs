@@ -30,6 +30,8 @@ pub enum Obj {
     Pour,
     Region,
     Hole,
+    /// A whole part, as placement rules see it.
+    Part,
 }
 
 impl Obj {
@@ -43,6 +45,7 @@ impl Obj {
             Obj::Pour => "pour",
             Obj::Region => "copper region",
             Obj::Hole => "hole",
+            Obj::Part => "part",
         }
     }
     /// Name in Altium's per-object clearance table.
@@ -56,6 +59,7 @@ impl Obj {
             Obj::Pour => "Poly",
             Obj::Region => "Region",
             Obj::Hole => "Hole",
+            Obj::Part => "Component",
         }
     }
     const ALL: [Obj; 8] = [
@@ -84,11 +88,15 @@ pub enum Kind {
     MaskSliver,
     /// Silkscreen on or too near a solder mask opening.
     SilkToMask,
+    /// Silkscreen of one part on or too near another's.
+    SilkToSilk,
+    /// Two parts on the same side closer than their rule allows.
+    PartClearance,
     Unrouted,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 10] = [
+    pub const ALL: [Kind; 12] = [
         Kind::Short,
         Kind::Clearance,
         Kind::Width,
@@ -98,6 +106,8 @@ impl Kind {
         Kind::HoleSize,
         Kind::MaskSliver,
         Kind::SilkToMask,
+        Kind::SilkToSilk,
+        Kind::PartClearance,
         Kind::Unrouted,
     ];
     pub fn label(self) -> &'static str {
@@ -111,6 +121,8 @@ impl Kind {
             Kind::HoleSize => "Hole size",
             Kind::MaskSliver => "Mask sliver",
             Kind::SilkToMask => "Silk to mask",
+            Kind::SilkToSilk => "Silk to silk",
+            Kind::PartClearance => "Part clearance",
             Kind::Unrouted => "Unrouted net",
         }
     }
@@ -124,6 +136,8 @@ impl Kind {
                 | Kind::HoleSize
                 | Kind::MaskSliver
                 | Kind::SilkToMask
+                | Kind::SilkToSilk
+                | Kind::PartClearance
         )
     }
 }
@@ -139,6 +153,8 @@ pub enum Item {
     /// A filled shape off copper (`Geometry::areas`), such as a solder
     /// mask opening drawn by hand.
     Area(usize),
+    /// A whole part (`Board::components`).
+    Part(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -165,7 +181,7 @@ enum Tok {
     Str(String),
     Open,
     Close,
-    Other,
+    Other(char),
 }
 
 fn tokens(s: &str) -> Vec<Tok> {
@@ -200,8 +216,8 @@ fn tokens(s: &str) -> Vec<Tok> {
                 }
                 out.push(Tok::Word(c[start..i].iter().collect()));
             }
-            _ => {
-                out.push(Tok::Other);
+            ch => {
+                out.push(Tok::Other(ch));
                 i += 1;
             }
         }
@@ -220,6 +236,8 @@ enum Part<'a> {
         designator: &'a str,
         footprint: &'a str,
         classes: &'a [String],
+        /// Whether any of its pads has a hole.
+        thru: bool,
     },
 }
 
@@ -331,24 +349,67 @@ impl Parser<'_> {
                         }
                     }
                 }
-                // Comparisons (`HoleSize = 45`) are beyond these terms:
-                // skip the operator and value, unknown.
-                if matches!(self.t.get(self.i), Some(Tok::Other)) {
+                // Comparisons: a whole part's kind and name are known
+                // (`ObjectKind = 'Component'`, `Name Like 'WASHER*'`); the
+                // rest (`HoleSize = 45`) are beyond these terms: skip the
+                // operator and value, unknown.
+                if args.is_empty() && matches!(self.t.get(self.i), Some(Tok::Other(_)))
+                    || self.peek_word("like")
+                {
+                    let mut op = String::new();
+                    let mut value = None;
                     while matches!(
                         self.t.get(self.i),
-                        Some(Tok::Other) | Some(Tok::Word(_)) | Some(Tok::Str(_))
+                        Some(Tok::Other(_)) | Some(Tok::Word(_)) | Some(Tok::Str(_))
                     ) && !self.peek_word("and")
                         && !self.peek_word("or")
                     {
+                        match &self.t[self.i] {
+                            Tok::Other(c) => op.push(*c),
+                            Tok::Word(x) if value.is_none() && x.eq_ignore_ascii_case("like") => {
+                                op = "like".into()
+                            }
+                            Tok::Str(v) | Tok::Word(v) if value.is_none() => {
+                                value = Some(v.clone())
+                            }
+                            _ => {}
+                        }
                         self.i += 1;
                     }
-                    return Ok(None);
+                    return Ok(value.and_then(|v| self.compare(&w, &op, &v)));
                 }
                 Ok(self.term(&w, &args))
             }
             _ => Err(()),
         }
     }
+    /// A comparison a whole part can answer: its kind or its designator.
+    fn compare(&self, w: &str, op: &str, v: &str) -> Tri {
+        let s = self.s;
+        if s.obj != Obj::Part {
+            return None;
+        }
+        let Part::In { designator, .. } = s.part else {
+            return None;
+        };
+        let w = w.to_ascii_lowercase();
+        let found = match w.as_str() {
+            "objectkind" => v.eq_ignore_ascii_case("component"),
+            // A 3D body's name: never a part's.
+            "identifier" => false,
+            "name" => match op {
+                "like" => glob(v, designator),
+                _ => v.eq_ignore_ascii_case(designator),
+            },
+            _ => return None,
+        };
+        match op {
+            "=" | "like" => Some(found),
+            "<>" => Some(!found),
+            _ => None,
+        }
+    }
+
     fn term(&self, w: &str, args: &[String]) -> Tri {
         let s = self.s;
         let arg = args.first().map(String::as_str).unwrap_or("");
@@ -361,7 +422,13 @@ impl Parser<'_> {
                 designator,
                 footprint,
                 classes,
+                ..
             } => Some(f(designator, footprint, classes)),
+        };
+        // Whether a whole part is through-hole: only asked of parts.
+        let thru = match (s.obj, s.part) {
+            (Obj::Part, Part::In { thru, .. }) => Some(thru),
+            _ => None,
         };
         match w.as_str() {
             "hasfootprint" => return part(&|_, f, _| glob(arg, f)),
@@ -370,6 +437,8 @@ impl Parser<'_> {
             "inanycomponent" => return part(&|_, _, _| true),
             "isfree" => return part(&|_, _, _| true).map(|v| !v),
             "hasfootprintpad" if matches!(s.part, Part::Free) => return Some(false),
+            "isthrucomponent" => return thru,
+            "issmtcomponent" => return thru.map(|t| !t),
             _ => {}
         }
         Some(match w.as_str() {
@@ -414,6 +483,8 @@ struct NetInfo {
     pair_classes: Vec<Vec<String>>,
     /// Each component's designator, footprint and classes.
     parts: Vec<(String, String, Vec<String>)>,
+    /// Whether each component has a pad with a hole.
+    thru: Vec<bool>,
 }
 
 impl NetInfo {
@@ -466,12 +537,23 @@ impl NetInfo {
                 (c.designator.clone(), c.footprint.clone(), cls)
             })
             .collect();
+        let mut thru = vec![false; board.components.len()];
+        for p in &board.geometry.pads {
+            if let Some(t) = p
+                .component
+                .and_then(|c| thru.get_mut(c as usize))
+                .filter(|_| p.hole.mil() > 0.0)
+            {
+                *t = true;
+            }
+        }
         NetInfo {
             names: board.nets.iter().map(|x| x.name.clone()).collect(),
             classes,
             pairs,
             pair_classes,
             parts,
+            thru,
         }
     }
 
@@ -484,6 +566,7 @@ impl NetInfo {
                 designator: d,
                 footprint: f,
                 classes: c,
+                thru: component.is_some_and(|i| self.thru[i as usize]),
             },
             None => Part::Free,
         };

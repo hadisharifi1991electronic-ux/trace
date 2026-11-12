@@ -773,7 +773,7 @@ impl App {
         let Some(v) = self.drc.list.get(i) else {
             return;
         };
-        let (at, layer, net) = (v.at, v.layer, v.nets[0]);
+        let (at, layer, net, items) = (v.at, v.layer, v.nets[0], v.items);
         self.mode3d = false;
         self.mode_sch = false;
         match net {
@@ -787,6 +787,39 @@ impl App {
         let p = [at[0] as f32, at[1] as f32];
         self.marker = Some(p);
         self.focus = Some(Focus::Point(p, self.view.scale.max(4.0)));
+        // Two parts too close: show both of them whole.
+        if let Some(s) = &self.scene {
+            let parts: Vec<u32> = items
+                .iter()
+                .filter_map(|it| match it {
+                    Some(trace_core::drc::Item::Part(c)) => Some(*c as u32),
+                    _ => None,
+                })
+                .collect();
+            let mut area = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+            for q in s.board.geometry.pads.iter() {
+                if !q.component.is_some_and(|c| parts.contains(&c)) {
+                    continue;
+                }
+                let r = (q.size_x.mil().max(q.size_y.mil()) / 2.0) as f32;
+                let (x, y) = (q.at.x.mil() as f32, q.at.y.mil() as f32);
+                area = [
+                    area[0].min(x - r),
+                    area[1].min(y - r),
+                    area[2].max(x + r),
+                    area[3].max(y + r),
+                ];
+            }
+            if area[0] <= area[2] {
+                let m = 0.15 * (area[2] - area[0]).max(area[3] - area[1]).max(100.0);
+                self.focus = Some(Focus::Area([
+                    area[0] - m,
+                    area[1] - m,
+                    area[2] + m,
+                    area[3] + m,
+                ]));
+            }
+        }
         self.needs_fit = false;
         self.message = Some((
             self.scene

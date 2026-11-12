@@ -6,9 +6,10 @@
 //! exactly: a net the edits left alone is never touched on the board.
 
 use crate::edit::Edit;
+use crate::footprint::{add_parts, parts_using, spots_beside, Footprint, NewPart};
 use crate::schematic::Drawing;
 use crate::{Board, Net};
-use std::collections::{BTreeSet, HashMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 
 /// A pin as (designator, pin number), upper case.
 pub type PinKey = (String, String);
@@ -122,9 +123,16 @@ pub enum Change {
         from: String,
         to: String,
     },
-    /// A part on the sheets that the board does not have.
+    /// A part on the sheets that the board does not have, and whose
+    /// footprint is not to be found.
     NotOnBoard {
         designator: String,
+        footprint: String,
+    },
+    /// A part on the sheets put on the board, beside it.
+    AddPart {
+        designator: String,
+        footprint: String,
     },
     /// A part taken off the sheets; its footprint stays on the board.
     Removed {
@@ -150,9 +158,22 @@ impl Change {
             ),
             Change::Rename { from, to } => format!("Rename {from} to {to}"),
             Change::RenameNet { from, to } => format!("Rename net {from} to {to}"),
-            Change::NotOnBoard { designator } => {
-                format!("{designator} is not on the board: place its footprint by hand")
+            Change::NotOnBoard {
+                designator,
+                footprint,
+            } if footprint.is_empty() => {
+                format!("{designator} is not on the board and has no footprint")
             }
+            Change::NotOnBoard {
+                designator,
+                footprint,
+            } => format!(
+                "{designator} is not on the board: footprint {footprint} is not on the board or in the open library"
+            ),
+            Change::AddPart {
+                designator,
+                footprint,
+            } => format!("Add {designator} ({footprint}) beside the board"),
             Change::Removed { designator } => {
                 format!("{designator} was removed from the sheets; its footprint stays")
             }
@@ -160,11 +181,48 @@ impl Change {
     }
 }
 
-/// What carrying the edits over does, and the board edit that does it.
+/// What carrying the edits over does, and the board edits that do it, in
+/// order, as one step.
 #[derive(Clone, Debug, Default)]
 pub struct Plan {
     pub changes: Vec<Change>,
-    pub edit: Option<Edit>,
+    pub edits: Vec<Edit>,
+}
+
+/// What the sheets say about a part, for putting it on the board.
+#[derive(Clone, Debug, Default)]
+pub struct PartInfo {
+    pub footprint: String,
+    pub value: Option<String>,
+    pub library_ref: String,
+    pub sheet: String,
+}
+
+/// Where new parts come from: what the sheets say about each part (by
+/// designator, upper case) and the footprints of an open library.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Sources<'a> {
+    pub parts: Option<&'a HashMap<String, PartInfo>>,
+    pub library: &'a [Footprint],
+}
+
+impl Sources<'_> {
+    /// The footprint `name`: from the library, else from a part on the
+    /// board that uses it.
+    fn footprint(&self, board: &Board, name: &str) -> Option<Footprint> {
+        if name.is_empty() {
+            return None;
+        }
+        if let Some(f) = self
+            .library
+            .iter()
+            .find(|f| f.name.eq_ignore_ascii_case(name))
+        {
+            return Some(f.clone());
+        }
+        let i = *parts_using(board, name).first()?;
+        Footprint::from_part(board, i)
+    }
 }
 
 /// Works out the board changes for sheets edited from `before` to
@@ -175,6 +233,18 @@ pub fn plan(
     after: &[&Drawing],
     renames: &HashMap<String, String>,
     board: &Board,
+) -> Plan {
+    plan_with(before, after, renames, board, Sources::default())
+}
+
+/// As [`plan`], and parts new on the sheets are put on the board when
+/// `sources` gives their footprint.
+pub fn plan_with(
+    before: &[&Drawing],
+    after: &[&Drawing],
+    renames: &HashMap<String, String>,
+    board: &Board,
+    sources: Sources,
 ) -> Plan {
     let old = netlist(before);
     let new = netlist(after);
@@ -249,6 +319,8 @@ pub fn plan(
     rest.sort_by_key(|&i| std::cmp::Reverse(new[i].pins.len()));
     let mut changes = Vec::new();
     let mut moves: Vec<(usize, Option<u32>, Option<u32>)> = Vec::new();
+    // The board net each pin of a changed net goes to.
+    let mut pin_target: HashMap<PinKey, u32> = HashMap::new();
     let name_of =
         |nets: &[Net], n: Option<u32>| n.and_then(|n| nets.get(n as usize)).map(|n| n.name.clone());
     for i in rest {
@@ -311,6 +383,9 @@ pub fn plan(
             claimed.insert(t);
         }
         for k in &n.pins {
+            if let Some(t) = target {
+                pin_target.insert(k.clone(), t);
+            }
             let bk = on_board(k);
             let Some(list) = pads.get(&bk) else { continue };
             let from = pad_net(&bk);
@@ -360,16 +435,50 @@ pub fn plan(
         .iter()
         .map(|c| c.designator.to_ascii_uppercase())
         .collect();
+    // Designators as drawn (not upper case), for new parts' names.
+    let drawn: HashMap<String, String> = after
+        .iter()
+        .flat_map(|d| d.parts.iter())
+        .map(|p| (p.designator.to_ascii_uppercase(), p.designator.clone()))
+        .collect();
+    let mut adding: Vec<NewPart> = Vec::new();
     for d in now.difference(&was) {
         let as_board = renames
             .get(d)
             .map(|o| o.to_ascii_uppercase())
             .unwrap_or(d.clone());
-        if !board_parts.contains(&as_board) {
+        if board_parts.contains(&as_board) {
+            continue;
+        }
+        let info = sources
+            .parts
+            .and_then(|m| m.get(d))
+            .cloned()
+            .unwrap_or_default();
+        let Some(fp) = sources.footprint(board, &info.footprint) else {
             changes.push(Change::NotOnBoard {
                 designator: d.clone(),
+                footprint: info.footprint,
             });
+            continue;
+        };
+        let name = drawn.get(d).cloned().unwrap_or(d.clone());
+        let mut np = NewPart::new(&name, fp, [0.0, 0.0]);
+        np.nets = pin_target
+            .iter()
+            .filter(|(k, _)| k.0 == *d)
+            .map(|(k, &t)| (k.1.clone(), t))
+            .collect();
+        if let Some(v) = info.value.filter(|v| !v.is_empty()) {
+            np.params = BTreeMap::from([("Comment".to_string(), v)]);
         }
+        np.library_ref = (!info.library_ref.is_empty()).then_some(info.library_ref);
+        np.sheet = (!info.sheet.is_empty()).then_some(info.sheet);
+        changes.push(Change::AddPart {
+            designator: name,
+            footprint: np.footprint.name.clone(),
+        });
+        adding.push(np);
     }
     let renamed_from: HashSet<String> = renames.values().map(|v| v.to_ascii_uppercase()).collect();
     for d in was.difference(&now) {
@@ -382,20 +491,33 @@ pub fn plan(
     changes.sort_by_key(|c| match c {
         Change::Rename { .. } => 0,
         Change::RenameNet { .. } => 1,
-        Change::Pin { .. } => 2,
-        _ => 2,
+        Change::AddPart { .. } => 2,
+        _ => 3,
     });
     names.sort();
     let renamed_net = nets.iter().zip(&board.nets).any(|(a, b)| a.name != b.name);
-    let edit =
-        (!moves.is_empty() || !names.is_empty() || renamed_net || nets.len() != board.nets.len())
-            .then(|| Edit::Netlist {
-                nets_before: board.nets.clone(),
-                nets_after: nets,
-                pads: moves,
-                names,
-            });
-    Plan { changes, edit }
+    let mut edits = Vec::new();
+    if !moves.is_empty() || !names.is_empty() || renamed_net || nets.len() != board.nets.len() {
+        edits.push(Edit::Netlist {
+            nets_before: board.nets.clone(),
+            nets_after: nets,
+            pads: moves,
+            names,
+        });
+    }
+    if !adding.is_empty() {
+        // New parts go in after the net list changes, beside the board.
+        let mut b = board.clone();
+        for e in &edits {
+            e.apply(&mut b);
+        }
+        let sizes: Vec<[f64; 4]> = adding.iter().map(|p| p.footprint.bounds()).collect();
+        for (p, at) in adding.iter_mut().zip(spots_beside(&b, &sizes)) {
+            p.at = at;
+        }
+        edits.extend(add_parts(&b, &adding));
+    }
+    Plan { changes, edits }
 }
 
 #[cfg(test)]
@@ -477,7 +599,11 @@ mod tests {
     fn untouched_sheets_change_nothing() {
         let d = drawing();
         let p = plan(&[&d], &[&d], &HashMap::new(), &board());
-        assert!(p.changes.is_empty() && p.edit.is_none(), "{:?}", p.changes);
+        assert!(
+            p.changes.is_empty() && p.edits.is_empty(),
+            "{:?}",
+            p.changes
+        );
     }
 
     #[test]
@@ -498,10 +624,10 @@ mod tests {
                 new_net: false,
             }]
         );
-        p.edit.clone().unwrap().apply(&mut b);
+        p.edits[0].apply(&mut b);
         assert_eq!(b.geometry.pads[3].net, Some(1));
         // Undo puts it back.
-        p.edit.unwrap().inverse().apply(&mut b);
+        p.edits[0].inverse().apply(&mut b);
         assert_eq!(b.geometry.pads[3].net, Some(2));
 
         // A new label name makes a new net; a deleted label leaves R1-2
@@ -530,7 +656,66 @@ mod tests {
         let mut b = board();
         let p = plan(&[&d], &[&e], &renames, &b);
         assert_eq!(p.changes.len(), 1, "{:?}", p.changes);
-        p.edit.unwrap().apply(&mut b);
+        p.edits[0].apply(&mut b);
         assert_eq!(b.components[1].designator, "R9");
+    }
+
+    #[test]
+    fn copied_parts_are_added_with_their_nets() {
+        let d = drawing();
+        let mut e = d.clone();
+        // R3: a copy of R2 below it, pin 1 on GND, pin 2 on a new net CLK.
+        let n = e.copy_part(1, [0.0, -1000.0], "R3").unwrap();
+        assert_eq!(n, 2);
+        e.add_label([800.0, -1000.0], "GND");
+        e.add_label([1200.0, -1000.0], "CLK");
+        let mut b = board();
+        let info: HashMap<String, PartInfo> = [(
+            "R3".to_string(),
+            PartInfo {
+                footprint: "0402".into(),
+                value: Some("10k".into()),
+                ..Default::default()
+            },
+        )]
+        .into();
+        let sources = Sources {
+            parts: Some(&info),
+            library: &[],
+        };
+        let p = plan_with(&[&d], &[&e], &HashMap::new(), &b, sources);
+        let text: Vec<String> = p.changes.iter().map(Change::describe).collect();
+        assert!(
+            text.contains(&"Add R3 (0402) beside the board".to_string()),
+            "{text:?}"
+        );
+        assert_eq!(p.edits.len(), 2, "{text:?}");
+        for e in &p.edits {
+            e.apply(&mut b);
+        }
+        assert_eq!(b.components.len(), 3);
+        assert_eq!(b.components[2].designator, "R3");
+        assert_eq!(b.components[2].param(&["Comment"]), Some("10k"));
+        let net = |pad: &str| {
+            b.geometry
+                .pads
+                .iter()
+                .find(|p| p.component == Some(2) && p.name == pad)
+                .and_then(|p| p.net)
+                .map(|n| b.nets[n as usize].name.clone())
+        };
+        assert_eq!(net("1").as_deref(), Some("GND"));
+        assert_eq!(net("2").as_deref(), Some("CLK"));
+        // It sits right of the board.
+        assert!(b.components[2].x.mil() > 0.0);
+        // Planning again finds nothing to do.
+        let p = plan_with(&[&e], &[&e], &HashMap::new(), &b, sources);
+        assert!(p.changes.is_empty(), "{:?}", p.changes);
+        // Without a footprint it is only reported.
+        let p = plan(&[&d], &[&e], &HashMap::new(), &board());
+        assert!(p
+            .changes
+            .iter()
+            .any(|c| matches!(c, Change::NotOnBoard { .. })));
     }
 }

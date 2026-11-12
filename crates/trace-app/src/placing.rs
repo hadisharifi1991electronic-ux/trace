@@ -26,6 +26,9 @@ pub struct Moving {
     pub ends: Vec<(usize, bool, usize)>,
     /// Copper of each of the part's nets outside it, for the ratsnest.
     targets: HashMap<u32, Vec<P>>,
+    /// A part just placed from a library: it follows the cursor without a
+    /// button held, a click drops it and Escape takes it away again.
+    pub floating: bool,
 }
 
 /// Whether pad `p` has copper on copper layer `l`.
@@ -90,6 +93,7 @@ impl Moving {
             grab: from.to_local(cursor),
             ends,
             targets,
+            floating: false,
         })
     }
 

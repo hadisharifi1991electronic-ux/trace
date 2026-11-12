@@ -3,6 +3,30 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.21.0 (2026-11-12)
+
+- Place new parts from a footprint library: "Place on board" in the
+  footprint editor puts a part with that footprint on the board with the
+  next free designator (letters taken from the board's parts that use the
+  footprint, or guessed from its name). It follows the cursor until a
+  click drops it; Space turns it, L flips it, Escape takes it away. One
+  Ctrl+Z takes back placing and moving together.
+- Copy a part on the schematic (Copy part in the side panel, or Ctrl+D):
+  the copy gets the next free designator, keeps the footprint and value,
+  and lands in a clear spot beside the original, away from wires, labels,
+  parts and notes, so it joins no net until you wire it.
+- Update PCB adds parts new on the sheets: the footprint comes from the
+  open footprint library, or from a part on the board that uses it. New
+  parts go in a column right of the board with their pads already on the
+  sheet's nets (a new net is made for a new label), ready to drag into
+  place. Parts whose footprint is not found are listed as before.
+- Each schematic part's footprint is read from the SchDoc (its current
+  PCB model) and kept in saved `.tracesch` files.
+- A new net label starts empty instead of with the last label's text.
+- Tried on the Sinara Clocker project: copying R43 as R44, labelling its
+  pins P3V3 and a new net, then Update PCB added R44 beside the board with
+  both pads on the right nets; planning again found nothing to do.
+
 ## 0.20.0 (2026-11-12)
 
 - Footprint editor (the Footprints button on the toolbar):

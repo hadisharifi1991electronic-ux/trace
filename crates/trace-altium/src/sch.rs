@@ -45,6 +45,7 @@ const DESIGNATOR: i64 = 34;
 const BUS_ENTRY: i64 = 37;
 const PARAMETER: i64 = 41;
 const PARAMETER_SET: i64 = 43;
+const IMPLEMENTATION: i64 = 45;
 const NOTE: i64 = 209;
 const BLANKET: i64 = 225;
 const HYPERLINK: i64 = 226;
@@ -512,6 +513,21 @@ fn read_records(records: &[SchRecord], name: String, file_name: &str) -> Sheet {
                     part_of[k] = part_of[o];
                 }
             }
+        }
+    }
+
+    // Each part's footprint: its current PCB model, an implementation
+    // (45) in the part's implementation list (44).
+    for p in &recs {
+        if rec(p) != Some(IMPLEMENTATION)
+            || !p.str("MODELTYPE").eq_ignore_ascii_case("PCBLIB")
+            || !p.bool("ISCURRENT")
+        {
+            continue;
+        }
+        let comp = owner_of(p).and_then(|o| owner_of(&recs[o]));
+        if let Some(&s) = comp.and_then(|c| symbol_at.get(&c)) {
+            sheet.symbols[s].footprint = p.str("MODELNAME");
         }
     }
 

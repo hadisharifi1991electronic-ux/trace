@@ -153,6 +153,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if resp.drag_started_by(egui::PointerButton::Primary)
         && app.tool == Tool::Select
         && app.router.active.is_none()
+        && app.moving.is_none()
     {
         if let Some(o) = ui.input(|i| i.pointer.press_origin()) {
             let [x, y] = app.view.to_board(o);
@@ -183,8 +184,17 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 m.follow([x as f64, y as f64]);
             }
         }
-        if resp.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
+        let floating = app.moving.as_ref().is_some_and(|m| m.floating);
+        let done = if floating {
+            resp.clicked() || resp.drag_stopped()
+        } else {
+            resp.drag_stopped() || !ui.input(|i| i.pointer.primary_down())
+        };
+        if done {
             if let Some(m) = app.moving.take() {
+                if floating {
+                    app.message = None;
+                }
                 if m.moved() {
                     let name = scene
                         .board
@@ -192,7 +202,11 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         .get(m.index)
                         .map(|c| c.designator.clone())
                         .unwrap_or_default();
-                    placed = Some((format!("Moved {name}"), m.edits(&scene.board)));
+                    let edits = m.edits(&scene.board);
+                    // One undo takes back placing and moving alike.
+                    app.join_next = floating && !edits.is_empty();
+                    let verb = if floating { "Placed" } else { "Moved" };
+                    placed = Some((format!("{verb} {name}"), edits));
                 }
                 app.moving = None;
             }
@@ -677,6 +691,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         app.router.tune.preview = None;
         app.router.shoved = None;
         app.apply_edits(&pending_label, edits);
+        if std::mem::take(&mut app.join_next) {
+            app.router.history.merge_last();
+        }
     } else if let Some(edits) = app.router.shoved.take() {
         let n = edits
             .iter()

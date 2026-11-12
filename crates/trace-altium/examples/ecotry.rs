@@ -55,8 +55,8 @@ fn main() {
         println!("  {}", c.describe());
     }
     let mut b = board.clone();
-    if let Some(edit) = p.edit {
-        edit.apply(&mut b);
+    if !p.edits.is_empty() {
+        p.edits.iter().for_each(|e| e.apply(&mut b));
         trace_core::connectivity::analyse(&mut b);
         let p2 = plan(&[&e.drawing], &[&e.drawing], &HashMap::new(), &b);
         println!("after applying, plan again: {} changes", p2.changes.len());

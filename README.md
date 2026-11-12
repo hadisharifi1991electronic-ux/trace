@@ -130,7 +130,10 @@ checker and simulator all read.
   grids from 0.01 mm. "Update N parts on the board" gives every part using
   the footprint the new pads and lines in one undoable edit: nets follow
   pad numbers, parts on the bottom are mirrored, pours are poured again.
-  Save keeps the library as `.tracelib`
+  Save keeps the library as `.tracelib`. "Place on board" puts a new part
+  with the footprint on the board under the cursor, with the next free
+  designator (R, C, U... as the board's parts with that footprint use):
+  click to drop it, Space turns it, L flips it, Escape takes it away
 
 ## Command-line tool
 
@@ -237,10 +240,12 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   ports); across sheets they are matched to the board through part pins.
 - Update PCB joins nets of the same name across sheets (flat), and moves
   pads between nets only: tracks keep their old nets, so the DRC shows
-  what to reroute. New parts cannot be placed from a library yet (a part
-  added on the sheets is listed as not on the board), and parts deleted
-  from the sheets stay on the board. Edits are not written back to
-  `.SchDoc` files.
+  what to reroute. A part new on the sheets is put beside the board with
+  its nets when its footprint is in the open footprint library or on
+  another part of the board; otherwise it is listed for placing by hand.
+  Parts deleted from the sheets stay on the board. New parts on the
+  sheets are copies of parts already there (no symbol libraries yet).
+  Edits are not written back to `.SchDoc` files.
 - Footprint libraries are read from `.PcbLib` and saved as `.tracelib`;
   writing `.PcbLib` and reading `.IntLib` are not done yet, and 3D bodies
   and text on mechanical layers are left out. Placing a new part from a

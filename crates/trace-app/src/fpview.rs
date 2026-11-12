@@ -30,6 +30,8 @@ pub enum Pick {
     /// Give the board's parts using footprint `.0` (as named on the board)
     /// the footprint `.1`.
     Update(String, Footprint),
+    /// Put a new part with this footprint on the board, under the cursor.
+    Place(Footprint),
     Message(String, bool),
 }
 
@@ -968,6 +970,13 @@ impl FpEditor {
             } else {
                 self.lib.footprints[cur].name.clone()
             };
+            if ui
+                .button("Place on board")
+                .on_hover_text("A new part with this footprint follows the cursor on the board: click to drop it, Space turns, L flips, Esc takes it away")
+                .clicked()
+            {
+                pick = Some(Pick::Place(self.lib.footprints[cur].clone()));
+            }
             let users = trace_core::footprint::parts_using(b, &key);
             if users.is_empty() {
                 ui.label(RichText::new("No part on the board uses this footprint.").weak());

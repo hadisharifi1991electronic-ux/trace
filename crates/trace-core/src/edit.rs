@@ -257,6 +257,16 @@ impl History {
         }
     }
 
+    /// Joins the last step into the one before it, which keeps its label.
+    pub fn merge_last(&mut self) {
+        if self.undo.len() >= 2 {
+            let (_, edits) = self.undo.pop().unwrap();
+            if let Some((_, before)) = self.undo.last_mut() {
+                before.extend(edits);
+            }
+        }
+    }
+
     pub fn undo(&mut self, board: &mut Board) -> Option<String> {
         let (label, edits) = self.undo.pop()?;
         for e in edits.iter().rev() {

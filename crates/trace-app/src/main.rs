@@ -109,6 +109,8 @@ pub struct App {
     pub drc: drc::Drc,
     /// The part being dragged.
     moving: Option<placing::Moving>,
+    /// The next board edit joins the last step (a part placed then dropped).
+    join_next: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -173,6 +175,7 @@ impl App {
             scroll_tab: false,
             drc: drc::Drc::default(),
             moving: None,
+            join_next: false,
         };
         if let Some(f) = start_file {
             app.open(f);
@@ -1040,6 +1043,54 @@ impl App {
         self.mode_sch = false;
     }
 
+    /// Puts a new part with footprint `fp` on the board, in the middle of
+    /// the view, and lets it follow the cursor until a click drops it.
+    fn place_footprint(&mut self, fp: trace_core::footprint::Footprint) {
+        use trace_core::footprint::{add_parts, next_designator, prefix_for, NewPart};
+        let Some(scene) = &self.scene else {
+            self.fped
+                .set_note("Open a board first to place parts on it.".into(), true);
+            return;
+        };
+        // Designators on the sheets count as taken too.
+        let taken: std::collections::HashSet<String> = self
+            .schem
+            .slots
+            .iter()
+            .filter_map(|s| s.sheet.as_ref())
+            .flat_map(|s| s.drawing.parts.iter())
+            .map(|p| p.designator.to_ascii_uppercase())
+            .collect();
+        let designator = next_designator(&scene.board, &prefix_for(&scene.board, &fp.name), &taken);
+        let r = self.view.rect;
+        let c = self.view.to_board(r.center());
+        let at = [
+            (c[0] as f64 / 5.0).round() * 5.0,
+            (c[1] as f64 / 5.0).round() * 5.0,
+        ];
+        let name = fp.name.clone();
+        let Some(edit) = add_parts(&scene.board, &[NewPart::new(&designator, fp, at)]) else {
+            return;
+        };
+        self.apply_edits(&format!("Placed {designator} ({name})"), vec![edit]);
+        self.drc.invalidate();
+        self.mode_fp = false;
+        self.mode3d = false;
+        self.mode_sch = false;
+        self.tool = Tool::Select;
+        if let Some(scene) = &self.scene {
+            let index = scene.board.components.len() - 1;
+            self.moving = placing::Moving::start(&scene.board, index, at).map(|mut m| {
+                m.floating = true;
+                m
+            });
+        }
+        self.message = Some((
+            format!("Placing {designator}: click to drop it. Space turns it, L flips it, Escape takes it away."),
+            false,
+        ));
+    }
+
     /// Carries out what the footprint editor asked for.
     fn footprint_pick(&mut self, pick: Option<fpview::Pick>) {
         match pick {
@@ -1067,6 +1118,7 @@ impl App {
                         .set_note("No part on the board uses it.".into(), true),
                 }
             }
+            Some(fpview::Pick::Place(fp)) => self.place_footprint(fp),
             Some(fpview::Pick::Message(text, err)) => self.fped.set_note(text, err),
             None => {}
         }
@@ -1591,8 +1643,12 @@ impl App {
             if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
                 self.find_in_schematic();
             }
-            self.schem
-                .side_panel(ui, self.selected, self.scene.as_ref());
+            self.schem.side_panel(
+                ui,
+                self.selected,
+                self.scene.as_ref(),
+                &self.fped.lib.footprints,
+            );
             if let Some((text, true)) = &self.message {
                 ui.colored_label(Color32::from_rgb(240, 96, 96), text.clone());
             }
@@ -2153,8 +2209,13 @@ impl eframe::App for App {
                 }
             }
             if back {
-                self.moving = None;
-                self.message = Some(("Move cancelled.".into(), false));
+                if self.moving.take().is_some_and(|m| m.floating) {
+                    // A part just placed: Escape takes it away again.
+                    self.undo();
+                    self.message = Some(("Placing cancelled.".into(), false));
+                } else {
+                    self.message = Some(("Move cancelled.".into(), false));
+                }
             }
         }
         let (open_shortcut, fit, flip, esc, measure_key, toggle3d, cm_key, sch_key) = ctx
@@ -2469,8 +2530,8 @@ impl eframe::App for App {
                     Some(schview::Pick::Part(d)) => {
                         self.select_part(&d, true);
                     }
-                    Some(schview::Pick::Eco(edit)) => {
-                        self.apply_edits("Updated the board from the schematic", vec![edit]);
+                    Some(schview::Pick::Eco(edits)) => {
+                        self.apply_edits("Updated the board from the schematic", edits);
                         if let Some(s) = &mut self.scene {
                             s.from_sheets = true;
                         }

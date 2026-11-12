@@ -367,6 +367,139 @@ impl Drawing {
         self.connect();
     }
 
+    /// A shift for a copy of part `i` that lands it clear of everything:
+    /// no pin of the copy on a wire, pin or label, and its body over no
+    /// other part. Tries right, below, left and above, further out each
+    /// round, on a 100 mil grid.
+    pub fn clear_spot(&self, i: usize) -> Pt {
+        let Some(q) = self.parts.get(i) else {
+            return [0.0, 0.0];
+        };
+        let (w, h) = (q.max[0] - q.min[0], q.max[1] - q.min[1]);
+        let step = |v: f64| ((v + 200.0) / 100.0).ceil() * 100.0;
+        let (sx, sy) = (step(w), step(h));
+        let pins: Vec<Pt> = self
+            .pins
+            .iter()
+            .filter(|p| p.part == i as u32)
+            .map(|p| p.at)
+            .collect();
+        let clear = |d: Pt| -> bool {
+            let (lo, hi) = (
+                [q.min[0] + d[0] - 20.0, q.min[1] + d[1] - 20.0],
+                [q.max[0] + d[0] + 20.0, q.max[1] + d[1] + 20.0],
+            );
+            let inside = |p: Pt| p[0] >= lo[0] && p[0] <= hi[0] && p[1] >= lo[1] && p[1] <= hi[1];
+            if self.size[0] > 0.0
+                && (lo[0] < 0.0 || lo[1] < 0.0 || hi[0] > self.size[0] || hi[1] > self.size[1])
+            {
+                return false;
+            }
+            if self.parts.iter().any(|o| {
+                o.min[0] <= hi[0] && o.max[0] >= lo[0] && o.min[1] <= hi[1] && o.max[1] >= lo[1]
+            }) {
+                return false;
+            }
+            for p in &pins {
+                let p = [p[0] + d[0], p[1] + d[1]];
+                if self.pins.iter().any(|o| same(o.at, p))
+                    || self.tags.iter().any(|t| t.at.iter().any(|&a| same(a, p)))
+                    || self.wires.iter().any(|w| {
+                        w.windows(2).any(|s| {
+                            same(s[0], p) || same(s[1], p) || inside_segment(p, s[0], s[1])
+                        })
+                    })
+                {
+                    return false;
+                }
+            }
+            // Nor over a note or text frame (filled boxes of the sheet).
+            let sheet_area = self.size[0] * self.size[1];
+            if self.shapes.iter().any(|sh| {
+                let SchGeom::Rect { min, max, .. } = &sh.geom else {
+                    return false;
+                };
+                sh.part.is_none()
+                    && sh.fill.is_some()
+                    && (max[0] - min[0]) * (max[1] - min[1]) < sheet_area / 4.0
+                    && min[0] <= hi[0]
+                    && max[0] >= lo[0]
+                    && min[1] <= hi[1]
+                    && max[1] >= lo[1]
+            }) {
+                return false;
+            }
+            // No wire runs through the body.
+            !self.wires.iter().any(|w| w.iter().any(|&p| inside(p)))
+        };
+        for k in 1..=12 {
+            let k = k as f64;
+            for d in [[sx * k, 0.0], [0.0, -sy * k], [-sx * k, 0.0], [0.0, sy * k]] {
+                if clear(d) {
+                    return d;
+                }
+            }
+        }
+        [sx, 0.0]
+    }
+
+    /// Adds a copy of part `i` moved by `d` mil and named `designator`,
+    /// with its graphics, text and pins (no wires). Returns its index.
+    pub fn copy_part(&mut self, i: usize, d: Pt, designator: &str) -> Option<usize> {
+        let q = self.parts.get(i)?.clone();
+        let me = Some(i as u32);
+        let new = self.parts.len() as u32;
+        let f = |p: Pt| [p[0] + d[0], p[1] + d[1]];
+        let shapes: Vec<SchShape> = self
+            .shapes
+            .iter()
+            .filter(|s| s.part == me)
+            .cloned()
+            .map(|mut s| {
+                map_geom(&mut s.geom, &f, false);
+                s.part = Some(new);
+                s
+            })
+            .collect();
+        let texts: Vec<SchText> = self
+            .texts
+            .iter()
+            .filter(|t| t.part == me)
+            .cloned()
+            .map(|mut t| {
+                t.at = f(t.at);
+                t.part = Some(new);
+                if t.text == q.designator {
+                    t.text = designator.to_string();
+                }
+                t
+            })
+            .collect();
+        let pins: Vec<SchPin> = self
+            .pins
+            .iter()
+            .filter(|p| p.part == i as u32)
+            .cloned()
+            .map(|mut p| {
+                p.at = f(p.at);
+                p.base = f(p.base);
+                p.part = new;
+                p
+            })
+            .collect();
+        self.shapes.extend(shapes);
+        self.texts.extend(texts);
+        self.pins.extend(pins);
+        self.parts.push(SchPart {
+            designator: designator.to_string(),
+            min: f(q.min),
+            max: f(q.max),
+            ..q
+        });
+        self.connect();
+        Some(new as usize)
+    }
+
     /// Renames part `i` and the designator drawn for it.
     pub fn rename_part(&mut self, i: usize, designator: &str) {
         let Some(q) = self.parts.get_mut(i) else {
@@ -384,6 +517,18 @@ impl Drawing {
 }
 
 impl Sheet {
+    /// Adds a copy of part `i` as a new part `designator`, `d` mil away,
+    /// with its own symbol entry (footprint and value kept).
+    pub fn copy_part(&mut self, i: usize, d: Pt, designator: &str) -> Option<usize> {
+        let sym = self.drawing.parts.get(i)?.symbol;
+        let mut s = self.symbols.get(sym).cloned().unwrap_or_default();
+        s.designator = designator.to_string();
+        self.symbols.push(s);
+        let n = self.drawing.copy_part(i, d, designator)?;
+        self.drawing.parts[n].symbol = self.symbols.len() - 1;
+        Some(n)
+    }
+
     /// Sets the value shown for part `i` (its comment, in Altium).
     pub fn set_value(&mut self, i: usize, value: &str) {
         let Some(q) = self.drawing.parts.get(i) else {

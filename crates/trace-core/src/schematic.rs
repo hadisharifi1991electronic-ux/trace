@@ -24,6 +24,9 @@ pub struct Symbol {
     pub description: String,
     pub value: Option<String>,
     pub pins: usize,
+    /// The footprint the part uses on the board (its current PCB model).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub footprint: String,
 }
 
 /// A point on a sheet in mil, y up.

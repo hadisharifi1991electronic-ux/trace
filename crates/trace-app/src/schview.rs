@@ -9,7 +9,8 @@ use eframe::egui::{self, Color32, FontId, Pos2, Rect, RichText, Shape, Stroke};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
-use trace_core::eco::{Change, Plan};
+use trace_core::eco::{Change, PartInfo, Plan, Sources};
+use trace_core::footprint::{designator_prefix, next_designator, Footprint};
 use trace_core::sch_edit::{snap, WIRE_COLOR};
 use trace_core::{Drawing, SavedSheet, SchFile, SchGeom, Sheet};
 
@@ -30,6 +31,7 @@ enum Act {
     Move(usize, [f64; 2]),
     Turn(usize),
     DeletePart(usize),
+    CopyPart(usize),
     DeleteWire(usize),
     DeleteTag(usize),
     Wire(Vec<[f64; 2]>),
@@ -63,8 +65,8 @@ pub struct Slot {
 pub enum Pick {
     BoardNet(u32),
     Part(String),
-    /// Carry the schematic edits to the board.
-    Eco(trace_core::edit::Edit),
+    /// Carry the schematic edits to the board, as one step.
+    Eco(Vec<trace_core::edit::Edit>),
     /// Something to tell the person.
     Message(String, bool),
 }
@@ -575,7 +577,7 @@ impl Schematics {
     /// fresh from its file is compared with the sheets as first read; one
     /// already updated (or saved by Trace after an update) with the sheets
     /// as it last took them.
-    fn plan(&self, scene: &Scene) -> Plan {
+    fn plan(&self, scene: &Scene, library: &[Footprint]) -> Plan {
         let fresh = !scene.from_sheets && ext(&scene.path) != "tracepcb";
         let (base, renames) = if fresh {
             (&self.original, &self.original_renames)
@@ -599,7 +601,78 @@ impl Schematics {
             .filter(|(now, was)| on_sheets.contains(*now) && !on_sheets.contains(*was))
             .map(|(a, b)| (a.clone(), b.clone()))
             .collect();
-        trace_core::eco::plan(&before, &after, &renames, &scene.board)
+        // What the sheets say about each part, for parts new on them.
+        let mut parts: HashMap<String, PartInfo> = HashMap::new();
+        for slot in &self.slots {
+            let Some(sheet) = &slot.sheet else { continue };
+            for p in &sheet.drawing.parts {
+                let Some(sym) = sheet.symbols.get(p.symbol) else {
+                    continue;
+                };
+                parts
+                    .entry(p.designator.to_ascii_uppercase())
+                    .or_insert_with(|| PartInfo {
+                        footprint: sym.footprint.clone(),
+                        value: sym.value.clone(),
+                        library_ref: sym.library_ref.clone(),
+                        sheet: slot.name.clone(),
+                    });
+            }
+        }
+        let sources = Sources {
+            parts: Some(&parts),
+            library,
+        };
+        trace_core::eco::plan_with(&before, &after, &renames, &scene.board, sources)
+    }
+
+    /// The first free designator with the letters of `like` (R for R12),
+    /// across every sheet and the board.
+    fn free_designator(&self, like: &str, scene: Option<&Scene>) -> String {
+        let taken: HashSet<String> = self
+            .slots
+            .iter()
+            .filter_map(|s| s.sheet.as_ref())
+            .flat_map(|s| s.drawing.parts.iter())
+            .map(|p| p.designator.to_ascii_uppercase())
+            .collect();
+        let prefix = designator_prefix(like);
+        let prefix = if prefix.is_empty() { "U" } else { prefix };
+        match scene {
+            Some(sc) => next_designator(&sc.board, prefix, &taken),
+            None => next_designator(&trace_core::Board::default(), prefix, &taken),
+        }
+    }
+
+    /// Copies part `i` of the current sheet beside it as a new part with
+    /// the next free designator, and selects the copy.
+    fn copy_part(&mut self, i: usize, scene: Option<&Scene>) {
+        let cur = self.current;
+        let Some((name, d)) = self
+            .slots
+            .get(cur)
+            .and_then(|s| s.sheet.as_ref())
+            .and_then(|s| {
+                Some((
+                    s.drawing.parts.get(i)?.designator.clone(),
+                    s.drawing.clear_spot(i),
+                ))
+            })
+        else {
+            return;
+        };
+        let new = self.free_designator(&name, scene);
+        let mut made = None;
+        let n2 = new.clone();
+        self.edit(|s| made = s.copy_part(i, d, &n2));
+        if let Some(n) = made {
+            self.sel_part = Some(n);
+            self.sel_wire = None;
+            self.sel_tag = None;
+            self.note = Some(format!(
+                "Copied {name} as {new}. Wire it up, then Update PCB adds it to the board."
+            ));
+        }
     }
 
     /// The board now matches the sheets.
@@ -850,7 +923,13 @@ impl Schematics {
     }
 
     /// The sheet list for the side panel.
-    pub fn side_panel(&mut self, ui: &mut egui::Ui, board_net: Option<u32>, scene: Option<&Scene>) {
+    pub fn side_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        board_net: Option<u32>,
+        scene: Option<&Scene>,
+        library: &[Footprint],
+    ) {
         self.poll();
         self.update_highlight(board_net, scene);
         if let Some(p) = &self.project {
@@ -911,10 +990,10 @@ impl Schematics {
             if let Some(scene) = scene {
                 if ui
                     .button("Update PCB…")
-                    .on_hover_text("Carry the sheet edits to the board: pin nets, new nets, net and part names")
+                    .on_hover_text("Carry the sheet edits to the board: pin nets, new nets, net and part names, new parts")
                     .clicked()
                 {
-                    let plan = self.plan(scene);
+                    let plan = self.plan(scene, library);
                     if plan.changes.is_empty() {
                         self.note = Some("The board already matches the sheets.".into());
                     } else {
@@ -1014,11 +1093,21 @@ impl Schematics {
                         ui.end_row();
                     });
                 let changed = self.edit_name.trim() != name || self.edit_value.trim() != value;
-                if ui
-                    .add_enabled(changed, egui::Button::new("Apply"))
-                    .clicked()
-                {
-                    apply = true;
+                let mut copy = false;
+                ui.horizontal(|ui| {
+                    if ui
+                        .add_enabled(changed, egui::Button::new("Apply"))
+                        .clicked()
+                    {
+                        apply = true;
+                    }
+                    copy = ui
+                        .button("Copy part")
+                        .on_hover_text("A copy beside it with the next free designator and the same footprint (Ctrl+D)")
+                        .clicked();
+                });
+                if copy {
+                    self.copy_part(pi, scene);
                 }
                 if apply && changed {
                     let (new_name, new_value) = (
@@ -1600,6 +1689,7 @@ impl Schematics {
                 SchTool::Label => {
                     if resp.clicked() {
                         self.label_at = Some(c);
+                        self.label_text.clear();
                     }
                 }
                 SchTool::Select => {
@@ -1653,6 +1743,12 @@ impl Schematics {
         // Keys, while the pointer is over the sheet and no text is typed.
         let typing = ui.ctx().wants_keyboard_input();
         if resp.hovered() && !typing && act.is_none() {
+            let copy = ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::D));
+            if copy && self.tool == SchTool::Select {
+                if let Some(i) = self.sel_part {
+                    act = Some(Act::CopyPart(i));
+                }
+            }
             let (w, n, esc, space, del, undo, redo, save) = ui.input_mut(|i| {
                 (
                     i.key_pressed(egui::Key::W),
@@ -1765,6 +1861,9 @@ impl Schematics {
                                 Change::NotOnBoard { .. } | Change::Removed { .. } => {
                                     ui.label(RichText::new(text).color(Color32::from_rgb(240, 180, 90)))
                                 }
+                                Change::AddPart { .. } => {
+                                    ui.label(RichText::new(text).color(Color32::from_rgb(120, 200, 120)))
+                                }
                                 _ => ui.label(text),
                             };
                         }
@@ -1777,9 +1876,18 @@ impl Schematics {
                         .weak()
                         .small(),
                     );
+                    if plan.changes.iter().any(|c| matches!(c, Change::AddPart { .. })) {
+                        ui.label(
+                            RichText::new(
+                                "New parts go to the right of the board with their nets: drag them into place.",
+                            )
+                            .weak()
+                            .small(),
+                        );
+                    }
                     ui.horizontal(|ui| {
                         if ui
-                            .add_enabled(plan.edit.is_some(), egui::Button::new("Apply to board"))
+                            .add_enabled(!plan.edits.is_empty(), egui::Button::new("Apply to board"))
                             .clicked()
                         {
                             apply = true;
@@ -1790,8 +1898,9 @@ impl Schematics {
                     });
                 });
             if apply {
-                if let Some(e) = self.eco.take().and_then(|p| p.edit) {
-                    pick = Some(Pick::Eco(e));
+                let edits = self.eco.take().map(|p| p.edits).unwrap_or_default();
+                if !edits.is_empty() {
+                    pick = Some(Pick::Eco(edits));
                     self.synced_now();
                     self.note = Some("Board updated. Ctrl+Z on the board takes it back.".into());
                 }
@@ -1825,6 +1934,7 @@ impl Schematics {
                 self.edit(|s| s.drawing.delete_part(i));
                 self.sel_part = None;
             }
+            Some(Act::CopyPart(i)) => self.copy_part(i, scene),
             Some(Act::DeleteWire(w)) => {
                 self.edit(|s| s.drawing.delete_wire(w));
                 self.sel_wire = None;

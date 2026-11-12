@@ -7,7 +7,7 @@ use crate::font::{text_tracks, Placing};
 use crate::place::{place, Placement};
 use crate::{Arc, Board, Component, LayerRef, Length, Pad, Point, Polygon, Side, Track};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Text a footprint carries. Special strings such as `.Designator` and
 /// `.Comment` become the part's own text when it is placed.
@@ -451,6 +451,206 @@ pub fn replace(board: &Board, fp: &Footprint, parts: &[usize]) -> Option<Edit> {
         after: Box::new(Prims::of(&b)),
         area: (area[0] <= area[2]).then_some(area),
     })
+}
+
+/// A part to put on the board.
+#[derive(Clone, Debug)]
+pub struct NewPart {
+    pub designator: String,
+    pub footprint: Footprint,
+    /// Where its origin goes, in mil, with its turn and side.
+    pub at: [f64; 2],
+    pub rotation_deg: f64,
+    pub side: Side,
+    pub library_ref: Option<String>,
+    pub sheet: Option<String>,
+    pub params: BTreeMap<String, String>,
+    /// The net of each pad, by pad name in upper case. Pads not listed are
+    /// on no net.
+    pub nets: HashMap<String, u32>,
+}
+
+impl NewPart {
+    pub fn new(designator: &str, footprint: Footprint, at: [f64; 2]) -> NewPart {
+        NewPart {
+            designator: designator.to_string(),
+            footprint,
+            at,
+            rotation_deg: 0.0,
+            side: Side::Top,
+            library_ref: None,
+            sheet: None,
+            params: BTreeMap::new(),
+            nets: HashMap::new(),
+        }
+    }
+}
+
+/// An edit that adds `parts` to the board, each drawn from its footprint
+/// with its designator and value text. `None` when there are none.
+pub fn add_parts(board: &Board, parts: &[NewPart]) -> Option<Edit> {
+    if parts.is_empty() {
+        return None;
+    }
+    let before = Prims::of(board);
+    let mut b = board.clone();
+    let mut area = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+    for np in parts {
+        let index = b.components.len();
+        b.components.push(Component {
+            designator: np.designator.clone(),
+            footprint: np.footprint.name.clone(),
+            library_ref: np.library_ref.clone(),
+            x: Length::from_mil(np.at[0]),
+            y: Length::from_mil(np.at[1]),
+            rotation_deg: np.rotation_deg,
+            side: np.side,
+            sheet: np.sheet.clone(),
+            params: np.params.clone(),
+        });
+        let mut new = np.footprint.instance(&b, index, true);
+        for p in &mut new.pads {
+            p.net = np.nets.get(&p.name.to_ascii_uppercase()).copied();
+            let q = mil(p.at);
+            let r = p.size_x.mil().max(p.size_y.mil());
+            area = [
+                area[0].min(q[0] - r),
+                area[1].min(q[1] - r),
+                area[2].max(q[0] + r),
+                area[3].max(q[1] + r),
+            ];
+        }
+        let g = &mut b.geometry;
+        g.pads.extend(new.pads);
+        g.tracks.extend(new.tracks);
+        g.arcs.extend(new.arcs);
+        g.polygons.extend(new.polygons);
+        g.areas.extend(new.areas);
+    }
+    Some(Edit::Parts {
+        before: Box::new(before),
+        after: Box::new(Prims::of(&b)),
+        area: (area[0] <= area[2]).then_some(area),
+    })
+}
+
+/// Extent of the board in mil: its outline, or else its pads and tracks.
+pub fn board_extent(board: &Board) -> Option<[f64; 4]> {
+    let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+    let mut add = |q: [f64; 2]| {
+        b = [
+            b[0].min(q[0]),
+            b[1].min(q[1]),
+            b[2].max(q[0]),
+            b[3].max(q[1]),
+        ];
+    };
+    let g = &board.geometry;
+    if g.outline.len() >= 3 {
+        g.outline.iter().for_each(|&p| add(mil(p)));
+    } else {
+        g.pads.iter().for_each(|p| add(mil(p.at)));
+        for t in &g.tracks {
+            add(mil(t.start));
+            add(mil(t.end));
+        }
+    }
+    (b[0] <= b[2]).then_some(b)
+}
+
+/// Spots beside the board, right of its outline from the top down, for
+/// footprints of the given extents (as Altium leaves new parts). Each spot
+/// is where the footprint's origin goes, in mil.
+pub fn spots_beside(board: &Board, sizes: &[[f64; 4]]) -> Vec<[f64; 2]> {
+    let ext = board_extent(board).unwrap_or([0.0, 0.0, 0.0, 0.0]);
+    let gap = 100.0;
+    let column_height = (ext[3] - ext[1]).max(2000.0);
+    let (mut x, mut y) = (ext[2] + 500.0, ext[3]);
+    let mut column_width: f64 = 0.0;
+    let mut out = Vec::new();
+    for s in sizes {
+        let (w, h) = (s[2] - s[0], s[3] - s[1]);
+        if y - h < ext[3] - column_height && y < ext[3] {
+            x += column_width + gap * 2.0;
+            y = ext[3];
+            column_width = 0.0;
+        }
+        // Origin so the footprint's box sits at (x, y) top left, on a 5 mil grid.
+        let snap = |v: f64| (v / 5.0).round() * 5.0;
+        out.push([snap(x - s[0]), snap(y - s[3])]);
+        y -= h + gap;
+        column_width = column_width.max(w);
+    }
+    out
+}
+
+/// The letters a designator starts with ("R" for R12, "U" for U3A).
+pub fn designator_prefix(d: &str) -> &str {
+    let end = d.find(|c: char| c.is_ascii_digit()).unwrap_or(d.len());
+    &d[..end]
+}
+
+/// The first designator `prefix<n>` not in `taken` (upper case) and not
+/// on the board.
+pub fn next_designator(board: &Board, prefix: &str, taken: &HashSet<String>) -> String {
+    let used: HashSet<String> = board
+        .components
+        .iter()
+        .map(|c| c.designator.to_ascii_uppercase())
+        .chain(taken.iter().cloned())
+        .collect();
+    (1..)
+        .map(|n| format!("{prefix}{n}"))
+        .find(|d| !used.contains(&d.to_ascii_uppercase()))
+        .unwrap_or_default()
+}
+
+/// The designator letters to use for a new part with footprint `fp`: those
+/// of the board's parts using it, or a guess from its name.
+pub fn prefix_for(board: &Board, fp: &str) -> String {
+    let mut count: HashMap<&str, usize> = HashMap::new();
+    for c in board
+        .components
+        .iter()
+        .filter(|c| c.footprint.eq_ignore_ascii_case(fp))
+    {
+        let p = designator_prefix(&c.designator);
+        if !p.is_empty() {
+            *count.entry(p).or_default() += 1;
+        }
+    }
+    if let Some((p, _)) = count
+        .into_iter()
+        .max_by_key(|&(p, n)| (n, std::cmp::Reverse(p)))
+    {
+        return p.to_string();
+    }
+    let n = fp.to_ascii_uppercase();
+    let has = |k: &[&str]| k.iter().any(|k| n.starts_with(k));
+    if has(&["RES", "R0", "R1", "R2"]) {
+        "R"
+    } else if has(&["CAP", "C0", "C1", "C2"]) {
+        "C"
+    } else if has(&["IND", "L0", "L1", "L2"]) {
+        "L"
+    } else if has(&["DIO", "LED", "SOD", "DO-", "D0", "D1", "D2"]) {
+        "D"
+    } else if has(&["SOT", "TO-", "TO2", "DPAK"]) {
+        "Q"
+    } else if has(&["CON", "HDR", "HEADER", "USB", "SMA", "PIN"]) {
+        "J"
+    } else if has(&["XTAL", "CRYSTAL", "OSC"]) {
+        "Y"
+    } else if has(&["SW", "BUTTON"]) {
+        "S"
+    } else if has(&["FID"]) {
+        "FID"
+    } else if has(&["TP", "TEST"]) {
+        "TP"
+    } else {
+        "U"
+    }
+    .to_string()
 }
 
 #[cfg(test)]

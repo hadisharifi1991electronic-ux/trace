@@ -93,15 +93,7 @@ pub fn read_schdoc(path: impl AsRef<Path>) -> Result<Sheet> {
         for r in split_sch(&extra) {
             let SchRecord::Text(p) = r else { continue };
             if p.int("RECORD") == Some(BLANKET) {
-                sheet.drawing.shapes.push(trace_core::SchShape {
-                    geom: SchGeom::Poly(points(&p)),
-                    width: line_width(&p),
-                    stroke: Some(color(&p, "COLOR", 0xff)),
-                    fill: None,
-                    dashed: true,
-                    part: None,
-                    wire: None,
-                });
+                sheet.drawing.shapes.push(blanket(&p));
             }
         }
     }
@@ -127,6 +119,19 @@ pub fn read_schdoc(path: impl AsRef<Path>) -> Result<Sheet> {
         }
     }
     Ok(sheet)
+}
+
+/// A blanket: a dashed outline that applies directives to an area.
+fn blanket(p: &Props) -> SchShape {
+    SchShape {
+        geom: SchGeom::Poly(points(p)),
+        width: line_width(p),
+        stroke: Some(color(p, "COLOR", 0xff)),
+        fill: None,
+        dashed: true,
+        part: None,
+        wire: None,
+    }
 }
 
 /// Reads an Altium symbol library (`.SchLib`): one storage per component,
@@ -548,6 +553,15 @@ impl Builder<'_> {
         });
     }
 
+    /// Links tag `tag` to the text `f` draws, if it draws one.
+    fn tag_text(&mut self, tag: usize, f: impl FnOnce(&mut Self)) {
+        let before = self.d.texts.len();
+        f(self);
+        if self.d.texts.len() > before {
+            self.d.tags[tag].graphic = Some(before as u32);
+        }
+    }
+
     /// Text from a label-like record: location, orientation, justification.
     fn label(&mut self, k: usize, p: &Props, text: String) {
         let mut just = p.int("JUSTIFICATION").unwrap_or(0).clamp(0, 8) as u8;
@@ -757,8 +771,10 @@ fn read_records(records: &[SchRecord], name: String, file_name: &str) -> Sheet {
                 }
             }
             Some(PARAMETER) => {
-                if !p.bool("ISHIDDEN") && p.get("LOCATION.X").is_some() {
-                    let o = owner_of(p);
+                // Parameters of a part's models are data, not drawn.
+                let o = owner_of(p);
+                let model = o.is_some_and(|o| matches!(rec(&recs[o]), Some(44..=48)));
+                if !p.bool("ISHIDDEN") && p.get("LOCATION.X").is_some() && !model {
                     let mut t = b.resolve(o, &p.str("TEXT"));
                     if t == "*" {
                         t.clear();
@@ -936,32 +952,7 @@ fn read_records(records: &[SchRecord], name: String, file_name: &str) -> Sheet {
                 }
             }
             Some(TEXT_FRAME) | Some(NOTE) => text_frame(&mut b, k, p),
-            Some(PARAMETER_SET) => {
-                // A directive: a short stem and a small flag.
-                let loc = at(p);
-                let d = dir(p.int("ORIENTATION").unwrap_or(0));
-                let c = color(p, "COLOR", 0xff);
-                let tip = add(loc, d, 40.0);
-                b.line(k, vec![loc, tip], 0.0, c);
-                b.d.shapes.push(SchShape {
-                    geom: SchGeom::Arc {
-                        c: add(tip, d, 25.0),
-                        r: [25.0, 25.0],
-                        start: 0.0,
-                        end: 360.0,
-                    },
-                    width: 0.0,
-                    stroke: Some(c),
-                    fill: None,
-                    dashed: false,
-                    part: None,
-                    wire: None,
-                });
-                let name = p.str("NAME");
-                if !name.eq_ignore_ascii_case("DIFFPAIR") && !p.bool("ISHIDDEN") {
-                    b.text(k, add(tip, d, 60.0), name, 1, c, 0, 1);
-                }
-            }
+            Some(PARAMETER_SET) => param_set(&mut b, k, p),
             _ => {}
         }
     }
@@ -1316,7 +1307,10 @@ fn power_port(b: &mut Builder, k: usize, p: &Props) {
             _ => 7,
         };
         let at = add(loc, d, reach - 50.0);
-        b.text(k, at, text, p.int("FONTID").unwrap_or(1), c, 0, just);
+        let tag = b.d.tags.len() - 1;
+        b.tag_text(tag, |b| {
+            b.text(k, at, text, p.int("FONTID").unwrap_or(1), c, 0, just)
+        });
     }
 }
 
@@ -1387,15 +1381,9 @@ fn port(b: &mut Builder, k: usize, p: &Props) {
     };
     let tc = color(p, "TEXTCOLOR", 0);
     let font = p.int("TEXTFONTID").unwrap_or(1);
-    b.text(
-        k,
-        q(s, 0.0),
-        name,
-        font,
-        tc,
-        if vertical { 1 } else { 0 },
-        just,
-    );
+    let tag = b.d.tags.len() - 1;
+    let rot = if vertical { 1 } else { 0 };
+    b.tag_text(tag, |b| b.text(k, q(s, 0.0), name, font, tc, rot, just));
 }
 
 fn sheet_entry(b: &mut Builder, k: usize, p: &Props, min: Pt, max: Pt) {
@@ -1442,7 +1430,37 @@ fn sheet_entry(b: &mut Builder, k: usize, p: &Props, min: Pt, max: Pt) {
     };
     let font = p.int("TEXTFONTID").unwrap_or(1);
     let tc = color(p, "TEXTCOLOR", 0x80);
-    b.text(k, add(edge, inward, l + 30.0), name, font, tc, rot, just);
+    let tag = b.d.tags.len() - 1;
+    b.tag_text(tag, |b| {
+        b.text(k, add(edge, inward, l + 30.0), name, font, tc, rot, just)
+    });
+}
+
+/// A directive: a short stem and a small flag.
+fn param_set(b: &mut Builder, k: usize, p: &Props) {
+    let loc = at(p);
+    let d = dir(p.int("ORIENTATION").unwrap_or(0));
+    let c = color(p, "COLOR", 0xff);
+    let tip = add(loc, d, 40.0);
+    b.line(k, vec![loc, tip], 0.0, c);
+    b.d.shapes.push(SchShape {
+        geom: SchGeom::Arc {
+            c: add(tip, d, 25.0),
+            r: [25.0, 25.0],
+            start: 0.0,
+            end: 360.0,
+        },
+        width: 0.0,
+        stroke: Some(c),
+        fill: None,
+        dashed: false,
+        part: None,
+        wire: None,
+    });
+    let name = p.str("NAME");
+    if !name.eq_ignore_ascii_case("DIFFPAIR") && !p.bool("ISHIDDEN") {
+        b.text(k, add(tip, d, 60.0), name, 1, c, 0, 1);
+    }
 }
 
 fn text_frame(b: &mut Builder, k: usize, p: &Props) {
@@ -1494,6 +1512,10 @@ fn text_frame(b: &mut Builder, k: usize, p: &Props) {
         part: b.part_of[k],
     });
 }
+
+#[path = "sch_write.rs"]
+mod write;
+pub use write::write_schdoc;
 
 #[cfg(test)]
 mod tests {

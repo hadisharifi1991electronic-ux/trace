@@ -26,7 +26,10 @@ checker and simulator all read.
   places net labels; change a part's designator or value in the side
   panel; Ctrl+Z / Ctrl+Y undo and redo. Save (Ctrl+S) writes a Trace
   schematic (`.tracesch`) next to the project, which opening the
-  `.PrjPcb` picks up again. Update PCB… lists what the edits change on the
+  `.PrjPcb` picks up again. Save as Altium… writes every sheet back as an
+  Altium `.SchDoc` (with a copy of the `.PrjPcb` that lists them) into a
+  folder you pick: what did not change is kept exactly as Altium wrote it,
+  hidden parameters, footprint models and all. Update PCB… lists what the edits change on the
   board (pins moving between nets, renamed nets and parts) and carries
   them over in one undoable step; pours are poured again
 - place new parts from symbol libraries: Place symbol… (or P) opens an
@@ -177,6 +180,8 @@ trace convert <file> out.json    export to Trace's open JSON model
 trace convert <file> out.kicad_pcb   write a KiCad board
 trace convert <file> out.PcbDoc      write an Altium Designer board
 trace convert sheet.SchDoc out.svg   draw a schematic sheet as SVG
+trace convert sheet.SchDoc out.SchDoc     write a schematic sheet as an Altium sheet
+trace convert sheets.tracesch folder  write every sheet of a Trace schematic as Altium sheets
 trace fab board.PcbDoc out.zip   Gerber X2, drill, IPC-356, pick-and-place and BOM (or a folder)
 trace odb board.PcbDoc out.tgz   ODB++ job: layers, drills, parts, nets and stack-up (or a folder)
 trace symbols lib.SchLib [out.svg]     list a schematic library's (or IntLib's) symbols; draw them all as SVG
@@ -276,8 +281,15 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   its nets when its footprint is in the open footprint library or on
   another part of the board; otherwise it is listed for placing by hand.
   Parts deleted from the sheets stay on the board. New parts come from
-  copies or from `.SchLib` and `.IntLib` libraries. Edits
-  are not written back to `.SchDoc` files.
+  copies or from `.SchLib` and `.IntLib` libraries.
+- Save as Altium writes sheets as `.SchDoc`. Records that still draw what
+  they drew are copied from the sheet's own `.SchDoc` unchanged (parts with
+  all their units, parameters and models; directives, notes, templates).
+  Edited and new things are written from what the sheet shows: a moved,
+  turned or copied part, new wires, labels and parts. A part turned in Trace
+  is written with its pins and graphics where they now are, not as a
+  rotated part, and buses are written as plain lines. A file already in the
+  folder is kept as `.bak` first.
 - Footprint libraries are read from `.PcbLib` and `.IntLib` and saved as
   `.tracelib` or `.PcbLib` (an `.IntLib` is never written); 3D bodies and text
   on mechanical layers are left out, so a `.PcbLib` saved by Trace has no
@@ -294,7 +306,7 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
 | Crate | Purpose |
 | --- | --- |
 | `crates/trace-core` | Format-neutral design model (lengths in nanometres) |
-| `crates/trace-altium` | Altium `.PcbDoc` / `.SchDoc` reader (OLE compound files) |
+| `crates/trace-altium` | Altium `.PcbDoc` / `.SchDoc` / library reader, and `.SchDoc` writer (OLE compound files) |
 | `crates/trace-allegro` | Allegro `.brd` reader, ported from KiCad's Allegro importer |
 | `crates/trace-gerber` | Gerber, Excellon, IPC-356 and ODB++ import with layer detection and net tracing |
 | `crates/trace-export` | Writes boards in other tools' formats (KiCad, Altium) and fab outputs (Gerber X2, Excellon, IPC-356, pick-and-place, BOM, ODB++) |

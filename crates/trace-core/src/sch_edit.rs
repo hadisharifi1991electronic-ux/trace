@@ -360,7 +360,8 @@ impl Drawing {
             return;
         }
         let tag = self.tags.remove(t);
-        if let Some(g) = tag.graphic {
+        // A port or power port keeps its drawing; a label is only its text.
+        if let Some(g) = tag.graphic.filter(|_| tag.kind == TagKind::Label) {
             let keep: Vec<bool> = (0..self.texts.len()).map(|i| i != g as usize).collect();
             self.retain_texts(&keep);
         }

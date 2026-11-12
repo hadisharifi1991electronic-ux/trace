@@ -3,6 +3,29 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.28.0 (2026-11-12)
+
+- Schematics save as Altium sheets: Save as Altium… in the schematic
+  editor writes every sheet as a `.SchDoc` into a folder you pick, with a
+  copy of the `.PrjPcb` listing them (other documents point back to where
+  they are). A file already there is kept as `.bak` first.
+- What did not change is kept as Altium wrote it, in its order: parts with
+  all their units and display modes, hidden parameters, footprint and
+  simulation models, unique ids, directives (differential pairs, no ERC),
+  notes, templates, blankets and pictures. Moved parts keep all of that
+  too; a changed value or footprint is written into it.
+- What changed is written from the sheet: parts moved, turned, copied or
+  placed from a library, wires, junctions, net labels, power ports, ports,
+  sheet symbols and their entries, text and graphics.
+- `trace convert sheet.SchDoc out.SchDoc`, and `trace convert
+  sheets.tracesch folder` for every sheet of a saved Trace schematic.
+- Checked on seven public sheets (Clocker, and six from the Archimajor
+  board, 20,000 records): each reads back with the same drawing, parts and
+  nets, every record kept; and with parts moved, turned, copied, deleted
+  and placed, wires, labels and values changed, the edits read back.
+- Ports and power ports now link to the text that names them.
+- Parameters of a part's models are no longer drawn on the sheet.
+
 ## 0.27.0 (2026-11-12)
 
 - Altium integrated libraries (`.IntLib`) are read: the symbols and

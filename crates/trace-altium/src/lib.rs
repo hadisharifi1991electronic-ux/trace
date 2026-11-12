@@ -14,7 +14,7 @@ mod sch;
 pub use intlib::{read_intlib, IntLib};
 pub use pcb::read_pcbdoc;
 pub use pcblib::read_pcblib;
-pub use sch::{read_schdoc, read_schlib};
+pub use sch::{read_schdoc, read_schlib, write_schdoc};
 
 use std::io::{Read, Seek};
 use std::path::Path;

@@ -26,6 +26,8 @@ USAGE:
     trace convert <file> <out.kicad_pcb>        Write a KiCad board (KiCad 7 and later)
     trace convert <file> <out.PcbDoc>           Write an Altium Designer board
     trace convert <file.SchDoc> <out.svg>       Draw a schematic sheet as SVG
+    trace convert <file.SchDoc> <out.SchDoc>    Write a schematic sheet as an Altium sheet
+    trace convert <file.tracesch> <folder>      Write every sheet of a Trace schematic as Altium sheets
     trace fab <board> <out.zip|folder>          Gerber X2, drill, IPC-356, pick-and-place and BOM files
     trace odb <board> <out.tgz|folder>          ODB++ job: layers, drills, parts and nets in one package
     trace layers <gerber folder|zip>            Show which layer each Gerber or drill file was taken as
@@ -719,6 +721,35 @@ fn convert(file: &str, out: &str) -> Res {
             return Err("only schematic sheets can be drawn as .svg".into());
         };
         std::fs::write(out, trace_export::sheet_svg(&sh))?;
+        println!("wrote {out}");
+        return Ok(());
+    }
+    if file.to_ascii_lowercase().ends_with(".tracesch") {
+        // A Trace schematic: every sheet, as Altium sheets in folder `out`.
+        let f = trace_core::SchFile::load(Path::new(file))?;
+        let from = Path::new(file).parent().unwrap_or(Path::new("."));
+        std::fs::create_dir_all(out)?;
+        for s in &f.sheets {
+            let src = from.join(&s.file);
+            let stem = Path::new(&s.file)
+                .file_stem()
+                .unwrap_or_default()
+                .to_string_lossy();
+            let original = src.is_file() && s.file.to_ascii_lowercase().ends_with(".schdoc");
+            let bytes = trace_altium::write_schdoc(&s.sheet, original.then_some(src.as_path()))?;
+            let to = Path::new(out).join(format!("{stem}.SchDoc"));
+            std::fs::write(&to, bytes)?;
+            println!("wrote {}", to.display());
+        }
+        return Ok(());
+    }
+    if out.to_ascii_lowercase().ends_with(".schdoc") {
+        let Design::Sheet(sh) = load(file)? else {
+            return Err("only schematic sheets can be written as .SchDoc".into());
+        };
+        let original = file.to_ascii_lowercase().ends_with(".schdoc");
+        let bytes = trace_altium::write_schdoc(&sh, original.then(|| std::path::Path::new(file)))?;
+        std::fs::write(out, bytes)?;
         println!("wrote {out}");
         return Ok(());
     }

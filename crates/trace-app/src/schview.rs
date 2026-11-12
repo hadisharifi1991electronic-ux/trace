@@ -215,6 +215,44 @@ fn project_docs(prj: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
+/// Keeps a file about to be replaced as `name.bak`, the first time only.
+fn backup(p: &Path) -> Result<(), String> {
+    if !p.exists() {
+        return Ok(());
+    }
+    let mut bak = p.as_os_str().to_owned();
+    bak.push(".bak");
+    let bak = PathBuf::from(bak);
+    if !bak.exists() {
+        std::fs::copy(p, &bak).map_err(|e| format!("{}: {e}", bak.display()))?;
+    }
+    Ok(())
+}
+
+/// A project's text with its sheets pointing at the files written (by
+/// name, next to it) and its other documents at where they are.
+fn retarget_project(text: &str, from_dir: &Path, sheets: &[(PathBuf, String)]) -> String {
+    let mut out = String::new();
+    for line in text.lines() {
+        let Some(p) = line.trim_start().strip_prefix("DocumentPath=") else {
+            out.push_str(line);
+            out.push_str("\r\n");
+            continue;
+        };
+        let full = from_dir.join(p.replace('\\', std::path::MAIN_SEPARATOR_STR));
+        let same = |a: &Path| {
+            a.file_name().map(|f| f.to_ascii_lowercase())
+                == full.file_name().map(|f| f.to_ascii_lowercase())
+        };
+        let new = match sheets.iter().find(|(src, _)| same(src)) {
+            Some((_, name)) => name.clone(),
+            None => full.display().to_string(),
+        };
+        out.push_str(&format!("DocumentPath={new}\r\n"));
+    }
+    out
+}
+
 fn ext(p: &Path) -> String {
     p.extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase())
@@ -673,6 +711,54 @@ impl Schematics {
         Ok(path)
     }
 
+    /// Writes every sheet into `dir` as an Altium `.SchDoc`, keeping what
+    /// each sheet's own `.SchDoc` holds that Trace does not draw. A file
+    /// already there is kept as `.bak` first. With a project, a copy of it
+    /// that lists the written sheets goes there too. Returns how many
+    /// sheets were written.
+    pub fn save_altium(&mut self, dir: &Path) -> Result<usize, String> {
+        if self.loader.is_some() {
+            return Err("Wait until every sheet has been read.".into());
+        }
+        std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+        let mut written = Vec::new();
+        for slot in &self.slots {
+            let Some(sheet) = &slot.sheet else { continue };
+            let name = format!("{}.SchDoc", slot.name);
+            let original =
+                (ext(&slot.path) == "schdoc" && slot.path.is_file()).then_some(slot.path.as_path());
+            let bytes =
+                trace_altium::write_schdoc(sheet, original).map_err(|e| format!("{name}: {e}"))?;
+            let to = dir.join(&name);
+            backup(&to)?;
+            std::fs::write(&to, bytes).map_err(|e| format!("{}: {e}", to.display()))?;
+            written.push((slot.path.clone(), name));
+        }
+        if let Some(prj) = &self.project {
+            let from_dir = prj.parent().unwrap_or(Path::new("."));
+            if from_dir.canonicalize().ok() != dir.canonicalize().ok() {
+                let text = std::fs::read(prj)
+                    .map(|b| String::from_utf8_lossy(&b).into_owned())
+                    .map_err(|e| e.to_string())?;
+                let to = dir.join(prj.file_name().unwrap_or_default());
+                backup(&to)?;
+                std::fs::write(&to, retarget_project(&text, from_dir, &written))
+                    .map_err(|e| format!("{}: {e}", to.display()))?;
+            }
+        }
+        Ok(written.len())
+    }
+
+    /// The folder of the project, or of the first sheet.
+    fn project_dir(&self) -> PathBuf {
+        self.project
+            .as_ref()
+            .or(self.slots.first().map(|s| &s.path))
+            .and_then(|p| p.parent())
+            .unwrap_or(Path::new("."))
+            .to_path_buf()
+    }
+
     /// What carrying the sheet edits to `board` would change. A board read
     /// fresh from its file is compared with the sheets as first read; one
     /// already updated (or saved by Trace after an update) with the sheets
@@ -1108,6 +1194,22 @@ impl Schematics {
                     Ok(p) => format!("Saved {}", p.display()),
                     Err(e) => e,
                 });
+            }
+            if ui
+                .button("Save as Altium…")
+                .on_hover_text("Write each sheet as an Altium .SchDoc (with a copy of the project) into a folder you pick")
+                .clicked()
+            {
+                if let Some(dir) = rfd::FileDialog::new()
+                    .set_title("Folder for the Altium sheets")
+                    .set_directory(self.project_dir())
+                    .pick_folder()
+                {
+                    self.note = Some(match self.save_altium(&dir) {
+                        Ok(n) => format!("Wrote {n} Altium sheets to {}", dir.display()),
+                        Err(e) => e,
+                    });
+                }
             }
             if let Some(scene) = scene {
                 if ui
@@ -2107,5 +2209,51 @@ impl Schematics {
             None => {}
         }
         pick
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn altium_sheets_save_with_a_project_that_lists_them() {
+        let dir = std::env::temp_dir().join(format!("trace-altium-save-{}", std::process::id()));
+        let src = dir.join("src");
+        let out = dir.join("out");
+        std::fs::create_dir_all(&src).unwrap();
+        let prj = src.join("Demo.PrjPcb");
+        std::fs::write(
+            &prj,
+            "[Design]\r\nVersion=1.0\r\n[Document1]\r\nDocumentPath=Main.SchDoc\r\n[Document2]\r\nDocumentPath=Board.PcbDoc\r\n",
+        )
+        .unwrap();
+        let mut sheet = Sheet::default();
+        sheet.drawing.size = [11000.0, 8500.0];
+        sheet.drawing.add_wire(vec![[100.0, 100.0], [500.0, 100.0]]);
+        sheet.drawing.add_label([500.0, 100.0], "SDA");
+        let mut s = Schematics {
+            project: Some(prj.clone()),
+            ..Default::default()
+        };
+        s.slots.push(Slot {
+            path: src.join("Main.SchDoc"),
+            name: "Main".into(),
+            sheet: Some(sheet),
+            error: None,
+            boxes: Vec::new(),
+        });
+        assert_eq!(s.save_altium(&out), Ok(1));
+        let back = trace_altium::read_schdoc(out.join("Main.SchDoc")).unwrap();
+        assert_eq!(back.net_labels, ["SDA"]);
+        assert_eq!(back.wires, 1);
+        let p = std::fs::read_to_string(out.join("Demo.PrjPcb")).unwrap();
+        assert!(p.contains("DocumentPath=Main.SchDoc\r\n"));
+        let board = src.join("Board.PcbDoc").display().to_string();
+        assert!(p.contains(&format!("DocumentPath={board}\r\n")));
+        // Saving again keeps the first file as a backup.
+        assert_eq!(s.save_altium(&out), Ok(1));
+        assert!(out.join("Main.SchDoc.bak").exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

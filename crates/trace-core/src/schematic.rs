@@ -240,7 +240,8 @@ pub struct NetTag {
     pub at: Vec<Pt>,
     pub text: String,
     pub kind: TagKind,
-    /// The text that draws it (`Drawing::texts`), for net labels.
+    /// The text that shows its name (`Drawing::texts`): a net label's
+    /// text, or the name drawn on a port, power port or sheet entry.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub graphic: Option<u32>,
 }

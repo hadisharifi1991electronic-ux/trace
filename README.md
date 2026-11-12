@@ -146,7 +146,9 @@ checker and simulator all read.
   grids from 0.01 mm. "Update N parts on the board" gives every part using
   the footprint the new pads and lines in one undoable edit: nets follow
   pad numbers, parts on the bottom are mirrored, pours are poured again.
-  Save keeps the library as `.tracelib`. "Place on board" puts a new part
+  Save keeps the library as `.tracelib`; "Save as PcbLib…" writes an
+  Altium footprint library (pads with their rounded corners, slots, mask
+  and paste, lines, arcs, text and regions). "Place on board" puts a new part
   with the footprint on the board under the cursor, with the next free
   designator (R, C, U... as the board's parts with that footprint use):
   click to drop it, Space turns it, L flips it, Escape takes it away
@@ -170,7 +172,7 @@ trace convert <file> out.PcbDoc      write an Altium Designer board
 trace convert sheet.SchDoc out.svg   draw a schematic sheet as SVG
 trace fab board.PcbDoc out.zip   Gerber X2, drill, IPC-356, pick-and-place and BOM (or a folder)
 trace symbols lib.SchLib [out.svg]     list a schematic library's symbols; draw them all as SVG
-trace footprints lib.PcbLib [out.tracelib]   list a library's (or a board's) footprints; save as a Trace library
+trace footprints lib.PcbLib [out]   list a library's (or a board's) footprints; save as .tracelib or .PcbLib
 ```
 
 Every command also takes an Allegro `.brd` (versions 16.0 to 23.x), a Gerber
@@ -265,14 +267,14 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   what to reroute. A part new on the sheets is put beside the board with
   its nets when its footprint is in the open footprint library or on
   another part of the board; otherwise it is listed for placing by hand.
-  Parts deleted from the sheets stay on the board. New parts on the
-  sheets are copies of parts already there (no symbol libraries yet).
-  Edits are not written back to `.SchDoc` files.
-- Footprint libraries are read from `.PcbLib` and saved as `.tracelib`;
-  writing `.PcbLib` and reading `.IntLib` are not done yet, and 3D bodies
-  and text on mechanical layers are left out. Placing a new part from a
-  library onto the board is not done yet. Updating parts keeps their
-  designator and value text where it was.
+  Parts deleted from the sheets stay on the board. New parts come from
+  copies or from `.SchLib` symbol libraries (not `.IntLib` yet). Edits
+  are not written back to `.SchDoc` files.
+- Footprint libraries are read from `.PcbLib` and saved as `.tracelib`
+  or `.PcbLib`; reading `.IntLib` is not done yet, and 3D bodies and text
+  on mechanical layers are left out, so a `.PcbLib` saved by Trace has no
+  3D models. Updating parts keeps their designator and value text where
+  it was.
 - Altium solid regions are drawn; Altium polygon pours are counted but not
   drawn yet. Allegro pours are drawn.
 - Traced Gerber nets get names like `Net-042`, since bare Gerber files do not

@@ -3,6 +3,21 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.25.0 (2026-11-12)
+
+- Footprint libraries can be saved as Altium `.PcbLib`: "Save as PcbLib…"
+  in the footprint editor, or `trace footprints <lib|board> out.PcbLib`.
+  Pads (with rounded corners, slotted holes, their own mask and paste
+  expansion, tenting and plating), lines, arcs, text, and copper, paste
+  and mask regions are written; names longer than Altium's 31-character
+  storage limit are kept in full. 3D bodies are not written.
+- Checked by reading every footprint back: all 90 footprints of ten
+  public libraries come back the same as they were read from Altium's
+  own files.
+- Altium boards (Save as Altium board) now also keep rounded-rectangle
+  pads, slotted holes, pad mask and paste expansion, tenting, unplated
+  holes, and paste and solder mask regions.
+
 ## 0.24.0 (2026-11-12)
 
 - Altium schematic libraries (`.SchLib`): symbols are read with their

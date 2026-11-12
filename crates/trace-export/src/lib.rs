@@ -6,7 +6,7 @@ pub mod fab;
 pub mod kicad;
 pub mod svg;
 
-pub use altium::to_altium;
+pub use altium::{to_altium, to_pcblib};
 pub use fab::{fab_files, fab_zip, FabFile, FabOptions};
 #[doc(hidden)]
 pub use kicad::fracture;

@@ -9,6 +9,8 @@ license.workspace = true
 trace-gerber.workspace = true
 trace-allegro.workspace = true
 trace-altium.workspace = true
+serde = "1"
+serde_json = "1"
 
 [dependencies]
 trace-core.workspace = true

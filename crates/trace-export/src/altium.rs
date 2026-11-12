@@ -13,12 +13,283 @@
 //! layer to layer use Altium's full-stack mode with a size per layer.
 
 use std::io::{Cursor, Write};
+use trace_core::footprint::{Footprint, Library};
 use trace_core::{Arc, Board, LayerKind, LayerRef, Length, Pad, PadShape, Point, Side};
 
 /// The board as the bytes of a `.PcbDoc` file. `name` is the file name
 /// Altium shows for it.
 pub fn to_altium(board: &Board, name: &str) -> std::io::Result<Vec<u8>> {
     Writer::new(board).run(name)
+}
+
+/// A footprint library as the bytes of a `.PcbLib` file: one storage per
+/// footprint, whose `Data` stream holds its name and then its primitives,
+/// each as in a board's streams. `name` is the file name Altium shows.
+pub fn to_pcblib(lib: &Library, name: &str) -> std::io::Result<Vec<u8>> {
+    let mut cf = cfb::CompoundFile::create(Cursor::new(Vec::new()))?;
+    let mut head = Vec::new();
+    let pascal = |out: &mut Vec<u8>, s: &str| {
+        let b: Vec<u8> = s
+            .chars()
+            .take(255)
+            .map(|c| if (c as u32) < 256 { c as u8 } else { b'?' })
+            .collect();
+        out.push(b.len() as u8);
+        out.extend_from_slice(&b);
+    };
+    // "PCB 6.0 Binary Library File", its version and an id.
+    let title = "PCB 6.0 Binary Library File";
+    head.extend_from_slice(&(title.len() as u32).to_le_bytes());
+    pascal(&mut head, title);
+    head.extend_from_slice(&5.01f64.to_le_bytes());
+    head.extend_from_slice(&8u32.to_le_bytes());
+    let empty = Board::default();
+    let mut ids = Writer::new(&empty);
+    let id = ids.unique_id();
+    pascal(&mut head, &id);
+    cf.create_stream("/FileHeader")?.write_all(&head)?;
+
+    // Storage names: at most 31 characters, none of / \ : !, each once.
+    let mut used = std::collections::HashSet::new();
+    let storages: Vec<String> = lib
+        .footprints
+        .iter()
+        .map(|f| {
+            let base: String = f
+                .name
+                .chars()
+                .map(|c| {
+                    if "/\\:!".contains(c) || (c as u32) < 32 {
+                        '_'
+                    } else {
+                        c
+                    }
+                })
+                .take(31)
+                .collect();
+            let base = if base.is_empty() {
+                "Footprint".into()
+            } else {
+                base
+            };
+            let mut s = base.clone();
+            let mut k = 1;
+            while !used.insert(s.to_ascii_uppercase()) {
+                let tag = format!("~{k}");
+                s = format!(
+                    "{}{tag}",
+                    base.chars().take(31 - tag.len()).collect::<String>()
+                );
+                k += 1;
+            }
+            s
+        })
+        .collect();
+
+    // The library record: its kind, then the footprint names.
+    let stack_board = Board {
+        stackup: two_layer_stack(),
+        ..Default::default()
+    };
+    let mut props = vec![
+        p("FILENAME", name),
+        p("KIND", "Protel_Advanced_PCB_Library"),
+        p("VERSION", "3.00"),
+        p("DATE", "01.01.2026"),
+        p("TIME", "00:00:00"),
+    ];
+    Writer::new(&stack_board).stack(&mut props);
+    let mut data = Vec::new();
+    text_record(&mut data, &props);
+    data.extend_from_slice(&(lib.footprints.len() as u32).to_le_bytes());
+    for f in &lib.footprints {
+        let mut n = Vec::new();
+        pascal(&mut n, &f.name);
+        data.extend_from_slice(&(n.len() as u32).to_le_bytes());
+        data.extend_from_slice(&n);
+    }
+    cf.create_storage("/Library")?;
+    cf.create_stream("/Library/Header")?
+        .write_all(&1u32.to_le_bytes())?;
+    cf.create_stream("/Library/Data")?.write_all(&data)?;
+    cf.create_stream("/Library/EmbeddedFonts")?
+        .write_all(&0u32.to_le_bytes())?;
+    for s in ["Models", "ModelsNoEmbed", "Textures"] {
+        cf.create_storage(format!("/Library/{s}"))?;
+        cf.create_stream(format!("/Library/{s}/Header"))?
+            .write_all(&0u32.to_le_bytes())?;
+        cf.create_stream(format!("/Library/{s}/Data"))?;
+    }
+    // A table of contents Altium shows in its library list.
+    let mut toc = Vec::new();
+    for f in &lib.footprints {
+        let mut line = format!(
+            "Name={}|Pad Count={}|Height={}|Description={}",
+            f.name,
+            f.pads.len(),
+            trim(f.height.map_or(0.0, |h| h.mil()), 4),
+            f.description.replace('|', "/")
+        );
+        line.push_str("\r\n");
+        toc.extend(
+            line.chars()
+                .map(|c| if (c as u32) < 256 { c as u8 } else { b'?' }),
+        );
+    }
+    cf.create_storage("/Library/ComponentParamsTOC")?;
+    let mut tocd = (toc.len() as u32).to_le_bytes().to_vec();
+    tocd.extend_from_slice(&toc);
+    cf.create_stream("/Library/ComponentParamsTOC/Header")?
+        .write_all(&1u32.to_le_bytes())?;
+    cf.create_stream("/Library/ComponentParamsTOC/Data")?
+        .write_all(&tocd)?;
+
+    for (f, st) in lib.footprints.iter().zip(&storages) {
+        let (count, prims, wide) = footprint_records(f);
+        let mut d = Vec::new();
+        let mut n = Vec::new();
+        pascal(&mut n, &f.name);
+        d.extend_from_slice(&(n.len() as u32).to_le_bytes());
+        d.extend_from_slice(&n);
+        d.extend_from_slice(&prims);
+        cf.create_storage(format!("/{st}"))?;
+        cf.create_stream(format!("/{st}/Header"))?
+            .write_all(&count.to_le_bytes())?;
+        cf.create_stream(format!("/{st}/Data"))?.write_all(&d)?;
+        let mut params = Vec::new();
+        let mut pv = vec![p("PATTERN", f.name.clone())];
+        if let Some(h) = f.height {
+            pv.push(p("HEIGHT", mil(h)));
+        }
+        pv.push(p("DESCRIPTION", f.description.clone()));
+        text_record(&mut params, &pv);
+        cf.create_stream(format!("/{st}/Parameters"))?
+            .write_all(&params)?;
+        let mut w = Vec::new();
+        let wv: Vec<(String, String)> = wide
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let codes: Vec<String> = t.chars().map(|c| (c as u32).to_string()).collect();
+                (format!("ENCODEDTEXT{i}"), codes.join(","))
+            })
+            .collect();
+        if !wv.is_empty() {
+            text_record(&mut w, &wv);
+        }
+        cf.create_stream(format!("/{st}/WideStrings"))?
+            .write_all(&w)?;
+    }
+    cf.flush()?;
+    Ok(cf.into_inner().into_inner())
+}
+
+/// Top and bottom copper, for a library's layer list.
+fn two_layer_stack() -> trace_core::Stackup {
+    let layer = |name: &str, kind| trace_core::StackLayer {
+        name: name.into(),
+        altium_id: None,
+        kind,
+        thickness: Length::from_mil(if kind == LayerKind::Copper { 1.4 } else { 12.6 }),
+        dielectric_constant: (kind == LayerKind::Dielectric).then_some(4.8),
+        material: None,
+    };
+    trace_core::Stackup {
+        layers: vec![
+            layer("Top Layer", LayerKind::Copper),
+            layer("Dielectric 1", LayerKind::Dielectric),
+            layer("Bottom Layer", LayerKind::Copper),
+        ],
+    }
+}
+
+/// One footprint's primitive records, how many there are, and the texts
+/// they point to in the `WideStrings` stream.
+fn footprint_records(f: &Footprint) -> (u32, Vec<u8>, Vec<String>) {
+    let mut stackup = two_layer_stack();
+    // Footprints with inner layers keep them.
+    for k in 2..f.copper.max(2) {
+        stackup.layers.insert(
+            stackup.layers.len() - 1,
+            trace_core::StackLayer {
+                name: format!("Mid-Layer {}", k - 1),
+                altium_id: None,
+                kind: LayerKind::Copper,
+                thickness: Length::from_mil(1.4),
+                dielectric_constant: None,
+                material: None,
+            },
+        );
+    }
+    let mut board = Board {
+        stackup,
+        ..Default::default()
+    };
+    let g = &mut board.geometry;
+    g.pads = f.pads.clone();
+    g.tracks = f.tracks.clone();
+    g.arcs = f.arcs.clone();
+    g.polygons = f.regions.clone();
+    for q in &mut g.pads {
+        q.net = None;
+        q.component = None;
+    }
+    for t in &mut g.tracks {
+        t.net = None;
+        t.component = None;
+    }
+    for a in &mut g.arcs {
+        a.net = None;
+        a.component = None;
+    }
+    for r in &mut g.polygons {
+        r.net = None;
+        r.component = None;
+    }
+    let mut w = Writer::new(&board);
+    w.shift = (0, 0);
+    w.copper = f.copper.clamp(2, 32);
+    let (a, arcs) = w.arcs6();
+    let (n, pads, extra) = w.pads6();
+    let (t, tracks) = w.tracks6();
+    let (r, regions) = w.regions6(&extra);
+    let mut out = Vec::new();
+    out.extend(arcs);
+    out.extend(pads);
+    out.extend(tracks);
+    out.extend(regions);
+    let mut wide = Vec::new();
+    let mut texts = 0;
+    for tx in &f.texts {
+        let Some(l) = w.layer(&tx.layer) else {
+            continue;
+        };
+        let mut b = TEXT;
+        b[0] = l.v6;
+        put_i32(&mut b, 13, unit(tx.at.x));
+        put_i32(&mut b, 17, unit(tx.at.y));
+        put_i32(&mut b, 21, unit(tx.height));
+        put_f64(&mut b, 27, tx.rotation_deg);
+        b[35] = tx.mirror as u8;
+        put_i32(&mut b, 36, unit(tx.width));
+        b[40] = tx.text.eq_ignore_ascii_case(".Comment") as u8;
+        b[41] = tx.text.eq_ignore_ascii_case(".Designator") as u8;
+        put_u32(&mut b, 115, wide.len() as u32);
+        put_u32(&mut b, 226, l.v7);
+        wide.push(tx.text.clone());
+        let mut s = Vec::new();
+        let bytes: Vec<u8> = tx
+            .text
+            .chars()
+            .take(255)
+            .map(|c| if (c as u32) < 256 { c as u8 } else { b'?' })
+            .collect();
+        s.push(bytes.len() as u8);
+        s.extend_from_slice(&bytes);
+        binary_record(&mut out, 5, &[&b, &s]);
+        texts += 1;
+    }
+    (a + n + t + r + texts, out, wide)
 }
 
 /// Template records from a board saved by Altium Designer. Offsets of the
@@ -55,6 +326,24 @@ const VIA: [u8; 300] = [
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff, 0x7f, 0x00,
+];
+/// A stroke-font text from a footprint library saved by Altium Designer.
+const TEXT: [u8; 240] = [
+    0x3a, 0x0c, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xf2, 0x61, 0xd1,
+    0xff, 0xe0, 0x5e, 0xf8, 0xff, 0x50, 0xc3, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x10, 0x27, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x41, 0x00,
+    0x72, 0x00, 0x69, 0x00, 0x61, 0x00, 0x6c, 0x00, 0x00, 0x00, 0x56, 0x40, 0x01, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0xa0, 0x86, 0x01, 0x00, 0x04, 0x00, 0xa0, 0x86, 0x01, 0x00, 0x40, 0x0d,
+    0x03, 0x00, 0x40, 0x0d, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x40, 0x9c, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xbf, 0x4d, 0x5d, 0x00,
+    0x40, 0x42, 0x0f, 0x00, 0x05, 0x00, 0x00, 0x00, 0x00, 0xa0, 0x37, 0xa0, 0x00, 0x20, 0x0b, 0x20,
+    0x00, 0x40, 0x0d, 0x03, 0x00, 0x40, 0x0d, 0x03, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x01, 0x01,
+    0x00, 0x41, 0x00, 0x72, 0x00, 0x69, 0x00, 0x61, 0x00, 0x6c, 0x00, 0x00, 0x00, 0x53, 0x48, 0x41,
+    0x50, 0x45, 0x42, 0x41, 0x53, 0x45, 0x44, 0x3d, 0x46, 0x41, 0x4c, 0x53, 0x45, 0x7c, 0x43, 0x41,
+    0x56, 0x49, 0x54, 0x59, 0x48, 0x45, 0x49, 0x47, 0x48, 0x54, 0x3d, 0x30, 0x6d, 0x69, 0x6c, 0x7c,
+    0x53, 0x54, 0x41, 0x4e, 0x44, 0x4f, 0x46, 0x46, 0x48, 0x45, 0x49, 0x47, 0x48, 0x54, 0x3d, 0x30,
+    0x6d, 0x01, 0x02, 0x00, 0x02, 0x01, 0x01, 0x00, 0x00, 0x00, 0x00, 0x80, 0x00, 0x00, 0x00, 0x80,
 ];
 const PAD: [u8; 171] = [
     0x01, 0x0c, 0x00, 0xff, 0xff, 0xff, 0xff, 0x6c, 0x00, 0xff, 0xff, 0xff, 0xff, 0xf2, 0x43, 0xe7,
@@ -117,6 +406,27 @@ fn put_u32(b: &mut [u8], at: usize, v: u32) {
 }
 fn put_f64(b: &mut [u8], at: usize, v: f64) {
     b[at..at + 8].copy_from_slice(&v.to_le_bytes());
+}
+
+/// The corner radius of a pad whose outline is the rounded rectangle of its
+/// own size, as Altium's rounded-rectangle pads are read.
+fn round_corner(pad: &Pad) -> Option<Length> {
+    let first = *pad.outline.first()?;
+    let (s, c) = (-pad.rotation_deg).to_radians().sin_cos();
+    let (dx, dy) = (
+        (first.x.0 - pad.at.x.0) as f64,
+        (first.y.0 - pad.at.y.0) as f64,
+    );
+    let y = dx * s + dy * c;
+    let r = Length((pad.size_y.0 as f64 / 2.0 - y).round() as i64);
+    if r.0 <= 0 {
+        return None;
+    }
+    let again =
+        trace_core::geometry::round_rect(pad.at, pad.size_x, pad.size_y, pad.rotation_deg, r);
+    let near = |a: &Point, b: &Point| (a.x.0 - b.x.0).abs() <= 3 && (a.y.0 - b.y.0).abs() <= 3;
+    (again.len() == pad.outline.len() && again.iter().zip(&pad.outline).all(|(a, b)| near(a, b)))
+        .then_some(r)
 }
 
 /// One text record: little-endian length, then the properties and a NUL.
@@ -344,6 +654,12 @@ impl<'a> Writer<'a> {
                     name: MECH_NAMES[k as usize - 1],
                 }
             }
+            // Paste and solder mask, by their old numbers.
+            LayerRef::Other(id @ 35..=38) => AltLayer {
+                v6: *id,
+                v7: 0x0103_0008 + (*id - 35) as u32,
+                name: ["TOPPASTE", "BOTTOMPASTE", "TOPSOLDER", "BOTTOMSOLDER"][(*id - 35) as usize],
+            },
             LayerRef::Other(_) => return None,
         })
     }
@@ -927,7 +1243,7 @@ impl<'a> Writer<'a> {
                 .filter(|&c| (c as usize) < comps)
                 .map(|c| c as u16)
                 .unwrap_or(u16::MAX);
-            let custom = pad.outline.len() >= 3;
+            let custom = pad.outline.len() >= 3 && round_corner(pad).is_none();
             if custom {
                 regions.push(Region {
                     layer: if l.v6 == MULTI.v6 {
@@ -967,7 +1283,8 @@ impl<'a> Writer<'a> {
             (w, h, sh) = (d, d, 1);
         }
         let hole = unit(pad.hole);
-        if hole > 0 {
+        // A land of no size takes the hole's.
+        if hole > 0 && (w == 0 || h == 0) {
             w = w.max(hole);
             h = h.max(hole);
         }
@@ -988,8 +1305,29 @@ impl<'a> Writer<'a> {
                 pad.rotation_deg.rem_euclid(360.0)
             },
         );
-        r[60] = u8::from(hole > 0 && pad.name != "NPTH");
+        r[60] = u8::from(hole > 0 && pad.name != "NPTH" && !pad.fab.unplated);
         r[62] = 0;
+        // Mask and paste of its own, and tenting.
+        let fab = &pad.fab;
+        if let Some(m) = fab.mask {
+            r[102] = 2;
+            put_i32(&mut r, 90, unit(m));
+        }
+        if fab.no_paste {
+            r[101] = 2;
+            put_i32(&mut r, 86, unit(Length::from_mm(-1000.0)));
+        } else if let Some(e) = fab.paste {
+            r[101] = 2;
+            put_i32(&mut r, 86, unit(e));
+        }
+        if fab.tent_top {
+            r[1] |= 0x20;
+        }
+        if fab.tent_bottom {
+            r[1] |= 0x40;
+        }
+        let corner = if custom { None } else { round_corner(pad) };
+        let slot = hole > 0 && fab.slot.0 > pad.hole.0;
         // Through-hole pads span top to bottom; others sit on their layer.
         let (from, to) = if l.v6 == MULTI.v6 {
             (1, 32)
@@ -1000,7 +1338,8 @@ impl<'a> Writer<'a> {
         r[117] = from;
 
         let mut stack = Vec::new();
-        if !pad.stack.is_empty() && l.v6 == MULTI.v6 && !custom {
+        let full = !pad.stack.is_empty() && l.v6 == MULTI.v6 && !custom;
+        if full {
             r[62] = 2; // full stack
             let last = self.copper - 1;
             // Layers without a land keep a ring the size of the hole.
@@ -1038,14 +1377,43 @@ impl<'a> Writer<'a> {
             stack.extend(xs);
             stack.extend(ys);
             stack.extend(shapes);
+        } else if corner.is_some() || slot {
+            // The same land on every mid layer.
+            for _ in 2..=30 {
+                stack.extend_from_slice(&w.to_le_bytes());
+            }
+            for _ in 2..=30 {
+                stack.extend_from_slice(&h.to_le_bytes());
+            }
+            stack.extend(std::iter::repeat_n(sh, 29));
+        }
+        if !stack.is_empty() {
             stack.push(0); // unknown
-            stack.push(0); // round hole
-            stack.extend_from_slice(&0i32.to_le_bytes()); // slot size
-            stack.extend_from_slice(&0f64.to_le_bytes()); // slot rotation
+            stack.push(if slot { 2 } else { 0 }); // hole shape
+            let len = if slot { unit(fab.slot) } else { 0 };
+            stack.extend_from_slice(&len.to_le_bytes()); // slot length
+            let turn = if slot {
+                (fab.slot_deg - pad.rotation_deg).rem_euclid(360.0)
+            } else {
+                0.0
+            };
+            stack.extend_from_slice(&turn.to_le_bytes()); // slot rotation
             stack.extend(std::iter::repeat_n(0u8, 32 * 4 * 2)); // hole offsets
             stack.push(0);
-            stack.extend(std::iter::repeat_n(0u8, 32)); // alternative shapes
-            stack.extend(std::iter::repeat_n(0u8, 32)); // corner radii
+            // Rounded rectangles: alternative shape 9 with the corner as a
+            // percentage of half the short side.
+            let (alt, pct) = match corner {
+                Some(c) => {
+                    let half = pad.size_x.0.min(pad.size_y.0) as f64 / 2.0;
+                    (
+                        9u8,
+                        (c.0 as f64 / half * 100.0).round().clamp(1.0, 100.0) as u8,
+                    )
+                }
+                None => (0, 0),
+            };
+            stack.extend(std::iter::repeat_n(alt, 32)); // alternative shapes
+            stack.extend(std::iter::repeat_n(pct, 32)); // corner radii
             debug_assert_eq!(stack.len(), 596);
         }
 
@@ -1187,5 +1555,132 @@ mod tests {
         assert!((v.diameter.mm() - 0.6).abs() < 1e-5);
         // The closing point is not repeated.
         assert_eq!(back.geometry.outline.len(), 4);
+    }
+
+    #[test]
+    fn footprint_library_reads_back() {
+        use trace_core::footprint::{FpText, Library};
+        // Lengths Altium holds exactly (0.1 mil steps).
+        let mm = |v: f64| Length::from_mil((v / 0.0254 * 10.0).round() / 10.0);
+        let ptm = |x: f64, y: f64| Point { x: mm(x), y: mm(y) };
+        let pad = |name: &str, x: f64, layer: LayerRef| Pad {
+            layer,
+            net: None,
+            component: None,
+            name: name.into(),
+            at: ptm(x, 0.0),
+            size_x: mm(0.6),
+            size_y: mm(1.2),
+            hole: Length(0),
+            shape: PadShape::Rect,
+            rotation_deg: 90.0,
+            outline: Vec::new(),
+            stack: Vec::new(),
+            fab: Default::default(),
+        };
+        let mut rounded = pad("2", 2.0, LayerRef::Copper(0));
+        rounded.shape = PadShape::Round;
+        rounded.outline = trace_core::geometry::round_rect(
+            rounded.at,
+            rounded.size_x,
+            rounded.size_y,
+            90.0,
+            mm(0.15),
+        );
+        rounded.fab.mask = Some(mm(0.05));
+        rounded.fab.no_paste = true;
+        // -1 m, as Altium marks "no paste", to its 0.0001 mil steps.
+        rounded.fab.paste = Some(Length(-999_999_999));
+        let mut slot = pad("3", 5.0, LayerRef::AllCopper);
+        slot.hole = mm(0.8);
+        slot.size_x = mm(1.4);
+        slot.size_y = mm(2.6);
+        slot.shape = PadShape::Round;
+        slot.rotation_deg = 0.0;
+        slot.fab.slot = mm(2.0);
+        slot.fab.slot_deg = 90.0;
+        let fp = Footprint {
+            name: "A_VERY_LONG_FOOTPRINT_NAME_OVER_31_CHARACTERS/X".into(),
+            description: "Test part".into(),
+            height: Some(mm(1.0)),
+            pads: vec![pad("1", 0.0, LayerRef::Copper(0)), rounded, slot],
+            tracks: vec![Track {
+                layer: LayerRef::TopSilk,
+                net: None,
+                start: ptm(-1.0, 1.0),
+                end: ptm(6.0, 1.0),
+                width: mm(0.15),
+                component: None,
+                text: false,
+            }],
+            arcs: vec![Arc {
+                layer: LayerRef::TopSilk,
+                net: None,
+                center: ptm(-1.0, 0.0),
+                radius: mm(0.2),
+                start_deg: 0.0,
+                end_deg: 360.0,
+                width: mm(0.1),
+                component: None,
+            }],
+            regions: vec![trace_core::Polygon {
+                layer: LayerRef::Other(35),
+                net: None,
+                outline: vec![ptm(4.0, -1.0), ptm(6.0, -1.0), ptm(6.0, 1.0)],
+                holes: Vec::new(),
+                pour: None,
+                component: None,
+            }],
+            texts: vec![FpText {
+                layer: LayerRef::TopSilk,
+                at: ptm(0.0, 2.0),
+                height: mm(1.0),
+                width: mm(0.15),
+                rotation_deg: 90.0,
+                mirror: false,
+                text: ".Designator".into(),
+            }],
+            ..Default::default()
+        };
+        let mut second = fp.clone();
+        second.name.push('2');
+        let lib = Library {
+            version: String::new(),
+            footprints: vec![fp.clone(), second],
+        };
+        let bytes = to_pcblib(&lib, "t.PcbLib").unwrap();
+        let dir = std::env::temp_dir().join(format!("trace-pcblib-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.PcbLib");
+        std::fs::write(&path, bytes).unwrap();
+        let back = trace_altium::read_pcblib(&path).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(back.footprints.len(), 2);
+        let f = &back.footprints[0];
+        assert_eq!(f.name, fp.name);
+        assert_eq!(f.description, "Test part");
+        assert_eq!(f.height, fp.height);
+        let json = |v: &dyn erased::Json| v.json();
+        assert_eq!(json(&f.pads), json(&fp.pads));
+        assert_eq!(json(&f.tracks), json(&fp.tracks));
+        assert_eq!(json(&f.regions), json(&fp.regions));
+        assert_eq!(f.texts.len(), 1);
+        assert_eq!(f.texts[0].text, ".Designator");
+        assert_eq!(f.texts[0].rotation_deg, 90.0);
+        assert_eq!(f.texts[0].at, fp.texts[0].at);
+        let a = &f.arcs[0];
+        assert_eq!((a.start_deg, a.end_deg), (0.0, 360.0));
+    }
+
+    /// Compares values through their JSON, as Trace saves them.
+    mod erased {
+        pub trait Json {
+            fn json(&self) -> String;
+        }
+        impl<T: serde::Serialize> Json for T {
+            fn json(&self) -> String {
+                serde_json::to_string(self).unwrap()
+            }
+        }
     }
 }

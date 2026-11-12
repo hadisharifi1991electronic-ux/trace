@@ -30,8 +30,9 @@ USAGE:
     trace layers <gerber folder|zip>            Show which layer each Gerber or drill file was taken as
     trace symbols <lib.SchLib> [out.svg]        List the symbols of an Altium schematic library;
                                                 with out, draw them all as SVG
-    trace footprints <lib|board> [out.tracelib] List the footprints of a .PcbLib, .tracelib or board;
-                                                with out, save them as a Trace footprint library
+    trace footprints <lib|board> [out]          List the footprints of a .PcbLib, .tracelib or board;
+                                                with out, save them as a Trace library (.tracelib)
+                                                or an Altium one (.PcbLib)
 ";
 
 fn main() -> ExitCode {
@@ -178,7 +179,15 @@ fn footprints(file: &str, out: Option<&str>) -> Res {
     if let Some(out) = out {
         let mut lib = lib;
         lib.version = env!("CARGO_PKG_VERSION").to_string();
-        lib.save(Path::new(out))?;
+        if out.to_ascii_lowercase().ends_with(".pcblib") {
+            let name = Path::new(out)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            std::fs::write(out, trace_export::to_pcblib(&lib, &name)?)?;
+        } else {
+            lib.save(Path::new(out))?;
+        }
         println!("saved {out}");
     }
     Ok(())

@@ -450,7 +450,19 @@ impl FpEditor {
 
     fn save_to(&mut self, path: &Path) -> Result<(), String> {
         self.lib.version = env!("CARGO_PKG_VERSION").to_string();
-        self.lib.save(path).map_err(|e| e.to_string())?;
+        let altium = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("pcblib"));
+        if altium {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let bytes = trace_export::to_pcblib(&self.lib, &name).map_err(|e| e.to_string())?;
+            std::fs::write(path, bytes).map_err(|e| e.to_string())?;
+        } else {
+            self.lib.save(path).map_err(|e| e.to_string())?;
+        }
         self.path = Some(path.to_path_buf());
         self.source = path
             .file_name()
@@ -459,6 +471,25 @@ impl FpEditor {
         self.from_board = false;
         self.dirty = false;
         Ok(())
+    }
+
+    /// Saves as an Altium `.PcbLib`, asking where.
+    fn save_altium(&mut self) -> Option<Pick> {
+        let stem = self
+            .source
+            .trim_start_matches("Footprints on ")
+            .split('.')
+            .next()
+            .unwrap_or("footprints")
+            .to_string();
+        let path = rfd::FileDialog::new()
+            .add_filter("Altium footprint library", &["PcbLib"])
+            .set_file_name(format!("{stem}.PcbLib"))
+            .save_file()?;
+        Some(match self.save_to(&path) {
+            Ok(()) => Pick::Message(format!("Saved {}", path.display()), false),
+            Err(e) => Pick::Message(format!("Could not save {}: {e}", path.display()), true),
+        })
     }
 
     fn save(&mut self, ask: bool) -> Option<Pick> {
@@ -679,6 +710,13 @@ impl FpEditor {
                 .clicked()
             {
                 pick = self.save(true);
+            }
+            if ui
+                .add_enabled(!self.is_empty(), egui::Button::new("Save as PcbLib…"))
+                .on_hover_text("Write an Altium footprint library (.PcbLib): pads, lines, arcs, text and regions. 3D bodies are not kept, so save under a new name rather than over a library made in Altium.")
+                .clicked()
+            {
+                pick = self.save_altium();
             }
         });
         ui.horizontal(|ui| {

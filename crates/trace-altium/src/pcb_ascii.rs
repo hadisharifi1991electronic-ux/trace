@@ -259,6 +259,7 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
         };
         match p.int("KIND") {
             Some(0) => board.net_classes.push(class),
+            Some(1) => board.component_classes.push(class),
             Some(6) => board.diff_pair_classes.push(class),
             _ => {}
         }
@@ -533,6 +534,7 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
             outline,
             holes,
             pour: index(p, "POLYGON"),
+            component: index(p, "COMPONENT"),
         };
         if matches!(layer, LayerRef::Copper(_)) {
             let (mask, paste) = expansions(p, &rules);
@@ -558,6 +560,7 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
             outline: crate::pcb::fill_outline(a, b, angle(p, "ROTATION")),
             holes: Vec::new(),
             pour: None,
+            component: index(p, "COMPONENT"),
         };
         if matches!(layer, LayerRef::Copper(_)) {
             let (mask, paste) = expansions(p, &rules);

@@ -17,7 +17,8 @@ USAGE:
     trace pairs <board> [max-skew]              Differential pair lengths and skew (default max-skew 5mil)
     trace rules <board>                         Design rules, grouped by kind
     trace check <board>                         Check length, match, skew and via limits from the board's rules
-    trace drc <board>                           Design rule check: clearance, shorts, width, unrouted nets
+    trace drc <board> [--all]                   Design rule check: clearance, shorts, width, unrouted nets,
+                                                holes, annular rings, mask slivers, silk on pads, board edge
     trace impedance <board>                     Stack-up, widths for 50/100 ohm, and the impedance of each pair
     trace view <board> [out.html]               Open the board in the viewer (in your browser)
     trace convert <file> <out.json>             Export to Trace's open JSON model
@@ -45,7 +46,8 @@ fn main() -> ExitCode {
         ["pairs", file, skew] => pairs(file, skew),
         ["rules", file] => rules(file),
         ["check", file] => check(file),
-        ["drc", file] => drc(file),
+        ["drc", file] => drc(file, 15),
+        ["drc", file, "--all"] => drc(file, usize::MAX),
         ["impedance", file] => impedance(file),
         ["convert", file, out] => convert(file, out),
         ["layers", file] => layers(file),
@@ -398,7 +400,7 @@ fn impedance(file: &str) -> Res {
     Ok(())
 }
 
-fn drc(file: &str) -> Res {
+fn drc(file: &str, show: usize) -> Res {
     let b = board(file)?;
     let t = std::time::Instant::now();
     let found = trace_core::drc::check(&b, 5000);
@@ -410,7 +412,7 @@ fn drc(file: &str) -> Res {
     }
     for (kind, list) in &by_kind {
         println!("{kind}: {}", list.len());
-        for v in list.iter().take(15) {
+        for v in list.iter().take(show) {
             let layer = v
                 .layer
                 .and_then(|l| {
@@ -430,8 +432,8 @@ fn drc(file: &str) -> Res {
                 trace_core::drc::describe(&b, v)
             );
         }
-        if list.len() > 15 {
-            println!("  ... {} more", list.len() - 15);
+        if list.len() > show {
+            println!("  ... {} more (--all lists them)", list.len() - show);
         }
     }
     println!("{} violations in {:.2} s", found.len(), took.as_secs_f64());

@@ -118,6 +118,11 @@ impl Move {
             LayerRef::Copper(i) => LayerRef::Copper(self.copper(*i)),
             LayerRef::TopSilk => LayerRef::BottomSilk,
             LayerRef::BottomSilk => LayerRef::TopSilk,
+            // Altium's paste (35, 36) and solder mask (37, 38) layers.
+            LayerRef::Other(35) => LayerRef::Other(36),
+            LayerRef::Other(36) => LayerRef::Other(35),
+            LayerRef::Other(37) => LayerRef::Other(38),
+            LayerRef::Other(38) => LayerRef::Other(37),
             other => other.clone(),
         }
     }
@@ -163,6 +168,17 @@ pub fn place(board: &mut Board, index: usize, from: Placement, to: Placement) {
         (a.start_deg, a.end_deg) = if m.flips() { (e, s) } else { (s, e) };
         a.center = m.point(a.center);
         a.layer = m.layer(&a.layer);
+    }
+    for f in g
+        .polygons
+        .iter_mut()
+        .chain(g.areas.iter_mut())
+        .filter(|f| f.component == me)
+    {
+        for q in f.outline.iter_mut().chain(f.holes.iter_mut().flatten()) {
+            *q = m.point(*q);
+        }
+        f.layer = m.layer(&f.layer);
     }
     for b in g.bodies.iter_mut().filter(|b| b.component == me) {
         b.at = m.point(b.at);

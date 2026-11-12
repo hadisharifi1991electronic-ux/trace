@@ -169,6 +169,9 @@ pub struct Polygon {
     /// The pour (`Geometry::pours`) this area was poured from, if any.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pour: Option<u32>,
+    /// The part it belongs to, which it moves with.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub component: Option<u32>,
 }
 
 /// A copper pour as drawn: the area it may fill, its net and layer. Its

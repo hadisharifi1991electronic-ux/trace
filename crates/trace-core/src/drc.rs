@@ -1,5 +1,8 @@
 //! Design rule check: clearance between copper of different nets, shorts,
-//! track widths and nets left unrouted, against the board's own rules.
+//! track widths and nets left unrouted, against the board's own rules; and
+//! the manufacturing rules (hole size and spacing, annular ring, solder
+//! mask slivers, silkscreen over mask openings, copper near the board
+//! edge), in `fab`.
 //!
 //! Rule scopes are read as Altium query expressions. Terms Trace can judge
 //! from nets alone are understood (`All`, `InNet`, `InNetClass`,
@@ -11,6 +14,10 @@
 use crate::route::{inside, land, pt, seg_seg, Shape, P};
 use crate::{Board, LayerRef, Length, Rule};
 use std::collections::{HashMap, HashSet};
+
+#[path = "drc_fab.rs"]
+mod fab;
+pub use fab::{mask_rule, MaskRule};
 
 /// The kinds of copper object rules tell apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -68,17 +75,56 @@ pub enum Kind {
     Clearance,
     Short,
     Width,
+    /// Copper closer to the board edge than its rule allows.
+    BoardEdge,
+    HoleToHole,
+    AnnularRing,
+    HoleSize,
+    /// A strip of solder mask between two openings too thin to stay on.
+    MaskSliver,
+    /// Silkscreen on or too near a solder mask opening.
+    SilkToMask,
     Unrouted,
 }
 
 impl Kind {
+    pub const ALL: [Kind; 10] = [
+        Kind::Short,
+        Kind::Clearance,
+        Kind::Width,
+        Kind::BoardEdge,
+        Kind::HoleToHole,
+        Kind::AnnularRing,
+        Kind::HoleSize,
+        Kind::MaskSliver,
+        Kind::SilkToMask,
+        Kind::Unrouted,
+    ];
     pub fn label(self) -> &'static str {
         match self {
             Kind::Clearance => "Clearance",
             Kind::Short => "Short circuit",
             Kind::Width => "Width",
+            Kind::BoardEdge => "Board edge",
+            Kind::HoleToHole => "Hole to hole",
+            Kind::AnnularRing => "Annular ring",
+            Kind::HoleSize => "Hole size",
+            Kind::MaskSliver => "Mask sliver",
+            Kind::SilkToMask => "Silk to mask",
             Kind::Unrouted => "Unrouted net",
         }
+    }
+    /// A manufacturing rule rather than an electrical one.
+    pub fn is_fab(self) -> bool {
+        matches!(
+            self,
+            Kind::BoardEdge
+                | Kind::HoleToHole
+                | Kind::AnnularRing
+                | Kind::HoleSize
+                | Kind::MaskSliver
+                | Kind::SilkToMask
+        )
     }
 }
 
@@ -90,6 +136,9 @@ pub enum Item {
     Via(usize),
     Pad(usize),
     Polygon(usize),
+    /// A filled shape off copper (`Geometry::areas`), such as a solder
+    /// mask opening drawn by hand.
+    Area(usize),
 }
 
 #[derive(Clone, Debug)]
@@ -160,6 +209,20 @@ fn tokens(s: &str) -> Vec<Tok> {
     out
 }
 
+/// The part an object belongs to, as far as a scope can ask.
+#[derive(Clone, Copy)]
+enum Part<'a> {
+    /// Not known here: terms about parts are left undecided.
+    Unknown,
+    /// Belongs to no part.
+    Free,
+    In {
+        designator: &'a str,
+        footprint: &'a str,
+        classes: &'a [String],
+    },
+}
+
 /// What a scope term is judged on.
 struct Subject<'a> {
     net: &'a str,
@@ -167,6 +230,35 @@ struct Subject<'a> {
     classes: &'a [String],
     pair: Option<&'a str>,
     pair_classes: &'a [String],
+    part: Part<'a>,
+}
+
+/// Altium footprint patterns: `*` for any run of characters, `?` for one,
+/// without case.
+fn glob(pattern: &str, name: &str) -> bool {
+    let p: Vec<char> = pattern.to_lowercase().chars().collect();
+    let n: Vec<char> = name.to_lowercase().chars().collect();
+    let (mut i, mut j, mut star, mut mark) = (0, 0, None, 0);
+    while j < n.len() {
+        if i < p.len() && (p[i] == '?' || p[i] == n[j]) {
+            i += 1;
+            j += 1;
+        } else if i < p.len() && p[i] == '*' {
+            star = Some(i);
+            mark = j;
+            i += 1;
+        } else if let Some(st) = star {
+            i = st + 1;
+            mark += 1;
+            j = mark;
+        } else {
+            return false;
+        }
+    }
+    while i < p.len() && p[i] == '*' {
+        i += 1;
+    }
+    i == p.len()
 }
 
 struct Parser<'a> {
@@ -262,8 +354,24 @@ impl Parser<'_> {
         let arg = args.first().map(String::as_str).unwrap_or("");
         let eq = |a: &str, b: &str| a.eq_ignore_ascii_case(b);
         let w = w.to_ascii_lowercase();
-        // Pours and free regions never belong to a part.
-        let partless = matches!(s.obj, Obj::Pour);
+        let part = |f: &dyn Fn(&str, &str, &[String]) -> bool| match s.part {
+            Part::Unknown => None,
+            Part::Free => Some(false),
+            Part::In {
+                designator,
+                footprint,
+                classes,
+            } => Some(f(designator, footprint, classes)),
+        };
+        match w.as_str() {
+            "hasfootprint" => return part(&|_, f, _| glob(arg, f)),
+            "incomponent" => return part(&|d, _, _| eq(d, arg)),
+            "incomponentclass" => return part(&|_, _, c| c.iter().any(|c| eq(c, arg))),
+            "inanycomponent" => return part(&|_, _, _| true),
+            "isfree" => return part(&|_, _, _| true).map(|v| !v),
+            "hasfootprintpad" if matches!(s.part, Part::Free) => return Some(false),
+            _ => {}
+        }
         Some(match w.as_str() {
             "all" | "oncopper" | "onsignal" => true,
             "innet" => eq(arg, s.net),
@@ -281,12 +389,6 @@ impl Parser<'_> {
             "isregion" => s.obj == Obj::Region,
             "isfill" => false,
             "iskeepout" => false,
-            "hasfootprint" | "incomponent" | "incomponentclass" | "inanycomponent"
-            | "hasfootprintpad"
-                if partless =>
-            {
-                false
-            }
             _ => return None,
         })
     }
@@ -310,6 +412,8 @@ struct NetInfo {
     classes: Vec<Vec<String>>,
     pairs: Vec<Option<String>>,
     pair_classes: Vec<Vec<String>>,
+    /// Each component's designator, footprint and classes.
+    parts: Vec<(String, String, Vec<String>)>,
 }
 
 impl NetInfo {
@@ -345,16 +449,55 @@ impl NetInfo {
                 }
             }
         }
+        let parts = board
+            .components
+            .iter()
+            .map(|c| {
+                let cls = board
+                    .component_classes
+                    .iter()
+                    .filter(|k| {
+                        k.members
+                            .iter()
+                            .any(|m| m.eq_ignore_ascii_case(&c.designator))
+                    })
+                    .map(|k| k.name.clone())
+                    .collect();
+                (c.designator.clone(), c.footprint.clone(), cls)
+            })
+            .collect();
         NetInfo {
             names: board.nets.iter().map(|x| x.name.clone()).collect(),
             classes,
             pairs,
             pair_classes,
+            parts,
         }
+    }
+
+    /// As `subject`, for one object whose part is known: `None` for a
+    /// free object.
+    fn subject_in(&self, net: Option<u32>, obj: Obj, component: Option<u32>) -> Subject<'_> {
+        let mut s = self.subject(net, obj);
+        s.part = match component.and_then(|c| self.parts.get(c as usize)) {
+            Some((d, f, c)) => Part::In {
+                designator: d,
+                footprint: f,
+                classes: c,
+            },
+            None => Part::Free,
+        };
+        s
     }
 
     fn subject(&self, net: Option<u32>, obj: Obj) -> Subject<'_> {
         static NONE: Vec<String> = Vec::new();
+        // Pours never belong to a part.
+        let part = if obj == Obj::Pour {
+            Part::Free
+        } else {
+            Part::Unknown
+        };
         match net.map(|n| n as usize).filter(|&n| n < self.names.len()) {
             Some(n) => Subject {
                 net: &self.names[n],
@@ -362,6 +505,7 @@ impl NetInfo {
                 classes: &self.classes[n],
                 pair: self.pairs[n].as_deref(),
                 pair_classes: &self.pair_classes[n],
+                part,
             },
             None => Subject {
                 net: "No Net",
@@ -369,6 +513,7 @@ impl NetInfo {
                 classes: &NONE,
                 pair: None,
                 pair_classes: &NONE,
+                part,
             },
         }
     }
@@ -703,7 +848,7 @@ fn copper(board: &Board) -> (Vec<Copper>, Vec<Area>) {
                         r: 0.0,
                     },
                     item: Item::Polygon(i),
-                    component: None,
+                    component: f.component,
                 });
             }
         }
@@ -1024,13 +1169,10 @@ pub fn check(board: &Board, limit: usize) -> Vec<Violation> {
         }
     }
 
+    fab::check(board, &info, &items, &mut out);
+
     out.sort_by(|a, b| {
-        let rank = |k: Kind| match k {
-            Kind::Short => 0,
-            Kind::Clearance => 1,
-            Kind::Width => 2,
-            Kind::Unrouted => 3,
-        };
+        let rank = |k: Kind| Kind::ALL.iter().position(|&x| x == k).unwrap_or(0);
         rank(a.kind).cmp(&rank(b.kind)).then(
             a.found
                 .partial_cmp(&b.found)
@@ -1081,6 +1223,7 @@ pub fn describe(board: &Board, v: &Violation) -> String {
             v.rule
         ),
         Kind::Unrouted => format!("{}: {}", net(v.nets[0]), v.rule),
+        _ => fab::describe(board, v),
     }
 }
 

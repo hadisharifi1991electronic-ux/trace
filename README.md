@@ -103,7 +103,10 @@ checker and simulator all read.
   Altium boards is drawn in a stroke font
 - check design rules (the DRC button, or D): clearance, short circuits,
   track width and unrouted nets, from the board's own Altium rules (per
-  object type, by priority, net and class scopes). Live is on by default:
+  object type, by priority, net, class, part, footprint and part class
+  scopes); and the manufacturing rules: hole size, hole to hole, annular
+  ring, solder mask slivers, silkscreen over mask openings or pads, and
+  copper near or over the board edge. Live is on by default:
   the board is checked again in the background after every edit, the
   count shows in the status bar, and markers on the board show where.
   Click a violation to zoom to it. Boards without rules (Gerber, ODB++,
@@ -118,7 +121,8 @@ trace pairs board.PcbDoc [5mil]  length of each differential pair (tracks, arcs,
 trace view board.PcbDoc          open the board viewer in your browser
 trace rules board.PcbDoc         design rules grouped by kind
 trace check board.PcbDoc         check the board's length and matched-length rules; lists failing nets
-trace drc board.PcbDoc           design rule check: clearance, short circuits, width, unrouted nets
+trace drc board.PcbDoc [--all]   design rule check: clearance, shorts, width, unrouted nets, and the
+                                 manufacturing rules (holes, rings, mask slivers, silk on pads, board edge)
 trace impedance board.PcbDoc     stack-up widths for 50 Ω and 100 Ω pairs, and each pair's Zdiff
 trace convert <file> out.json    export to Trace's open JSON model
 trace convert <file> out.kicad_pcb   write a KiCad board
@@ -184,15 +188,14 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   pads, so moving far leaves long diagonal segments to tidy up; tracks on
   surface pads stay behind when the part is flipped. Silk follows parts
   on Altium boards (other formats do not say which silk is a part's).
-  Copper, mask and paste areas drawn in a footprint (custom pad shapes,
-  mask openings) stay where they are when the part moves.
   Vias are through vias. Push moves tracks only (not vias or pads), one
   track deep: a track that would have to push another is not moved.
 - The design rule check takes a rule whose scope it cannot judge (rooms,
-  footprints, hole sizes) as possibly applying, and uses the smaller gap of
-  it and the rule that surely applies, so it errs towards fewer reports.
-  Silkscreen, solder mask, hole-to-hole and component clearance rules are
-  not checked yet.
+  layers, hole sizes) as possibly applying, and uses the smaller gap of it
+  and the rule that surely applies, so it errs towards fewer reports.
+  Clearance rules do not yet tell parts apart (the manufacturing rules
+  do). Silk to silk, component clearance, height and net antennae rules
+  are not checked yet.
 - Fab outputs draw text in one stroke font, so silkscreen text is placed
   and sized as in Altium but its letters are shaped differently (TrueType
   text too). Text on mechanical layers and Altium special strings other

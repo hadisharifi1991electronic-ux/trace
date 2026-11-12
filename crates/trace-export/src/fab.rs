@@ -49,6 +49,10 @@ impl FabOptions {
     /// `PasteMaskExpansion`), defaults where it has none.
     pub fn from_board(board: &Board) -> FabOptions {
         let mut o = FabOptions::default();
+        let m = trace_core::drc::mask_rule(board);
+        o.mask_expansion = m.expansion;
+        o.tent_top = m.tent_top;
+        o.tent_bottom = m.tent_bottom;
         let rule = |kind: &str| {
             board
                 .rules
@@ -61,18 +65,6 @@ impl FabOptions {
                 })
                 .min_by_key(|r| r.priority)
         };
-        if let Some(r) = rule("SolderMaskExpansion") {
-            if let Some(e) = r.params.get("EXPANSION").and_then(|v| Length::parse(v)) {
-                o.mask_expansion = e;
-            }
-            let yes = |k: &str| r.params.get(k).map(|v| v.eq_ignore_ascii_case("TRUE"));
-            if let Some(t) = yes("ISTENTINGTOP") {
-                o.tent_top = t;
-            }
-            if let Some(t) = yes("ISTENTINGBOTTOM") {
-                o.tent_bottom = t;
-            }
-        }
         if let Some(r) = rule("PasteMaskExpansion") {
             if let Some(e) = r.params.get("EXPANSION").and_then(|v| Length::parse(v)) {
                 o.paste_expansion = e;

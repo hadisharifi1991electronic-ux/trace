@@ -245,6 +245,7 @@ pub(crate) fn openings(
                 outline,
                 holes,
                 pour: None,
+                component: copper.component,
             });
         }
     }
@@ -402,6 +403,7 @@ fn parse_region(b: &[u8], layers: &LayerMap) -> Option<Polygon> {
         outline,
         holes,
         pour: u16_at(b, 5).filter(|&i| i != u16::MAX).map(u32::from),
+        component: u16_at(b, 7).filter(|&i| i != u16::MAX).map(u32::from),
     })
 }
 
@@ -576,14 +578,9 @@ fn parse_pad(blocks: &[&[u8]], layers: &LayerMap) -> Option<Pad> {
 
 /// The board outline is stored as numbered vertices `VX0`, `VY0`, ...;
 /// arcs between vertices are flattened to their end points for now.
+/// The board shape, its rounded corners and other arcs included.
 pub(crate) fn parse_outline(p: &Props) -> Vec<Point> {
-    (0..)
-        .map_while(|i| {
-            let x = p.get(&format!("VX{i}")).and_then(Length::parse)?;
-            let y = p.get(&format!("VY{i}")).and_then(Length::parse)?;
-            Some(Point { x, y })
-        })
-        .collect()
+    vertices(p)
 }
 
 /// An outline given as `VX0`/`VY0`... vertices, `KIND{i}=1` marking an arc
@@ -719,6 +716,7 @@ pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
         };
         match p.int("KIND") {
             Some(0) => board.net_classes.push(class),
+            Some(1) => board.component_classes.push(class),
             Some(6) => board.diff_pair_classes.push(class),
             _ => {}
         }
@@ -809,6 +807,7 @@ pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
                 outline: fill_outline(a, e, rot),
                 holes: Vec::new(),
                 pour: None,
+                component: u16_at(b, 7).filter(|&i| i != u16::MAX).map(u32::from),
             };
             if matches!(layer, LayerRef::Copper(_)) {
                 g.polygons.push(poly);

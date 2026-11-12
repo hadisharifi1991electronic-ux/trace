@@ -1184,6 +1184,7 @@ mod tests {
         let len = (t.end.x.0 - t.start.x.0) as f64 / 1e6;
         assert!((len - 4.0).abs() < 1e-5, "{len}");
         assert!((v.diameter.mm() - 0.6).abs() < 1e-5);
-        assert_eq!(back.geometry.outline.len(), 5);
+        // The closing point is not repeated.
+        assert_eq!(back.geometry.outline.len(), 4);
     }
 }

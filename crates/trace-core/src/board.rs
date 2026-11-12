@@ -10,6 +10,9 @@ pub struct Board {
     pub diff_pair_classes: Vec<NetClass>,
     pub diff_pairs: Vec<DiffPair>,
     pub components: Vec<Component>,
+    /// Component classes: their names and the designators in each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub component_classes: Vec<NetClass>,
     pub rules: Vec<Rule>,
     pub stats: BoardStats,
     pub geometry: crate::Geometry,

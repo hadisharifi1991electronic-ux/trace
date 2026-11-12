@@ -3,6 +3,35 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.18.0 (2026-11-12)
+
+- Manufacturing checks in the DRC, from the board's own Altium rules,
+  listed with the rest and marked on the board:
+  - hole size (smallest and largest drill);
+  - hole to hole spacing (slots included; stacked and blind vias that
+    share no layer are left alone);
+  - annular ring of plated holes and vias, layer by layer;
+  - solder mask slivers between openings, with each pad's own expansion
+    and tenting, and mask openings drawn by hand;
+  - silkscreen over mask openings, or over the pad itself where the rule
+    measures to exposed copper;
+  - copper near the board edge, or past it, with the rule's gaps per
+    object (pours often have their own).
+  Each kind has its own chip in the DRC panel, shown once it finds
+  something. `trace drc board --all` lists every one.
+- Rule scopes now understand parts: `InComponent`, `HasFootprint` (with
+  `*` wildcards), `InComponentClass`, `InAnyComponent`, `IsFree`. Altium
+  component classes are read.
+- Rounded corners and other arcs of the board shape are read from Altium
+  boards (they were cut straight before), so the board edge, the outline
+  Gerber and pours by the corners are right.
+- Copper regions, fills and mask openings drawn in a footprint move with
+  their part.
+- On the DAC39RF12 EVM: 17 board edge, 2 annular ring, 52 mask sliver and
+  37 silk to mask findings: edge-launch connector copper drawn to the
+  edge, two balun shield holes larger than their pads, 2–3 mil
+  mask between fine-pitch pins, silk over pads.
+
 ## 0.17.0 (2026-11-06)
 
 - Fab outputs: File → Export fab outputs (Gerber, drill, BOM), or

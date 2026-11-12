@@ -345,6 +345,7 @@ impl<'a> Builder<'a> {
             outline: self.points(&outline),
             holes,
             pour: None,
+            component: None,
         });
     }
 

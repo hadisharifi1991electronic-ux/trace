@@ -1,5 +1,5 @@
 //! The Design Rule Check window: runs the board's clearance, short-circuit,
-//! width and unrouted-net rules in the background, after every edit when
+//! width, unrouted-net and manufacturing rules in the background, after every edit when
 //! Live is on, and lists what fails. A click takes the board view there.
 
 use eframe::egui::{self, Color32, RichText};
@@ -28,12 +28,14 @@ pub struct Drc {
     /// The row last clicked.
     pub current: Option<usize>,
     /// Which kinds are listed; the last is length constraints.
-    show: [bool; 5],
+    show: [bool; KINDS.len() + 1],
     /// The board has no clearance rules of its own.
     no_rules: bool,
 }
 
-const KINDS: [Kind; 4] = [Kind::Short, Kind::Clearance, Kind::Width, Kind::Unrouted];
+const KINDS: [Kind; 10] = Kind::ALL;
+/// Where the length constraints sit in `show`.
+const LENGTHS: usize = KINDS.len();
 
 /// A row the user clicked: a violation, or a net that fails a length
 /// constraint.
@@ -49,6 +51,12 @@ pub fn color(kind: Kind) -> Color32 {
         Kind::Short => Color32::from_rgb(255, 70, 70),
         Kind::Clearance => Color32::from_rgb(255, 150, 60),
         Kind::Width => Color32::from_rgb(240, 210, 80),
+        Kind::BoardEdge => Color32::from_rgb(255, 120, 200),
+        Kind::HoleToHole => Color32::from_rgb(230, 230, 230),
+        Kind::AnnularRing => Color32::from_rgb(200, 200, 120),
+        Kind::HoleSize => Color32::from_rgb(170, 170, 170),
+        Kind::MaskSliver => Color32::from_rgb(90, 210, 120),
+        Kind::SilkToMask => Color32::from_rgb(240, 240, 160),
         Kind::Unrouted => Color32::from_rgb(120, 180, 255),
     }
 }
@@ -64,7 +72,7 @@ impl Default for Drc {
             running: None,
             took: 0.0,
             current: None,
-            show: [true; 5],
+            show: [true; KINDS.len() + 1],
             no_rules: false,
         }
     }
@@ -209,6 +217,11 @@ impl Drc {
         ui.horizontal_wrapped(|ui| {
             for (i, k) in KINDS.into_iter().enumerate() {
                 let n = self.list.iter().filter(|v| v.kind == k).count();
+                // Manufacturing kinds the board has no rule for stay out of
+                // the way.
+                if n == 0 && k.is_fab() {
+                    continue;
+                }
                 let text = RichText::new(format!("{} {n}", k.label())).color(if n > 0 {
                     color(k)
                 } else {
@@ -222,9 +235,10 @@ impl Drc {
             } else {
                 Color32::GRAY
             });
-            ui.toggle_value(&mut self.show[4], text).on_hover_text(
-                "Nets failing the Constraint Manager's length, match, skew and via rules",
-            );
+            ui.toggle_value(&mut self.show[LENGTHS], text)
+                .on_hover_text(
+                    "Nets failing the Constraint Manager's length, match, skew and via rules",
+                );
         });
         if self.no_rules {
             ui.label(
@@ -236,7 +250,7 @@ impl Drc {
         }
         ui.separator();
         if self.checked.is_some() && self.list.is_empty() && lengths.is_empty() {
-            ui.label("Clearance, short circuit, width, unrouted net and length rules all pass.");
+            ui.label("Electrical, manufacturing and length rules all pass.");
             return None;
         }
         enum Row {
@@ -253,7 +267,7 @@ impl Drc {
             })
             .map(Row::V)
             .collect();
-        if self.show[4] {
+        if self.show[LENGTHS] {
             rows.extend((0..lengths.len()).map(Row::L));
         }
         let copper: Vec<String> = board

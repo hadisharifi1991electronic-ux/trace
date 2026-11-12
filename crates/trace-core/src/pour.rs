@@ -620,6 +620,7 @@ fn pour_among(board: &Board, areas: &[Polygon], index: usize) -> Vec<Polygon> {
                     .map(|h| h.into_iter().map(point).collect())
                     .collect(),
                 pour: Some(index as u32),
+                component: None,
             }
         })
         .collect()

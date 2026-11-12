@@ -3,6 +3,28 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.22.0 (2026-11-12)
+
+- Blind, buried and micro vias when routing. The route bar's Via list
+  holds every via span the board uses (read from its vias, with the size
+  most of them have) and the through via:
+  - Auto (the default) places the narrowest via that joins the two
+    layers, or a stack of microvias and buried vias meeting end to end
+    (top to L3 on an HDI board: L1-L2, L2-L3 and the buried L3-L8, at one
+    spot) before falling back to the through via;
+  - or pick one via by hand; if it does not reach the next layer the
+    route bar says so;
+  - each via kind keeps its own pad and drill size, and + adds a span the
+    board does not use yet (microvias start at 10/4 mil).
+  Clearance is checked only on the layers each via spans. Backspace takes
+  back a whole stack. Placed vias keep their span in the DRC, pours, 3D
+  view, drill files and the KiCad and Altium writers.
+- KiCad export writes vias joining an outer layer to the next as
+  microvias.
+- Tried on the ODB++ rigid-flex sample (10 layers, microvias L1-L2,
+  L2-L3, L8-L9, L9-L10 and buried L3-L8): its via kinds are listed with
+  their sizes.
+
 ## 0.21.0 (2026-11-12)
 
 - Place new parts from a footprint library: "Place on board" in the

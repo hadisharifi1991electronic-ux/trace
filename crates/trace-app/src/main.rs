@@ -111,6 +111,8 @@ pub struct App {
     moving: Option<placing::Moving>,
     /// The next board edit joins the last step (a part placed then dropped).
     join_next: bool,
+    /// Layers (from 1) of a via span being added in the route bar.
+    new_span: (u8, u8),
 }
 
 #[derive(Clone, Copy)]
@@ -176,6 +178,7 @@ impl App {
             drc: drc::Drc::default(),
             moving: None,
             join_next: false,
+            new_span: (1, 2),
         };
         if let Some(f) = start_file {
             app.open(f);
@@ -1549,6 +1552,12 @@ impl App {
     }
 
     fn route_bar(&mut self, ui: &mut egui::Ui) {
+        let n = self
+            .scene
+            .as_ref()
+            .map(|s| s.board.stackup.copper_layers().count().max(1) as u8)
+            .unwrap_or(2);
+        let new_span = &mut self.new_span;
         let r = &mut self.router;
         let mm = |ui: &mut egui::Ui, v: &mut f64, label: &str, tip: &str| {
             ui.label(label);
@@ -1578,8 +1587,73 @@ impl App {
             "Clearance",
             "Gap kept to copper of other nets",
         );
-        mm(ui, &mut r.via_d, "Via", "Via pad diameter");
-        mm(ui, &mut r.via_hole, "hole", "Via drill");
+        // Which via a layer change places, and its size.
+        let name = |k: &trace_core::route::ViaKind| {
+            format!("L{}-L{} {}", k.from + 1, k.to + 1, k.kind_name(n))
+        };
+        let through = r.through(n);
+        let shown = match r.via_choice {
+            None => "Auto".to_string(),
+            Some(i) => r.kinds.get(i).map(name).unwrap_or_else(|| name(&through)),
+        };
+        ui.label("Via");
+        egui::ComboBox::from_id_salt("via_kind")
+            .width(150.0)
+            .selected_text(shown)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut r.via_choice, None, "Auto")
+                    .on_hover_text("The narrowest via, or stack of microvias and buried vias, that joins the two layers");
+                for (i, k) in r.kinds.iter().enumerate() {
+                    ui.selectable_value(&mut r.via_choice, Some(i), name(k));
+                }
+                ui.selectable_value(&mut r.via_choice, Some(r.kinds.len()), name(&through));
+            })
+            .response
+            .on_hover_text("V places this via and goes on to the next layer");
+        let tip = if r.via_choice.is_none() || r.via_choice == Some(r.kinds.len()) {
+            "Through via pad diameter"
+        } else {
+            "Via pad diameter"
+        };
+        let (d, h) = match r.via_choice.and_then(|i| r.kinds.get_mut(i)) {
+            Some(k) => (&mut k.diameter, &mut k.hole),
+            None => (&mut r.via_d, &mut r.via_hole),
+        };
+        mm(ui, d, "", tip);
+        mm(ui, h, "hole", "Via drill");
+        ui.menu_button("+", |ui| {
+            ui.label("Add a blind or buried via");
+            ui.horizontal(|ui| {
+                ui.label("from L");
+                ui.add(egui::DragValue::new(&mut new_span.0).range(1..=n));
+                ui.label("to L");
+                ui.add(egui::DragValue::new(&mut new_span.1).range(1..=n));
+            });
+            let (a, b) = (
+                new_span.0.min(new_span.1) - 1,
+                new_span.0.max(new_span.1) - 1,
+            );
+            let exists = a == b
+                || (a == 0 && b + 1 >= n)
+                || r.kinds.iter().any(|k| k.from == a && k.to == b);
+            if ui.add_enabled(!exists, egui::Button::new("Add")).clicked() {
+                // Microvias are small; others take the through size.
+                let micro = b == a + 1;
+                r.kinds.push(trace_core::route::ViaKind {
+                    from: a,
+                    to: b,
+                    diameter: if micro { 10.0 } else { r.via_d },
+                    hole: if micro { 4.0 } else { r.via_hole },
+                });
+                r.kinds.sort_by_key(|k| (k.to - k.from, k.from));
+                r.via_choice = None;
+                ui.close_menu();
+            }
+        })
+        .response
+        .on_hover_text(
+            "Add a via span the board does not use yet (microvias, blind and buried vias)",
+        );
         ui.separator();
         egui::ComboBox::from_id_salt("corner")
             .width(90.0)

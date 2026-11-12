@@ -770,16 +770,16 @@ fn draw_route(
             );
         }
     }
-    for v in a.via_points() {
+    for (v, d, hole) in a.via_shapes() {
         let c = view.to_screen(v[0] as f32, v[1] as f32);
         shapes.push(Shape::circle_filled(
             c,
-            (r.via_d / 2.0) as f32 * view.scale,
+            (d / 2.0) as f32 * view.scale,
             amber,
         ));
         shapes.push(Shape::circle_filled(
             c,
-            (r.via_hole / 2.0) as f32 * view.scale,
+            (hole / 2.0) as f32 * view.scale,
             Color32::from_rgb(20, 20, 24),
         ));
     }

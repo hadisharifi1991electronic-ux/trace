@@ -71,7 +71,12 @@ checker and simulator all read.
 - route tracks (the Route button, or X): click a pad, via or track end to
   start, click to place corners (Shift+Space cycles 45°, 45° arc, 90°,
   90° arc and any angle; Space flips the bend), V / Shift+V for a via to the next
-  layer down / up, Backspace to take back a corner, and the route ends on
+  layer down / up (the Via list on the route bar: Auto takes the
+  narrowest via the board uses that joins the two layers, stacking
+  microvias and buried vias end to end where needed; or pick a through,
+  blind, buried or micro via, each with its own size, and + adds a span
+  the board does not use yet), Backspace to take back a corner or a
+  whole via stack, and the route ends on
   copper of its own net. Obstacles are handled as in Altium (Shift+R or
   the list on the route bar): Walkaround hugs what is in the way at 45°
   and stops short when there is no way round; Push and walkaround moves
@@ -212,7 +217,7 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   pads, so moving far leaves long diagonal segments to tidy up; tracks on
   surface pads stay behind when the part is flipped. Silk follows parts
   on Altium boards (other formats do not say which silk is a part's).
-  Vias are through vias. Push moves tracks only (not vias or pads), one
+  Push moves tracks only (not vias or pads), one
   track deep: a track that would have to push another is not moved.
 - The design rule check takes a rule whose scope it cannot judge (rooms,
   layers, hole sizes) as possibly applying, and uses the smaller gap of it

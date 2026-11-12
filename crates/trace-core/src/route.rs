@@ -397,6 +397,125 @@ pub fn common_via(board: &Board) -> (f64, f64) {
         .unwrap_or((20.0, 10.0))
 }
 
+/// A kind of via: the copper layers it joins (0 = top, `from` <= `to`)
+/// and its pad and drill size in mil.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct ViaKind {
+    pub from: u8,
+    pub to: u8,
+    pub diameter: f64,
+    pub hole: f64,
+}
+
+impl ViaKind {
+    pub fn spans(&self, l: u8) -> bool {
+        (self.from..=self.to).contains(&l)
+    }
+
+    /// What it is on a board of `n` copper layers.
+    pub fn kind_name(&self, n: u8) -> &'static str {
+        let last = n.saturating_sub(1);
+        if self.from == 0 && self.to >= last {
+            "through"
+        } else if self.to == self.from + 1 && (self.from == 0 || self.to >= last) {
+            "microvia"
+        } else if self.from == 0 || self.to >= last {
+            "blind"
+        } else if self.to == self.from + 1 {
+            "buried microvia"
+        } else {
+            "buried"
+        }
+    }
+}
+
+/// The kinds of via on a board: each layer span its vias use, with the
+/// size most of them have, narrowest first. The through via is always
+/// there (sized as the board's through vias, or 20/10 mil).
+pub fn via_kinds(board: &Board) -> Vec<ViaKind> {
+    let n = board.stackup.copper_layers().count().max(1) as u8;
+    let mut count: HashMap<(u8, u8, i64, i64), usize> = HashMap::new();
+    for v in &board.geometry.vias {
+        let (lo, hi) = (
+            v.from_layer.min(v.to_layer),
+            v.from_layer.max(v.to_layer).min(n - 1),
+        );
+        *count.entry((lo, hi, v.diameter.0, v.hole.0)).or_default() += 1;
+    }
+    let mut best: HashMap<(u8, u8), ((i64, i64), usize)> = HashMap::new();
+    for ((lo, hi, d, h), c) in count {
+        let e = best.entry((lo, hi)).or_insert(((d, h), 0));
+        if (c, (d, h)) > (e.1, e.0) {
+            *e = ((d, h), c);
+        }
+    }
+    let mut out: Vec<ViaKind> = best
+        .into_iter()
+        .map(|((lo, hi), ((d, h), _))| ViaKind {
+            from: lo,
+            to: hi,
+            diameter: Length(d).mil(),
+            hole: Length(h).mil(),
+        })
+        .collect();
+    if !out.iter().any(|k| k.from == 0 && k.to >= n - 1) {
+        out.push(ViaKind {
+            from: 0,
+            to: n - 1,
+            diameter: 20.0,
+            hole: 10.0,
+        });
+    }
+    out.sort_by_key(|k| (k.to - k.from, k.from));
+    out
+}
+
+/// The vias that take a route from layer `a` to layer `b` at one spot:
+/// one via spanning both, or microvias and buried vias stacked end to end.
+/// Of the ways there, the one that spans the fewest layers wins, then the
+/// one with fewest vias. Empty when there is no way.
+pub fn via_chain(kinds: &[ViaKind], a: u8, b: u8) -> Vec<ViaKind> {
+    let (lo, hi) = (a.min(b), a.max(b));
+    let mut best: Option<(u8, usize, Vec<ViaKind>)> = None;
+    fn grow(
+        kinds: &[ViaKind],
+        chain: &mut Vec<ViaKind>,
+        span: (u8, u8),
+        want: (u8, u8),
+        best: &mut Option<(u8, usize, Vec<ViaKind>)>,
+    ) {
+        if span.0 <= want.0 && span.1 >= want.1 {
+            let key = (span.1 - span.0, chain.len());
+            if best.as_ref().is_none_or(|b| key < (b.0, b.1)) {
+                *best = Some((key.0, key.1, chain.clone()));
+            }
+            return;
+        }
+        if chain.len() >= 4 {
+            return;
+        }
+        for k in kinds {
+            // Stacked vias meet at one layer: the next one starts where the
+            // stack ends, above or below.
+            let next = if k.from == span.1 && k.to > span.1 && span.1 < want.1 {
+                (span.0, k.to)
+            } else if k.to == span.0 && k.from < span.0 && span.0 > want.0 {
+                (k.from, span.1)
+            } else {
+                continue;
+            };
+            chain.push(*k);
+            grow(kinds, chain, next, want, best);
+            chain.pop();
+        }
+    }
+    for k in kinds.iter().filter(|k| k.spans(lo) || k.spans(hi)) {
+        let mut chain = vec![*k];
+        grow(kinds, &mut chain, (k.from, k.to), (lo, hi), &mut best);
+    }
+    best.map(|b| b.2).unwrap_or_default()
+}
+
 #[derive(Clone, Debug)]
 pub enum Shape {
     /// A segment swept by a radius; a point when both ends are the same.
@@ -714,6 +833,22 @@ impl Obstacles {
         clearance: f64,
     ) -> Option<Hit> {
         self.check(None, c, c, d / 2.0, nets, clearance)
+    }
+
+    /// The same for a via of diameter `d` at `c` on copper layers
+    /// `from..=to` only.
+    pub fn check_span_via(
+        &self,
+        c: P,
+        d: f64,
+        nets: [Option<u32>; 2],
+        clearance: f64,
+        from: u8,
+        to: u8,
+    ) -> Option<Hit> {
+        (from..=to)
+            .filter_map(|l| self.check(Some(l), c, c, d / 2.0, nets, clearance))
+            .min_by(|a, b| a.gap.total_cmp(&b.gap))
     }
 
     /// The same for a through via of diameter `d` at `c`.
@@ -1047,5 +1182,38 @@ mod tests {
         let r = Shape::Poly(rect([0.0, 0.0], 20.0, 10.0, 0.0));
         assert!((r.gap([0.0, 15.0], [0.0, 15.0], 2.0) - 8.0).abs() < 1e-9);
         assert!(r.gap([0.0, 0.0], [1.0, 0.0], 2.0) < 0.0);
+    }
+
+    #[test]
+    fn via_chains_pick_the_narrowest_stack() {
+        let k = |from, to| ViaKind {
+            from,
+            to,
+            diameter: 10.0,
+            hole: 4.0,
+        };
+        // An HDI board: microvias 0-1, 1-2, 7-8, 8-9, buried 2-7, through.
+        let kinds = [k(0, 1), k(1, 2), k(2, 7), k(7, 8), k(8, 9), k(0, 9)];
+        let spans = |a, b| -> Vec<(u8, u8)> {
+            via_chain(&kinds, a, b)
+                .iter()
+                .map(|v| (v.from, v.to))
+                .collect()
+        };
+        assert_eq!(spans(0, 1), vec![(0, 1)]);
+        assert_eq!(spans(1, 0), vec![(0, 1)]);
+        assert_eq!(spans(0, 2), vec![(0, 1), (1, 2)]);
+        assert_eq!(spans(3, 4), vec![(2, 7)]);
+        assert_eq!(spans(0, 3), vec![(0, 1), (1, 2), (2, 7)]);
+        assert_eq!(spans(9, 7), vec![(7, 8), (8, 9)]);
+        // Top to bottom: the through via, not a stack of five.
+        assert_eq!(spans(0, 9), vec![(0, 9)]);
+        // Only a through via: always it.
+        assert_eq!(via_chain(&[k(0, 3)], 1, 2).len(), 1);
+        assert!(via_chain(&[k(0, 1)], 1, 2).is_empty());
+        assert_eq!(k(0, 1).kind_name(10), "microvia");
+        assert_eq!(k(2, 7).kind_name(10), "buried");
+        assert_eq!(k(0, 9).kind_name(10), "through");
+        assert_eq!(k(0, 3).kind_name(10), "blind");
     }
 }

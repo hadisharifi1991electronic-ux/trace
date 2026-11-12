@@ -696,7 +696,15 @@ impl<'a> Writer<'a> {
                 v.from_layer.max(v.to_layer).min(last),
             );
             let through = a == 0 && z >= last;
-            let kind = if through { "" } else { " blind" };
+            // KiCad's microvia joins an outer layer to the one next to it.
+            let micro = z == a + 1 && (a == 0 || z >= last);
+            let kind = if through {
+                ""
+            } else if micro {
+                " micro"
+            } else {
+                " blind"
+            };
             // KiCad 7 gives a via one size on every layer. With per-layer
             // rings the via takes its end-layer land; a larger ring on any
             // layer, and every inner land when some layer has none, becomes a

@@ -7,7 +7,7 @@
 //! drawn red and is not placed.
 
 use trace_core::edit::{Edit, History};
-use trace_core::route::{self, Corner, Hit, Obstacles, Piece, P};
+use trace_core::route::{self, Corner, Hit, Obstacles, Piece, ViaKind, P};
 use trace_core::walk::{self, Ask, Shove};
 use trace_core::{Arc, Board, LayerRef, Length, Point, Track, Via};
 
@@ -77,8 +77,11 @@ pub struct Active {
     pub net: Option<u32>,
     pub pair: Option<PairInfo>,
     runs: Vec<Run>,
-    /// Vias placed so far, with their nets.
-    vias: Vec<(P, Option<u32>)>,
+    /// Vias placed so far, with their nets and kinds.
+    vias: Vec<(P, Option<u32>, ViaKind)>,
+    /// How many vias each layer change placed, so Backspace takes back
+    /// a whole stack.
+    via_groups: Vec<usize>,
     /// Centre-line pieces from the last fixed point to the cursor.
     pub preview: Vec<Piece>,
     /// The preview ends on copper of the route's own net (for a pair: on
@@ -110,6 +113,10 @@ impl Active {
     }
     pub fn via_points(&self) -> impl Iterator<Item = P> + '_ {
         self.vias.iter().map(|v| v.0)
+    }
+    /// Each via placed so far: centre, pad and drill diameter.
+    pub fn via_shapes(&self) -> impl Iterator<Item = (P, f64, f64)> + '_ {
+        self.vias.iter().map(|v| (v.0, v.2.diameter, v.2.hole))
     }
     fn fix_preview(&mut self) {
         let preview = std::mem::take(&mut self.preview);
@@ -256,8 +263,16 @@ impl TunePreview {
 pub struct Router {
     pub tune: Tune,
     pub width: f64,
+    /// Size of the through via.
     pub via_d: f64,
     pub via_hole: f64,
+    /// Blind, buried and micro vias the router may use (not the through
+    /// via), with their sizes.
+    pub kinds: Vec<ViaKind>,
+    /// The via to place at a layer change: `None` picks the narrowest
+    /// via or stack that joins the two layers; `Some(i)` is `kinds[i]`,
+    /// or the through via past the end of `kinds`.
+    pub via_choice: Option<usize>,
     pub clearance: f64,
     pub corner: Corner,
     /// Space: which run of a corner comes first.
@@ -292,6 +307,8 @@ impl Router {
             width: route::DEFAULT_WIDTH,
             via_d: 20.0,
             via_hole: 10.0,
+            kinds: Vec::new(),
+            via_choice: None,
             clearance: route::DEFAULT_CLEARANCE,
             corner: Corner::Line45,
             flip: false,
@@ -315,7 +332,58 @@ impl Router {
         (self.corner, self.arc, self.pairs, self.mode) = (corner, arc, pairs, mode);
         self.width = route::board_width(board);
         self.clearance = route::board_clearance(board);
-        (self.via_d, self.via_hole) = route::common_via(board);
+        let n = board.stackup.copper_layers().count().max(1) as u8;
+        let kinds = route::via_kinds(board);
+        match kinds.iter().find(|k| k.from == 0 && k.to >= n - 1) {
+            Some(t) => (self.via_d, self.via_hole) = (t.diameter, t.hole),
+            None => (self.via_d, self.via_hole) = route::common_via(board),
+        }
+        self.kinds = kinds
+            .into_iter()
+            .filter(|k| !(k.from == 0 && k.to >= n - 1))
+            .collect();
+    }
+
+    /// The through via on a board of `n` copper layers, at its set size.
+    pub fn through(&self, n: u8) -> ViaKind {
+        ViaKind {
+            from: 0,
+            to: n.saturating_sub(1),
+            diameter: self.via_d,
+            hole: self.via_hole,
+        }
+    }
+
+    /// The vias a change from layer `a` to `b` places at one spot, or why
+    /// none can.
+    pub fn via_stack(&self, n: u8, a: u8, b: u8) -> Result<Vec<ViaKind>, String> {
+        let through = self.through(n);
+        match self.via_choice {
+            Some(i) => {
+                let k = self.kinds.get(i).copied().unwrap_or(through);
+                if k.spans(a) && k.spans(b) {
+                    Ok(vec![k])
+                } else {
+                    Err(format!(
+                        "The chosen via joins L{} to L{}, not L{} to L{}: pick another via or Auto",
+                        k.from + 1,
+                        k.to + 1,
+                        a + 1,
+                        b + 1
+                    ))
+                }
+            }
+            None => {
+                let mut all = self.kinds.clone();
+                all.push(through);
+                let chain = route::via_chain(&all, a, b);
+                if chain.is_empty() {
+                    Err(format!("No via joins L{} to L{}", a + 1, b + 1))
+                } else {
+                    Ok(chain)
+                }
+            }
+        }
     }
 
     /// The board changed; obstacles are rebuilt on next use.
@@ -352,6 +420,7 @@ impl Router {
                 to: None,
             }],
             vias: Vec::new(),
+            via_groups: Vec::new(),
             preview: Vec::new(),
             lands: false,
             landing: None,
@@ -563,10 +632,20 @@ impl Router {
     /// after fixing the preview, and carries on on `next` layer.
     pub fn via(&mut self, board: &Board, next: u8) {
         self.seen = None;
-        let (d, clearance) = (self.via_d, self.clearance);
+        let clearance = self.clearance;
         if self.active.as_ref().is_some_and(|a| a.layer() == next) {
             return;
         }
+        let n = board.stackup.copper_layers().count().max(1) as u8;
+        let cur = self.active.as_ref().map(|a| a.layer()).unwrap_or(0);
+        let stack = match self.via_stack(n, cur, next) {
+            Ok(s) => s,
+            Err(e) => {
+                self.message = Some(e);
+                return;
+            }
+        };
+        let d = stack.iter().map(|k| k.diameter).fold(0.0, f64::max);
         if let Some(a) = self.active.as_mut().filter(|a| a.hit.is_none()) {
             a.fix_preview();
         }
@@ -612,23 +691,34 @@ impl Router {
             None => vec![at],
         };
         for &v in &spots {
-            if let Some(h) = self.obstacles(board).check_pair_via(v, d, nets, clearance) {
-                self.message = Some(format!(
-                    "No room for a via here: {}",
-                    too_close(board, &h, clearance)
-                ));
-                return;
+            for k in &stack {
+                if let Some(h) = self
+                    .obstacles(board)
+                    .check_span_via(v, k.diameter, nets, clearance, k.from, k.to)
+                {
+                    self.message = Some(format!(
+                        "No room for a via here: {}",
+                        too_close(board, &h, clearance)
+                    ));
+                    return;
+                }
             }
         }
         let a = self.active.as_mut().unwrap();
         let (from, to) = match pair_vias {
             Some((va, vb, partner)) => {
-                a.vias.push((va, net));
-                a.vias.push((vb, partner));
+                for k in &stack {
+                    a.vias.push((va, net, *k));
+                    a.vias.push((vb, partner, *k));
+                }
+                a.via_groups.push(stack.len() * 2);
                 (Some((va, vb)), Some((va, vb)))
             }
             None => {
-                a.vias.push((at, net));
+                for k in &stack {
+                    a.vias.push((at, net, *k));
+                }
+                a.via_groups.push(stack.len());
                 (None, None)
             }
         };
@@ -658,8 +748,8 @@ impl Router {
         if a.runs.len() > 1 {
             let pair = a.runs.last().unwrap().from.is_some();
             a.runs.pop();
-            a.vias.pop();
-            if pair {
+            let n = a.via_groups.pop().unwrap_or(if pair { 2 } else { 1 });
+            for _ in 0..n {
                 a.vias.pop();
             }
             a.runs.last_mut().unwrap().to = None;
@@ -723,17 +813,16 @@ impl Router {
                 }
             }
         }
-        let copper = board.stackup.copper_layers().count().max(1) as u8;
-        for (vi, &(v, net)) in (board.geometry.vias.len()..).zip(a.vias.iter()) {
+        for (vi, &(v, net, k)) in (board.geometry.vias.len()..).zip(a.vias.iter()) {
             edits.push(Edit::InsertVia {
                 index: vi,
                 via: Via {
                     net,
-                    from_layer: 0,
-                    to_layer: copper - 1,
+                    from_layer: k.from,
+                    to_layer: k.to,
                     at: point(v),
-                    diameter: Length::from_mil(self.via_d),
-                    hole: Length::from_mil(self.via_hole),
+                    diameter: Length::from_mil(k.diameter),
+                    hole: Length::from_mil(k.hole),
                     rings: Vec::new(),
                     fab: Default::default(),
                 },
@@ -889,6 +978,67 @@ mod tests {
         assert!(ends
             .iter()
             .any(|(_, _, l, w)| **l == LayerRef::Copper(1) && (w.mil() - 4.0).abs() < 1e-3));
+    }
+
+    #[test]
+    fn layer_changes_stack_microvias_and_buried_vias() {
+        let mut b = Board::default();
+        for i in 0..6 {
+            b.stackup.layers.push(StackLayer {
+                name: format!("L{i}"),
+                altium_id: None,
+                kind: LayerKind::Copper,
+                thickness: Length::from_mil(1.4),
+                dielectric_constant: None,
+                material: None,
+            });
+        }
+        b.nets.push(Net {
+            name: "A".into(),
+            ..Default::default()
+        });
+        b.geometry.pads = vec![pad(0, 0.0, 0.0)];
+        let mut r = Router::new();
+        let k = |from, to, d| ViaKind {
+            from,
+            to,
+            diameter: d,
+            hole: d / 2.0,
+        };
+        r.kinds = vec![k(0, 1, 10.0), k(1, 2, 10.0), k(2, 3, 16.0)];
+        let no_pad = |_: P, _: Option<u32>| None;
+        r.start([0.0, 0.0], Some(0), 0, None);
+        r.update(&b, [200.0, 0.0], None, no_pad);
+        assert!(r.click(&b).is_none());
+        // Top to L3: microvias 0-1 and 1-2 stacked.
+        r.via(&b, 2);
+        assert_eq!(r.active.as_ref().unwrap().layer(), 2, "{:?}", r.message);
+        r.update(&b, [200.0, 200.0], None, no_pad);
+        assert!(r.click(&b).is_none());
+        // L3 to L4: the buried 2-3.
+        r.via(&b, 3);
+        // L4 to the bottom: no blind via reaches it but the through via.
+        r.via(&b, 5);
+        assert_eq!(r.active.as_ref().unwrap().layer(), 5, "{:?}", r.message);
+        // Backspace takes back the whole last stack.
+        r.back();
+        assert_eq!(r.active.as_ref().unwrap().layer(), 3);
+        // A chosen via that does not reach says so.
+        r.via_choice = Some(0);
+        r.via(&b, 4);
+        assert!(r.message.as_deref().unwrap_or("").contains("not L4 to L5"));
+        r.via_choice = None;
+        let edits = r.finish(&b).unwrap();
+        let spans: Vec<(u8, u8, f64)> = edits
+            .iter()
+            .filter_map(|e| match e {
+                Edit::InsertVia { via, .. } => {
+                    Some((via.from_layer, via.to_layer, via.diameter.mil()))
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(spans, vec![(0, 1, 10.0), (1, 2, 10.0), (2, 3, 16.0)]);
     }
 
     #[test]

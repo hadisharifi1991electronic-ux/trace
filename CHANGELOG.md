@@ -3,6 +3,25 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.24.0 (2026-11-12)
+
+- Altium schematic libraries (`.SchLib`): symbols are read with their
+  graphics, pins (also the binary pin records libraries use), designator,
+  value, description and current footprint. Multi-part components give
+  one symbol per part.
+- Place symbol… in the schematic editor (or P): a window that lists the
+  open libraries' symbols with a search box and a drawn preview. Place
+  takes the symbol onto the sheet under the pointer; click drops it,
+  Space turns it, Esc cancels. New parts get the next free designator,
+  and units B, C… of a multi-part part join the first placed part that
+  lacks them. Update PCB then adds the part when its footprint is known.
+- The project's own libraries open with the project; libraries opened by
+  hand are remembered for next time.
+- `trace symbols lib.SchLib [out.svg]` lists a library and can draw every
+  symbol on one SVG sheet.
+- Tried on five public libraries (70 symbols: ICs, connectors, diodes,
+  transistors, capacitors); all draw as in Altium.
+
 ## 0.23.0 (2026-11-12)
 
 - Two more manufacturing checks in the DRC, from the board's own Altium

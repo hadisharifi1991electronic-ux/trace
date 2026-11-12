@@ -28,6 +28,8 @@ USAGE:
     trace convert <file.SchDoc> <out.svg>       Draw a schematic sheet as SVG
     trace fab <board> <out.zip|folder>          Gerber X2, drill, IPC-356, pick-and-place and BOM files
     trace layers <gerber folder|zip>            Show which layer each Gerber or drill file was taken as
+    trace symbols <lib.SchLib> [out.svg]        List the symbols of an Altium schematic library;
+                                                with out, draw them all as SVG
     trace footprints <lib|board> [out.tracelib] List the footprints of a .PcbLib, .tracelib or board;
                                                 with out, save them as a Trace footprint library
 ";
@@ -55,6 +57,8 @@ fn main() -> ExitCode {
         ["convert", file, out] => convert(file, out),
         ["layers", file] => layers(file),
         ["fab", file, out] => fab(file, out),
+        ["symbols", file] => symbols(file, None),
+        ["symbols", file, out] => symbols(file, Some(out)),
         ["footprints", file] => footprints(file, None),
         ["footprints", file, out] => footprints(file, Some(out)),
         ["view", file] => view_board(file, None),
@@ -74,6 +78,67 @@ fn main() -> ExitCode {
 }
 
 type Res = Result<(), Box<dyn std::error::Error>>;
+
+/// Lists the symbols of a `.SchLib`; with `out`, draws them all on one
+/// SVG sheet.
+fn symbols(file: &str, out: Option<&str>) -> Res {
+    let lib = trace_altium::read_schlib(file)?;
+    println!("{}: {} symbols", lib.name, lib.symbols.len());
+    for s in &lib.symbols {
+        let pins = s.drawing.pins.len();
+        println!(
+            "  {:<32} {:<5} {:>4} pins  {}  {}",
+            s.title(),
+            s.symbol.designator,
+            pins,
+            if s.symbol.footprint.is_empty() {
+                "-"
+            } else {
+                &s.symbol.footprint
+            },
+            s.symbol.description
+        );
+    }
+    if let Some(out) = out {
+        // A grid of symbols, each in a cell as big as the biggest.
+        let cell = lib
+            .symbols
+            .iter()
+            .map(|s| s.drawing.size[0].max(s.drawing.size[1]))
+            .fold(400.0f64, f64::max)
+            + 400.0;
+        let cols = (lib.symbols.len() as f64).sqrt().ceil().max(1.0) as usize;
+        let rows = lib.symbols.len().div_ceil(cols).max(1);
+        let mut sheet = trace_core::Sheet {
+            name: lib.name.clone(),
+            ..Default::default()
+        };
+        sheet.drawing.size = [cols as f64 * cell, rows as f64 * cell];
+        sheet.drawing.paper = [255, 255, 255];
+        for (k, s) in lib.symbols.iter().enumerate() {
+            let q = &s.drawing.parts[0];
+            let mid = [(q.min[0] + q.max[0]) / 2.0, (q.min[1] + q.max[1]) / 2.0];
+            let (c, r) = ((k % cols) as f64, (rows - 1 - k / cols) as f64);
+            let at = [(c + 0.5) * cell - mid[0], (r + 0.5) * cell - mid[1]];
+            sheet.place_symbol(s, at, &s.symbol.designator);
+            sheet.drawing.texts.push(trace_core::SchText {
+                at: [(c + 0.5) * cell, r * cell + 100.0],
+                text: s.title(),
+                size: 80.0,
+                color: [0, 0, 0],
+                rot: 0,
+                just: 1,
+                bold: false,
+                italic: false,
+                wrap: None,
+                part: None,
+            });
+        }
+        std::fs::write(out, trace_export::sheet_svg(&sheet))?;
+        println!("wrote {out}");
+    }
+    Ok(())
+}
 
 fn footprints(file: &str, out: Option<&str>) -> Res {
     use trace_core::footprint::{Footprint, Library};

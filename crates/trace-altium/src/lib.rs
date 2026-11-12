@@ -12,7 +12,7 @@ mod sch;
 
 pub use pcb::read_pcbdoc;
 pub use pcblib::read_pcblib;
-pub use sch::read_schdoc;
+pub use sch::{read_schdoc, read_schlib};
 
 use std::io::{Read, Seek};
 use std::path::Path;

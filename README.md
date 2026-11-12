@@ -29,6 +29,15 @@ checker and simulator all read.
   `.PrjPcb` picks up again. Update PCB… lists what the edits change on the
   board (pins moving between nets, renamed nets and parts) and carries
   them over in one undoable step; pours are poured again
+- place new parts from symbol libraries: Place symbol… (or P) opens an
+  Altium `.SchLib` (the libraries an Altium project lists open by
+  themselves, and opened ones are remembered). Find a symbol by name or
+  description, see it drawn with its pins and footprint, and Place it: it
+  follows the pointer until a click drops it (Space turns it, Esc takes it
+  back). It gets the next free designator; a later unit of a multi-part
+  part (U1B) joins the first placed part still missing it. Update PCB adds
+  it to the board when its footprint is on the board or in the open
+  footprint library
 - open fabrication data: a folder or `.zip` of Gerber and drill files, several
   files at once, or an ODB++ job (`.tgz`, `.zip` or folder). Each file's layer
   is recognised automatically and the board is rebuilt with copper, holes,
@@ -160,6 +169,7 @@ trace convert <file> out.kicad_pcb   write a KiCad board
 trace convert <file> out.PcbDoc      write an Altium Designer board
 trace convert sheet.SchDoc out.svg   draw a schematic sheet as SVG
 trace fab board.PcbDoc out.zip   Gerber X2, drill, IPC-356, pick-and-place and BOM (or a folder)
+trace symbols lib.SchLib [out.svg]     list a schematic library's symbols; draw them all as SVG
 trace footprints lib.PcbLib [out.tracelib]   list a library's (or a board's) footprints; save as a Trace library
 ```
 

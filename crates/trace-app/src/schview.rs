@@ -36,6 +36,8 @@ enum Act {
     DeleteTag(usize),
     Wire(Vec<[f64; 2]>),
     Label([f64; 2], String),
+    /// Takes back a symbol that was being placed.
+    CancelPlace,
     Undo,
     Redo,
     Save,
@@ -126,6 +128,11 @@ pub struct Schematics {
     /// Changes waiting to go to the board.
     eco: Option<Plan>,
     note: Option<String>,
+    /// Symbol libraries, for placing new parts.
+    pub libs: crate::symlib::Libraries,
+    /// The dragged part follows the pointer until a click drops it (a
+    /// symbol just taken from a library).
+    floating: bool,
 }
 
 /// The drawing to keep as the board's match: no pictures.
@@ -376,9 +383,11 @@ impl Schematics {
 
     /// Opens sheets in the background, keeping their order.
     pub fn open(&mut self, files: Vec<PathBuf>, project: Option<PathBuf>, ctx: &egui::Context) {
+        let libs = std::mem::take(&mut self.libs);
         *self = Schematics {
             project,
             needs_fit: true,
+            libs,
             ..Default::default()
         };
         self.slots = files
@@ -427,8 +436,96 @@ impl Schematics {
                 .filter(|p| ext(p) == "schdoc" && p.exists())
                 .collect();
             self.open(sheets, Some(path.to_path_buf()), ctx);
+            self.project_libs();
         } else {
             self.open(vec![path.to_path_buf()], None, ctx);
+        }
+    }
+
+    pub fn with_libs(libs: crate::symlib::Libraries) -> Self {
+        Schematics {
+            libs,
+            ..Default::default()
+        }
+    }
+
+    /// Opens the symbol libraries the project lists.
+    fn project_libs(&mut self) {
+        if let Some(prj) = &self.project {
+            let libs: Vec<PathBuf> = project_docs(prj)
+                .into_iter()
+                .filter(|p| ext(p) == "schlib")
+                .collect();
+            self.libs.load_quietly(&libs);
+        }
+    }
+
+    /// The designator for a new unit of library symbol `lib`: for a later
+    /// unit of a multi-part component (U1B), the first placed component of
+    /// the same kind that lacks that unit; otherwise the next free one.
+    fn unit_designator(&self, lib: &trace_core::LibSymbol, scene: Option<&Scene>) -> String {
+        if lib.parts > 1 {
+            let letter = (b'A' + (lib.part.clamp(1, 26) - 1) as u8) as char;
+            let mut units: std::collections::BTreeMap<String, HashSet<char>> = Default::default();
+            for sheet in self.slots.iter().filter_map(|s| s.sheet.as_ref()) {
+                let d = &sheet.drawing;
+                for (i, q) in d.parts.iter().enumerate() {
+                    let same = sheet
+                        .symbols
+                        .get(q.symbol)
+                        .is_some_and(|s| s.library_ref == lib.name);
+                    if !same {
+                        continue;
+                    }
+                    let set = units.entry(q.designator.clone()).or_default();
+                    for t in d.texts.iter().filter(|t| t.part == Some(i as u32)) {
+                        if let Some(l) = t.text.strip_prefix(q.designator.as_str()) {
+                            if l.len() == 1 {
+                                set.extend(l.chars());
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some((d, _)) = units.iter().find(|(_, set)| !set.contains(&letter)) {
+                return d.clone();
+            }
+        }
+        self.free_designator(&lib.symbol.designator, scene)
+    }
+
+    /// Takes symbol `at` of the libraries onto the current sheet, at the
+    /// middle of the view, following the pointer until a click drops it.
+    fn start_place(&mut self, at: (usize, usize), scene: Option<&Scene>) {
+        let Some(lib) = self.libs.symbol(at).cloned() else {
+            return;
+        };
+        if self
+            .slots
+            .get(self.current)
+            .and_then(|s| s.sheet.as_ref())
+            .is_none()
+        {
+            self.note = Some("Open a sheet first.".into());
+            return;
+        }
+        let c = self.view.to_board(self.view.rect.center());
+        let spot = snap([c[0] as f64, c[1] as f64], GRID);
+        let name = self.unit_designator(&lib, scene);
+        let mut made = None;
+        let n2 = name.clone();
+        self.edit(|s| made = s.place_symbol(&lib, spot, &n2));
+        if let Some(n) = made {
+            self.tool = SchTool::Select;
+            self.sel_part = Some(n);
+            self.sel_wire = None;
+            self.sel_tag = None;
+            self.drag = Some((n, spot));
+            self.floating = true;
+            self.note = Some(format!(
+                "Placing {name} ({}): click to drop it, Space turns it, Esc cancels.",
+                lib.title()
+            ));
         }
     }
 
@@ -477,7 +574,9 @@ impl Schematics {
     pub fn open_saved(&mut self, path: &Path, project: Option<PathBuf>) -> Result<(), String> {
         let f = SchFile::load(path).map_err(|e| e.to_string())?;
         let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        let libs = std::mem::take(&mut self.libs);
         *self = Schematics {
+            libs,
             project: project.or_else(|| {
                 f.project
                     .as_ref()
@@ -514,6 +613,7 @@ impl Schematics {
         }
         self.renames = f.renames.into_iter().collect();
         self.original_renames = f.original_renames.into_iter().collect();
+        self.project_libs();
         Ok(())
     }
 
@@ -977,6 +1077,16 @@ impl Schematics {
                 }
             }
         });
+        if ui
+            .button("Place symbol…")
+            .on_hover_text("Place a new part from a symbol library (.SchLib) (P)")
+            .clicked()
+        {
+            self.libs.open = true;
+        }
+        if let Some(at) = self.libs.window(ui.ctx()) {
+            self.start_place(at, scene);
+        }
         ui.horizontal(|ui| {
             let save = ui
                 .add_enabled(self.dirty, egui::Button::new("Save"))
@@ -1279,7 +1389,7 @@ impl Schematics {
         }
         // Pressing on a part with the Select tool drags it; anywhere else
         // pans.
-        if resp.drag_started() && self.tool == SchTool::Select {
+        if resp.drag_started() && self.tool == SchTool::Select && !self.floating {
             let origin = ui.input(|i| i.pointer.press_origin());
             if let Some(o) = origin {
                 let b = self.view.to_board(o);
@@ -1300,7 +1410,7 @@ impl Schematics {
             self.view.tx += d.x;
             self.view.ty += d.y;
         }
-        if !resp.dragged() && !resp.drag_started() {
+        if !resp.dragged() && !resp.drag_started() && !self.floating {
             self.drag = None;
         }
         if ui.input(|i| i.key_pressed(egui::Key::F)) && !ui.ctx().wants_keyboard_input() {
@@ -1699,7 +1809,15 @@ impl Schematics {
                             self.drag = Some((i, c));
                         }
                     }
-                    if resp.double_clicked() {
+                    if self.floating {
+                        if resp.clicked() || resp.drag_started() {
+                            self.floating = false;
+                            self.drag = None;
+                            self.note = Some(
+                                "Placed. Wire it up, then Update PCB adds it to the board.".into(),
+                            );
+                        }
+                    } else if resp.double_clicked() {
                         if let Some(i) = hit_link {
                             let want = d.links[i].file.to_ascii_lowercase();
                             let target = self.slots.iter().position(|s| {
@@ -1772,7 +1890,12 @@ impl Schematics {
             if n {
                 self.tool = SchTool::Label;
             }
-            if esc {
+            if ui.input(|i| i.key_pressed(egui::Key::P)) {
+                self.libs.open = true;
+            }
+            if esc && self.floating {
+                act = Some(Act::CancelPlace);
+            } else if esc {
                 if self.wire_pts.len() >= 2 {
                     act = Some(Act::Wire(std::mem::take(&mut self.wire_pts)));
                 } else {
@@ -1952,6 +2075,14 @@ impl Schematics {
                 self.edit(|s| {
                     s.drawing.add_label(at, &text);
                 });
+            }
+            Some(Act::CancelPlace) => {
+                self.floating = false;
+                self.drag = None;
+                self.step(true);
+                self.redo.pop();
+                self.sel_part = None;
+                self.note = Some("Placing cancelled.".into());
             }
             Some(Act::Undo) => self.step(true),
             Some(Act::Redo) => self.step(false),

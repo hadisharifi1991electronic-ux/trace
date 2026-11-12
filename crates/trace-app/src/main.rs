@@ -12,6 +12,7 @@ mod placing;
 mod router;
 mod scene;
 mod schview;
+mod symlib;
 mod toolbar;
 mod view3d;
 
@@ -166,7 +167,9 @@ impl App {
             cm: cm::Cm::new(cc.storage.and_then(|s| s.get_string(cm::STORE_KEY))),
             imp: imp::Imp::new(cc.storage.and_then(|s| s.get_string(imp::STORE_KEY))),
             mode_sch: false,
-            schem: schview::Schematics::default(),
+            schem: schview::Schematics::with_libs(symlib::Libraries::new(
+                cc.storage.and_then(|s| s.get_string(symlib::STORE_KEY)),
+            )),
             mode_fp: false,
             fped: fpview::FpEditor::default(),
             ctx: cc.egui_ctx.clone(),
@@ -2696,6 +2699,7 @@ impl eframe::App for App {
         storage.set_string(RECENT_KEY, list.join("\n"));
         storage.set_string(cm::STORE_KEY, self.cm.to_store());
         storage.set_string(imp::STORE_KEY, self.imp.to_store());
+        storage.set_string(symlib::STORE_KEY, self.schem.libs.to_store());
     }
 }
 

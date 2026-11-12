@@ -447,49 +447,83 @@ impl Drawing {
     /// with its graphics, text and pins (no wires). Returns its index.
     pub fn copy_part(&mut self, i: usize, d: Pt, designator: &str) -> Option<usize> {
         let q = self.parts.get(i)?.clone();
+        let from = q.designator.clone();
+        let pieces = self.pieces(i);
+        Some(self.paste(pieces, q, d, &from, designator))
+    }
+
+    /// Adds part `i` of another drawing (a library symbol), `d` mil from
+    /// where it is there, as part `designator`. A designator drawn with a
+    /// part letter (U?A) keeps its letter.
+    pub fn paste_part(
+        &mut self,
+        src: &Drawing,
+        i: usize,
+        d: Pt,
+        designator: &str,
+    ) -> Option<usize> {
+        let q = src.parts.get(i)?.clone();
+        let from = q.designator.clone();
+        Some(self.paste(src.pieces(i), q, d, &from, designator))
+    }
+
+    /// The shapes, texts and pins of part `i`.
+    fn pieces(&self, i: usize) -> (Vec<SchShape>, Vec<SchText>, Vec<SchPin>) {
         let me = Some(i as u32);
+        (
+            self.shapes
+                .iter()
+                .filter(|s| s.part == me)
+                .cloned()
+                .collect(),
+            self.texts
+                .iter()
+                .filter(|t| t.part == me)
+                .cloned()
+                .collect(),
+            self.pins
+                .iter()
+                .filter(|p| p.part == i as u32)
+                .cloned()
+                .collect(),
+        )
+    }
+
+    fn paste(
+        &mut self,
+        (shapes, texts, pins): (Vec<SchShape>, Vec<SchText>, Vec<SchPin>),
+        q: SchPart,
+        d: Pt,
+        from: &str,
+        designator: &str,
+    ) -> usize {
         let new = self.parts.len() as u32;
         let f = |p: Pt| [p[0] + d[0], p[1] + d[1]];
-        let shapes: Vec<SchShape> = self
-            .shapes
-            .iter()
-            .filter(|s| s.part == me)
-            .cloned()
-            .map(|mut s| {
-                map_geom(&mut s.geom, &f, false);
-                s.part = Some(new);
-                s
-            })
-            .collect();
-        let texts: Vec<SchText> = self
-            .texts
-            .iter()
-            .filter(|t| t.part == me)
-            .cloned()
-            .map(|mut t| {
-                t.at = f(t.at);
-                t.part = Some(new);
-                if t.text == q.designator {
-                    t.text = designator.to_string();
-                }
-                t
-            })
-            .collect();
-        let pins: Vec<SchPin> = self
-            .pins
-            .iter()
-            .filter(|p| p.part == i as u32)
-            .cloned()
-            .map(|mut p| {
-                p.at = f(p.at);
-                p.base = f(p.base);
-                p.part = new;
-                p
-            })
-            .collect();
-        self.shapes.extend(shapes);
-        self.texts.extend(texts);
-        self.pins.extend(pins);
+        self.shapes.extend(shapes.into_iter().map(|mut s| {
+            map_geom(&mut s.geom, &f, false);
+            s.part = Some(new);
+            s
+        }));
+        self.texts.extend(texts.into_iter().map(|mut t| {
+            t.at = f(t.at);
+            t.part = Some(new);
+            if t.text == from {
+                t.text = designator.to_string();
+            } else if let Some(letter) = t
+                .text
+                .strip_prefix(from)
+                .filter(|l| l.len() == 1 && l.chars().all(|c| c.is_ascii_uppercase()))
+            {
+                t.text = format!("{designator}{letter}");
+            }
+            t
+        }));
+        self.pins.extend(pins.into_iter().map(|mut p| {
+            p.at = f(p.at);
+            p.base = f(p.base);
+            p.part = new;
+            p
+        }));
         self.parts.push(SchPart {
             designator: designator.to_string(),
             min: f(q.min),
@@ -497,7 +531,7 @@ impl Drawing {
             ..q
         });
         self.connect();
-        Some(new as usize)
+        new as usize
     }
 
     /// Renames part `i` and the designator drawn for it.
@@ -525,6 +559,20 @@ impl Sheet {
         s.designator = designator.to_string();
         self.symbols.push(s);
         let n = self.drawing.copy_part(i, d, designator)?;
+        self.drawing.parts[n].symbol = self.symbols.len() - 1;
+        Some(n)
+    }
+
+    /// Places a library symbol with its origin at `at`, as part
+    /// `designator`, with its own symbol entry.
+    pub fn place_symbol(&mut self, lib: &LibSymbol, at: Pt, designator: &str) -> Option<usize> {
+        let mut s = lib.symbol.clone();
+        s.designator = designator.to_string();
+        if s.library_ref.is_empty() {
+            s.library_ref = lib.name.clone();
+        }
+        self.symbols.push(s);
+        let n = self.drawing.paste_part(&lib.drawing, 0, at, designator)?;
         self.drawing.parts[n].symbol = self.symbols.len() - 1;
         Some(n)
     }

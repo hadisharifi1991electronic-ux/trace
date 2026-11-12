@@ -10,7 +10,8 @@ use crate::{Container, Error, Result};
 use std::collections::HashMap;
 use std::path::Path;
 use trace_core::{
-    Drawing, NetTag, Pt, Rgb, SchGeom, SchPart, SchPin, SchShape, SchText, Sheet, Symbol, TagKind,
+    Drawing, LibSymbol, NetTag, Pt, Rgb, SchGeom, SchPart, SchPin, SchShape, SchText, Sheet,
+    Symbol, SymbolLib, TagKind,
 };
 
 // Record ids in the schematic `FileHeader` stream.
@@ -126,6 +127,113 @@ pub fn read_schdoc(path: impl AsRef<Path>) -> Result<Sheet> {
         }
     }
     Ok(sheet)
+}
+
+/// Reads an Altium symbol library (`.SchLib`): one storage per component,
+/// whose `Data` stream holds the component record and then its graphics
+/// and pins (owned by it without saying so), in symbol coordinates.
+/// Multi-part components give one symbol per part.
+pub fn read_schlib(path: impl AsRef<Path>) -> Result<SymbolLib> {
+    let path = path.as_ref();
+    let mut c = Container::open(path)?;
+    let header = c
+        .stream("/FileHeader")?
+        .ok_or_else(|| Error::MissingStream("FileHeader".into()))?;
+    let head = split_sch(&header)
+        .into_iter()
+        .find_map(|r| match r {
+            SchRecord::Text(p) => Some(p),
+            _ => None,
+        })
+        .unwrap_or_default();
+    // The library's fonts, as a sheet record would give them.
+    let mut fonts = Props::default();
+    fonts.set("RECORD", SHEET.to_string());
+    for (k, v) in head.keys() {
+        let font_key = k == "FONTIDCOUNT"
+            || ["SIZE", "BOLD", "ITALIC", "FONTNAME"]
+                .iter()
+                .any(|f| k.strip_prefix(f).is_some_and(|n| n.parse::<u32>().is_ok()));
+        if font_key {
+            fonts.set(k, v.clone());
+        }
+    }
+    let storages: Vec<String> = c
+        .cfb
+        .read_root_storage()
+        .filter(|e| e.is_storage())
+        .map(|e| e.name().to_string())
+        .collect();
+    let mut lib = SymbolLib {
+        name: path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        symbols: Vec::new(),
+    };
+    for st in storages {
+        let Some(data) = c.stream(&format!("/{st}/Data"))? else {
+            continue;
+        };
+        lib.symbols.extend(lib_symbols(&split_sch(&data), &fonts));
+    }
+    lib.symbols.sort_by(|a, b| {
+        (a.name.to_ascii_lowercase(), a.part).cmp(&(b.name.to_ascii_lowercase(), b.part))
+    });
+    Ok(lib)
+}
+
+/// The symbols of one library component's records: one per part.
+fn lib_symbols(recs: &[SchRecord], fonts: &Props) -> Vec<LibSymbol> {
+    let Some(SchRecord::Text(comp)) = recs.first() else {
+        return Vec::new();
+    };
+    if comp.int("RECORD") != Some(COMPONENT) {
+        return Vec::new();
+    }
+    let name = comp.str("LIBREFERENCE");
+    // Altium counts one more part than there are.
+    let parts = (comp.int("PARTCOUNT").unwrap_or(2) - 1).clamp(1, 26) as u32;
+    let mut out = Vec::new();
+    for part in 1..=parts {
+        let mut list = vec![SchRecord::Text(fonts.clone())];
+        for (k, r) in recs.iter().enumerate() {
+            list.push(match r {
+                SchRecord::Text(p) if k == 0 => {
+                    let mut p = p.clone();
+                    p.set("CURRENTPARTID", part.to_string());
+                    p.set("DISPLAYMODE", "0");
+                    SchRecord::Text(p)
+                }
+                SchRecord::Text(p) if p.get("OWNERINDEX").is_none() => {
+                    let mut p = p.clone();
+                    p.set("OWNERINDEX", "0");
+                    SchRecord::Text(p)
+                }
+                r => r.clone(),
+            });
+        }
+        let sheet = read_records(&list, name.clone(), "");
+        let mut drawing = sheet.drawing;
+        if drawing.parts.is_empty() || (drawing.pins.is_empty() && drawing.shapes.is_empty()) {
+            continue;
+        }
+        let q = &drawing.parts[0];
+        drawing.size = [q.max[0] - q.min[0], q.max[1] - q.min[1]];
+        let mut symbol = sheet.symbols.into_iter().next().unwrap_or_default();
+        if symbol.designator.is_empty() {
+            symbol.designator = "U?".into();
+            drawing.parts[0].designator = symbol.designator.clone();
+        }
+        out.push(LibSymbol {
+            name: name.clone(),
+            part,
+            parts,
+            symbol,
+            drawing,
+        });
+    }
+    out
 }
 
 /// The `Storage` stream: a header record, then for each embedded file a
@@ -1377,4 +1485,69 @@ fn text_frame(b: &mut Builder, k: usize, p: &Props) {
             .then_some((max[0] - min[0] - 2.0 * margin).max(10.0)),
         part: b.part_of[k],
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(s: &str) -> SchRecord {
+        SchRecord::Text(Props::parse(s))
+    }
+
+    /// A two-part component (like a dual op-amp): each part has its own
+    /// box and pins, and both share the designator and footprint.
+    #[test]
+    fn multi_part_library_components_give_one_symbol_per_part() {
+        let recs = vec![
+            text("|RECORD=1|LibReference=DUAL|ComponentDescription=Dual buffer|PartCount=3|CurrentPartId=1"),
+            text("|RECORD=14|OwnerPartId=1|Location.X=0|Location.Y=0|Corner.X=40|Corner.Y=30|IsSolid=T|AreaColor=11599871"),
+            text("|RECORD=2|OwnerPartId=1|Location.X=40|Location.Y=10|PinLength=20|PinConglomerate=0|Designator=1|Name=OUT"),
+            text("|RECORD=2|OwnerPartId=1|Location.X=0|Location.Y=10|PinLength=20|PinConglomerate=2|Designator=2|Name=IN"),
+            text("|RECORD=14|OwnerPartId=2|Location.X=0|Location.Y=0|Corner.X=50|Corner.Y=30"),
+            text("|RECORD=2|OwnerPartId=2|Location.X=50|Location.Y=10|PinLength=20|PinConglomerate=0|Designator=7|Name=OUT"),
+            text("|RECORD=34|OwnerPartId=-1|Location.X=0|Location.Y=40|Text=U?|Name=Designator"),
+            text("|RECORD=41|OwnerPartId=-1|Location.X=0|Location.Y=-10|Text=10k|Name=Value"),
+            text("|RECORD=44"),
+            text("|RECORD=45|OwnerIndex=8|ModelName=SOIC8|ModelType=PCBLIB|IsCurrent=T"),
+        ];
+        let mut fonts = Props::default();
+        fonts.set("RECORD", SHEET.to_string());
+        let list = lib_symbols(&recs, &fonts);
+        assert_eq!(list.len(), 2);
+        let (a, b) = (&list[0], &list[1]);
+        assert_eq!((a.part, a.parts, b.part), (1, 2, 2));
+        assert_eq!(a.title(), "DUAL A");
+        assert_eq!(a.symbol.footprint, "SOIC8");
+        assert_eq!(a.symbol.designator, "U?");
+        assert_eq!(a.symbol.value.as_deref(), Some("10k"));
+        let pins = |s: &LibSymbol| {
+            s.drawing
+                .pins
+                .iter()
+                .map(|p| p.number.clone())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(pins(a), ["1", "2"]);
+        assert_eq!(pins(b), ["7"]);
+        // The pin ends: 1 sticks out right from x=400 mil, 2 left from 0.
+        assert_eq!(a.drawing.pins[0].at, [600.0, 100.0]);
+        assert_eq!(a.drawing.pins[1].at, [-200.0, 100.0]);
+        // The designator is drawn with the part letter.
+        assert!(
+            b.drawing.texts.iter().any(|t| t.text == "U?B"),
+            "{:?}",
+            b.drawing.texts
+        );
+
+        // Placing part B as U5 draws U5B, keeps the footprint and pins.
+        let mut sheet = Sheet::default();
+        let n = sheet.place_symbol(b, [1000.0, 2000.0], "U5").unwrap();
+        let d = &sheet.drawing;
+        assert_eq!(d.parts[n].designator, "U5");
+        assert!(d.texts.iter().any(|t| t.text == "U5B"));
+        assert_eq!(d.pins[0].at, [1700.0, 2100.0]);
+        assert_eq!(sheet.symbols[d.parts[n].symbol].footprint, "SOIC8");
+        assert_eq!(sheet.symbols[d.parts[n].symbol].library_ref, "DUAL");
+    }
 }

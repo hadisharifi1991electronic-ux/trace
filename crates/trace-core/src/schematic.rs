@@ -29,6 +29,41 @@ pub struct Symbol {
     pub footprint: String,
 }
 
+/// A schematic symbol library (an Altium `.SchLib`).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SymbolLib {
+    pub name: String,
+    /// One entry per part of each component (U1A and U1B are two).
+    pub symbols: Vec<LibSymbol>,
+}
+
+/// One placeable symbol: a component, or one part of a multi-part one.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct LibSymbol {
+    /// The component's name in the library.
+    pub name: String,
+    /// Which part this is (1 for A) and how many the component has.
+    pub part: u32,
+    pub parts: u32,
+    /// Designator (such as `R?`), description, value, footprint.
+    pub symbol: Symbol,
+    /// The graphics, with the symbol's origin at 0,0: one part, index 0.
+    pub drawing: Drawing,
+}
+
+impl LibSymbol {
+    /// The name shown in lists: with the part letter when there are
+    /// several (LM358 B).
+    pub fn title(&self) -> String {
+        if self.parts > 1 {
+            let letter = (b'A' + (self.part.clamp(1, 26) - 1) as u8) as char;
+            format!("{} {letter}", self.name)
+        } else {
+            self.name.clone()
+        }
+    }
+}
+
 /// A point on a sheet in mil, y up.
 pub type Pt = [f64; 2];
 

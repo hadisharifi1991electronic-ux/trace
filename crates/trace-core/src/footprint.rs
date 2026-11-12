@@ -586,7 +586,10 @@ pub fn spots_beside(board: &Board, sizes: &[[f64; 4]]) -> Vec<[f64; 2]> {
 
 /// The letters a designator starts with ("R" for R12, "U" for U3A).
 pub fn designator_prefix(d: &str) -> &str {
-    let end = d.find(|c: char| c.is_ascii_digit()).unwrap_or(d.len());
+    // A library designator (R?) has no number yet.
+    let end = d
+        .find(|c: char| c.is_ascii_digit() || c == '?')
+        .unwrap_or(d.len());
     &d[..end]
 }
 

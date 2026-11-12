@@ -245,6 +245,7 @@ impl TunePreview {
                         y: Length::from_mil(p.end()[1]),
                     },
                     width: old.width,
+                    text: false,
                 },
             });
         }
@@ -693,6 +694,7 @@ impl Router {
                             start: point(p),
                             end: point(q),
                             width,
+                            text: false,
                         },
                     });
                     ti += 1;

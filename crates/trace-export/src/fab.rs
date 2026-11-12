@@ -1328,6 +1328,7 @@ mod tests {
             end: pt(30.0, 5.8),
             width: Length::from_mm(0.2),
             component: None,
+            text: false,
         });
         b.geometry.vias.push(Via {
             net: Some(1),

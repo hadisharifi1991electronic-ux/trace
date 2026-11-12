@@ -948,6 +948,7 @@ mod tests {
             start: p(0.0, 0.0),
             end: p(1.0, 1.0),
             width: Length::from_mm(0.2),
+            text: false,
         });
         b.geometry.pads.push(Pad {
             layer: LayerRef::Copper(0),

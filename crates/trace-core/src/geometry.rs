@@ -8,6 +8,16 @@ pub struct Point {
     pub y: Length,
 }
 
+impl Point {
+    /// A point given in mil.
+    pub fn mil(x: f64, y: f64) -> Point {
+        Point {
+            x: Length::from_mil(x),
+            y: Length::from_mil(y),
+        }
+    }
+}
+
 /// Which layer a primitive sits on. Copper layers are numbered from the top
 /// (0) down; everything else is named.
 #[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -32,6 +42,9 @@ pub struct Track {
     /// The part it belongs to (silk outline, part copper), which moves with it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component: Option<u32>,
+    /// A stroke of text (a designator, a label) rather than a drawn line.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub text: bool,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

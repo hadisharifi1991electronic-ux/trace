@@ -111,6 +111,7 @@ pub fn text_tracks(text: &str, p: &Placing, layer: LayerRef, component: Option<u
                 end: b,
                 width: p.width,
                 component,
+                text: true,
             });
         }
     }

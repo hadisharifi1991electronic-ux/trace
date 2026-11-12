@@ -11,6 +11,7 @@ pub mod eco;
 pub mod edit;
 pub mod file;
 pub mod font;
+pub mod footprint;
 pub mod geometry;
 pub mod impedance;
 pub mod place;

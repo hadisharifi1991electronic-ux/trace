@@ -289,7 +289,7 @@ fn seg_dist(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
 }
 
 /// Ear-clipping for small polygons (port shapes, arrows, glyphs).
-fn triangulate(pts: &[Pos2]) -> Vec<[usize; 3]> {
+pub(crate) fn triangulate(pts: &[Pos2]) -> Vec<[usize; 3]> {
     let n = pts.len();
     if n < 3 {
         return Vec::new();

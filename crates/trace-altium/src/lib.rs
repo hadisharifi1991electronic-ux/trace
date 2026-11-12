@@ -6,10 +6,12 @@
 
 mod pcb;
 mod pcb_ascii;
+mod pcblib;
 pub mod records;
 mod sch;
 
 pub use pcb::read_pcbdoc;
+pub use pcblib::read_pcblib;
 pub use sch::read_schdoc;
 
 use std::io::{Read, Seek};

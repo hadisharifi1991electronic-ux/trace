@@ -6,6 +6,7 @@
 mod canvas;
 mod cm;
 mod drc;
+mod fpview;
 mod imp;
 mod placing;
 mod router;
@@ -87,6 +88,9 @@ pub struct App {
     imp: imp::Imp,
     mode_sch: bool,
     schem: schview::Schematics,
+    /// The footprint editor is showing.
+    mode_fp: bool,
+    fped: fpview::FpEditor,
     ctx: egui::Context,
     /// Where the board view should go on its next frame: a point and zoom,
     /// or an area to fit.
@@ -159,6 +163,8 @@ impl App {
             imp: imp::Imp::new(cc.storage.and_then(|s| s.get_string(imp::STORE_KEY))),
             mode_sch: false,
             schem: schview::Schematics::default(),
+            mode_fp: false,
+            fped: fpview::FpEditor::default(),
             ctx: cc.egui_ctx.clone(),
             focus: None,
             single: None,
@@ -179,7 +185,25 @@ impl App {
             .extension()
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
+        if ext == "pcblib" || ext == "tracelib" {
+            match self.fped.open_file(&path) {
+                Ok(()) => {
+                    self.mode_fp = true;
+                    self.mode_sch = false;
+                    self.mode3d = false;
+                    self.message = None;
+                    self.recent.retain(|p| p != &path);
+                    self.recent.insert(0, path.clone());
+                    self.recent.truncate(8);
+                }
+                Err(e) => {
+                    self.message = Some((format!("Could not open {}: {e}", path.display()), true))
+                }
+            }
+            return;
+        }
         if ext == "schdoc" || ext == "prjpcb" || ext == "tracesch" {
+            self.mode_fp = false;
             self.schem.open_path(&path, &self.ctx);
             self.mode_sch = true;
             self.mode3d = false;
@@ -199,6 +223,7 @@ impl App {
         }
         if self.load_board(path.clone()) {
             self.mode_sch = false;
+            self.mode_fp = false;
             self.recent.retain(|p| p != &path);
             self.recent.insert(0, path.clone());
             self.recent.truncate(8);
@@ -284,7 +309,7 @@ impl App {
         ];
         let mut boards: Vec<&str> = vec![
             "PcbDoc", "pcbdoc", "brd", "BRD", "tracepcb", "SchDoc", "schdoc", "PrjPcb", "prjpcb",
-            "tracesch",
+            "tracesch", "PcbLib", "pcblib", "tracelib",
         ];
         boards.extend(gerber);
         if let Some(mut picked) = rfd::FileDialog::new()
@@ -293,6 +318,7 @@ impl App {
             .add_filter("Altium PCB", &["PcbDoc", "pcbdoc"])
             .add_filter("Altium schematic", &["SchDoc", "schdoc"])
             .add_filter("Trace schematic", &["tracesch"])
+            .add_filter("Footprint library", &["PcbLib", "pcblib", "tracelib"])
             .add_filter("Allegro board", &["brd", "BRD"])
             .add_filter("Gerber, drill or ODB++", &gerber)
             .add_filter("All files", &["*"])
@@ -992,13 +1018,67 @@ impl App {
         self.router.tune.preview = None;
     }
 
+    /// Shows the footprint editor, with the board's footprints when no
+    /// library is open in it.
+    fn open_footprints(&mut self) {
+        if self.mode_fp {
+            self.mode_fp = false;
+            return;
+        }
+        if let Some(scene) = &self.scene {
+            if self.fped.is_empty() || (self.fped.from_board && !self.fped.dirty) {
+                let title = scene
+                    .path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                self.fped.open_board(&scene.board, &title);
+            }
+        }
+        self.mode_fp = true;
+        self.mode3d = false;
+        self.mode_sch = false;
+    }
+
+    /// Carries out what the footprint editor asked for.
+    fn footprint_pick(&mut self, pick: Option<fpview::Pick>) {
+        match pick {
+            Some(fpview::Pick::Update(name, fp)) => {
+                let Some(scene) = &self.scene else { return };
+                let parts = trace_core::footprint::parts_using(&scene.board, &name);
+                match trace_core::footprint::replace(&scene.board, &fp, &parts) {
+                    Some(edit) => {
+                        let n = parts.len();
+                        let s = if n == 1 { "" } else { "s" };
+                        self.apply_edits(
+                            &format!("Gave {n} part{s} the footprint {}", fp.name),
+                            vec![edit],
+                        );
+                        self.drc.invalidate();
+                        self.fped.set_note(
+                            format!(
+                                "Updated {n} part{s} on the board. Ctrl+Z on the board undoes it."
+                            ),
+                            false,
+                        );
+                    }
+                    None => self
+                        .fped
+                        .set_note("No part on the board uses it.".into(), true),
+                }
+            }
+            Some(fpview::Pick::Message(text, err)) => self.fped.set_note(text, err),
+            None => {}
+        }
+    }
+
     /// The standard bar: files, undo, zoom, views and the analysis windows.
     fn toolbar(&mut self, ui: &mut egui::Ui) {
         use toolbar::{button, divider, Icon};
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 2.0;
             let has_board = self.scene.is_some();
-            let board2d = has_board && !self.mode3d && !self.mode_sch;
+            let board2d = has_board && !self.mode3d && !self.mode_sch && !self.mode_fp;
             if button(ui, Icon::Open, false, true, "Open a board or schematic (Ctrl+O)").clicked() {
                 self.open_dialog();
             }
@@ -1033,14 +1113,20 @@ impl App {
             if button(ui, Icon::Board, board2d, has_board, "Board view (2D)").clicked() {
                 self.mode3d = false;
                 self.mode_sch = false;
+                self.mode_fp = false;
             }
-            if button(ui, Icon::View3d, has_board && self.mode3d && !self.mode_sch, has_board, "3D view of the assembled board (3)").clicked() {
+            if button(ui, Icon::View3d, has_board && self.mode3d && !self.mode_sch && !self.mode_fp, has_board, "3D view of the assembled board (3)").clicked() {
                 self.mode3d = true;
                 self.mode_sch = false;
+                self.mode_fp = false;
             }
-            if button(ui, Icon::Schematic, self.mode_sch, !self.schem.is_empty(), "Schematic sheets (S)").clicked() {
+            if button(ui, Icon::Schematic, self.mode_sch && !self.mode_fp, !self.schem.is_empty(), "Schematic sheets (S)").clicked() {
                 self.mode_sch = true;
                 self.mode3d = false;
+                self.mode_fp = false;
+            }
+            if button(ui, Icon::Footprint, self.mode_fp, has_board || !self.fped.is_empty(), "Footprint editor: the board's footprints, or open a .PcbLib or .tracelib library").clicked() {
+                self.open_footprints();
             }
             divider(ui);
             if button(ui, Icon::Constraints, self.cm.open, has_board, "Constraint Manager: length, match, skew and via limits (C)").clicked() {
@@ -1054,6 +1140,15 @@ impl App {
             }
             divider(ui);
             ui.spacing_mut().item_spacing.x = 8.0;
+            if self.mode_fp {
+                ui.label(
+                    RichText::new(
+                        "Click to select, drag to move. P places pads, L draws lines, Delete removes, arrows nudge. Ctrl+Z undoes, Ctrl+S saves the library. F fits.",
+                    )
+                    .weak(),
+                );
+                return;
+            }
             if self.mode_sch {
                 ui.label(
                     RichText::new(
@@ -1480,6 +1575,13 @@ impl App {
     }
 
     fn side_panel(&mut self, ui: &mut egui::Ui) {
+        if self.mode_fp {
+            let pick = self
+                .fped
+                .side_panel(ui, self.scene.as_ref().map(|s| &s.board));
+            self.footprint_pick(pick);
+            return;
+        }
         if self.mode_sch {
             let r = ui.add(
                 egui::TextEdit::singleline(&mut self.search)
@@ -2007,7 +2109,7 @@ impl eframe::App for App {
                 });
         }
         let typing = ctx.wants_keyboard_input();
-        let board2d = !self.mode3d && !self.mode_sch;
+        let board2d = !self.mode3d && !self.mode_sch && !self.mode_fp;
         // Layer keys, as in Altium: Shift+S single layer mode, + and - the
         // next and previous copper layer.
         if board2d && self.scene.is_some() && !typing {
@@ -2170,7 +2272,7 @@ impl eframe::App for App {
         {
             self.drc.open = !self.drc.open;
         }
-        if sch_key && !self.schem.is_empty() {
+        if sch_key && !self.schem.is_empty() && !self.mode_fp {
             self.mode_sch = !self.mode_sch || self.scene.is_none();
             if self.mode_sch {
                 self.mode3d = false;
@@ -2179,11 +2281,11 @@ impl eframe::App for App {
         if cm_key && self.scene.is_some() {
             self.cm.open = !self.cm.open;
         }
-        if toggle3d && self.scene.is_some() {
+        if toggle3d && self.scene.is_some() && !self.mode_fp {
             self.mode3d = !self.mode3d || self.mode_sch;
             self.mode_sch = false;
         }
-        if self.scene.is_none() && !self.schem.is_empty() {
+        if self.scene.is_none() && !self.schem.is_empty() && !self.mode_fp {
             self.mode_sch = true;
         }
         if measure_key {
@@ -2219,7 +2321,7 @@ impl eframe::App for App {
         }
 
         egui::TopBottomPanel::top("menu").show(ctx, |ui| self.menu(ui, ctx));
-        if self.scene.is_some() || !self.schem.is_empty() {
+        if self.scene.is_some() || !self.schem.is_empty() || !self.fped.is_empty() {
             egui::TopBottomPanel::top("tools").show(ctx, |ui| self.toolbar(ui));
         }
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
@@ -2313,6 +2415,7 @@ impl eframe::App for App {
             .show(ctx, |ui| self.side_panel(ui));
         if self.show_pairs
             && !self.mode_sch
+            && !self.mode_fp
             && self
                 .scene
                 .as_ref()
@@ -2323,7 +2426,7 @@ impl eframe::App for App {
                 .default_height(220.0)
                 .show(ctx, |ui| self.pairs_panel(ui));
         }
-        if !self.mode_sch {
+        if !self.mode_sch && !self.mode_fp {
             let hit = match &self.scene {
                 Some(scene) if self.drc.open => {
                     let lengths = self.cm.failures(&scene.board);
@@ -2340,7 +2443,7 @@ impl eframe::App for App {
                 None => {}
             }
         }
-        let board2d = self.scene.is_some() && !self.mode3d && !self.mode_sch;
+        let board2d = self.scene.is_some() && !self.mode3d && !self.mode_sch && !self.mode_fp;
         if board2d {
             egui::TopBottomPanel::bottom("layer_tabs")
                 .frame(
@@ -2351,6 +2454,11 @@ impl eframe::App for App {
                 .show(ctx, |ui| self.layer_tabs(ui));
         }
         egui::CentralPanel::default().frame(egui::Frame::none().fill(Color32::from_rgb(15, 17, 21))).show(ctx, |ui| {
+            if self.mode_fp {
+                let pick = self.fped.show(ui);
+                self.footprint_pick(pick);
+                return;
+            }
             if self.mode_sch && !self.schem.is_empty() {
                 match self.schem.show(ui, self.selected, self.scene.as_ref()) {
                     Some(schview::Pick::BoardNet(n)) => {
@@ -2389,7 +2497,7 @@ impl eframe::App for App {
                 canvas::show(self, ui);
             }
         });
-        if self.scene.is_some() && !self.mode3d && !self.mode_sch {
+        if self.scene.is_some() && !self.mode3d && !self.mode_sch && !self.mode_fp {
             self.active_bar(ctx);
         }
         let pick = match &self.scene {

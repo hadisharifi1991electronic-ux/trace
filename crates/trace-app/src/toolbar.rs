@@ -17,6 +17,7 @@ pub enum Icon {
     Board,
     View3d,
     Schematic,
+    Footprint,
     Constraints,
     Impedance,
     Drc,
@@ -247,6 +248,27 @@ fn draw(p: &egui::Painter, icon: Icon, r: Rect, fg: Color32, enabled: bool) {
             );
             line(&[(0.0, 0.15), (0.0, 0.85)], st);
             line(&[(1.0, 0.15), (1.0, 0.85)], st);
+        }
+        Icon::Footprint => {
+            // A part outline with a row of pads on each side.
+            p.rect_stroke(
+                Rect::from_min_max(at(0.22, 0.1), at(0.78, 0.9)),
+                1.0,
+                s(1.2, fg),
+            );
+            for k in 0..3 {
+                let y = 0.22 + 0.28 * k as f32;
+                p.rect_filled(
+                    Rect::from_min_max(at(0.0, y - 0.07), at(0.16, y + 0.07)),
+                    0.0,
+                    tint(RED),
+                );
+                p.rect_filled(
+                    Rect::from_min_max(at(0.84, y - 0.07), at(1.0, y + 0.07)),
+                    0.0,
+                    tint(RED),
+                );
+            }
         }
         Icon::Constraints => {
             let st = s(1.0, fg);

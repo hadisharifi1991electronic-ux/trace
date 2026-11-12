@@ -1167,6 +1167,7 @@ mod tests {
             end: p(550.0, 500.0),
             width: Length::from_mil(6.0),
             component: Some(0),
+            text: false,
         });
         let v = kinds(&b, Kind::SilkToMask);
         assert_eq!(v.len(), 1, "{v:?}");
@@ -1183,6 +1184,7 @@ mod tests {
             end: p(15.0, 700.0),
             width: Length::from_mil(10.0),
             component: None,
+            text: false,
         });
         b.geometry.polygons.push(Polygon {
             layer: LayerRef::Copper(1),

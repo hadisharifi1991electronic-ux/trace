@@ -206,6 +206,7 @@ impl<'a> Builder<'a> {
                     start: self.pt(start.0 as f64, start.1 as f64),
                     end: self.pt(end.0 as f64, end.1 as f64),
                     width: self.len(*width as f64),
+                    text: false,
                 }),
                 Data::Arc { .. } => {
                     if let Some(a) = self.arc(b, layer.clone(), net) {
@@ -418,7 +419,13 @@ impl<'a> Builder<'a> {
             library_ref: None,
             x: self.len(x as f64),
             y: self.len(y as f64),
-            rotation_deg: rot,
+            // Allegro mirrors bottom parts left to right; Trace, like
+            // Altium and KiCad, top to bottom: the same with a half turn.
+            rotation_deg: if bottom {
+                (rot + 180.0).rem_euclid(360.0)
+            } else {
+                rot
+            },
             side: if bottom { Side::Bottom } else { Side::Top },
             sheet: None,
             params: Default::default(),

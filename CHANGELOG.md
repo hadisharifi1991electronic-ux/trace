@@ -3,6 +3,37 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.20.0 (2026-11-12)
+
+- Footprint editor (the Footprints button on the toolbar):
+  - opens Altium `.PcbLib` footprint libraries (pads with rounded corners
+    and per-layer stacks, lines, arcs, fills, regions and text), Trace
+    libraries (`.tracelib`), or the footprints of the open board, each
+    with the number of parts that use it;
+  - select and drag pads, lines and text on a grid; arrows nudge, Delete
+    removes; P places a pad numbered after the last one, L draws lines on
+    silk, courtyard, assembly or copper;
+  - the side panel edits a pad's number, place, size, turn, shape
+    (rounded rectangle with corner %), side, hole and plating, and adds
+    copies in a row, stepping like the nearest pad of the same size;
+  - new, copy and remove footprints; name and description; undo and redo;
+    mm or mil; Save and Save as keep a `.tracelib` library.
+- "Update N parts on the board": every part using the footprint gets the
+  edited pads and lines in one undoable edit. Pads keep their nets by
+  pad number, designator and value text stay where they were, and pours
+  are poured again.
+- Parts on the bottom side now mirror top to bottom (as Altium and KiCad
+  do), so a footprint taken from a bottom part and put back lands exactly;
+  flipping a part with L turns it 180° as well to keep its left and right.
+- Altium pads with rounded corners whose main shape is round are now read
+  as rounded rectangles.
+- `trace footprints <lib or board> [out.tracelib]` lists footprints and
+  saves them as a Trace library.
+- Tried on public Altium libraries (jefflongo/altium: ICs, connectors,
+  passives, transistors) and the Sinara Clocker board: widening the pads of
+  one capacitor footprint updated its 65 parts and the DRC count stayed
+  the same.
+
 ## 0.19.0 (2026-11-12)
 
 - Schematic editing, in the schematic view:

@@ -1248,6 +1248,7 @@ mod tests {
             start: p(0.0, y),
             end: p(1000.0, y),
             width: Length::from_mil(w),
+            text: false,
         }
     }
 
@@ -1332,6 +1333,7 @@ mod tests {
             start: p(500.0, -100.0),
             end: p(500.0, 100.0),
             width: Length::from_mil(4.0),
+            text: false,
         });
         let v = check(&b, 100);
         assert_eq!(

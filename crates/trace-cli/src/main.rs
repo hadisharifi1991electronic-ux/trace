@@ -27,6 +27,8 @@ USAGE:
     trace convert <file.SchDoc> <out.svg>       Draw a schematic sheet as SVG
     trace fab <board> <out.zip|folder>          Gerber X2, drill, IPC-356, pick-and-place and BOM files
     trace layers <gerber folder|zip>            Show which layer each Gerber or drill file was taken as
+    trace footprints <lib|board> [out.tracelib] List the footprints of a .PcbLib, .tracelib or board;
+                                                with out, save them as a Trace footprint library
 ";
 
 fn main() -> ExitCode {
@@ -52,6 +54,8 @@ fn main() -> ExitCode {
         ["convert", file, out] => convert(file, out),
         ["layers", file] => layers(file),
         ["fab", file, out] => fab(file, out),
+        ["footprints", file] => footprints(file, None),
+        ["footprints", file, out] => footprints(file, Some(out)),
         ["view", file] => view_board(file, None),
         ["view", file, out] => view_board(file, Some(out)),
         _ => {
@@ -69,6 +73,50 @@ fn main() -> ExitCode {
 }
 
 type Res = Result<(), Box<dyn std::error::Error>>;
+
+fn footprints(file: &str, out: Option<&str>) -> Res {
+    use trace_core::footprint::{Footprint, Library};
+    let ext = Path::new(file)
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .unwrap_or_default();
+    let lib = match ext.as_str() {
+        "pcblib" => trace_altium::read_pcblib(file)?,
+        "tracelib" => Library::load(Path::new(file))?,
+        _ => {
+            let Design::Board(board) = load(file)? else {
+                return Err("not a board or footprint library".into());
+            };
+            let mut seen = std::collections::HashSet::new();
+            let mut lib = Library::default();
+            for (i, c) in board.components.iter().enumerate() {
+                if seen.insert(c.footprint.to_ascii_uppercase()) {
+                    lib.footprints.extend(Footprint::from_part(&board, i));
+                }
+            }
+            lib
+        }
+    };
+    for f in &lib.footprints {
+        let b = f.bounds();
+        println!(
+            "{:40} {:4} pads  {:7.2} x {:7.2} mm  {}",
+            f.name,
+            f.pads.len(),
+            (b[2] - b[0]) * 0.0254,
+            (b[3] - b[1]) * 0.0254,
+            f.description
+        );
+    }
+    println!("{} footprints", lib.footprints.len());
+    if let Some(out) = out {
+        let mut lib = lib;
+        lib.version = env!("CARGO_PKG_VERSION").to_string();
+        lib.save(Path::new(out))?;
+        println!("saved {out}");
+    }
+    Ok(())
+}
 
 #[allow(clippy::large_enum_variant)]
 enum Design {

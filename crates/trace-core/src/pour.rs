@@ -676,6 +676,7 @@ fn touched(board: &Board, e: &Edit) -> Option<([f64; 4], Vec<u8>)> {
             }
             (b[0] <= b[2]).then(|| (b, (0..n).collect()))
         }
+        Edit::Parts { area, .. } => area.map(|b| (b, (0..n).collect())),
         Edit::MoveComponent { .. } | Edit::SetPolygons { .. } => None,
     }
 }
@@ -812,6 +813,7 @@ mod tests {
             start: p(500.0, 200.0),
             end: p(500.0, 800.0),
             width: Length::from_mil(10.0),
+            text: false,
         };
         let add = Edit::InsertTrack { index: 0, track };
         add.apply(&mut b);
@@ -842,6 +844,7 @@ mod tests {
             start: p(500.0, -100.0),
             end: p(500.0, 1100.0),
             width: Length::from_mil(10.0),
+            text: false,
         });
         let f = pour(&b, 0);
         assert_eq!(f.len(), 1);

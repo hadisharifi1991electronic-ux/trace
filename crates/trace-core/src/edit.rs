@@ -1,7 +1,43 @@
 //! Reversible changes to a board, and an undo history built from them.
 
 use crate::place::Placement;
-use crate::{Arc, Board, Length, Net, Polygon, Track, Via};
+use crate::{Arc, Board, Component, Length, Net, Pad, Polygon, Track, Via};
+
+/// The board's parts and their primitives, as a whole: what an edit that
+/// changes footprints swaps out and back.
+#[derive(Clone, Debug, Default)]
+pub struct Prims {
+    pub pads: Vec<Pad>,
+    pub tracks: Vec<Track>,
+    pub arcs: Vec<Arc>,
+    pub polygons: Vec<Polygon>,
+    pub areas: Vec<Polygon>,
+    pub components: Vec<Component>,
+}
+
+impl Prims {
+    pub fn of(board: &Board) -> Prims {
+        let g = &board.geometry;
+        Prims {
+            pads: g.pads.clone(),
+            tracks: g.tracks.clone(),
+            arcs: g.arcs.clone(),
+            polygons: g.polygons.clone(),
+            areas: g.areas.clone(),
+            components: board.components.clone(),
+        }
+    }
+
+    fn put(&self, board: &mut Board) {
+        let g = &mut board.geometry;
+        g.pads = self.pads.clone();
+        g.tracks = self.tracks.clone();
+        g.arcs = self.arcs.clone();
+        g.polygons = self.polygons.clone();
+        g.areas = self.areas.clone();
+        board.components = self.components.clone();
+    }
+}
 
 #[derive(Clone, Debug)]
 pub enum Edit {
@@ -56,6 +92,13 @@ pub enum Edit {
         /// (part, designator before, designator after).
         names: Vec<(usize, String, String)>,
     },
+    /// Swaps every part and primitive list, as changing footprints does.
+    /// `area` (mil) is where copper changed, for pouring again.
+    Parts {
+        before: Box<Prims>,
+        after: Box<Prims>,
+        area: Option<[f64; 4]>,
+    },
 }
 
 fn insert<T: Clone>(list: &mut Vec<T>, index: usize, item: &T) {
@@ -96,6 +139,7 @@ impl Edit {
             Edit::InsertVia { index, via } => insert(&mut board.geometry.vias, *index, via),
             Edit::RemoveVia { index, .. } => remove(&mut board.geometry.vias, *index),
             Edit::SetPolygons { after, .. } => board.geometry.polygons = after.clone(),
+            Edit::Parts { after, .. } => after.put(board),
             Edit::Netlist {
                 nets_after,
                 pads,
@@ -156,6 +200,15 @@ impl Edit {
             Edit::SetPolygons { before, after } => Edit::SetPolygons {
                 before: after.clone(),
                 after: before.clone(),
+            },
+            Edit::Parts {
+                before,
+                after,
+                area,
+            } => Edit::Parts {
+                before: after.clone(),
+                after: before.clone(),
+                area: *area,
             },
             Edit::Netlist {
                 nets_before,
@@ -280,6 +333,7 @@ mod tests {
                 y: Length(0),
             },
             width: Length::from_mil(5.0),
+            text: false,
         }
     }
 

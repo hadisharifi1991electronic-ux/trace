@@ -24,13 +24,14 @@ impl Placement {
     }
 
     /// Board coordinates (mil) to the part's own frame: rotation undone,
-    /// and mirrored in x for the bottom side.
+    /// and mirrored top to bottom (y) for the bottom side, as Altium and
+    /// KiCad flip parts.
     pub fn to_local(&self, p: [f64; 2]) -> [f64; 2] {
         let (s, c) = (-self.rotation_deg).to_radians().sin_cos();
         let (dx, dy) = (p[0] - self.x.mil(), p[1] - self.y.mil());
         let (u, v) = (dx * c - dy * s, dx * s + dy * c);
         if self.side == Side::Bottom {
-            [-u, v]
+            [u, -v]
         } else {
             [u, v]
         }
@@ -38,7 +39,7 @@ impl Placement {
 
     pub fn to_board(&self, p: [f64; 2]) -> [f64; 2] {
         let [u, v] = if self.side == Side::Bottom {
-            [-p[0], p[1]]
+            [p[0], -p[1]]
         } else {
             p
         };
@@ -271,6 +272,7 @@ mod tests {
             end: pt(120.0, 120.0),
             width: Length::from_mil(5.0),
             component: Some(0),
+            text: false,
         });
         b
     }
@@ -299,10 +301,11 @@ mod tests {
             close(t.start, 180.0, 30.0) && close(t.end, 180.0, 70.0),
             "{t:?}"
         );
-        // To the bottom: mirrored, on the bottom layers.
+        // To the bottom: mirrored (top to bottom, then a half turn: left to
+        // right), on the bottom layers.
         let flipped = Placement {
             side: Side::Bottom,
-            rotation_deg: 0.0,
+            rotation_deg: 180.0,
             ..to
         };
         place(&mut b, 0, to, flipped);

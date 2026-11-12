@@ -359,6 +359,7 @@ pub fn shove(
                     y: Length::from_mil(w[1][1]),
                 },
                 width: t.width,
+                text: false,
             });
         }
     }
@@ -470,6 +471,7 @@ mod tests {
             start: pt(0.0, 10.0),
             end: pt(300.0, 10.0),
             width: Length::from_mil(6.0),
+            text: false,
         };
         let b = board(vec![t], Vec::new());
         let obs = Obstacles::new(&b);

@@ -111,12 +111,14 @@ impl Moving {
         self.follow(cursor);
     }
 
-    /// Flips the part to the other side of the board, about the cursor.
+    /// Flips the part to the other side of the board, about the cursor,
+    /// mirrored left to right (a flip top to bottom and a half turn).
     pub fn flip(&mut self, cursor: P) {
         self.to.side = match self.to.side {
             Side::Top => Side::Bottom,
             Side::Bottom => Side::Top,
         };
+        self.to.rotation_deg = (self.to.rotation_deg + 180.0).rem_euclid(360.0);
         self.follow(cursor);
     }
 
@@ -268,6 +270,7 @@ mod tests {
             end: pt(200.0, 0.0),
             width: Length::from_mil(6.0),
             component: None,
+            text: false,
         });
         let mut m = Moving::start(&b, 0, [0.0, 0.0]).unwrap();
         assert_eq!(m.ends, vec![(0, true, 0)]);

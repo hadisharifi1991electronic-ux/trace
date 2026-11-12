@@ -340,6 +340,7 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
                 start: pt(p, "X1", "Y1")?,
                 end: pt(p, "X2", "Y2")?,
                 width: len(p, "WIDTH")?,
+                text: false,
             })
         })
         .collect();

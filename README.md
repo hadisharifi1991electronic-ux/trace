@@ -119,6 +119,18 @@ checker and simulator all read.
   count shows in the status bar, and markers on the board show where.
   Click a violation to zoom to it. Boards without rules (Gerber, ODB++,
   Allegro) are checked for overlapping copper of different nets only
+- edit footprints (the Footprints button): open an Altium `.PcbLib` or a
+  Trace library (`.tracelib`), or take the footprints from the open board,
+  each listed with the number of parts using it. Select, drag and nudge
+  pads, lines and text; P places a pad numbered after the last, L draws
+  silk, courtyard or assembly lines; change a pad's number, place, size,
+  turn, shape (round, rectangle, rounded rectangle with corner %,
+  octagon), side, hole and plating, or add copies in a row (the step is
+  taken from the nearest pad of the same size). Undo and redo, mm or mil,
+  grids from 0.01 mm. "Update N parts on the board" gives every part using
+  the footprint the new pads and lines in one undoable edit: nets follow
+  pad numbers, parts on the bottom are mirrored, pours are poured again.
+  Save keeps the library as `.tracelib`
 
 ## Command-line tool
 
@@ -137,6 +149,7 @@ trace convert <file> out.kicad_pcb   write a KiCad board
 trace convert <file> out.PcbDoc      write an Altium Designer board
 trace convert sheet.SchDoc out.svg   draw a schematic sheet as SVG
 trace fab board.PcbDoc out.zip   Gerber X2, drill, IPC-356, pick-and-place and BOM (or a folder)
+trace footprints lib.PcbLib [out.tracelib]   list a library's (or a board's) footprints; save as a Trace library
 ```
 
 Every command also takes an Allegro `.brd` (versions 16.0 to 23.x), a Gerber
@@ -228,6 +241,11 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   added on the sheets is listed as not on the board), and parts deleted
   from the sheets stay on the board. Edits are not written back to
   `.SchDoc` files.
+- Footprint libraries are read from `.PcbLib` and saved as `.tracelib`;
+  writing `.PcbLib` and reading `.IntLib` are not done yet, and 3D bodies
+  and text on mechanical layers are left out. Placing a new part from a
+  library onto the board is not done yet. Updating parts keeps their
+  designator and value text where it was.
 - Altium solid regions are drawn; Altium polygon pours are counted but not
   drawn yet. Allegro pours are drawn.
 - Traced Gerber nets get names like `Net-042`, since bare Gerber files do not

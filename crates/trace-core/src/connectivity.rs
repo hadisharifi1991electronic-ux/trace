@@ -421,6 +421,7 @@ mod tests {
             start: pt(x1, 0.0),
             end: pt(x2, 0.0),
             width: Length::from_mil(5.0),
+            text: false,
         }
     }
     fn board(tracks: Vec<Track>, vias: Vec<Via>) -> Board {

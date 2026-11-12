@@ -263,7 +263,7 @@ pub(crate) fn no_paste(e: Length) -> bool {
 // Track, arc, via and pad records all start with: layer u8, two flag bytes,
 // net index u16 and 8 bytes of links, with geometry from offset 13.
 
-fn parse_track(b: &[u8], layers: &LayerMap) -> Option<Track> {
+pub(crate) fn parse_track(b: &[u8], layers: &LayerMap) -> Option<Track> {
     Some(Track {
         component: u16_at(b, 7).filter(|&c| c != u16::MAX).map(u32::from),
         layer: layers.get(*b.first()?),
@@ -271,10 +271,11 @@ fn parse_track(b: &[u8], layers: &LayerMap) -> Option<Track> {
         start: point(b, 13)?,
         end: point(b, 21)?,
         width: len_at(b, 29)?,
+        text: false,
     })
 }
 
-fn parse_arc(b: &[u8], layers: &LayerMap) -> Option<Arc> {
+pub(crate) fn parse_arc(b: &[u8], layers: &LayerMap) -> Option<Arc> {
     let (start_deg, end_deg) = (f64_at(b, 25)?, f64_at(b, 33)?);
     if !start_deg.is_finite() || !end_deg.is_finite() {
         return None;
@@ -369,7 +370,27 @@ pub(crate) fn with_removed_pads(
 
 /// Copper regions: an 18-byte header, a property block, then the outline
 /// and each hole as a vertex count and (x, y) pairs of doubles.
-fn parse_region(b: &[u8], layers: &LayerMap) -> Option<Polygon> {
+/// Fills: layer, net at 3, part at 7, corners at 13 and 21, turn at 29.
+pub(crate) fn parse_fill(b: &[u8], layers: &LayerMap) -> Option<Polygon> {
+    let (Some(&id), Some(a), Some(e)) = (b.first(), point(b, 13), point(b, 21)) else {
+        return None;
+    };
+    let layer = layers.get(id);
+    if matches!(layer, LayerRef::AllCopper | LayerRef::Keepout) || b.get(1) == Some(&2) {
+        return None;
+    }
+    let rot = f64_at(b, 29).filter(|r| r.is_finite()).unwrap_or(0.0);
+    Some(Polygon {
+        layer,
+        net: net(b),
+        outline: fill_outline(a, e, rot),
+        holes: Vec::new(),
+        pour: None,
+        component: u16_at(b, 7).filter(|&i| i != u16::MAX).map(u32::from),
+    })
+}
+
+pub(crate) fn parse_region(b: &[u8], layers: &LayerMap) -> Option<Polygon> {
     let layer = layers.get(*b.first()?);
     if matches!(layer, LayerRef::AllCopper | LayerRef::Keepout) {
         return None;
@@ -412,7 +433,7 @@ fn parse_region(b: &[u8], layers: &LayerMap) -> Option<Polygon> {
 /// comment and designator flags at 40 and 41, the font kind at 43 (1 is
 /// TrueType), bold at 44 and the wide-string index at 115. The second
 /// block holds the text itself.
-fn parse_text(
+pub(crate) fn parse_text(
     r: &[&[u8]],
     layers: &LayerMap,
     wide: &std::collections::HashMap<u32, String>,
@@ -458,7 +479,7 @@ fn u32_at(b: &[u8], at: usize) -> Option<u32> {
 
 /// Pads have six blocks: name, two unused, a layer-stack string, the main
 /// geometry and extended shape data.
-fn parse_pad(blocks: &[&[u8]], layers: &LayerMap) -> Option<Pad> {
+pub(crate) fn parse_pad(blocks: &[&[u8]], layers: &LayerMap) -> Option<Pad> {
     let name = blocks
         .first()
         .and_then(|n| n.get(1..))
@@ -527,7 +548,10 @@ fn parse_pad(blocks: &[&[u8]], layers: &LayerMap) -> Option<Pad> {
         id @ 1..=32 => id as usize,
         _ => 1,
     };
-    if stack.is_empty() && shape == PadShape::Rect && extra.len() >= 596 && extra[532 + id - 1] == 9
+    if stack.is_empty()
+        && shape != PadShape::Octagon
+        && extra.len() >= 596
+        && extra[532 + id - 1] == 9
     {
         let pct = extra[564 + id - 1].min(100) as f64;
         if pct > 0.0 {
@@ -789,27 +813,12 @@ pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
         g.polygons = copper;
         g.areas = other;
     }
-    // Fills: layer, net at 3, part at 7, corners at 13 and 21, turn at 29.
     if let Some(d) = c.stream("/Fills6/Data")? {
         for r in split_binary(&d, 1) {
-            let b = r[0];
-            let (Some(&id), Some(a), Some(e)) = (b.first(), point(b, 13), point(b, 21)) else {
+            let Some(poly) = parse_fill(r[0], &layers) else {
                 continue;
             };
-            let layer = layers.get(id);
-            if matches!(layer, LayerRef::AllCopper | LayerRef::Keepout) || b.get(1) == Some(&2) {
-                continue;
-            }
-            let rot = f64_at(b, 29).filter(|r| r.is_finite()).unwrap_or(0.0);
-            let poly = Polygon {
-                layer: layer.clone(),
-                net: net(b),
-                outline: fill_outline(a, e, rot),
-                holes: Vec::new(),
-                pour: None,
-                component: u16_at(b, 7).filter(|&i| i != u16::MAX).map(u32::from),
-            };
-            if matches!(layer, LayerRef::Copper(_)) {
+            if matches!(poly.layer, LayerRef::Copper(_)) {
                 g.polygons.push(poly);
             } else {
                 g.areas.push(poly);

@@ -754,6 +754,7 @@ impl Builder {
                         start: pt(*a),
                         end: pt(*b),
                         width: mm(w),
+                        text: false,
                     });
                     self.named(ObjRef::Track(i), g, it.attrs);
                 }
@@ -826,6 +827,7 @@ impl Builder {
                     start: pt(*a),
                     end: pt(*b),
                     width: mm(geom::aperture_width(g.aperture(*ap))),
+                    text: false,
                 }),
                 Obj::Arc { ap, a, b, c, cw } => {
                     if let Some(arc) = core_arc(
@@ -848,6 +850,7 @@ impl Builder {
                         start: pt(*at),
                         end: pt(*at),
                         width: mm(w),
+                        text: false,
                     });
                 }
                 Obj::Region(cs) => {
@@ -861,6 +864,7 @@ impl Builder {
                                 start: pt(c[k]),
                                 end: pt(c[(k + 1) % c.len()]),
                                 width: mm(0.1),
+                                text: false,
                             });
                         }
                     }

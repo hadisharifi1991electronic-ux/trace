@@ -1158,6 +1158,7 @@ mod tests {
             start: pt(1.0, 1.0),
             end: pt(5.0, 1.0),
             width: Length::from_mm(0.2),
+            text: false,
         });
         g.vias.push(Via {
             net: Some(0),

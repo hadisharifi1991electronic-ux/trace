@@ -570,6 +570,7 @@ mod tests {
                 },
                 width: Length::from_mil(5.0),
                 component: None,
+                text: false,
             });
         }
         b

@@ -391,14 +391,23 @@ pub(crate) fn parse_fill(b: &[u8], layers: &LayerMap) -> Option<Polygon> {
 }
 
 pub(crate) fn parse_region(b: &[u8], layers: &LayerMap) -> Option<Polygon> {
+    parse_any_region(b, layers)
+        .filter(|(_, cutout)| !cutout)
+        .map(|(p, _)| p)
+}
+
+/// A copper region, or a polygon cutout (`true`): an area pours leave empty.
+pub(crate) fn parse_any_region(b: &[u8], layers: &LayerMap) -> Option<(Polygon, bool)> {
     let layer = layers.get(*b.first()?);
-    if matches!(layer, LayerRef::AllCopper | LayerRef::Keepout) {
-        return None;
-    }
     let holes = u16_at(b, 14)? as usize;
     let plen = i32_at(b, 18)? as usize;
     let props = Props::parse(&String::from_utf8_lossy(b.get(22..22 + plen)?));
-    if props.int("KIND").unwrap_or(0) != 0 || props.bool("ISBOARDCUTOUT") {
+    let cutout = props.int("KIND") == Some(1);
+    if props.bool("ISBOARDCUTOUT")
+        || !(cutout || props.int("KIND").unwrap_or(0) == 0)
+        || layer == LayerRef::Keepout
+        || (layer == LayerRef::AllCopper && !cutout)
+    {
         return None;
     }
     let mut i = 22 + plen;
@@ -418,14 +427,17 @@ pub(crate) fn parse_region(b: &[u8], layers: &LayerMap) -> Option<Polygon> {
     };
     let outline = ring()?;
     let holes = (0..holes).map(|_| ring()).collect::<Option<Vec<_>>>()?;
-    (outline.len() >= 3).then_some(Polygon {
+    let poly = Polygon {
         layer,
-        net: net(b),
+        net: if cutout { None } else { net(b) },
         outline,
         holes,
-        pour: u16_at(b, 5).filter(|&i| i != u16::MAX).map(u32::from),
+        pour: u16_at(b, 5)
+            .filter(|&i| i != u16::MAX && !cutout)
+            .map(u32::from),
         component: u16_at(b, 7).filter(|&i| i != u16::MAX).map(u32::from),
-    })
+    };
+    (poly.outline.len() >= 3).then_some((poly, cutout))
 }
 
 /// Texts: layer, part at 7, position at 13, height at 21, stroke font at
@@ -694,6 +706,14 @@ pub(crate) fn parse_pour(p: &Props, layers: &LayerMap) -> Pour {
             .get("REMOVEDEAD")
             .is_none_or(|v| v.eq_ignore_ascii_case("TRUE")),
         order: p.int("POURINDEX").unwrap_or(0) as i32,
+        // AREATHRESHOLD is in square 1/10000 mil.
+        min_island: if p.bool("REMOVEISLANDSBYAREA") {
+            p.get("AREATHRESHOLD")
+                .and_then(|v| v.trim().parse::<f64>().ok())
+                .map_or(0.0, |a| a / 1e8)
+        } else {
+            0.0
+        },
     }
 }
 
@@ -806,12 +826,20 @@ pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
             .collect();
     }
     if let Some(d) = c.stream("/Regions6/Data")? {
-        let (copper, other): (Vec<Polygon>, Vec<Polygon>) = split_binary(&d, 1)
+        for (p, cutout) in split_binary(&d, 1)
             .iter()
-            .filter_map(|r| parse_region(r[0], &layers))
-            .partition(|p| matches!(p.layer, LayerRef::Copper(_)));
-        g.polygons = copper;
-        g.areas = other;
+            .filter_map(|r| parse_any_region(r[0], &layers))
+        {
+            if cutout {
+                if matches!(p.layer, LayerRef::Copper(_) | LayerRef::AllCopper) {
+                    g.cutouts.push(p);
+                }
+            } else if matches!(p.layer, LayerRef::Copper(_)) {
+                g.polygons.push(p);
+            } else {
+                g.areas.push(p);
+            }
+        }
     }
     if let Some(d) = c.stream("/Fills6/Data")? {
         for r in split_binary(&d, 1) {
@@ -928,6 +956,9 @@ pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
                 .and_then(|p| p.net);
         }
     }
+    // Pours saved without their copper are poured here.
+    trace_core::pour::pour_missing(&mut board);
+    trace_core::pour::mark_unpoured(&mut board);
     trace_core::connectivity::analyse(&mut board);
 
     Ok(board)

@@ -200,6 +200,13 @@ pub struct Pour {
     /// Pours are filled in this order; a later pour keeps clear of earlier ones.
     #[serde(default)]
     pub order: i32,
+    /// Islands smaller than this (square mil) are left out.
+    #[serde(default, skip_serializing_if = "no_area")]
+    pub min_island: f64,
+}
+
+fn no_area(v: &f64) -> bool {
+    *v == 0.0
 }
 
 /// Physical content of a board.
@@ -220,6 +227,10 @@ pub struct Geometry {
     /// Pour outlines, for pouring again after edits.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pours: Vec<Pour>,
+    /// Areas pours leave empty on their layer (Altium polygon cutouts);
+    /// `AllCopper` keeps every layer empty there.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cutouts: Vec<Polygon>,
     /// True when pads and vias carry their copper layer by layer (`stack`,
     /// `rings`), as boards rebuilt from fabrication data do: a pad or via
     /// without that list then has the same copper on every layer it spans.

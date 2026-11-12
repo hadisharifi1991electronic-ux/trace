@@ -159,6 +159,7 @@ impl Footprint {
                 .filter(|p| p.component == me)
                 .cloned()
                 .collect(),
+            cutouts: Vec::new(),
             components: Vec::new(),
         };
         let mut b = part_board(board, index, prims);
@@ -376,6 +377,7 @@ impl Footprint {
             arcs: g.arcs,
             polygons: g.polygons,
             areas: g.areas,
+            cutouts: g.cutouts,
             components: Vec::new(),
         }
     }
@@ -431,6 +433,7 @@ pub fn replace(board: &Board, fp: &Footprint, parts: &[usize]) -> Option<Edit> {
         g.arcs.retain(|a| a.component != me);
         g.polygons.retain(|p| p.component != me || p.pour.is_some());
         g.areas.retain(|p| p.component != me);
+        g.cutouts.retain(|p| p.component != me);
         let mut new = fp.instance(&b, i, !has_text);
         for p in &mut new.pads {
             p.net = nets.get(&p.name.to_ascii_uppercase()).copied().flatten();

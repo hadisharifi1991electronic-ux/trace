@@ -249,6 +249,10 @@ struct Subject<'a> {
     pair: Option<&'a str>,
     pair_classes: &'a [String],
     part: Part<'a>,
+    /// The object's hole (mil), for `HoleSize` comparisons.
+    hole: Option<f64>,
+    /// The copper layer's name, for `OnLayer`.
+    layer: Option<&'a str>,
 }
 
 /// Altium footprint patterns: `*` for any run of characters, `?` for one,
@@ -386,6 +390,19 @@ impl Parser<'_> {
     /// A comparison a whole part can answer: its kind or its designator.
     fn compare(&self, w: &str, op: &str, v: &str) -> Tri {
         let s = self.s;
+        if w.eq_ignore_ascii_case("holesize") {
+            let (h, v) = (s.hole?, Length::parse(v).map(Length::mil)?);
+            let e = 1e-3;
+            return match op {
+                "=" => Some((h - v).abs() < e),
+                "<>" => Some((h - v).abs() >= e),
+                "<" => Some(h < v - e),
+                "<=" => Some(h <= v + e),
+                ">" => Some(h > v + e),
+                ">=" => Some(h >= v - e),
+                _ => None,
+            };
+        }
         if s.obj != Obj::Part {
             return None;
         }
@@ -444,6 +461,7 @@ impl Parser<'_> {
         Some(match w.as_str() {
             "all" | "oncopper" | "onsignal" => true,
             "innet" => eq(arg, s.net),
+            "onlayer" => eq(arg, s.layer?),
             "innetclass" => s.classes.iter().any(|c| eq(c, arg)),
             "indifferentialpair" => s.pair.is_some_and(|p| eq(p, arg)),
             "inanydifferentialpair" => s.pair.is_some(),
@@ -460,6 +478,52 @@ impl Parser<'_> {
             "iskeepout" => false,
             _ => return None,
         })
+    }
+}
+
+/// One object as a rule scope sees it, for judging scopes outside DRC.
+pub(crate) struct Thing {
+    pub net: Option<u32>,
+    pub obj: Obj,
+    pub component: Option<u32>,
+    /// Hole size in mil, for pads and vias.
+    pub hole: Option<f64>,
+    /// Copper layer index.
+    pub layer: Option<u8>,
+}
+
+/// Judges rule scopes against single objects of one board.
+pub(crate) struct Scopes {
+    info: NetInfo,
+    layers: Vec<String>,
+}
+
+impl Scopes {
+    pub(crate) fn new(board: &Board) -> Scopes {
+        Scopes {
+            info: NetInfo::new(board),
+            layers: board
+                .stackup
+                .copper_layers()
+                .map(|l| l.name.clone())
+                .collect(),
+        }
+    }
+
+    /// Whether `scope` takes the object: yes, no, or `None` when it asks
+    /// what Trace cannot tell (a room).
+    pub(crate) fn judge(&self, scope: &str, t: &Thing) -> Option<bool> {
+        let mut s = if t.obj == Obj::Pour {
+            self.info.subject(t.net, t.obj)
+        } else {
+            self.info.subject_in(t.net, t.obj, t.component)
+        };
+        s.hole = t.hole;
+        s.layer = t
+            .layer
+            .and_then(|l| self.layers.get(l as usize))
+            .map(String::as_str);
+        judge(scope, &s)
     }
 }
 
@@ -589,6 +653,8 @@ impl NetInfo {
                 pair: self.pairs[n].as_deref(),
                 pair_classes: &self.pair_classes[n],
                 part,
+                hole: None,
+                layer: None,
             },
             None => Subject {
                 net: "No Net",
@@ -597,6 +663,8 @@ impl NetInfo {
                 pair: None,
                 pair_classes: &NONE,
                 part,
+                hole: None,
+                layer: None,
             },
         }
     }
@@ -1392,6 +1460,13 @@ mod tests {
         assert_eq!(judge("WithinRoom('X')", &s), None);
         assert_eq!(judge("IsPad and HoleSize = 45", &s), Some(false));
         assert_eq!(judge("IsTrack and HoleSize = 45", &s), None);
+        let mut s = info.subject(Some(2), Obj::ThPad);
+        s.hole = Some(39.0);
+        assert_eq!(judge("IsPad and HoleSize <= 39", &s), Some(true));
+        assert_eq!(judge("IsPad and HoleSize = 45", &s), Some(false));
+        assert_eq!(judge("OnLayer('L2')", &s), None);
+        s.layer = Some("L2");
+        assert_eq!(judge("OnLayer('L2') and IsPad", &s), Some(true));
         assert_eq!(judge("not InNet('A') or WithinRoom('X')", &s), Some(true));
     }
 

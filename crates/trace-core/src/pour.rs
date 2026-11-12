@@ -5,8 +5,9 @@
 //! Gaps, thermal reliefs and the board-edge gap come from the board's
 //! clearance, polygon connect and board outline clearance rules.
 
+use crate::drc::{Obj, Scopes, Thing};
 use crate::edit::Edit;
-use crate::{Board, LayerRef, Length, PadShape, Point, Polygon};
+use crate::{Board, LayerRef, Length, PadShape, Point, Polygon, Rule};
 use i_overlay::core::fill_rule::FillRule;
 use i_overlay::core::overlay_rule::OverlayRule;
 use i_overlay::float::single::SingleFloatOverlay;
@@ -232,83 +233,89 @@ enum Style {
     },
 }
 
-/// Polygon connect styles for through pads, surface pads and vias, from
-/// the board's `PolygonConnect` rule that applies to everything (else the
-/// first by priority).
-struct Connect {
-    th: Style,
-    smd: Style,
-    via: Style,
+/// What a connect style depends on: object kind, part and hole size.
+type Asked = (Obj, Option<u32>, u64);
+
+/// Polygon connect styles from the board's `PolygonConnect` rules, judged
+/// for each pad and via: the first rule by priority whose scopes take the
+/// pour and the object. Rules that ask what Trace cannot tell (a room) are
+/// passed over.
+struct Connect<'a> {
+    rules: Vec<&'a Rule>,
+    scopes: Scopes,
+    pour: Thing,
+    /// Answers so far, by object kind, part and hole.
+    seen: std::cell::RefCell<std::collections::HashMap<Asked, Style>>,
 }
 
-impl Connect {
-    fn of(board: &Board, net: Option<u32>) -> Connect {
-        let name = net
-            .and_then(|n| board.nets.get(n as usize))
-            .map(|n| n.name.as_str())
-            .unwrap_or("");
-        // Rules for particular parts, layers or rooms are left to Altium;
-        // the rest apply by priority where their nets fit.
-        const PARTIAL: &[&str] = &[
-            "incomponent",
-            "hasfootprint",
-            "onlayer",
-            "holesize",
-            "withinroom",
-            "touchesroom",
-            "ispad",
-            "isvia",
-            "innetclass",
-        ];
-        let mut rules: Vec<_> = board
+impl<'a> Connect<'a> {
+    fn of(board: &'a Board, net: Option<u32>, layer: u8) -> Connect<'a> {
+        let mut rules: Vec<&Rule> = board
             .rules
             .iter()
             .filter(|r| r.enabled && r.kind.eq_ignore_ascii_case("PolygonConnect"))
-            .filter(|r| {
-                r.scope.iter().all(|s| {
-                    let low = s.to_ascii_lowercase();
-                    !PARTIAL.iter().any(|w| low.contains(w)) && scope_has_net(s, name)
-                })
-            })
             .collect();
         rules.sort_by_key(|r| r.priority);
-        let Some(r) = rules.first() else {
-            return Connect {
-                th: Style::Direct,
-                smd: Style::Direct,
-                via: Style::Direct,
-            };
+        Connect {
+            rules,
+            scopes: Scopes::new(board),
+            pour: Thing {
+                net,
+                obj: Obj::Pour,
+                component: None,
+                hole: None,
+                layer: Some(layer),
+            },
+            seen: Default::default(),
+        }
+    }
+
+    fn style(&self, t: &Thing) -> Style {
+        let key = (t.obj, t.component, t.hole.unwrap_or(-1.0).to_bits());
+        if let Some(s) = self.seen.borrow().get(&key) {
+            return *s;
+        }
+        let s = self.judge(t);
+        self.seen.borrow_mut().insert(key, s);
+        s
+    }
+
+    fn judge(&self, t: &Thing) -> Style {
+        fn scope(r: &Rule, k: usize) -> &str {
+            r.scope.get(k).map(String::as_str).unwrap_or("All")
+        }
+        let takes = |r: &Rule| {
+            let (a, b) = (scope(r, 0), scope(r, 1));
+            let j = |s: &str, t: &Thing| self.scopes.judge(s, t);
+            j(a, &self.pour) == Some(true) && j(b, t) == Some(true)
+                || j(a, t) == Some(true) && j(b, &self.pour) == Some(true)
         };
-        let get = |prefix: &str, key: &str| {
+        let Some(r) = self.rules.iter().find(|r| takes(r)) else {
+            return Style::Direct;
+        };
+        let prefix = match t.obj {
+            Obj::Via => "VIA",
+            Obj::SmdPad => "SMDPAD",
+            _ => "THPAD",
+        };
+        let get = |key: &str| {
             r.params
                 .iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case(&format!("{prefix}.{key}")))
                 .or_else(|| r.params.iter().find(|(k, _)| k.eq_ignore_ascii_case(key)))
                 .map(|(_, v)| v.as_str())
         };
-        let style = |prefix: &str| {
-            if !get(prefix, "CONNECTSTYLE").is_some_and(|s| s.eq_ignore_ascii_case("Relief")) {
-                return Style::Direct;
-            }
-            let len = |k: &str, d: f64| {
-                get(prefix, k)
-                    .and_then(Length::parse)
-                    .map(Length::mil)
-                    .unwrap_or(d)
-            };
-            Style::Relief {
-                gap: len("AIRGAPWIDTH", 10.0),
-                width: len("RELIEFCONDUCTORWIDTH", 10.0),
-                entries: get(prefix, "RELIEFENTRIES")
-                    .and_then(|v| v.trim().parse().ok())
-                    .unwrap_or(4),
-                diagonal: get(prefix, "POLYGONRELIEFANGLE").is_some_and(|v| v.contains("45")),
-            }
-        };
-        Connect {
-            th: style("THPAD"),
-            smd: style("SMDPAD"),
-            via: style("VIA"),
+        if !get("CONNECTSTYLE").is_some_and(|s| s.eq_ignore_ascii_case("Relief")) {
+            return Style::Direct;
+        }
+        let len = |k: &str, d: f64| get(k).and_then(Length::parse).map(Length::mil).unwrap_or(d);
+        Style::Relief {
+            gap: len("AIRGAPWIDTH", 10.0),
+            width: len("RELIEFCONDUCTORWIDTH", 10.0),
+            entries: get("RELIEFENTRIES")
+                .and_then(|v| v.trim().parse().ok())
+                .unwrap_or(4),
+            diagonal: get("POLYGONRELIEFANGLE").is_some_and(|v| v.contains("45")),
         }
     }
 }
@@ -342,6 +349,89 @@ fn outline_clearance(board: &Board, net: Option<u32>) -> f64 {
 /// Pours the pour at `index` again and returns its new copper.
 pub fn pour(board: &Board, index: usize) -> Vec<Polygon> {
     pour_among(board, &board.geometry.polygons, index)
+}
+
+/// Pours every pour that has an outline but no copper on the board, the
+/// way a file saved with its pours unpoured or shelved needs. Earlier
+/// pours first, as Altium pours them. Returns how many pours got copper.
+pub fn pour_missing(board: &mut Board) -> usize {
+    let g = &board.geometry;
+    let has: std::collections::HashSet<u32> = g.polygons.iter().filter_map(|p| p.pour).collect();
+    let mut todo: Vec<usize> = (0..g.pours.len())
+        .filter(|&i| g.pours[i].outline.len() >= 3 && !has.contains(&(i as u32)))
+        .collect();
+    if todo.is_empty() {
+        return 0;
+    }
+    todo.sort_by_key(|&i| (g.pours[i].order, i));
+    // Pours on different layers do not meet: each layer is poured on its
+    // own thread, its pours in order.
+    let mut layers: Vec<(LayerRef, Vec<usize>)> = Vec::new();
+    for i in todo {
+        let l = &g.pours[i].layer;
+        match layers.iter_mut().find(|(k, _)| k == l) {
+            Some((_, v)) => v.push(i),
+            None => layers.push((l.clone(), vec![i])),
+        }
+    }
+    let b: &Board = board;
+    let poured: Vec<(usize, Vec<Polygon>)> = std::thread::scope(|s| {
+        let jobs: Vec<_> = layers
+            .iter()
+            .map(|(l, todo)| {
+                s.spawn(move || {
+                    let mut after: Vec<Polygon> = b
+                        .geometry
+                        .polygons
+                        .iter()
+                        .filter(|p| p.layer == *l)
+                        .cloned()
+                        .collect();
+                    let had = after.len();
+                    let mut filled = 0;
+                    for &i in todo {
+                        let new = pour_among(b, &after, i);
+                        filled += usize::from(!new.is_empty());
+                        after.extend(new);
+                    }
+                    (filled, after.split_off(had))
+                })
+            })
+            .collect();
+        jobs.into_iter()
+            .map(|j| j.join().expect("pour thread"))
+            .collect()
+    });
+    let mut filled = 0;
+    for (n, new) in poured {
+        filled += n;
+        board.geometry.polygons.extend(new);
+    }
+    filled
+}
+
+/// Marks the nets whose connections run through a pour that has no
+/// copper on the board (hatched, shelved or never poured), so checks that
+/// need the copper leave them out; nets whose pours are poured are
+/// checked like any other.
+pub fn mark_unpoured(board: &mut Board) {
+    let has: std::collections::HashSet<u32> = board
+        .geometry
+        .polygons
+        .iter()
+        .filter_map(|p| p.pour)
+        .collect();
+    for n in &mut board.nets {
+        n.has_pour = false;
+    }
+    for (i, p) in board.geometry.pours.iter().enumerate() {
+        if has.contains(&(i as u32)) {
+            continue;
+        }
+        if let Some(n) = p.net.and_then(|n| board.nets.get_mut(n as usize)) {
+            n.has_pour = true;
+        }
+    }
 }
 
 /// As `pour`, with `areas` standing for the board's copper areas.
@@ -378,7 +468,7 @@ fn pour_among(board: &Board, areas: &[Polygon], index: usize) -> Vec<Polygon> {
             cuts.push(ring);
         }
     };
-    let connect = Connect::of(board, def.net);
+    let connect = Connect::of(board, def.net, layer);
     let mut reliefs: Vec<Vec<P>> = Vec::new();
     let mut spokes: Vec<Vec<P>> = Vec::new();
     let mut relieve = |c: P, sx: f64, sy: f64, deg: f64, shape: PadShape, style: &Style| {
@@ -390,7 +480,8 @@ fn pour_among(board: &Board, areas: &[Polygon], index: usize) -> Vec<Polygon> {
         } = *style
         {
             reliefs.push(land(c, sx, sy, deg, shape, gap));
-            let reach = sx.max(sy) / 2.0 + gap + 2.0;
+            // Long enough to cross the gap at the land's corners too.
+            let reach = sx.hypot(sy) / 2.0 + gap + 2.0;
             for k in 0..entries {
                 let a = deg + if diagonal { 45.0 } else { 0.0 } + 360.0 / entries as f64 * k as f64;
                 let (s, co) = a.to_radians().sin_cos();
@@ -453,10 +544,19 @@ fn pour_among(board: &Board, areas: &[Polygon], index: usize) -> Vec<Polygon> {
                 .map(|(_, d)| *d)
                 .unwrap_or(v.diameter)
                 .mil();
-            relieve(c, d, d, 0.0, PadShape::Round, &connect.via);
+            let style = connect.style(&Thing {
+                net,
+                obj: Obj::Via,
+                component: None,
+                hole: Some(v.hole.mil()),
+                layer: Some(layer),
+            });
+            relieve(c, d, d, 0.0, PadShape::Round, &style);
             continue;
         }
-        let d = v
+        // The pad on this layer, if Altium kept one there, and the hole:
+        // each kept back by its own gap.
+        let pad = v
             .rings
             .iter()
             .find(|(l, _)| *l == layer)
@@ -466,11 +566,13 @@ fn pour_among(board: &Board, areas: &[Polygon], index: usize) -> Vec<Polygon> {
             } else {
                 v.hole
             });
-        let d = d.mil().max(v.hole.mil());
-        add(
-            capsule(c, [c[0] + 1e-6, c[1]], d / 2.0 + gaps.via),
-            &mut cuts,
-        );
+        let r = if pad.0 > v.hole.0 {
+            pad.mil() / 2.0 + gaps.via
+        } else {
+            0.0
+        }
+        .max(v.hole.mil() / 2.0 + gaps.hole);
+        add(capsule(c, [c[0] + 1e-6, c[1]], r), &mut cuts);
     }
     for p in &g.pads {
         let through = p.layer == LayerRef::AllCopper;
@@ -492,12 +594,18 @@ fn pour_among(board: &Board, areas: &[Polygon], index: usize) -> Vec<Polygon> {
         if ours {
             if let Some((sx, sy, deg, sh)) = shape {
                 anchors.push(c);
-                let style = if p.hole.0 > 0 {
-                    &connect.th
-                } else {
-                    &connect.smd
-                };
-                relieve(c, sx, sy, deg, sh, style);
+                let style = connect.style(&Thing {
+                    net,
+                    obj: if p.hole.0 > 0 {
+                        Obj::ThPad
+                    } else {
+                        Obj::SmdPad
+                    },
+                    component: p.component,
+                    hole: (p.hole.0 > 0).then(|| p.hole.mil()),
+                    layer: Some(layer),
+                });
+                relieve(c, sx, sy, deg, sh, &style);
             }
             continue;
         }
@@ -515,16 +623,16 @@ fn pour_among(board: &Board, areas: &[Polygon], index: usize) -> Vec<Polygon> {
             );
             continue;
         }
-        match shape {
-            Some((sx, sy, deg, sh)) => {
-                let gap = if p.hole.0 > 0 { gaps.th } else { gaps.smd };
-                add(land(c, sx, sy, deg, sh, gap), &mut cuts)
-            }
-            None if p.hole.0 > 0 => add(
+        // The land, and the hole kept back by its own gap.
+        if let Some((sx, sy, deg, sh)) = shape {
+            let gap = if p.hole.0 > 0 { gaps.th } else { gaps.smd };
+            add(land(c, sx, sy, deg, sh, gap), &mut cuts)
+        }
+        if p.hole.0 > 0 {
+            add(
                 capsule(c, [c[0] + 1e-6, c[1]], p.hole.mil() / 2.0 + gaps.hole),
                 &mut cuts,
-            ),
-            None => {}
+            )
         }
     }
     // Other copper areas on the layer: other pours' copper and fixed
@@ -558,6 +666,23 @@ fn pour_among(board: &Board, areas: &[Polygon], index: usize) -> Vec<Polygon> {
         let style = OutlineStyle::new(gaps.area).line_join(LineJoin::Round(0.25));
         for grown in shape.outline(&style) {
             cuts.extend(grown);
+        }
+    }
+    // Polygon cutouts leave their area empty, with no clearance.
+    for f in g
+        .cutouts
+        .iter()
+        .filter(|f| on(&f.layer) || f.layer == LayerRef::AllCopper)
+    {
+        add(f.outline.iter().map(|&q| mil(q)).collect(), &mut cuts);
+        for h in &f.holes {
+            let mut h: Vec<P> = h.iter().map(|&q| mil(q)).collect();
+            if h.len() >= 3 && overlaps(bbox(&h), reach) {
+                if area(&h) > 0.0 {
+                    h.reverse();
+                }
+                cuts.push(h);
+            }
         }
     }
     // Keep back from the board edge.
@@ -600,13 +725,22 @@ fn pour_among(board: &Board, areas: &[Polygon], index: usize) -> Vec<Polygon> {
     };
     shapes
         .into_iter()
-        .filter(|s| !s.is_empty() && area(&s[0]).abs() > 4.0)
+        .filter(|s| !s.is_empty() && area(&s[0]).abs() > def.min_island.max(4.0))
         .filter(|s| {
-            !def.remove_dead
-                || net.is_none()
-                || anchors
-                    .iter()
-                    .any(|&a| inside(a, &s[0]) && !s[1..].iter().any(|h| inside(a, h)))
+            if !def.remove_dead || net.is_none() {
+                return true;
+            }
+            let within =
+                |a: P, b: [f64; 4]| a[0] >= b[0] && a[0] <= b[2] && a[1] >= b[1] && a[1] <= b[3];
+            let boxes: Vec<[f64; 4]> = s.iter().map(|r| bbox(r)).collect();
+            anchors.iter().any(|&a| {
+                within(a, boxes[0])
+                    && inside(a, &s[0])
+                    && !s[1..]
+                        .iter()
+                        .zip(&boxes[1..])
+                        .any(|(h, &b)| within(a, b) && inside(a, h))
+            })
         })
         .map(|s| {
             let mut rings = s.into_iter();
@@ -765,6 +899,7 @@ mod tests {
             ],
             remove_dead: true,
             order: 0,
+            min_island: 0.0,
         });
         // A GND pad so the pour is live.
         b.geometry.pads.push(Pad {
@@ -850,5 +985,120 @@ mod tests {
         assert_eq!(f.len(), 1);
         let c = copper(&f);
         assert!(c < 500_000.0 && c > 480_000.0, "{c}");
+    }
+
+    #[test]
+    fn pours_saved_without_copper_are_poured_and_their_nets_checked() {
+        let mut b = board();
+        // A hatched pour, which Trace cannot pour: its net stays unchecked.
+        b.geometry.pours.push(Pour {
+            layer: LayerRef::Copper(0),
+            net: Some(1),
+            outline: Vec::new(),
+            remove_dead: true,
+            order: 1,
+            min_island: 0.0,
+        });
+        assert_eq!(pour_missing(&mut b), 1);
+        assert!(b.geometry.polygons.iter().all(|p| p.pour == Some(0)));
+        assert_eq!(pour_missing(&mut b), 0, "already poured");
+        mark_unpoured(&mut b);
+        assert!(!b.nets[0].has_pour);
+        assert!(b.nets[1].has_pour);
+    }
+
+    #[test]
+    fn cutouts_holes_and_connect_rules() {
+        let mut b = board();
+        // A cutout takes its area and no more.
+        b.geometry.cutouts.push(Polygon {
+            layer: LayerRef::Copper(0),
+            net: None,
+            outline: vec![
+                p(600.0, 600.0),
+                p(700.0, 600.0),
+                p(700.0, 700.0),
+                p(600.0, 700.0),
+            ],
+            holes: Vec::new(),
+            pour: None,
+            component: None,
+        });
+        let c = copper(&pour(&b, 0));
+        assert!((c - 990_000.0).abs() < 1.0, "{c}");
+        b.geometry.cutouts.clear();
+        // A via of another net with its pad removed on this layer keeps the
+        // pour back from its hole by the hole gap.
+        b.rules.push(Rule {
+            kind: "Clearance".into(),
+            name: "Clearance_Poly".into(),
+            enabled: true,
+            priority: 1,
+            scope: vec!["InPolygon".into(), "All".into()],
+            params: [
+                ("GAP".to_string(), "5mil".to_string()),
+                (
+                    "OBJECTCLEARANCES".to_string(),
+                    "ClearanceObj_Poly-ClearanceObj_Hole:80000".to_string(),
+                ),
+            ]
+            .into(),
+        });
+        b.geometry.vias.push(Via {
+            net: Some(1),
+            from_layer: 0,
+            to_layer: 1,
+            at: p(300.0, 300.0),
+            diameter: Length::from_mil(18.0),
+            hole: Length::from_mil(8.0),
+            rings: vec![(0, Length::from_mil(8.0)), (1, Length::from_mil(18.0))],
+            fab: Default::default(),
+        });
+        let void = 1_000_000.0 - copper(&pour(&b, 0));
+        let r = (void / std::f64::consts::PI).sqrt();
+        assert!((r - 12.0).abs() < 0.3, "{r}");
+        b.geometry.vias.clear();
+        // A small-holed GND pad: a rule for such pads connects it directly
+        // where the board-wide rule asks for a relief.
+        let relief = |b: &Board| 1_000_000.0 - copper(&pour(b, 0));
+        b.geometry.pads.push(Pad {
+            layer: LayerRef::AllCopper,
+            net: Some(0),
+            component: None,
+            name: "2".into(),
+            at: p(500.0, 500.0),
+            size_x: Length::from_mil(60.0),
+            size_y: Length::from_mil(60.0),
+            hole: Length::from_mil(30.0),
+            shape: PadShape::Round,
+            rotation_deg: 0.0,
+            outline: Vec::new(),
+            stack: Vec::new(),
+            fab: Default::default(),
+        });
+        let rule = |name: &str, priority, scope: &str, style: &str| Rule {
+            kind: "PolygonConnect".into(),
+            name: name.into(),
+            enabled: true,
+            priority,
+            scope: vec!["All".into(), scope.into()],
+            params: [
+                ("CONNECTSTYLE".to_string(), style.to_string()),
+                ("AIRGAPWIDTH".to_string(), "10mil".to_string()),
+                ("RELIEFCONDUCTORWIDTH".to_string(), "10mil".to_string()),
+            ]
+            .into(),
+        };
+        b.rules.push(rule("PolygonConnect", 3, "All", "Relief"));
+        let both = relief(&b);
+        b.rules.push(rule(
+            "Thermal Pads",
+            2,
+            "IsPad and HoleSize <= 39",
+            "Direct",
+        ));
+        // Only the surface pad, which has no hole, keeps its relief.
+        let one = relief(&b);
+        assert!(one > 1000.0 && both - one > 2000.0, "{both} {one}");
     }
 }

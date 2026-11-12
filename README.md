@@ -233,14 +233,19 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
 ## Limits to know
 
 - Lengths include tracks, arcs and via barrels between the layers used, but
-  not package pin delays. Nets joined through copper pours are not checked
-  for completeness yet.
+  not package pin delays. Nets joined through copper pours are checked for
+  completeness when the pour's copper is on the board (or Trace poured it);
+  nets of hatched or shelved Altium pours are not.
 - Routing checks clearance to tracks, pads, vias and drill holes of other
-  nets. Pours on Altium boards are poured again after edits, close to
-  Altium's own result (within a few percent of copper area on the test
-  boards; rules scoped to parts, rooms or layers are not applied). Pours
-  from Gerber, ODB++ and
-  Allegro files are not poured again.
+  nets. Pours on Altium boards are poured again after edits, and pours
+  saved without their copper are poured when the board opens. On TI's
+  DAC39RF12 EVM (16 layers, 46 pours) Trace's pour is within 1% of TI's
+  Gerbers by copper area, and the design rule check finds the same as on
+  TI's own copper. Polygon cutouts, removed via pads, and connect rules
+  for kinds of pads, hole sizes, parts and layers are followed; rules for
+  rooms are not, necks are not removed, and the board edge is kept by the
+  board outline clearance rule (TI's copper came 10 mil closer). Pours
+  from Gerber, ODB++ and Allegro files are not poured again.
   Moving a part stretches only the last segment of each track on its
   pads, so moving far leaves long diagonal segments to tidy up; tracks on
   surface pads stay behind when the part is flipped. Silk follows parts
@@ -295,8 +300,8 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   on mechanical layers are left out, so a `.PcbLib` saved by Trace has no
   3D models. Updating parts keeps their designator and value text where
   it was.
-- Altium solid regions are drawn; Altium polygon pours are counted but not
-  drawn yet. Allegro pours are drawn.
+- Hatched and shelved Altium pours are not drawn (solid pours are).
+  Allegro pours are drawn.
 - Traced Gerber nets get names like `Net-042`, since bare Gerber files do not
   carry net names. Parts are only known when the files carry X2 component
   attributes or come from ODB++.

@@ -492,9 +492,12 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
 
     for p in of("Region") {
         let layer = layer(p);
-        if matches!(layer, LayerRef::AllCopper | LayerRef::Keepout)
-            || p.int("KIND").unwrap_or(0) != 0
-            || p.bool("ISBOARDCUTOUT")
+        // Polygon cutouts: areas pours leave empty.
+        let cutout = p.int("KIND") == Some(1);
+        if p.bool("ISBOARDCUTOUT")
+            || !(cutout || p.int("KIND").unwrap_or(0) == 0)
+            || layer == LayerRef::Keepout
+            || (layer == LayerRef::AllCopper && !cutout)
         {
             continue;
         }
@@ -515,6 +518,19 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
             })
             .filter(|h| h.len() >= 3)
             .collect();
+        if cutout {
+            if matches!(layer, LayerRef::Copper(_) | LayerRef::AllCopper) {
+                g.cutouts.push(Polygon {
+                    layer,
+                    net: None,
+                    outline,
+                    holes,
+                    pour: None,
+                    component: index(p, "COMPONENT"),
+                });
+            }
+            continue;
+        }
         let net = index(p, "NET")
             .or_else(|| {
                 pour_nets
@@ -624,13 +640,11 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
     board.stats.vias = g.vias.len();
     board.stats.pads = g.pads.len();
 
+    // Pours saved without their copper are poured here.
+    trace_core::pour::pour_missing(&mut board);
+    trace_core::pour::mark_unpoured(&mut board);
     trace_core::connectivity::analyse(&mut board);
     board.stats.polygons = pour_nets.len();
-    for n in pour_nets.into_iter().flatten() {
-        if let Some(net) = board.nets.get_mut(n as usize) {
-            net.has_pour = true;
-        }
-    }
     Ok(board)
 }
 
@@ -669,6 +683,7 @@ mod tests {
             "|RECORD=Via|NET=0|LAYER=MULTILAYER|X=600mil|Y=200mil|DIAMETER=18mil|HOLESIZE=8mil|STARTLAYER=TOP|ENDLAYER=BOTTOM",
             "|RECORD=Polygon|ID=0|NET=1|LAYER=BOTTOM",
             "RECORD=Region|POLYGON=0|LAYER=BOTTOM|KIND=0|MAINCONTOURVERTEXCOUNT=3|MVX0=0|MVY0=0|MVX1=10000000|MVY1=0|MVX2=0|MVY2=10000000|HOLECOUNT=0",
+            "RECORD=Region|LAYER=TOP|KIND=1|ISSHAPEBASED=TRUE|MAINCONTOURVERTEXCOUNT=3|VX0=0mil|VY0=0mil|VX1=100mil|VY1=0mil|VX2=0mil|VY2=100mil|HOLECOUNT=0",
         ]
         .join("\r");
         std::fs::write(&path, text).unwrap();
@@ -685,6 +700,11 @@ mod tests {
         assert_eq!(g.polygons[0].net, Some(1));
         assert_eq!(g.polygons[0].layer, LayerRef::Copper(1));
         assert_eq!(g.outline.len(), 3);
-        assert!(b.nets[1].has_pour);
+        // A polygon cutout is kept apart, as an area pours leave empty.
+        assert_eq!(g.polygons.len(), 1);
+        assert_eq!(g.cutouts.len(), 1);
+        assert_eq!(g.cutouts[0].layer, LayerRef::Copper(0));
+        // Its pour has its copper on the board, so the net is checked.
+        assert!(!b.nets[1].has_pour);
     }
 }

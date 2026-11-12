@@ -3,6 +3,30 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.29.0 (2026-11-12)
+
+- Altium polygon pours saved without their copper are poured when the
+  board opens, each layer on its own thread, and their nets are then
+  checked for unrouted pads like any other net.
+- Pouring follows Altium more closely:
+  - polygon cutouts (keep-out areas for pours) are read and obeyed, and
+    move with their part;
+  - vias whose pad Altium removed on a layer keep the pour back from the
+    hole by the hole clearance, not from a pad that is not there;
+  - holes of pads (mounting holes) are kept clear by the hole clearance
+    as well as the land;
+  - polygon connect rules are judged for each pad and via, so rules such
+    as `IsPad and HoleSize <= 39` (direct connect for thermal vias), or
+    rules for parts, footprints and layers, apply where they should;
+  - diagonal thermal spokes on square pads reach the pour;
+  - islands under the pour's area threshold are removed.
+- On TI's DAC39RF12 EVM with its 167 poured regions taken out, Trace pours
+  all 46 pours in about 5 s (4 cores); the copper is within 1% of TI's
+  Gerbers on every layer (it was about 4.4%), and the design rule check
+  gives the same 296 results as on TI's own copper.
+- Rule scopes can now ask `HoleSize` (`=`, `<`, `<=`, `>`, `>=`, `<>`)
+  and `OnLayer('…')`.
+
 ## 0.28.0 (2026-11-12)
 
 - Schematics save as Altium sheets: Save as Altium… in the schematic

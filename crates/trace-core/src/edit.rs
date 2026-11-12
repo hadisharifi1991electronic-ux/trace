@@ -12,6 +12,7 @@ pub struct Prims {
     pub arcs: Vec<Arc>,
     pub polygons: Vec<Polygon>,
     pub areas: Vec<Polygon>,
+    pub cutouts: Vec<Polygon>,
     pub components: Vec<Component>,
 }
 
@@ -24,6 +25,7 @@ impl Prims {
             arcs: g.arcs.clone(),
             polygons: g.polygons.clone(),
             areas: g.areas.clone(),
+            cutouts: g.cutouts.clone(),
             components: board.components.clone(),
         }
     }
@@ -35,6 +37,7 @@ impl Prims {
         g.arcs = self.arcs.clone();
         g.polygons = self.polygons.clone();
         g.areas = self.areas.clone();
+        g.cutouts = self.cutouts.clone();
         board.components = self.components.clone();
     }
 }

@@ -174,6 +174,7 @@ pub fn place(board: &mut Board, index: usize, from: Placement, to: Placement) {
         .polygons
         .iter_mut()
         .chain(g.areas.iter_mut())
+        .chain(g.cutouts.iter_mut())
         .filter(|f| f.component == me)
     {
         for q in f.outline.iter_mut().chain(f.holes.iter_mut().flatten()) {

@@ -765,12 +765,14 @@ fn read_records(records: &[SchRecord], name: String, file_name: &str) -> Sheet {
             }
             Some(NET_LABEL) => {
                 let t = p.str("TEXT");
+                let ti = b.d.texts.len();
+                b.label(k, p, t.clone());
                 b.d.tags.push(NetTag {
                     at: vec![at(p)],
-                    text: t.clone(),
+                    text: t,
                     kind: TagKind::Label,
+                    graphic: (b.d.texts.len() > ti).then_some(ti as u32),
                 });
-                b.label(k, p, t);
             }
             Some(POWER_PORT) => power_port(&mut b, k, p),
             Some(PORT) => port(&mut b, k, p),
@@ -1074,6 +1076,7 @@ fn power_port(b: &mut Builder, k: usize, p: &Props) {
         at: vec![loc],
         text: text.clone(),
         kind: TagKind::Power,
+        graphic: None,
     });
     // Glyphs in local (across, along) mil, after KiCad's drawings.
     let q = |u: f64, v: f64| -> Pt { [loc[0] + n[0] * u + d[0] * v, loc[1] + n[1] * u + d[1] * v] };
@@ -1243,6 +1246,7 @@ fn port(b: &mut Builder, k: usize, p: &Props) {
         at: vec![q(0.0, 0.0), q(w, 0.0)],
         text: name.clone(),
         kind: TagKind::Port,
+        graphic: None,
     });
     let (s, just) = match p.int("ALIGNMENT").unwrap_or(0) {
         1 => (w - tip, 5),
@@ -1296,6 +1300,7 @@ fn sheet_entry(b: &mut Builder, k: usize, p: &Props, min: Pt, max: Pt) {
         at: vec![edge],
         text: name.clone(),
         kind: TagKind::SheetEntry,
+        graphic: None,
     });
     let (rot, just) = match side {
         1 => (0, 5),

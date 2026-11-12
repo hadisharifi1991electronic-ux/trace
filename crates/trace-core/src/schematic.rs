@@ -72,8 +72,52 @@ pub struct SchImage {
     pub min: Pt,
     pub max: Pt,
     pub keep_aspect: bool,
-    #[serde(skip)]
+    /// Kept as base64 in Trace files.
+    #[serde(default, with = "b64")]
     pub data: std::sync::Arc<Vec<u8>>,
+}
+
+/// Picture bytes as base64 text.
+mod b64 {
+    use serde::{Deserialize, Deserializer, Serializer};
+    use std::sync::Arc;
+
+    const ABC: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+
+    pub fn serialize<S: Serializer>(v: &Arc<Vec<u8>>, s: S) -> Result<S::Ok, S::Error> {
+        let mut out = String::with_capacity(v.len() * 4 / 3 + 4);
+        for c in v.chunks(3) {
+            let n = (c[0] as u32) << 16
+                | (*c.get(1).unwrap_or(&0) as u32) << 8
+                | *c.get(2).unwrap_or(&0) as u32;
+            for k in 0..4 {
+                if k <= c.len() {
+                    out.push(ABC[(n >> (18 - 6 * k) & 63) as usize] as char);
+                } else {
+                    out.push('=');
+                }
+            }
+        }
+        s.serialize_str(&out)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Arc<Vec<u8>>, D::Error> {
+        let text = String::deserialize(d)?;
+        let mut out = Vec::with_capacity(text.len() * 3 / 4);
+        let (mut acc, mut bits) = (0u32, 0);
+        for b in text.bytes() {
+            let Some(v) = ABC.iter().position(|&a| a == b) else {
+                continue;
+            };
+            acc = acc << 6 | v as u32;
+            bits += 6;
+            if bits >= 8 {
+                bits -= 8;
+                out.push((acc >> bits) as u8);
+            }
+        }
+        Ok(Arc::new(out))
+    }
 }
 
 impl Drawing {
@@ -158,6 +202,9 @@ pub struct NetTag {
     pub at: Vec<Pt>,
     pub text: String,
     pub kind: TagKind,
+    /// The text that draws it (`Drawing::texts`), for net labels.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub graphic: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -371,11 +418,13 @@ mod tests {
                     at: vec![[10.0, 0.0]],
                     text: "A".into(),
                     kind: TagKind::Label,
+                    graphic: None,
                 },
                 NetTag {
                     at: vec![[250.0, 0.0]],
                     text: "A".into(),
                     kind: TagKind::Label,
+                    graphic: None,
                 },
             ],
             ..Default::default()
@@ -387,5 +436,51 @@ mod tests {
         assert_eq!(net(0), net(3));
         assert_eq!(d.nets[net(3)].pins, vec![0]);
         assert_eq!(d.nets[net(0)].name.as_deref(), Some("A"));
+    }
+}
+
+/// A Trace schematic file (`.tracesch`): every sheet of a project as
+/// edited, and the sheets as they were when the board last matched them,
+/// so changes can still be carried to the board after reopening.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SchFile {
+    /// Trace version that wrote it.
+    pub version: String,
+    /// The project it came from, if any.
+    #[serde(default)]
+    pub project: Option<String>,
+    pub sheets: Vec<SavedSheet>,
+    /// Designators renamed on the sheets and not yet on the board: now ->
+    /// as on the board.
+    #[serde(default)]
+    pub renames: std::collections::BTreeMap<String, String>,
+    /// Every designator renamed since the sheets were first read: now -> as
+    /// in the original board file.
+    #[serde(default)]
+    pub original_renames: std::collections::BTreeMap<String, String>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct SavedSheet {
+    /// The sheet's file name, as sheet symbols refer to it.
+    pub file: String,
+    pub sheet: Sheet,
+    /// The drawing as the board last matched it (no pictures).
+    #[serde(default)]
+    pub synced: Option<Drawing>,
+    /// The drawing as first read, which the original board file matches.
+    #[serde(default)]
+    pub original: Option<Drawing>,
+}
+
+impl SchFile {
+    pub fn save(&self, path: &std::path::Path) -> std::io::Result<()> {
+        let f = std::io::BufWriter::new(std::fs::File::create(path)?);
+        serde_json::to_writer(f, self).map_err(std::io::Error::other)
+    }
+
+    pub fn load(path: &std::path::Path) -> std::io::Result<SchFile> {
+        let f = std::io::BufReader::new(std::fs::File::open(path)?);
+        serde_json::from_reader(f).map_err(std::io::Error::other)
     }
 }

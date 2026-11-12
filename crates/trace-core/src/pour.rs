@@ -658,6 +658,24 @@ fn touched(board: &Board, e: &Edit) -> Option<([f64; 4], Vec<u8>)> {
             let b = crate::place::area(board, *index, *from, *to)?;
             Some((b, (0..n).collect()))
         }
+        Edit::Netlist { pads, .. } => {
+            // Pads that change net: pours about them connect differently.
+            let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+            for p in pads
+                .iter()
+                .filter_map(|&(i, ..)| board.geometry.pads.get(i))
+            {
+                let c = mil(p.at);
+                let r = p.size_x.mil().max(p.size_y.mil());
+                b = [
+                    b[0].min(c[0] - r),
+                    b[1].min(c[1] - r),
+                    b[2].max(c[0] + r),
+                    b[3].max(c[1] + r),
+                ];
+            }
+            (b[0] <= b[2]).then(|| (b, (0..n).collect()))
+        }
         Edit::MoveComponent { .. } | Edit::SetPolygons { .. } => None,
     }
 }

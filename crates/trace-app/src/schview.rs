@@ -1,5 +1,7 @@
-//! The schematic viewer: draws Altium sheets, and cross-probes nets and
-//! parts with the board.
+//! The schematic editor: draws Altium sheets, cross-probes nets and parts
+//! with the board, edits the sheets (move, turn and delete parts, wires,
+//! net labels, names and values), saves them as a Trace file, and carries
+//! the edits to the board.
 
 use crate::canvas::View;
 use crate::scene::Scene;
@@ -7,7 +9,35 @@ use eframe::egui::{self, Color32, FontId, Pos2, Rect, RichText, Shape, Stroke};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
-use trace_core::{SchGeom, Sheet};
+use trace_core::eco::{Change, Plan};
+use trace_core::sch_edit::{snap, WIRE_COLOR};
+use trace_core::{Drawing, SavedSheet, SchFile, SchGeom, Sheet};
+
+/// Grid the editing tools snap to, in mil.
+const GRID: f64 = 50.0;
+
+/// What a click on the sheet does.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SchTool {
+    #[default]
+    Select,
+    Wire,
+    Label,
+}
+
+/// An edit worked out while drawing, made once the drawing is done with.
+enum Act {
+    Move(usize, [f64; 2]),
+    Turn(usize),
+    DeletePart(usize),
+    DeleteWire(usize),
+    DeleteTag(usize),
+    Wire(Vec<[f64; 2]>),
+    Label([f64; 2], String),
+    Undo,
+    Redo,
+    Save,
+}
 
 /// (designator, pad name) -> board net.
 type PadNets = HashMap<(String, String), u32>;
@@ -33,6 +63,10 @@ pub struct Slot {
 pub enum Pick {
     BoardNet(u32),
     Part(String),
+    /// Carry the schematic edits to the board.
+    Eco(trace_core::edit::Edit),
+    /// Something to tell the person.
+    Message(String, bool),
 }
 
 #[derive(Default)]
@@ -58,6 +92,98 @@ pub struct Schematics {
     picked: Option<u32>,
     /// Area to frame on the next frame, once the view knows its size.
     focus: Option<[f32; 4]>,
+    pub tool: SchTool,
+    /// Each sheet as the board last matched it.
+    baseline: Vec<Option<Drawing>>,
+    undo: Vec<(usize, Sheet)>,
+    redo: Vec<(usize, Sheet)>,
+    /// Designators renamed on the sheets: now -> as on the board.
+    renames: HashMap<String, String>,
+    /// The sheets as first read, which the board file as it was matches,
+    /// and every rename since.
+    original: Vec<Option<Drawing>>,
+    original_renames: HashMap<String, String>,
+    /// Edited since saved.
+    pub dirty: bool,
+    /// The Trace schematic file the sheets were read from or saved to.
+    pub saved_to: Option<PathBuf>,
+    sel_wire: Option<usize>,
+    sel_tag: Option<usize>,
+    /// A part being dragged, and the grid point it was last moved to.
+    drag: Option<(usize, [f64; 2])>,
+    /// Points of the wire being drawn.
+    wire_pts: Vec<[f64; 2]>,
+    /// Where a net label goes, while its name is typed.
+    label_at: Option<[f64; 2]>,
+    label_text: String,
+    /// Name and value fields for the selected part: (sheet, part).
+    edit_for: Option<(usize, usize)>,
+    edit_name: String,
+    edit_value: String,
+    edit_tag: String,
+    /// Changes waiting to go to the board.
+    eco: Option<Plan>,
+    note: Option<String>,
+}
+
+/// The drawing to keep as the board's match: no pictures.
+fn synced(d: &Drawing) -> Drawing {
+    let mut d = d.clone();
+    d.images.clear();
+    d
+}
+
+/// The smallest part box holding `p`.
+fn part_at(d: &Drawing, p: [f64; 2]) -> Option<usize> {
+    d.parts
+        .iter()
+        .enumerate()
+        .filter(|(_, q)| {
+            p[0] >= q.min[0] && p[0] <= q.max[0] && p[1] >= q.min[1] && p[1] <= q.max[1]
+        })
+        .min_by(|a, b| {
+            let area = |q: &trace_core::SchPart| (q.max[0] - q.min[0]) * (q.max[1] - q.min[1]);
+            area(a.1).total_cmp(&area(b.1))
+        })
+        .map(|(i, _)| i)
+}
+
+/// The point on the wire nearest `p`, if one runs within `catch`: on the
+/// grid along the wire where that stays on it.
+fn on_wire_near(d: &Drawing, p: [f64; 2], catch: f64) -> Option<[f64; 2]> {
+    let mut best: Option<([f64; 2], f64)> = None;
+    for w in &d.wires {
+        for s in w.windows(2) {
+            let dist = seg_dist(p, s[0], s[1]);
+            if dist < catch && best.is_none_or(|b| dist < b.1) {
+                let (a, b) = (s[0], s[1]);
+                let q = if (a[0] - b[0]).abs() < 1e-6 {
+                    let y = snap(p, GRID)[1];
+                    let y = if y >= a[1].min(b[1]) && y <= a[1].max(b[1]) {
+                        y
+                    } else {
+                        p[1]
+                    };
+                    [a[0], y]
+                } else if (a[1] - b[1]).abs() < 1e-6 {
+                    let x = snap(p, GRID)[0];
+                    let x = if x >= a[0].min(b[0]) && x <= a[0].max(b[0]) {
+                        x
+                    } else {
+                        p[0]
+                    };
+                    [x, a[1]]
+                } else {
+                    let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+                    let t = (((p[0] - a[0]) * dx + (p[1] - a[1]) * dy) / (dx * dx + dy * dy))
+                        .clamp(0.0, 1.0);
+                    [a[0] + t * dx, a[1] + t * dy]
+                };
+                best = Some((q, dist));
+            }
+        }
+    }
+    best.map(|b| b.0)
 }
 
 fn rgb(c: [u8; 3]) -> Color32 {
@@ -280,9 +406,20 @@ impl Schematics {
         self.loader = Some(rx);
     }
 
-    /// Opens a `.SchDoc` or every sheet of a `.PrjPcb`.
+    /// Opens a `.SchDoc`, a Trace schematic, or every sheet of a `.PrjPcb`
+    /// (from its Trace schematic, when it has been saved as one).
     pub fn open_path(&mut self, path: &Path, ctx: &egui::Context) {
+        if ext(path) == "tracesch" {
+            if let Err(e) = self.open_saved(path, None) {
+                self.note = Some(format!("Could not read {}: {e}", path.display()));
+            }
+            return;
+        }
         if ext(path) == "prjpcb" {
+            let saved = path.with_extension("tracesch");
+            if saved.exists() && self.open_saved(&saved, Some(path.to_path_buf())).is_ok() {
+                return;
+            }
             let sheets = project_docs(path)
                 .into_iter()
                 .filter(|p| ext(p) == "schdoc" && p.exists())
@@ -308,6 +445,14 @@ impl Schematics {
                                 .iter()
                                 .map(|sh| shape_box(&sh.geom, sh.width))
                                 .collect();
+                            if self.baseline.len() < i + 1 {
+                                self.baseline.resize(i + 1, None);
+                            }
+                            self.baseline[i] = Some(synced(&sheet.drawing));
+                            if self.original.len() < i + 1 {
+                                self.original.resize(i + 1, None);
+                            }
+                            self.original[i] = Some(synced(&sheet.drawing));
                             s.sheet = Some(sheet);
                         }
                         Err(e) => s.error = Some(e),
@@ -326,11 +471,209 @@ impl Schematics {
         }
     }
 
+    /// Reads sheets saved by Trace.
+    pub fn open_saved(&mut self, path: &Path, project: Option<PathBuf>) -> Result<(), String> {
+        let f = SchFile::load(path).map_err(|e| e.to_string())?;
+        let dir = path.parent().unwrap_or(Path::new(".")).to_path_buf();
+        *self = Schematics {
+            project: project.or_else(|| {
+                f.project
+                    .as_ref()
+                    .map(|p| dir.join(p))
+                    .filter(|p| p.exists())
+            }),
+            needs_fit: true,
+            saved_to: Some(path.to_path_buf()),
+            ..Default::default()
+        };
+        for s in f.sheets {
+            let file = dir.join(&s.file);
+            self.slots.push(Slot {
+                name: file
+                    .file_stem()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                path: file,
+                boxes: s
+                    .sheet
+                    .drawing
+                    .shapes
+                    .iter()
+                    .map(|sh| shape_box(&sh.geom, sh.width))
+                    .collect(),
+                error: None,
+                sheet: None,
+            });
+            let base = s.synced.unwrap_or_else(|| synced(&s.sheet.drawing));
+            self.original
+                .push(Some(s.original.unwrap_or_else(|| base.clone())));
+            self.baseline.push(Some(base));
+            self.slots.last_mut().unwrap().sheet = Some(s.sheet);
+        }
+        self.renames = f.renames.into_iter().collect();
+        self.original_renames = f.original_renames.into_iter().collect();
+        Ok(())
+    }
+
+    /// Where the sheets save to: the file they came from, else next to the
+    /// project or first sheet.
+    fn save_path(&self) -> Option<PathBuf> {
+        self.saved_to
+            .clone()
+            .or_else(|| self.project.as_ref().map(|p| p.with_extension("tracesch")))
+            .or_else(|| {
+                self.slots
+                    .first()
+                    .map(|s| s.path.with_extension("tracesch"))
+            })
+    }
+
+    /// Saves every sheet as one Trace schematic file.
+    pub fn save(&mut self) -> Result<PathBuf, String> {
+        if self.loader.is_some() {
+            return Err("Wait until every sheet has been read.".into());
+        }
+        let path = self.save_path().ok_or("Nothing to save.")?;
+        let file = SchFile {
+            version: env!("CARGO_PKG_VERSION").to_string(),
+            project: self
+                .project
+                .as_ref()
+                .and_then(|p| p.file_name())
+                .map(|f| f.to_string_lossy().into_owned()),
+            sheets: self
+                .slots
+                .iter()
+                .enumerate()
+                .filter_map(|(i, s)| {
+                    Some(SavedSheet {
+                        file: s.path.file_name()?.to_string_lossy().into_owned(),
+                        sheet: s.sheet.clone()?,
+                        synced: self.baseline.get(i).cloned().flatten(),
+                        original: self.original.get(i).cloned().flatten(),
+                    })
+                })
+                .collect(),
+            renames: self
+                .renames
+                .iter()
+                .map(|(a, b)| (a.clone(), b.clone()))
+                .collect(),
+            original_renames: self
+                .original_renames
+                .iter()
+                .map(|(a, b)| (a.clone(), b.clone()))
+                .collect(),
+        };
+        file.save(&path).map_err(|e| e.to_string())?;
+        self.saved_to = Some(path.clone());
+        self.dirty = false;
+        Ok(path)
+    }
+
+    /// What carrying the sheet edits to `board` would change. A board read
+    /// fresh from its file is compared with the sheets as first read; one
+    /// already updated (or saved by Trace after an update) with the sheets
+    /// as it last took them.
+    fn plan(&self, scene: &Scene) -> Plan {
+        let fresh = !scene.from_sheets && ext(&scene.path) != "tracepcb";
+        let (base, renames) = if fresh {
+            (&self.original, &self.original_renames)
+        } else {
+            (&self.baseline, &self.renames)
+        };
+        let before: Vec<&Drawing> = base.iter().flatten().collect();
+        let after: Vec<&Drawing> = self
+            .slots
+            .iter()
+            .filter_map(|s| s.sheet.as_ref().map(|s| &s.drawing))
+            .collect();
+        // Renames still standing: the new name is on a sheet, the old one
+        // no longer is.
+        let on_sheets: HashSet<String> = after
+            .iter()
+            .flat_map(|d| d.parts.iter().map(|p| p.designator.to_ascii_uppercase()))
+            .collect();
+        let renames: HashMap<String, String> = renames
+            .iter()
+            .filter(|(now, was)| on_sheets.contains(*now) && !on_sheets.contains(*was))
+            .map(|(a, b)| (a.clone(), b.clone()))
+            .collect();
+        trace_core::eco::plan(&before, &after, &renames, &scene.board)
+    }
+
+    /// The board now matches the sheets.
+    fn synced_now(&mut self) {
+        self.baseline = self
+            .slots
+            .iter()
+            .map(|s| s.sheet.as_ref().map(|s| synced(&s.drawing)))
+            .collect();
+        self.renames.clear();
+        self.dirty = true;
+    }
+
+    /// Makes one edit to the current sheet as an undoable step.
+    fn edit(&mut self, f: impl FnOnce(&mut Sheet)) {
+        let cur = self.current;
+        let Some(sheet) = self.slots.get_mut(cur).and_then(|s| s.sheet.as_mut()) else {
+            return;
+        };
+        self.undo.push((cur, sheet.clone()));
+        if self.undo.len() > 200 {
+            self.undo.remove(0);
+        }
+        self.redo.clear();
+        f(sheet);
+        self.after_edit(cur);
+    }
+
+    /// Brings what is worked out from a sheet up to date after it changed.
+    fn after_edit(&mut self, i: usize) {
+        if let Some(s) = self.slots.get_mut(i) {
+            if let Some(sheet) = &s.sheet {
+                s.boxes = sheet
+                    .drawing
+                    .shapes
+                    .iter()
+                    .map(|sh| shape_box(&sh.geom, sh.width))
+                    .collect();
+            }
+        }
+        self.hl_for = None;
+        self.sel_net = None;
+        self.dirty = true;
+    }
+
+    fn step(&mut self, back: bool) {
+        let (from, to) = if back {
+            (&mut self.undo, &mut self.redo)
+        } else {
+            (&mut self.redo, &mut self.undo)
+        };
+        let Some((i, sheet)) = from.pop() else { return };
+        let Some(slot) = self.slots.get_mut(i) else {
+            return;
+        };
+        if let Some(now) = slot.sheet.replace(sheet) {
+            to.push((i, now));
+        }
+        self.select_sheet(i);
+        self.sel_part = None;
+        self.sel_wire = None;
+        self.sel_tag = None;
+        self.after_edit(i);
+    }
+
     pub fn select_sheet(&mut self, i: usize) {
         if i < self.slots.len() && i != self.current {
             self.current = i;
             self.sel_net = None;
             self.sel_part = None;
+            self.sel_wire = None;
+            self.sel_tag = None;
+            self.wire_pts.clear();
+            self.drag = None;
             self.needs_fit = true;
         }
     }
@@ -526,6 +869,78 @@ impl Schematics {
                 ui.label(format!("Reading sheets: {done} of {total}"));
             });
         }
+        // Editing tools.
+        ui.horizontal(|ui| {
+            for (t, name, tip) in [
+                (
+                    SchTool::Select,
+                    "Select",
+                    "Click to select, drag parts to move them",
+                ),
+                (
+                    SchTool::Wire,
+                    "Wire",
+                    "Draw wires: click each corner, double-click or Esc to end (W)",
+                ),
+                (
+                    SchTool::Label,
+                    "Net label",
+                    "Click a wire or pin to name its net (N)",
+                ),
+            ] {
+                if ui
+                    .selectable_label(self.tool == t, name)
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    self.tool = t;
+                    self.wire_pts.clear();
+                }
+            }
+        });
+        ui.horizontal(|ui| {
+            let save = ui
+                .add_enabled(self.dirty, egui::Button::new("Save"))
+                .on_hover_text("Save the sheets as one Trace schematic file next to the project (Ctrl+S)");
+            if save.clicked() {
+                self.note = Some(match self.save() {
+                    Ok(p) => format!("Saved {}", p.display()),
+                    Err(e) => e,
+                });
+            }
+            if let Some(scene) = scene {
+                if ui
+                    .button("Update PCB…")
+                    .on_hover_text("Carry the sheet edits to the board: pin nets, new nets, net and part names")
+                    .clicked()
+                {
+                    let plan = self.plan(scene);
+                    if plan.changes.is_empty() {
+                        self.note = Some("The board already matches the sheets.".into());
+                    } else {
+                        self.eco = Some(plan);
+                    }
+                }
+            }
+            if ui
+                .add_enabled(!self.undo.is_empty(), egui::Button::new("⟲"))
+                .on_hover_text("Undo (Ctrl+Z)")
+                .clicked()
+            {
+                self.step(true);
+            }
+            if ui
+                .add_enabled(!self.redo.is_empty(), egui::Button::new("⟳"))
+                .on_hover_text("Redo (Ctrl+Y)")
+                .clicked()
+            {
+                self.step(false);
+            }
+        });
+        if let Some(n) = &self.note {
+            ui.label(RichText::new(n).weak().small());
+        }
+        ui.separator();
         ui.label(RichText::new("Sheets").weak());
         let mut go = None;
         egui::ScrollArea::vertical()
@@ -561,19 +976,143 @@ impl Schematics {
             );
         }
         ui.separator();
-        if let Some(sheet) = self.slots.get(self.current).and_then(|s| s.sheet.as_ref()) {
-            if let Some(pi) = self.sel_part {
-                if let Some(p) = sheet.drawing.parts.get(pi) {
-                    let sym = &sheet.symbols[p.symbol];
-                    ui.label(RichText::new(&p.designator).strong().size(16.0));
-                    if let Some(v) = &sym.value {
-                        ui.label(v);
-                    }
-                    ui.label(RichText::new(&sym.library_ref).weak());
-                    if !sym.description.is_empty() {
-                        ui.label(RichText::new(&sym.description).weak().small());
+        let cur = self.current;
+        // Name and value of the selected part, which can be changed.
+        if let Some(pi) = self.sel_part {
+            let found = self
+                .slots
+                .get(cur)
+                .and_then(|s| s.sheet.as_ref())
+                .and_then(|sheet| {
+                    let p = sheet.drawing.parts.get(pi)?;
+                    let sym = sheet.symbols.get(p.symbol)?;
+                    Some((
+                        p.designator.clone(),
+                        sym.value.clone().unwrap_or_default(),
+                        sym.library_ref.clone(),
+                        sym.description.clone(),
+                    ))
+                });
+            if let Some((name, value, lib, desc)) = found {
+                if self.edit_for != Some((cur, pi)) {
+                    self.edit_for = Some((cur, pi));
+                    self.edit_name = name.clone();
+                    self.edit_value = value.clone();
+                }
+                ui.label(RichText::new(&name).strong().size(16.0));
+                let mut apply = false;
+                egui::Grid::new("part_fields")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.label("Designator");
+                        let r = ui.text_edit_singleline(&mut self.edit_name);
+                        apply |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        ui.end_row();
+                        ui.label("Value");
+                        let r = ui.text_edit_singleline(&mut self.edit_value);
+                        apply |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                        ui.end_row();
+                    });
+                let changed = self.edit_name.trim() != name || self.edit_value.trim() != value;
+                if ui
+                    .add_enabled(changed, egui::Button::new("Apply"))
+                    .clicked()
+                {
+                    apply = true;
+                }
+                if apply && changed {
+                    let (new_name, new_value) = (
+                        self.edit_name.trim().to_string(),
+                        self.edit_value.trim().to_string(),
+                    );
+                    let taken = new_name != name
+                        && self.slots.iter().filter_map(|s| s.sheet.as_ref()).any(|s| {
+                            s.drawing
+                                .parts
+                                .iter()
+                                .any(|p| p.designator.eq_ignore_ascii_case(&new_name))
+                        });
+                    if new_name.is_empty() || taken {
+                        self.note = Some(format!(
+                            "{new_name} is already used; pick another designator."
+                        ));
+                    } else {
+                        if new_name != name {
+                            // Every unit of a multi-part component shares the name.
+                            let was = self
+                                .renames
+                                .remove(&name.to_ascii_uppercase())
+                                .unwrap_or_else(|| name.to_ascii_uppercase());
+                            self.renames.insert(new_name.to_ascii_uppercase(), was);
+                            let first = self
+                                .original_renames
+                                .remove(&name.to_ascii_uppercase())
+                                .unwrap_or_else(|| name.to_ascii_uppercase());
+                            self.original_renames
+                                .insert(new_name.to_ascii_uppercase(), first);
+                        }
+                        let (n2, v2, old) = (new_name.clone(), new_value.clone(), name.clone());
+                        self.edit(move |sheet| {
+                            let units: Vec<usize> = sheet
+                                .drawing
+                                .parts
+                                .iter()
+                                .enumerate()
+                                .filter(|(_, p)| p.designator == old)
+                                .map(|(i, _)| i)
+                                .collect();
+                            for i in units {
+                                if n2 != old {
+                                    sheet.drawing.rename_part(i, &n2);
+                                }
+                                sheet.set_value(i, &v2);
+                            }
+                        });
+                        self.edit_for = None;
+                        self.note = Some(
+                            "Changed on the sheet. Update PCB carries it to the board.".into(),
+                        );
                     }
                 }
+                ui.label(RichText::new(&lib).weak());
+                if !desc.is_empty() {
+                    ui.label(RichText::new(&desc).weak().small());
+                }
+            }
+        } else if let Some(t) = self.sel_tag {
+            let found = self
+                .slots
+                .get(cur)
+                .and_then(|s| s.sheet.as_ref())
+                .and_then(|s| s.drawing.tags.get(t))
+                .map(|t| (t.text.clone(), t.kind));
+            if let Some((text, kind)) = found {
+                ui.label(RichText::new(format!("{kind:?} {text}")).strong());
+                if kind == trace_core::TagKind::Label {
+                    if self.edit_for != Some((cur, usize::MAX - t)) {
+                        self.edit_for = Some((cur, usize::MAX - t));
+                        self.edit_tag = text.clone();
+                    }
+                    let r = ui.text_edit_singleline(&mut self.edit_tag);
+                    if r.lost_focus()
+                        && ui.input(|i| i.key_pressed(egui::Key::Enter))
+                        && !self.edit_tag.trim().is_empty()
+                        && self.edit_tag.trim() != text
+                    {
+                        let new = self.edit_tag.trim().to_string();
+                        self.edit(move |s| s.drawing.rename_tag(t, &new));
+                        self.edit_for = None;
+                    }
+                    ui.label(
+                        RichText::new("Enter renames the label. Delete removes it.")
+                            .weak()
+                            .small(),
+                    );
+                }
+            }
+        }
+        if let Some(sheet) = self.slots.get(self.current).and_then(|s| s.sheet.as_ref()) {
+            if self.sel_part.is_some() || self.sel_tag.is_some() {
             } else if let Some(ni) = self.sel_net {
                 if let Some(n) = sheet.drawing.nets.get(ni) {
                     ui.label(
@@ -649,10 +1188,31 @@ impl Schematics {
                 }
             }
         }
-        if resp.dragged() {
+        // Pressing on a part with the Select tool drags it; anywhere else
+        // pans.
+        if resp.drag_started() && self.tool == SchTool::Select {
+            let origin = ui.input(|i| i.pointer.press_origin());
+            if let Some(o) = origin {
+                let b = self.view.to_board(o);
+                let p = [b[0] as f64, b[1] as f64];
+                if let Some(i) = part_at(&sheet.drawing, p) {
+                    self.undo.push((cur, sheet.clone()));
+                    self.redo.clear();
+                    self.drag = Some((i, snap(p, GRID)));
+                    self.sel_part = Some(i);
+                    self.sel_net = None;
+                    self.sel_wire = None;
+                    self.sel_tag = None;
+                }
+            }
+        }
+        if resp.dragged() && self.drag.is_none() {
             let d = resp.drag_delta();
             self.view.tx += d.x;
             self.view.ty += d.y;
+        }
+        if !resp.dragged() && !resp.drag_started() {
+            self.drag = None;
         }
         if ui.input(|i| i.key_pressed(egui::Key::F)) && !ui.ctx().wants_keyboard_input() {
             self.needs_fit = true;
@@ -867,10 +1427,84 @@ impl Schematics {
         }
         painter.extend(shapes);
 
-        // Hover and pick.
+        // Selected wire and label, the wire being drawn.
+        let sel_stroke = Stroke::new((30.0 * view.scale).max(4.0), HIGHLIGHT.gamma_multiply(0.5));
+        if let Some(w) = self.sel_wire.and_then(|w| d.wires.get(w)) {
+            let pts: Vec<Pos2> = w
+                .iter()
+                .map(|p| view.to_screen(p[0] as f32, p[1] as f32))
+                .collect();
+            painter.add(Shape::line(pts, sel_stroke));
+        }
+        if let Some(t) = self.sel_tag.and_then(|t| d.tags.get(t)) {
+            for a in &t.at {
+                painter.circle_stroke(
+                    view.to_screen(a[0] as f32, a[1] as f32),
+                    (40.0 * view.scale).max(6.0),
+                    sel_stroke,
+                );
+            }
+        }
         let pointer = resp.hover_pos().map(|p| view.to_board(p));
+        // Pin ends and wire ends close to the pointer win over the grid, so a
+        // wire lands on them even when they sit off the grid.
+        let catch = (10.0 / view.scale as f64).max(1.0);
+        let snapped = pointer.map(|p| {
+            let p = [p[0] as f64, p[1] as f64];
+            d.pins
+                .iter()
+                .map(|pin| pin.at)
+                .chain(d.wires.iter().flat_map(|w| [w[0], w[w.len() - 1]]))
+                .map(|q| (q, (q[0] - p[0]).hypot(q[1] - p[1])))
+                .filter(|(_, dist)| *dist < catch)
+                .min_by(|a, b| a.1.total_cmp(&b.1))
+                .map(|(q, _)| q)
+                .or_else(|| on_wire_near(d, p, catch))
+                // On a pin's line: its free end, where things connect.
+                .or_else(|| {
+                    d.pins
+                        .iter()
+                        .find(|pin| seg_dist(p, pin.at, pin.base) < catch)
+                        .map(|pin| pin.at)
+                })
+                .unwrap_or_else(|| snap(p, GRID))
+        });
+        let on_pin = snapped.is_some_and(|c| d.pins.iter().any(|pin| pin.at == c));
+        let wire_color = rgb(WIRE_COLOR);
+        if self.tool == SchTool::Wire {
+            if let (Some(&last), Some(c)) = (self.wire_pts.last(), snapped) {
+                let mut pts = self.wire_pts.clone();
+                pts.push([c[0], last[1]]);
+                pts.push(c);
+                let pts: Vec<Pos2> = pts
+                    .iter()
+                    .map(|p| view.to_screen(p[0] as f32, p[1] as f32))
+                    .collect();
+                painter.add(Shape::line(pts, Stroke::new(px(10.0).max(2.0), wire_color)));
+            }
+        }
+        if matches!(self.tool, SchTool::Wire | SchTool::Label) {
+            if let Some(c) = snapped {
+                let at = view.to_screen(c[0] as f32, c[1] as f32);
+                let r = 6.0;
+                if on_pin {
+                    painter.circle_stroke(at, 5.0, Stroke::new(1.5_f32, HIGHLIGHT));
+                }
+                painter.line_segment(
+                    [at - egui::vec2(r, 0.0), at + egui::vec2(r, 0.0)],
+                    Stroke::new(1.0_f32, wire_color),
+                );
+                painter.line_segment(
+                    [at - egui::vec2(0.0, r), at + egui::vec2(0.0, r)],
+                    Stroke::new(1.0_f32, wire_color),
+                );
+            }
+        }
+
+        // Hover and pick.
         self.hover = None;
         let mut pick = None;
+        let mut act: Option<Act> = None;
         if let Some(p) = pointer {
             let p = [p[0] as f64, p[1] as f64];
             let tol = (5.0 / view.scale as f64).max(8.0);
@@ -897,19 +1531,7 @@ impl Schematics {
                 .and_then(|i| net_of(0, i as u32))
                 .or_else(|| hit_wire.and_then(|i| net_of(1, i as u32)))
                 .or_else(|| hit_tag.and_then(|i| net_of(2, i as u32)));
-            let hit_part = d
-                .parts
-                .iter()
-                .enumerate()
-                .filter(|(_, q)| {
-                    p[0] >= q.min[0] && p[0] <= q.max[0] && p[1] >= q.min[1] && p[1] <= q.max[1]
-                })
-                .min_by(|a, b| {
-                    let area =
-                        |q: &trace_core::SchPart| (q.max[0] - q.min[0]) * (q.max[1] - q.min[1]);
-                    area(a.1).total_cmp(&area(b.1))
-                })
-                .map(|(i, _)| i);
+            let hit_part = part_at(d, p);
             let hit_link = d.links.iter().position(|l| {
                 p[0] >= l.min[0] && p[0] <= l.max[0] && p[1] >= l.min[1] && p[1] <= l.max[1]
             });
@@ -945,41 +1567,291 @@ impl Schematics {
                     )
                 })
             };
-            if resp.double_clicked() {
-                if let Some(i) = hit_link {
-                    let want = d.links[i].file.to_ascii_lowercase();
-                    let target = self.slots.iter().position(|s| {
-                        s.path
-                            .file_name()
-                            .is_some_and(|f| f.to_string_lossy().to_ascii_lowercase() == want)
-                    });
-                    if let Some(t) = target {
-                        self.select_sheet(t);
-                        return None;
-                    }
-                }
-            } else if resp.clicked() {
-                if let Some(n) = hit_net {
-                    self.sel_net = Some(n);
-                    self.sel_part = None;
-                    if let Some(scene) = scene {
-                        if let Some(bn) = self.board_net(cur, n, scene) {
-                            self.picked = Some(bn);
-                            pick = Some(Pick::BoardNet(bn));
+            let c = snapped.unwrap_or_else(|| snap(p, GRID));
+            match self.tool {
+                SchTool::Wire => {
+                    // Ending on a pin or another wire finishes the wire.
+                    let joins = d.pins.iter().any(|pin| pin.at == c)
+                        || d.wires
+                            .iter()
+                            .any(|w| w.windows(2).any(|s| seg_dist(c, s[0], s[1]) < 0.6));
+                    if resp.double_clicked() {
+                        if self.wire_pts.len() >= 2 {
+                            act = Some(Act::Wire(std::mem::take(&mut self.wire_pts)));
+                        }
+                    } else if resp.clicked() {
+                        match self.wire_pts.last().copied() {
+                            None => self.wire_pts.push(c),
+                            Some(last) => {
+                                let corner = [c[0], last[1]];
+                                if corner != last && corner != c {
+                                    self.wire_pts.push(corner);
+                                }
+                                if c != last {
+                                    self.wire_pts.push(c);
+                                }
+                                if joins && self.wire_pts.len() >= 2 {
+                                    act = Some(Act::Wire(std::mem::take(&mut self.wire_pts)));
+                                }
+                            }
                         }
                     }
-                } else if let Some(i) = hit_part {
-                    self.sel_part = Some(i);
-                    self.sel_net = None;
-                    let des = self.slots[cur].sheet.as_ref().unwrap().drawing.parts[i]
-                        .designator
-                        .clone();
-                    pick = Some(Pick::Part(des));
-                } else {
-                    self.sel_net = None;
-                    self.sel_part = None;
+                }
+                SchTool::Label => {
+                    if resp.clicked() {
+                        self.label_at = Some(c);
+                    }
+                }
+                SchTool::Select => {
+                    if let Some((i, last)) = self.drag {
+                        if c != last {
+                            act = Some(Act::Move(i, [c[0] - last[0], c[1] - last[1]]));
+                            self.drag = Some((i, c));
+                        }
+                    }
+                    if resp.double_clicked() {
+                        if let Some(i) = hit_link {
+                            let want = d.links[i].file.to_ascii_lowercase();
+                            let target = self.slots.iter().position(|s| {
+                                s.path.file_name().is_some_and(|f| {
+                                    f.to_string_lossy().to_ascii_lowercase() == want
+                                })
+                            });
+                            if let Some(t) = target {
+                                self.select_sheet(t);
+                                return None;
+                            }
+                        }
+                    } else if resp.clicked() {
+                        self.sel_wire = if hit_pin.is_none() { hit_wire } else { None };
+                        self.sel_tag = hit_tag;
+                        if let Some(n) = hit_net {
+                            self.sel_net = Some(n);
+                            self.sel_part = None;
+                            if let Some(scene) = scene {
+                                if let Some(bn) = self.board_net(cur, n, scene) {
+                                    self.picked = Some(bn);
+                                    pick = Some(Pick::BoardNet(bn));
+                                }
+                            }
+                        } else if let Some(i) = hit_part {
+                            self.sel_part = Some(i);
+                            self.sel_net = None;
+                            let des = self.slots[cur].sheet.as_ref().unwrap().drawing.parts[i]
+                                .designator
+                                .clone();
+                            pick = Some(Pick::Part(des));
+                        } else {
+                            self.sel_net = None;
+                            self.sel_part = None;
+                        }
+                    }
                 }
             }
+        }
+
+        // Keys, while the pointer is over the sheet and no text is typed.
+        let typing = ui.ctx().wants_keyboard_input();
+        if resp.hovered() && !typing && act.is_none() {
+            let (w, n, esc, space, del, undo, redo, save) = ui.input_mut(|i| {
+                (
+                    i.key_pressed(egui::Key::W),
+                    i.key_pressed(egui::Key::N),
+                    i.key_pressed(egui::Key::Escape),
+                    i.key_pressed(egui::Key::Space),
+                    i.key_pressed(egui::Key::Delete) || i.key_pressed(egui::Key::Backspace),
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::Z),
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::Y)
+                        || i.consume_key(
+                            egui::Modifiers::COMMAND | egui::Modifiers::SHIFT,
+                            egui::Key::Z,
+                        ),
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::S),
+                )
+            });
+            if w {
+                self.tool = SchTool::Wire;
+                self.wire_pts.clear();
+            }
+            if n {
+                self.tool = SchTool::Label;
+            }
+            if esc {
+                if self.wire_pts.len() >= 2 {
+                    act = Some(Act::Wire(std::mem::take(&mut self.wire_pts)));
+                } else {
+                    self.wire_pts.clear();
+                    self.tool = SchTool::Select;
+                }
+            }
+            if space {
+                if let Some(i) = self.drag.map(|d| d.0).or(self.sel_part) {
+                    act = Some(Act::Turn(i));
+                }
+            }
+            if del && self.tool == SchTool::Select {
+                act = if let Some(t) = self.sel_tag {
+                    Some(Act::DeleteTag(t))
+                } else if let Some(w) = self.sel_wire {
+                    Some(Act::DeleteWire(w))
+                } else {
+                    self.sel_part.map(Act::DeletePart)
+                };
+            }
+            if undo {
+                act = Some(Act::Undo);
+            }
+            if redo {
+                act = Some(Act::Redo);
+            }
+            if save {
+                act = Some(Act::Save);
+            }
+        }
+
+        // The name for a new net label.
+        if let Some(at) = self.label_at {
+            let mut open = true;
+            let mut done = false;
+            egui::Window::new("Net label")
+                .collapsible(false)
+                .resizable(false)
+                .open(&mut open)
+                .fixed_pos(view.to_screen(at[0] as f32, at[1] as f32) + egui::vec2(16.0, 16.0))
+                .show(ui.ctx(), |ui| {
+                    let r = ui.text_edit_singleline(&mut self.label_text);
+                    // Asked after reading the response: focusing first would
+                    // hide the Enter that just let go of it.
+                    if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                        done = true;
+                    } else {
+                        r.request_focus();
+                    }
+                    ui.label(
+                        RichText::new("Enter places it, Esc cancels.")
+                            .weak()
+                            .small(),
+                    );
+                });
+            if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                open = false;
+            }
+            if done && !self.label_text.trim().is_empty() {
+                act = Some(Act::Label(at, self.label_text.trim().to_string()));
+                self.label_at = None;
+            } else if !open {
+                self.label_at = None;
+            }
+        }
+
+        // Changes waiting to go to the board.
+        if let Some(plan) = &self.eco {
+            let mut open = true;
+            let mut apply = false;
+            let mut cancel = false;
+            egui::Window::new("Update PCB from schematic")
+                .collapsible(false)
+                .default_width(460.0)
+                .open(&mut open)
+                .show(ui.ctx(), |ui| {
+                    ui.label(match plan.changes.len() {
+                        1 => "1 change:".to_string(),
+                        n => format!("{n} changes:"),
+                    });
+                    egui::ScrollArea::vertical().max_height(320.0).show(ui, |ui| {
+                        for c in &plan.changes {
+                            let text = c.describe();
+                            match c {
+                                Change::NotOnBoard { .. } | Change::Removed { .. } => {
+                                    ui.label(RichText::new(text).color(Color32::from_rgb(240, 180, 90)))
+                                }
+                                _ => ui.label(text),
+                            };
+                        }
+                    });
+                    ui.separator();
+                    ui.label(
+                        RichText::new(
+                            "Tracks keep their nets: where a pad changes net, the DRC shows what to reroute.",
+                        )
+                        .weak()
+                        .small(),
+                    );
+                    ui.horizontal(|ui| {
+                        if ui
+                            .add_enabled(plan.edit.is_some(), egui::Button::new("Apply to board"))
+                            .clicked()
+                        {
+                            apply = true;
+                        }
+                        if ui.button("Cancel").clicked() {
+                            cancel = true;
+                        }
+                    });
+                });
+            if apply {
+                if let Some(e) = self.eco.take().and_then(|p| p.edit) {
+                    pick = Some(Pick::Eco(e));
+                    self.synced_now();
+                    self.note = Some("Board updated. Ctrl+Z on the board takes it back.".into());
+                }
+            } else if !open || cancel {
+                self.eco = None;
+            }
+        }
+
+        // Make the edit, now the drawing is no longer borrowed.
+        match act {
+            Some(Act::Move(i, dv)) => {
+                // One undo step covers the whole drag.
+                if let Some(s) = self.slots.get_mut(cur).and_then(|s| s.sheet.as_mut()) {
+                    s.drawing.move_part(i, dv);
+                }
+                self.after_edit(cur);
+                self.sel_part = Some(i);
+            }
+            Some(Act::Turn(i)) => {
+                if self.drag.is_some() {
+                    if let Some(s) = self.slots.get_mut(cur).and_then(|s| s.sheet.as_mut()) {
+                        s.drawing.turn_part(i);
+                    }
+                    self.after_edit(cur);
+                } else {
+                    self.edit(|s| s.drawing.turn_part(i));
+                }
+                self.sel_part = Some(i);
+            }
+            Some(Act::DeletePart(i)) => {
+                self.edit(|s| s.drawing.delete_part(i));
+                self.sel_part = None;
+            }
+            Some(Act::DeleteWire(w)) => {
+                self.edit(|s| s.drawing.delete_wire(w));
+                self.sel_wire = None;
+            }
+            Some(Act::DeleteTag(t)) => {
+                self.edit(|s| s.drawing.delete_tag(t));
+                self.sel_tag = None;
+            }
+            Some(Act::Wire(pts)) => {
+                self.edit(|s| {
+                    s.drawing.add_wire(pts);
+                });
+            }
+            Some(Act::Label(at, text)) => {
+                self.edit(|s| {
+                    s.drawing.add_label(at, &text);
+                });
+            }
+            Some(Act::Undo) => self.step(true),
+            Some(Act::Redo) => self.step(false),
+            Some(Act::Save) => {
+                pick = Some(match self.save() {
+                    Ok(p) => Pick::Message(format!("Saved {}", p.display()), false),
+                    Err(e) => Pick::Message(e, true),
+                });
+            }
+            None => {}
         }
         pick
     }

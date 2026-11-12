@@ -21,6 +21,14 @@ checker and simulator all read.
   net on the board too; on the board, "Show in schematic" jumps to the sheet
   with the selected net, and the sheet list marks every sheet that has it.
   Double-click a sheet symbol to open its sheet
+- edit the schematic: drag parts (their wires follow), Space turns, Delete
+  removes; W draws wires (click the corners, end on a pin or wire), N
+  places net labels; change a part's designator or value in the side
+  panel; Ctrl+Z / Ctrl+Y undo and redo. Save (Ctrl+S) writes a Trace
+  schematic (`.tracesch`) next to the project, which opening the
+  `.PrjPcb` picks up again. Update PCB… lists what the edits change on the
+  board (pins moving between nets, renamed nets and parts) and carries
+  them over in one undoable step; pours are poured again
 - open fabrication data: a folder or `.zip` of Gerber and drill files, several
   files at once, or an ODB++ job (`.tgz`, `.zip` or folder). Each file's layer
   is recognised automatically and the board is rebuilt with copper, holes,
@@ -214,6 +222,12 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   harnesses are drawn as lines without their connectors' labels.
 - Schematic nets are joined within a sheet (wires, labels, power ports,
   ports); across sheets they are matched to the board through part pins.
+- Update PCB joins nets of the same name across sheets (flat), and moves
+  pads between nets only: tracks keep their old nets, so the DRC shows
+  what to reroute. New parts cannot be placed from a library yet (a part
+  added on the sheets is listed as not on the board), and parts deleted
+  from the sheets stay on the board. Edits are not written back to
+  `.SchDoc` files.
 - Altium solid regions are drawn; Altium polygon pours are counted but not
   drawn yet. Allegro pours are drawn.
 - Traced Gerber nets get names like `Net-042`, since bare Gerber files do not

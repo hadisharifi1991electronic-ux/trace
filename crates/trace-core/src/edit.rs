@@ -1,7 +1,7 @@
 //! Reversible changes to a board, and an undo history built from them.
 
 use crate::place::Placement;
-use crate::{Arc, Board, Length, Polygon, Track, Via};
+use crate::{Arc, Board, Length, Net, Polygon, Track, Via};
 
 #[derive(Clone, Debug)]
 pub enum Edit {
@@ -46,6 +46,16 @@ pub enum Edit {
         before: Vec<Polygon>,
         after: Vec<Polygon>,
     },
+    /// Changes from the schematic: the net list, which net each pad is on,
+    /// and part designators.
+    Netlist {
+        nets_before: Vec<Net>,
+        nets_after: Vec<Net>,
+        /// (pad, net before, net after).
+        pads: Vec<(usize, Option<u32>, Option<u32>)>,
+        /// (part, designator before, designator after).
+        names: Vec<(usize, String, String)>,
+    },
 }
 
 fn insert<T: Clone>(list: &mut Vec<T>, index: usize, item: &T) {
@@ -86,6 +96,24 @@ impl Edit {
             Edit::InsertVia { index, via } => insert(&mut board.geometry.vias, *index, via),
             Edit::RemoveVia { index, .. } => remove(&mut board.geometry.vias, *index),
             Edit::SetPolygons { after, .. } => board.geometry.polygons = after.clone(),
+            Edit::Netlist {
+                nets_after,
+                pads,
+                names,
+                ..
+            } => {
+                board.nets = nets_after.clone();
+                for &(i, _, n) in pads {
+                    if let Some(p) = board.geometry.pads.get_mut(i) {
+                        p.net = n;
+                    }
+                }
+                for (i, _, name) in names {
+                    if let Some(c) = board.components.get_mut(*i) {
+                        c.designator = name.clone();
+                    }
+                }
+            }
         }
     }
 
@@ -128,6 +156,20 @@ impl Edit {
             Edit::SetPolygons { before, after } => Edit::SetPolygons {
                 before: after.clone(),
                 after: before.clone(),
+            },
+            Edit::Netlist {
+                nets_before,
+                nets_after,
+                pads,
+                names,
+            } => Edit::Netlist {
+                nets_before: nets_after.clone(),
+                nets_after: nets_before.clone(),
+                pads: pads.iter().map(|&(i, a, b)| (i, b, a)).collect(),
+                names: names
+                    .iter()
+                    .map(|(i, a, b)| (*i, b.clone(), a.clone()))
+                    .collect(),
             },
         }
     }

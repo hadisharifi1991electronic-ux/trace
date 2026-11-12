@@ -123,6 +123,8 @@ pub struct Layer {
 
 pub struct Scene {
     pub path: PathBuf,
+    /// Update PCB has carried schematic edits to this board since it was read.
+    pub from_sheets: bool,
     pub board: Board,
     pub prims: Vec<Prim>,
     pub layers: Vec<Layer>,
@@ -473,6 +475,7 @@ impl Scene {
         let (fills, fill_verts, fill_tris) = triangulate(&board, &slot);
 
         Scene {
+            from_sheets: false,
             path,
             fills,
             fill_verts,

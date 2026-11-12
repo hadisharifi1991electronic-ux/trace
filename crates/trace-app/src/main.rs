@@ -179,7 +179,7 @@ impl App {
             .extension()
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
-        if ext == "schdoc" || ext == "prjpcb" {
+        if ext == "schdoc" || ext == "prjpcb" || ext == "tracesch" {
             self.schem.open_path(&path, &self.ctx);
             self.mode_sch = true;
             self.mode3d = false;
@@ -284,6 +284,7 @@ impl App {
         ];
         let mut boards: Vec<&str> = vec![
             "PcbDoc", "pcbdoc", "brd", "BRD", "tracepcb", "SchDoc", "schdoc", "PrjPcb", "prjpcb",
+            "tracesch",
         ];
         boards.extend(gerber);
         if let Some(mut picked) = rfd::FileDialog::new()
@@ -291,6 +292,7 @@ impl App {
             .add_filter("Altium project", &["PrjPcb", "prjpcb"])
             .add_filter("Altium PCB", &["PcbDoc", "pcbdoc"])
             .add_filter("Altium schematic", &["SchDoc", "schdoc"])
+            .add_filter("Trace schematic", &["tracesch"])
             .add_filter("Allegro board", &["brd", "BRD"])
             .add_filter("Gerber, drill or ODB++", &gerber)
             .add_filter("All files", &["*"])
@@ -1055,7 +1057,7 @@ impl App {
             if self.mode_sch {
                 ui.label(
                     RichText::new(
-                        "Click a wire or pin to select its net on the board too. Double-click a sheet symbol to open its sheet. F fits.",
+                        "Click a wire or pin to select its net on the board too. Drag parts to move them (Space turns, Delete removes). W draws wires, N places net labels, Ctrl+Z undoes, Ctrl+S saves. F fits.",
                     )
                     .weak(),
                 );
@@ -2057,13 +2059,13 @@ impl eframe::App for App {
             .input_mut(|i| {
                 (
                     i.consume_key(egui::Modifiers::COMMAND, egui::Key::O),
-                    !typing && board2d && i.key_pressed(egui::Key::F),
-                    !typing && board2d && i.key_pressed(egui::Key::B),
+                    !typing && board2d && plain_key(i, egui::Key::F),
+                    !typing && board2d && plain_key(i, egui::Key::B),
                     i.key_pressed(egui::Key::Escape),
-                    !typing && board2d && i.key_pressed(egui::Key::M),
-                    !typing && i.key_pressed(egui::Key::Num3),
-                    !typing && i.key_pressed(egui::Key::C),
-                    !typing && !i.modifiers.shift && i.key_pressed(egui::Key::S),
+                    !typing && board2d && plain_key(i, egui::Key::M),
+                    !typing && plain_key(i, egui::Key::Num3),
+                    !typing && plain_key(i, egui::Key::C),
+                    !typing && plain_key(i, egui::Key::S),
                 )
             });
         // Editing and routing keys.
@@ -2359,6 +2361,16 @@ impl eframe::App for App {
                     Some(schview::Pick::Part(d)) => {
                         self.select_part(&d, true);
                     }
+                    Some(schview::Pick::Eco(edit)) => {
+                        self.apply_edits("Updated the board from the schematic", vec![edit]);
+                        if let Some(s) = &mut self.scene {
+                            s.from_sheets = true;
+                        }
+                        self.drc.invalidate();
+                    }
+                    Some(schview::Pick::Message(text, error)) => {
+                        self.message = Some((text, error));
+                    }
                     None => {}
                 }
                 return;
@@ -2409,4 +2421,14 @@ impl eframe::App for App {
         storage.set_string(cm::STORE_KEY, self.cm.to_store());
         storage.set_string(imp::STORE_KEY, self.imp.to_store());
     }
+}
+
+/// `key` pressed with no Ctrl, Shift or Alt held at the time. Judged from
+/// the key event itself, since the modifiers may already be up again by the
+/// time the frame reads them.
+fn plain_key(i: &egui::InputState, key: egui::Key) -> bool {
+    i.events.iter().any(|e| {
+        matches!(e, egui::Event::Key { key: k, pressed: true, modifiers, .. }
+            if *k == key && !modifiers.command && !modifiers.ctrl && !modifiers.shift && !modifiers.alt)
+    })
 }

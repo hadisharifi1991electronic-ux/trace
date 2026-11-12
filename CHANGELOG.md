@@ -3,6 +3,34 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.19.0 (2026-11-12)
+
+- Schematic editing, in the schematic view:
+  - drag parts and their wires follow with a bend; Space turns a part,
+    Delete removes a part, wire or label;
+  - W draws wires: click the corners (a right-angle corner is added),
+    and the wire ends on a pin or another wire, with a junction where it
+    lands mid-wire. Clicks catch pin ends, wire ends and wires near the
+    pointer, so off-grid pins connect;
+  - N places a net label; select one to rename or remove it;
+  - change a part's designator or value in the side panel (every unit of
+    a multi-part component follows);
+  - Ctrl+Z / Ctrl+Y undo and redo, up to 200 steps.
+- Update PCB…: compares the sheets with the board and lists every change,
+  pins moving between nets, nets renamed by a label, parts renamed, parts
+  only on one side, then applies them as one undoable board edit and
+  pours again. A board read fresh from its file is compared with the
+  sheets as first read, so edits saved earlier still carry over after
+  reopening.
+- Save (Ctrl+S) keeps the edited sheets, pictures included, in a Trace
+  schematic (`.tracesch`) next to the project; opening the `.PrjPcb` or
+  the `.tracesch` brings them back. File → Open lists `.tracesch` files.
+- Single-letter keys (S, C, F, B, M, 3) no longer fire when Ctrl, Shift
+  or Alt is held, so Ctrl+S saves instead of switching views.
+- Tried on the Sinara Clocker project (Altium, CERN-OHL): wiring a pin to
+  another net, a new label and a renamed capacitor gave 7 changes, and
+  re-planning after applying gave none.
+
 ## 0.18.0 (2026-11-12)
 
 - Manufacturing checks in the DRC, from the board's own Altium rules,

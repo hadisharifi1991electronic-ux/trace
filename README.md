@@ -30,14 +30,14 @@ checker and simulator all read.
   board (pins moving between nets, renamed nets and parts) and carries
   them over in one undoable step; pours are poured again
 - place new parts from symbol libraries: Place symbol… (or P) opens an
-  Altium `.SchLib` (the libraries an Altium project lists open by
+  Altium `.SchLib` or integrated library `.IntLib` (the libraries an Altium project lists open by
   themselves, and opened ones are remembered). Find a symbol by name or
   description, see it drawn with its pins and footprint, and Place it: it
   follows the pointer until a click drops it (Space turns it, Esc takes it
   back). It gets the next free designator; a later unit of a multi-part
   part (U1B) joins the first placed part still missing it. Update PCB adds
-  it to the board when its footprint is on the board or in the open
-  footprint library
+  it to the board when its footprint is on the board, in the open
+  footprint library or in an open `.IntLib`
 - open fabrication data: a folder or `.zip` of Gerber and drill files, several
   files at once, or an ODB++ job (`.tgz`, `.zip` or folder). Each file's layer
   is recognised automatically and the board is rebuilt with copper, holes,
@@ -141,7 +141,8 @@ checker and simulator all read.
   count shows in the status bar, and markers on the board show where.
   Click a violation to zoom to it. Boards without rules (Gerber, ODB++,
   Allegro) are checked for overlapping copper of different nets only
-- edit footprints (the Footprints button): open an Altium `.PcbLib` or a
+- edit footprints (the Footprints button): open an Altium `.PcbLib`, the
+  footprints of an `.IntLib`, or a
   Trace library (`.tracelib`), or take the footprints from the open board,
   each listed with the number of parts using it. Select, drag and nudge
   pads, lines and text; P places a pad numbered after the last, L draws
@@ -178,7 +179,7 @@ trace convert <file> out.PcbDoc      write an Altium Designer board
 trace convert sheet.SchDoc out.svg   draw a schematic sheet as SVG
 trace fab board.PcbDoc out.zip   Gerber X2, drill, IPC-356, pick-and-place and BOM (or a folder)
 trace odb board.PcbDoc out.tgz   ODB++ job: layers, drills, parts, nets and stack-up (or a folder)
-trace symbols lib.SchLib [out.svg]     list a schematic library's symbols; draw them all as SVG
+trace symbols lib.SchLib [out.svg]     list a schematic library's (or IntLib's) symbols; draw them all as SVG
 trace footprints lib.PcbLib [out]   list a library's (or a board's) footprints; save as .tracelib or .PcbLib
 ```
 
@@ -275,10 +276,10 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   its nets when its footprint is in the open footprint library or on
   another part of the board; otherwise it is listed for placing by hand.
   Parts deleted from the sheets stay on the board. New parts come from
-  copies or from `.SchLib` symbol libraries (not `.IntLib` yet). Edits
+  copies or from `.SchLib` and `.IntLib` libraries. Edits
   are not written back to `.SchDoc` files.
-- Footprint libraries are read from `.PcbLib` and saved as `.tracelib`
-  or `.PcbLib`; reading `.IntLib` is not done yet, and 3D bodies and text
+- Footprint libraries are read from `.PcbLib` and `.IntLib` and saved as
+  `.tracelib` or `.PcbLib` (an `.IntLib` is never written); 3D bodies and text
   on mechanical layers are left out, so a `.PcbLib` saved by Trace has no
   3D models. Updating parts keeps their designator and value text where
   it was.

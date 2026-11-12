@@ -29,9 +29,9 @@ USAGE:
     trace fab <board> <out.zip|folder>          Gerber X2, drill, IPC-356, pick-and-place and BOM files
     trace odb <board> <out.tgz|folder>          ODB++ job: layers, drills, parts and nets in one package
     trace layers <gerber folder|zip>            Show which layer each Gerber or drill file was taken as
-    trace symbols <lib.SchLib> [out.svg]        List the symbols of an Altium schematic library;
+    trace symbols <lib.SchLib|IntLib> [out.svg] List the symbols of an Altium schematic library;
                                                 with out, draw them all as SVG
-    trace footprints <lib|board> [out]          List the footprints of a .PcbLib, .tracelib or board;
+    trace footprints <lib|board> [out]          List the footprints of a .PcbLib, .IntLib, .tracelib or board;
                                                 with out, save them as a Trace library (.tracelib)
                                                 or an Altium one (.PcbLib)
 ";
@@ -85,7 +85,11 @@ type Res = Result<(), Box<dyn std::error::Error>>;
 /// Lists the symbols of a `.SchLib`; with `out`, draws them all on one
 /// SVG sheet.
 fn symbols(file: &str, out: Option<&str>) -> Res {
-    let lib = trace_altium::read_schlib(file)?;
+    let lib = if file.to_ascii_lowercase().ends_with(".intlib") {
+        trace_altium::read_intlib(file)?.symbols
+    } else {
+        trace_altium::read_schlib(file)?
+    };
     println!("{}: {} symbols", lib.name, lib.symbols.len());
     for s in &lib.symbols {
         let pins = s.drawing.pins.len();
@@ -151,6 +155,7 @@ fn footprints(file: &str, out: Option<&str>) -> Res {
         .unwrap_or_default();
     let lib = match ext.as_str() {
         "pcblib" => trace_altium::read_pcblib(file)?,
+        "intlib" => trace_altium::read_intlib(file)?.footprints,
         "tracelib" => Library::load(Path::new(file))?,
         _ => {
             let Design::Board(board) = load(file)? else {

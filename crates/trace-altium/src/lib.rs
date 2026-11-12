@@ -4,12 +4,14 @@
 //! Format knowledge here was worked out from real files; KiCad's open-source
 //! Altium importer was used as a behaviour reference.
 
+mod intlib;
 mod pcb;
 mod pcb_ascii;
 mod pcblib;
 pub mod records;
 mod sch;
 
+pub use intlib::{read_intlib, IntLib};
 pub use pcb::read_pcbdoc;
 pub use pcblib::read_pcblib;
 pub use sch::{read_schdoc, read_schlib};
@@ -42,6 +44,14 @@ impl Container<std::fs::File> {
             path: path.display().to_string(),
             source,
         })?;
+        Ok(Container { cfb })
+    }
+}
+
+impl Container<std::io::Cursor<Vec<u8>>> {
+    /// A compound file held in memory.
+    pub(crate) fn from_bytes(data: Vec<u8>) -> Result<Self> {
+        let cfb = cfb::CompoundFile::open(std::io::Cursor::new(data))?;
         Ok(Container { cfb })
     }
 }

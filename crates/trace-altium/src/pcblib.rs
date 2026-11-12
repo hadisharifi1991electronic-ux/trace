@@ -172,7 +172,13 @@ fn footprint(data: &[u8], params: Option<&Props>, wide: &HashMap<u32, String>) -
 
 /// Reads every footprint of an Altium `.PcbLib`.
 pub fn read_pcblib(path: impl AsRef<Path>) -> Result<Library> {
-    let mut c = Container::open(path.as_ref())?;
+    pcblib_from(&mut Container::open(path.as_ref())?)
+}
+
+/// The footprints of a `.PcbLib` already open (on disk or in memory).
+pub(crate) fn pcblib_from<F: std::io::Read + std::io::Seek>(
+    c: &mut Container<F>,
+) -> Result<Library> {
     if !c.cfb.is_stream("/Library/Data") {
         return Err(Error::MissingStream("Library/Data".into()));
     }

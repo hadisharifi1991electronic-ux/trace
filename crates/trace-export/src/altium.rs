@@ -1672,6 +1672,61 @@ mod tests {
         assert_eq!((a.start_deg, a.end_deg), (0.0, 360.0));
     }
 
+    #[test]
+    fn integrated_library_footprints_read_back() {
+        use std::io::Write;
+        use trace_core::footprint::Library;
+        let fp = Footprint {
+            name: "R0603".into(),
+            pads: vec![Pad {
+                layer: LayerRef::Copper(0),
+                net: None,
+                component: None,
+                name: "1".into(),
+                at: Point::default(),
+                size_x: Length::from_mil(30.0),
+                size_y: Length::from_mil(35.0),
+                hole: Length(0),
+                shape: PadShape::Rect,
+                rotation_deg: 0.0,
+                outline: Vec::new(),
+                stack: Vec::new(),
+                fab: Default::default(),
+            }],
+            ..Default::default()
+        };
+        let lib = Library {
+            version: String::new(),
+            footprints: vec![fp],
+        };
+        let pcblib = to_pcblib(&lib, "0.pcblib").unwrap();
+        // An IntLib holds each library as a tag byte (2) and zlib data.
+        let mut z = flate2::write::ZlibEncoder::new(vec![2u8], flate2::Compression::default());
+        z.write_all(&pcblib).unwrap();
+        let packed = z.finish().unwrap();
+        let dir = std::env::temp_dir().join(format!("trace-intlib-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("t.IntLib");
+        {
+            let mut c = cfb::create(&path).unwrap();
+            c.create_storage("/PCBLib").unwrap();
+            c.create_stream("/PCBLib/0.pcblib")
+                .unwrap()
+                .write_all(&packed)
+                .unwrap();
+            c.flush().unwrap();
+        }
+        let back = trace_altium::read_intlib(&path).unwrap();
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(back.name, "t");
+        assert!(back.symbols.symbols.is_empty());
+        assert_eq!(back.footprints.footprints.len(), 1);
+        let f = &back.footprints.footprints[0];
+        assert_eq!(f.name, "R0603");
+        assert_eq!(f.pads.len(), 1);
+        assert_eq!(f.pads[0].size_x, Length::from_mil(30.0));
+    }
+
     /// Compares values through their JSON, as Trace saves them.
     mod erased {
         pub trait Json {

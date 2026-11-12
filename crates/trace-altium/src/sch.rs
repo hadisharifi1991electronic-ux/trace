@@ -135,7 +135,18 @@ pub fn read_schdoc(path: impl AsRef<Path>) -> Result<Sheet> {
 /// Multi-part components give one symbol per part.
 pub fn read_schlib(path: impl AsRef<Path>) -> Result<SymbolLib> {
     let path = path.as_ref();
-    let mut c = Container::open(path)?;
+    let name = path
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    schlib_from(&mut Container::open(path)?, name)
+}
+
+/// The symbols of a `.SchLib` already open (on disk or in memory).
+pub(crate) fn schlib_from<F: std::io::Read + std::io::Seek>(
+    c: &mut Container<F>,
+    name: String,
+) -> Result<SymbolLib> {
     let header = c
         .stream("/FileHeader")?
         .ok_or_else(|| Error::MissingStream("FileHeader".into()))?;
@@ -165,10 +176,7 @@ pub fn read_schlib(path: impl AsRef<Path>) -> Result<SymbolLib> {
         .map(|e| e.name().to_string())
         .collect();
     let mut lib = SymbolLib {
-        name: path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_default(),
+        name,
         symbols: Vec::new(),
     };
     for st in storages {

@@ -194,8 +194,30 @@ impl App {
             .extension()
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
             .unwrap_or_default();
-        if ext == "pcblib" || ext == "tracelib" {
+        if ext == "pcblib" || ext == "tracelib" || ext == "intlib" {
+            // An integrated library's symbols go to Place symbol.
+            let symbols = (ext == "intlib")
+                .then(|| self.schem.libs.load(&path).ok())
+                .flatten()
+                .and_then(|()| {
+                    self.schem
+                        .libs
+                        .libs
+                        .iter()
+                        .find(|(p, _)| p == &path)
+                        .map(|(_, l)| l.symbols.len())
+                })
+                .unwrap_or(0);
             match self.fped.open_file(&path) {
+                Err(_) if symbols > 0 => {
+                    self.message = Some((
+                        format!(
+                            "{} has no footprints; its {symbols} symbols are in Place symbol (P in a schematic)",
+                            path.display()
+                        ),
+                        false,
+                    ));
+                }
                 Ok(()) => {
                     self.mode_fp = true;
                     self.mode_sch = false;
@@ -318,7 +340,7 @@ impl App {
         ];
         let mut boards: Vec<&str> = vec![
             "PcbDoc", "pcbdoc", "brd", "BRD", "tracepcb", "SchDoc", "schdoc", "PrjPcb", "prjpcb",
-            "tracesch", "PcbLib", "pcblib", "tracelib",
+            "tracesch", "PcbLib", "pcblib", "IntLib", "intlib", "tracelib",
         ];
         boards.extend(gerber);
         if let Some(mut picked) = rfd::FileDialog::new()
@@ -327,7 +349,10 @@ impl App {
             .add_filter("Altium PCB", &["PcbDoc", "pcbdoc"])
             .add_filter("Altium schematic", &["SchDoc", "schdoc"])
             .add_filter("Trace schematic", &["tracesch"])
-            .add_filter("Footprint library", &["PcbLib", "pcblib", "tracelib"])
+            .add_filter(
+                "Footprint library",
+                &["PcbLib", "pcblib", "IntLib", "intlib", "tracelib"],
+            )
             .add_filter("Allegro board", &["brd", "BRD"])
             .add_filter("Gerber, drill or ODB++", &gerber)
             .add_filter("All files", &["*"])

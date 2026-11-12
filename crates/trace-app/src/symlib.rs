@@ -4,6 +4,7 @@
 use crate::canvas::View;
 use eframe::egui::{self, Color32, FontId, Pos2, Rect, RichText, Sense, Shape, Stroke};
 use std::path::{Path, PathBuf};
+use trace_core::footprint::Footprint;
 use trace_core::{Drawing, LibSymbol, SchGeom, SymbolLib};
 
 /// Where the list of opened libraries is kept between runs.
@@ -13,6 +14,8 @@ pub const STORE_KEY: &str = "symbol_libraries";
 pub struct Libraries {
     pub open: bool,
     pub libs: Vec<(PathBuf, SymbolLib)>,
+    /// Footprints of the open integrated libraries, by library.
+    footprints: Vec<(PathBuf, Vec<Footprint>)>,
     /// Libraries to read the first time the window opens.
     pending: Vec<PathBuf>,
     filter: String,
@@ -43,9 +46,23 @@ impl Libraries {
             .join("\n")
     }
 
-    /// Reads a library, or reads it again if it is open already.
+    /// Reads a library (`.SchLib`, or `.IntLib` with its footprints), or
+    /// reads it again if it is open already.
     pub fn load(&mut self, path: &Path) -> Result<(), String> {
-        let lib = trace_altium::read_schlib(path).map_err(|e| e.to_string())?;
+        let int = path
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("intlib"));
+        let lib = if int {
+            let il = trace_altium::read_intlib(path).map_err(|e| e.to_string())?;
+            self.footprints.retain(|(p, _)| p != path);
+            if !il.footprints.footprints.is_empty() {
+                self.footprints
+                    .push((path.to_path_buf(), il.footprints.footprints));
+            }
+            il.symbols
+        } else {
+            trace_altium::read_schlib(path).map_err(|e| e.to_string())?
+        };
         match self.libs.iter().position(|(p, _)| p == path) {
             Some(i) => self.libs[i].1 = lib,
             None => self.libs.push((path.to_path_buf(), lib)),
@@ -60,6 +77,16 @@ impl Libraries {
                 let _ = self.load(p);
             }
         }
+    }
+
+    /// Whether an open integrated library brought footprints.
+    pub fn has_footprints(&self) -> bool {
+        !self.footprints.is_empty()
+    }
+
+    /// The footprints of the open integrated libraries.
+    pub fn footprints(&self) -> impl Iterator<Item = &Footprint> {
+        self.footprints.iter().flat_map(|(_, f)| f)
     }
 
     pub fn symbol(&self, at: (usize, usize)) -> Option<&LibSymbol> {
@@ -93,12 +120,17 @@ impl Libraries {
         let mut place = None;
         ui.horizontal(|ui| {
             if ui
-                .button("Open SchLib…")
-                .on_hover_text("Add an Altium schematic library (.SchLib)")
+                .button("Open library…")
+                .on_hover_text(
+                    "Add an Altium schematic library (.SchLib) or integrated library (.IntLib)",
+                )
                 .clicked()
             {
                 if let Some(paths) = rfd::FileDialog::new()
-                    .add_filter("Schematic libraries", &["SchLib", "schlib"])
+                    .add_filter(
+                        "Symbol libraries",
+                        &["SchLib", "schlib", "IntLib", "intlib"],
+                    )
                     .pick_files()
                 {
                     for p in paths {
@@ -117,7 +149,7 @@ impl Libraries {
         if self.libs.is_empty() {
             ui.label(
                 RichText::new(
-                    "No libraries yet. Open a .SchLib; the libraries of an Altium project open by themselves.",
+                    "No libraries yet. Open a .SchLib or .IntLib; the libraries of an Altium project open by themselves.",
                 )
                 .weak(),
             );
@@ -199,7 +231,8 @@ impl Libraries {
             }
         });
         if let Some(li) = close_lib {
-            self.libs.remove(li);
+            let (path, _) = self.libs.remove(li);
+            self.footprints.retain(|(p, _)| p != &path);
             self.pick = None;
         }
         place

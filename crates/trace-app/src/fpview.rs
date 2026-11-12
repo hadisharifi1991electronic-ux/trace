@@ -361,7 +361,7 @@ impl FpEditor {
         };
     }
 
-    /// Opens a `.PcbLib` or `.tracelib`.
+    /// Opens a `.PcbLib`, `.IntLib` (its footprints) or `.tracelib`.
     pub fn open_file(&mut self, path: &Path) -> Result<(), String> {
         let ext = path
             .extension()
@@ -373,6 +373,10 @@ impl FpEditor {
             .unwrap_or_default();
         let lib = if ext == "tracelib" {
             Library::load(path).map_err(|e| e.to_string())?
+        } else if ext == "intlib" {
+            trace_altium::read_intlib(path)
+                .map_err(|e| e.to_string())?
+                .footprints
         } else {
             trace_altium::read_pcblib(path).map_err(|e| e.to_string())?
         };
@@ -687,7 +691,10 @@ impl FpEditor {
         ui.horizontal_wrapped(|ui| {
             if ui.button("Open library…").clicked() {
                 if let Some(p) = rfd::FileDialog::new()
-                    .add_filter("Footprint libraries", &["PcbLib", "pcblib", "tracelib"])
+                    .add_filter(
+                        "Footprint libraries",
+                        &["PcbLib", "pcblib", "IntLib", "intlib", "tracelib"],
+                    )
                     .pick_file()
                 {
                     pick = Some(match self.open_file(&p) {

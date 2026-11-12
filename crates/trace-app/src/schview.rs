@@ -454,7 +454,7 @@ impl Schematics {
         if let Some(prj) = &self.project {
             let libs: Vec<PathBuf> = project_docs(prj)
                 .into_iter()
-                .filter(|p| ext(p) == "schlib")
+                .filter(|p| ext(p) == "schlib" || ext(p) == "intlib")
                 .collect();
             self.libs.load_quietly(&libs);
         }
@@ -719,6 +719,18 @@ impl Schematics {
                     });
             }
         }
+        // The open footprint library first, then those of open IntLibs.
+        let all: Vec<Footprint>;
+        let library = if self.libs.has_footprints() {
+            all = library
+                .iter()
+                .chain(self.libs.footprints())
+                .cloned()
+                .collect();
+            &all[..]
+        } else {
+            library
+        };
         let sources = Sources {
             parts: Some(&parts),
             library,
@@ -1079,7 +1091,7 @@ impl Schematics {
         });
         if ui
             .button("Place symbol…")
-            .on_hover_text("Place a new part from a symbol library (.SchLib) (P)")
+            .on_hover_text("Place a new part from a symbol library (.SchLib or .IntLib) (P)")
             .clicked()
         {
             self.libs.open = true;

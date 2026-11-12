@@ -3,6 +3,21 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.27.0 (2026-11-12)
+
+- Altium integrated libraries (`.IntLib`) are read: the symbols and
+  footprints compiled into them.
+- Place symbol… opens `.IntLib` files as well as `.SchLib`, and the
+  `.IntLib`s an Altium project lists open by themselves. Update PCB also
+  takes a new part's footprint from an open `.IntLib`.
+- Opening an `.IntLib` (File → Open or the footprint editor's Open
+  library…) shows its footprints in the footprint editor and adds its
+  symbols to Place symbol. The `.IntLib` itself is never overwritten; save
+  the footprints as `.tracelib` or `.PcbLib`.
+- `trace symbols` and `trace footprints` take `.IntLib` files.
+- Checked on five public integrated libraries (3,906 symbols and 196
+  footprints of resistors, capacitors and connectors): every one reads.
+
 ## 0.26.0 (2026-11-12)
 
 - ODB++ export: File → Export ODB++…, or `trace odb <board> out.tgz`

@@ -761,8 +761,22 @@ fn convert(file: &str, out: &str) -> Res {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        std::fs::write(out, trace_export::to_altium(&b, &name)?)?;
-        println!("wrote {out}");
+        let binary = file.to_ascii_lowercase().ends_with(".pcbdoc")
+            && std::fs::read(file)?.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]);
+        if binary {
+            // Saved over the original's records: nothing it holds is lost.
+            let (bytes, report) =
+                trace_export::to_altium_over(std::path::Path::new(file), &b, &name)?;
+            std::fs::write(out, bytes)?;
+            println!("wrote {out} ({})", report.summary());
+        } else {
+            std::fs::write(out, trace_export::to_altium(&b, &name)?)?;
+            println!("wrote {out}");
+        }
+        let back = trace_altium::read_pcbdoc(out)?;
+        for d in trace_export::altium_rt::compare(&b, &back) {
+            println!("read back differs: {d}");
+        }
         return Ok(());
     }
     let json = match load(file)? {

@@ -3,6 +3,39 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.30.0 (2026-11-12)
+
+- Boards save back into Altium: File → Save as Altium board on a board
+  opened from a binary `.PcbDoc` starts from that file and keeps every
+  record of it, so rules, classes, polygon pour settings, dimensions, 3D
+  bodies, unions, library links and unique ids all survive. Saving a board
+  you did not change writes every stream byte for byte as it was.
+- What you edited is written into it: parts moved, turned or flipped take
+  their pads, silk, texts, regions and 3D models along (flipped parts go to
+  the other side, their text mirrored); removed tracks, arcs, vias and
+  areas are dropped; new routing and poured copper are added, new vias and
+  pads copied from a via or pad of the same style on the board; net changes
+  from the schematic (Update PCB) are patched in; new parts get a part
+  record with a designator and a comment; renamed parts get their new
+  designator.
+- Altium's tables that point at records by position (pad unique ids,
+  primitive GUIDs, pad and via library links, part parameters,
+  shape-based regions) are renumbered to match, and the ratsnest is left
+  for Altium to rebuild.
+- Every save is read back and compared with the board saved; the status
+  line says how many records were kept, changed, added and removed, and
+  any difference. A file already there is kept as `.bak` first.
+- `trace convert board.PcbDoc out.PcbDoc` saves the same way and reports
+  the check.
+- Checked on two private boards (one of 67,000 records, one with 2,000
+  3D bodies) and three public boards: unchanged saves are identical stream by
+  stream; with parts moved, turned and flipped, routing removed and added,
+  pads moved to other nets, a new net, a new part and pours poured again,
+  each board reads back exactly as edited.
+- Not yet: boards from an ASCII `.PcbDoc`, Allegro or Gerber are still
+  written fresh; new pours and new polygon cutouts are written as copper
+  only (pours) or not at all (cutouts); a changed board
+  shape or new stack-up layers are not written.
 ## 0.29.0 (2026-11-12)
 
 - Altium polygon pours saved without their copper are poured when the

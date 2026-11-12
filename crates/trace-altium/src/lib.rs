@@ -7,6 +7,7 @@
 mod intlib;
 mod pcb;
 mod pcb_ascii;
+pub mod pcb_raw;
 mod pcblib;
 pub mod records;
 mod sch;

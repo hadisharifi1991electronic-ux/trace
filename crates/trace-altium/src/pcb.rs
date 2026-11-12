@@ -292,7 +292,7 @@ pub(crate) fn parse_arc(b: &[u8], layers: &LayerMap) -> Option<Arc> {
     })
 }
 
-fn parse_via(b: &[u8], layers: &LayerMap) -> Option<Via> {
+pub(crate) fn parse_via(b: &[u8], layers: &LayerMap) -> Option<Via> {
     let copper = |id: u8| match layers.get(id) {
         LayerRef::Copper(i) => Some(i),
         _ => None,

@@ -48,7 +48,13 @@ checker and simulator all read.
   file was taken as and why. File → Save as Trace board keeps the result
 - save any open board as a KiCad board (File → Save as KiCad board), to keep
   working on it in KiCad 7 or later, or as an Altium board (File → Save as
-  Altium board), which writes a `.PcbDoc`
+  Altium board), which writes a `.PcbDoc`. A board opened from a binary
+  `.PcbDoc` is saved over that file's own records: everything Trace did not
+  change (rules, classes, pour settings, dimensions, 3D bodies, unions,
+  unique ids) is kept exactly as Altium wrote it, and only the edits are
+  written (moved, turned or flipped parts with everything they own, new and
+  removed routing, net changes, new parts). Each save is read back and
+  checked; a file already there is kept as `.bak` first
 - see tracks, pads, vias, copper pours, silkscreen and the board outline
 - turn the board in 3D (the 3D button, or 3): solder mask, exposed pads,
   silkscreen, holes and the parts: Altium boards show the 3D (STEP) models

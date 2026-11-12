@@ -328,7 +328,7 @@ const VIA: [u8; 300] = [
     0x00, 0x00, 0x00, 0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff, 0x7f, 0x00,
 ];
 /// A stroke-font text from a footprint library saved by Altium Designer.
-const TEXT: [u8; 240] = [
+pub(crate) const TEXT: [u8; 240] = [
     0x3a, 0x0c, 0x00, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xf2, 0x61, 0xd1,
     0xff, 0xe0, 0x5e, 0xf8, 0xff, 0x50, 0xc3, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
     0x00, 0x00, 0x00, 0x00, 0x10, 0x27, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x41, 0x00,
@@ -360,16 +360,16 @@ const PAD: [u8; 171] = [
 ];
 
 /// Altium's internal unit is 1/10,000 mil (2.54 nm).
-fn unit(l: Length) -> i32 {
+pub(crate) fn unit(l: Length) -> i32 {
     (l.0 as f64 / 2.54).round() as i32
 }
 
-fn mil(l: Length) -> String {
+pub(crate) fn mil(l: Length) -> String {
     let v = l.0 as f64 / 25_400.0;
     format!("{}mil", trim(v, 4))
 }
 
-fn trim(v: f64, places: usize) -> String {
+pub(crate) fn trim(v: f64, places: usize) -> String {
     let s = format!("{v:.places$}");
     let s = s.trim_end_matches('0').trim_end_matches('.');
     if s.is_empty() || s == "-" {
@@ -380,7 +380,7 @@ fn trim(v: f64, places: usize) -> String {
 }
 
 /// Altium writes floating-point properties in Delphi's exponent form.
-fn delphi(v: f64) -> String {
+pub(crate) fn delphi(v: f64) -> String {
     if v == 0.0 {
         return " 0.00000000000000E+0000".into();
     }
@@ -395,16 +395,16 @@ fn delphi(v: f64) -> String {
     )
 }
 
-fn put_u16(b: &mut [u8], at: usize, v: u16) {
+pub(crate) fn put_u16(b: &mut [u8], at: usize, v: u16) {
     b[at..at + 2].copy_from_slice(&v.to_le_bytes());
 }
-fn put_i32(b: &mut [u8], at: usize, v: i32) {
+pub(crate) fn put_i32(b: &mut [u8], at: usize, v: i32) {
     b[at..at + 4].copy_from_slice(&v.to_le_bytes());
 }
-fn put_u32(b: &mut [u8], at: usize, v: u32) {
+pub(crate) fn put_u32(b: &mut [u8], at: usize, v: u32) {
     b[at..at + 4].copy_from_slice(&v.to_le_bytes());
 }
-fn put_f64(b: &mut [u8], at: usize, v: f64) {
+pub(crate) fn put_f64(b: &mut [u8], at: usize, v: f64) {
     b[at..at + 8].copy_from_slice(&v.to_le_bytes());
 }
 
@@ -430,7 +430,7 @@ fn round_corner(pad: &Pad) -> Option<Length> {
 }
 
 /// One text record: little-endian length, then the properties and a NUL.
-fn text_record(out: &mut Vec<u8>, props: &[(String, String)]) {
+pub(crate) fn text_record(out: &mut Vec<u8>, props: &[(String, String)]) {
     let mut s = String::from("|");
     for (k, v) in props {
         s.push_str(k);
@@ -450,7 +450,7 @@ fn text_record(out: &mut Vec<u8>, props: &[(String, String)]) {
 }
 
 /// One binary record: type byte, then each subrecord with its length.
-fn binary_record(out: &mut Vec<u8>, kind: u8, subs: &[&[u8]]) {
+pub(crate) fn binary_record(out: &mut Vec<u8>, kind: u8, subs: &[&[u8]]) {
     out.push(kind);
     for s in subs {
         out.extend_from_slice(&(s.len() as u32).to_le_bytes());
@@ -458,7 +458,7 @@ fn binary_record(out: &mut Vec<u8>, kind: u8, subs: &[&[u8]]) {
     }
 }
 
-fn p(k: &str, v: impl Into<String>) -> (String, String) {
+pub(crate) fn p(k: &str, v: impl Into<String>) -> (String, String) {
     (k.to_string(), v.into())
 }
 
@@ -516,13 +516,17 @@ const MECH_NAMES: [&str; 16] = [
     "MECHANICAL16",
 ];
 
-struct Writer<'a> {
+pub(crate) struct Writer<'a> {
     b: &'a Board,
     copper: u8,
     /// Added to every coordinate so the board sits inside Altium's
     /// workspace (internal units).
     shift: (i64, i64),
     ids: u64,
+    /// Altium layer byte of each copper layer (top first), when writing
+    /// into an existing board whose layer numbers are set; empty numbers
+    /// them in order.
+    copper_ids: Vec<u8>,
 }
 
 impl<'a> Writer<'a> {
@@ -573,6 +577,7 @@ impl<'a> Writer<'a> {
             copper,
             shift,
             ids: 0,
+            copper_ids: Vec::new(),
         }
     }
 
@@ -589,8 +594,18 @@ impl<'a> Writer<'a> {
         format!("{}mil", trim(self.y(l) as f64 / 10_000.0, 4))
     }
 
+    /// A writer for records that go into an existing board: coordinates
+    /// as they are, copper layers numbered as that board numbers them.
+    pub(crate) fn in_place(b: &'a Board, copper_ids: Vec<u8>) -> Self {
+        let mut w = Writer::new(b);
+        w.shift = (0, 0);
+        w.copper = (copper_ids.len() as u8).clamp(2, 32);
+        w.copper_ids = copper_ids;
+        w
+    }
+
     /// Altium's eight-letter unique ids.
-    fn unique_id(&mut self) -> String {
+    pub(crate) fn unique_id(&mut self) -> String {
         self.ids += 1;
         let mut v = self.ids.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         (0..8)
@@ -602,7 +617,12 @@ impl<'a> Writer<'a> {
             .collect()
     }
 
-    fn guid(&mut self) -> String {
+    /// Starts unique ids from `seed`, so they differ from a board's own.
+    pub(crate) fn seed(&mut self, seed: u64) {
+        self.ids = seed;
+    }
+
+    pub(crate) fn guid(&mut self) -> String {
         self.ids += 1;
         let a = self.ids.wrapping_mul(0x9E37_79B9_7F4A_7C15);
         let b = a.rotate_left(29) ^ 0xD1B5_4A32_D192_ED03;
@@ -617,6 +637,17 @@ impl<'a> Writer<'a> {
     }
 
     fn copper_layer(&self, n: u8) -> AltLayer {
+        if let Some(&id) = self.copper_ids.get(n as usize) {
+            return match id {
+                1 => AltLayer { v6: 1, v7: 0x0100_0001, name: "TOP" },
+                32 => AltLayer { v6: 32, v7: 0x0100_FFFF, name: "BOTTOM" },
+                id => AltLayer {
+                    v6: id,
+                    v7: 0x0100_0000 + id as u32,
+                    name: MID_NAMES[(id as usize).clamp(2, 31) - 2],
+                },
+            };
+        }
         let last = self.copper - 1;
         if n == 0 {
             AltLayer {
@@ -1026,6 +1057,14 @@ impl<'a> Writer<'a> {
     fn nets6(&mut self) -> (u32, Vec<u8>) {
         let mut out = Vec::new();
         for n in &self.b.nets {
+            out.extend(self.net_record(n));
+        }
+        (self.b.nets.len() as u32, out)
+    }
+
+    pub(crate) fn net_record(&mut self, n: &trace_core::Net) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
             let id = self.unique_id();
             let mut v = vec![
                 p("SELECTION", "FALSE"),
@@ -1045,13 +1084,22 @@ impl<'a> Writer<'a> {
             v.push(p("UNIQUEID", id));
             text_record(&mut out, &v);
         }
-        (self.b.nets.len() as u32, out)
+        out
     }
 
     fn components6(&mut self) -> (u32, Vec<u8>) {
         let mut out = Vec::new();
         for c in &self.b.components {
             let id = self.unique_id();
+            out.extend(self.component_record(c, &id));
+        }
+        (self.b.components.len() as u32, out)
+    }
+
+    /// A part's record, with `id` as its unique id.
+    pub(crate) fn component_record(&self, c: &trace_core::Component, id: &str) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
             let pattern = if c.footprint.is_empty() {
                 "TRACE_PART".to_string()
             } else {
@@ -1093,7 +1141,7 @@ impl<'a> Writer<'a> {
             ];
             text_record(&mut out, &v);
         }
-        (self.b.components.len() as u32, out)
+        out
     }
 
     /// A part index as Altium stores it, or none (0xFFFF).
@@ -1107,21 +1155,10 @@ impl<'a> Writer<'a> {
         let mut out = Vec::new();
         let mut n = 0;
         for t in &self.b.geometry.tracks {
-            let Some(l) = self.layer(&t.layer) else {
+            let Some(r) = self.track_record(t) else {
                 continue;
             };
-            let mut r = TRACK;
-            r[0] = l.v6;
-            put_u16(&mut r, 3, self.net(t.net));
-            put_u16(&mut r, 5, u16::MAX);
-            put_u16(&mut r, 7, self.component(t.component));
-            put_i32(&mut r, 13, self.x(t.start.x));
-            put_i32(&mut r, 17, self.y(t.start.y));
-            put_i32(&mut r, 21, self.x(t.end.x));
-            put_i32(&mut r, 25, self.y(t.end.y));
-            put_i32(&mut r, 29, unit(t.width));
-            put_u32(&mut r, 41, l.v7);
-            binary_record(&mut out, 4, &[&r]);
+            out.extend(r);
             n += 1;
         }
         // Graphic outline lines, when the board has an outline, go on
@@ -1152,6 +1189,24 @@ impl<'a> Writer<'a> {
         (n, out)
     }
 
+    pub(crate) fn track_record(&self, t: &trace_core::Track) -> Option<Vec<u8>> {
+        let l = self.layer(&t.layer)?;
+        let mut r = TRACK;
+        r[0] = l.v6;
+        put_u16(&mut r, 3, self.net(t.net));
+        put_u16(&mut r, 5, u16::MAX);
+        put_u16(&mut r, 7, self.component(t.component));
+        put_i32(&mut r, 13, self.x(t.start.x));
+        put_i32(&mut r, 17, self.y(t.start.y));
+        put_i32(&mut r, 21, self.x(t.end.x));
+        put_i32(&mut r, 25, self.y(t.end.y));
+        put_i32(&mut r, 29, unit(t.width));
+        put_u32(&mut r, 41, l.v7);
+        let mut out = Vec::new();
+        binary_record(&mut out, 4, &[&r]);
+        Some(out)
+    }
+
     fn arcs6(&mut self) -> (u32, Vec<u8>) {
         let mut out = Vec::new();
         let mut n = 0;
@@ -1163,6 +1218,10 @@ impl<'a> Writer<'a> {
             n += 1;
         }
         (n, out)
+    }
+
+    pub(crate) fn arc_record_of(&self, a: &Arc) -> Option<Vec<u8>> {
+        Some(self.arc_record(a, self.layer(&a.layer)?))
     }
 
     fn arc_record(&self, a: &Arc, l: AltLayer) -> Vec<u8> {
@@ -1190,8 +1249,16 @@ impl<'a> Writer<'a> {
 
     fn vias6(&mut self) -> (u32, Vec<u8>) {
         let mut out = Vec::new();
-        let last = self.copper - 1;
         for v in &self.b.geometry.vias {
+            out.extend(self.via_record(v));
+        }
+        (self.b.geometry.vias.len() as u32, out)
+    }
+
+    pub(crate) fn via_record(&self, v: &trace_core::Via) -> Vec<u8> {
+        let mut out = Vec::new();
+        let last = self.copper - 1;
+        {
             let (a, z) = (
                 v.from_layer.min(v.to_layer),
                 v.from_layer.max(v.to_layer).min(last),
@@ -1225,7 +1292,7 @@ impl<'a> Writer<'a> {
             }
             binary_record(&mut out, 3, &[&r]);
         }
-        (self.b.geometry.vias.len() as u32, out)
+        out
     }
 
     /// Pads, and the copper regions that carry pads with an exact outline.
@@ -1261,6 +1328,38 @@ impl<'a> Writer<'a> {
             n += 1;
         }
         (n, out, regions)
+    }
+
+    /// A pad's record, and the copper region that carries its exact
+    /// outline when it has one.
+    pub(crate) fn pad_record_of(&self, pad: &Pad) -> Option<(Vec<u8>, Option<Region>)> {
+        let l = self.layer(&pad.layer)?;
+        let comp = self.component(pad.component);
+        let custom = pad.outline.len() >= 3 && round_corner(pad).is_none();
+        let region = custom.then(|| Region {
+            layer: if l.v6 == MULTI.v6 {
+                self.copper_layer(0)
+            } else {
+                l
+            },
+            net: self.net(pad.net),
+            component: comp,
+            outline: pad.outline.clone(),
+            holes: Vec::new(),
+        });
+        Some((self.pad_record(pad, l, comp, custom), region))
+    }
+
+    /// A copper or other area as a region record.
+    pub(crate) fn area_region(&self, q: &trace_core::Polygon) -> Option<Region> {
+        let l = self.layer(&q.layer)?;
+        (q.outline.len() >= 3).then(|| Region {
+            layer: l,
+            net: self.net(q.net),
+            component: self.component(q.component),
+            outline: q.outline.clone(),
+            holes: q.holes.iter().filter(|h| h.len() >= 3).cloned().collect(),
+        })
     }
 
     fn pad_record(&self, pad: &Pad, l: AltLayer, comp: u16, custom: bool) -> Vec<u8> {
@@ -1446,11 +1545,20 @@ impl<'a> Writer<'a> {
         all.extend(extra.iter().cloned());
         let mut out = Vec::new();
         for g in &all {
+            out.extend(self.region_record(g, None));
+        }
+        (all.len() as u32, out)
+    }
+
+    /// A region record; `pour` ties it to a polygon pour (by index).
+    pub(crate) fn region_record(&self, g: &Region, pour: Option<u16>) -> Vec<u8> {
+        let mut out = Vec::new();
+        {
             let mut h = [0u8; 18];
             h[0] = g.layer.v6;
             h[1] = 0x0c;
             put_u16(&mut h, 3, g.net);
-            put_u16(&mut h, 5, u16::MAX);
+            put_u16(&mut h, 5, pour.unwrap_or(u16::MAX));
             put_u16(&mut h, 7, g.component);
             h[9..13].copy_from_slice(&[0xff; 4]);
             put_u16(&mut h, 14, g.holes.len().min(u16::MAX as usize) as u16);
@@ -1485,12 +1593,47 @@ impl<'a> Writer<'a> {
             }
             binary_record(&mut out, 11, &[&body]);
         }
-        (all.len() as u32, out)
+        out
+    }
+
+    /// The same region as `ShapeBasedRegions6` keeps it: integer
+    /// vertices (straight edges), the outline closed, holes as doubles.
+    pub(crate) fn shape_region_record(&self, g: &Region, pour: Option<u16>) -> Vec<u8> {
+        let plain = self.region_record(g, pour);
+        // Header and properties as in the plain record.
+        let plen = u32::from_le_bytes(plain[5 + 18..5 + 22].try_into().unwrap()) as usize;
+        let mut body = plain[5..5 + 22 + plen].to_vec();
+        let mut pts = g.outline.clone();
+        if pts.len() > 1 && pts.first() == pts.last() {
+            pts.pop();
+        }
+        body.extend_from_slice(&(pts.len() as u32).to_le_bytes());
+        for q in pts.iter().chain(pts.first()) {
+            body.push(0);
+            body.extend_from_slice(&self.x(q.x).to_le_bytes());
+            body.extend_from_slice(&self.y(q.y).to_le_bytes());
+            body.extend_from_slice(&[0u8; 12]);
+            body.extend_from_slice(&[0u8; 16]);
+        }
+        for hole in g.holes.iter().take(u16::MAX as usize) {
+            let mut h = hole.clone();
+            if h.len() > 1 && h.first() == h.last() {
+                h.pop();
+            }
+            body.extend_from_slice(&(h.len() as u32).to_le_bytes());
+            for q in h {
+                body.extend_from_slice(&(self.x(q.x) as f64).to_le_bytes());
+                body.extend_from_slice(&(self.y(q.y) as f64).to_le_bytes());
+            }
+        }
+        let mut out = Vec::new();
+        binary_record(&mut out, 11, &[&body]);
+        out
     }
 }
 
 #[derive(Clone)]
-struct Region {
+pub(crate) struct Region {
     layer: AltLayer,
     net: u16,
     component: u16,

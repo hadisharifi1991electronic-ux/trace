@@ -460,10 +460,54 @@ impl App {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let result = trace_export::to_altium(&scene.board, &name)
-            .and_then(|bytes| std::fs::write(&path, bytes));
+        // A board opened from a binary PcbDoc is saved over that file's
+        // records, so everything Trace does not edit (rules, pour settings,
+        // dimensions, 3D bodies, unions...) is kept.
+        let original = scene.path.clone();
+        let over = original
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("pcbdoc"))
+            && std::fs::read(&original)
+                .map(|d| d.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]))
+                .unwrap_or(false);
+        let result: Result<String, String> = (|| {
+            let (bytes, report) = if over {
+                trace_export::to_altium_over(&original, &scene.board, &name)
+                    .map(|(b, r)| (b, Some(r)))
+                    .map_err(|e| e.to_string())?
+            } else {
+                (
+                    trace_export::to_altium(&scene.board, &name).map_err(|e| e.to_string())?,
+                    None,
+                )
+            };
+            // Replacing a file keeps the one there as .bak, the first time.
+            if path.exists() {
+                let mut bak = path.as_os_str().to_owned();
+                bak.push(".bak");
+                let bak = std::path::PathBuf::from(bak);
+                if !bak.exists() {
+                    std::fs::copy(&path, &bak).map_err(|e| format!("{}: {e}", bak.display()))?;
+                }
+            }
+            std::fs::write(&path, bytes).map_err(|e| e.to_string())?;
+            // Read it back: the file must hold the board as saved.
+            let back = trace_altium::read_pcbdoc(&path).map_err(|e| e.to_string())?;
+            let diff = trace_export::altium_rt::compare(&scene.board, &back);
+            let mut msg = format!("Saved {}", path.display());
+            if let Some(r) = report {
+                msg.push_str(&format!(" over the original board ({})", r.summary()));
+            }
+            if !diff.is_empty() {
+                msg.push_str(&format!(". Read back differs: {}", diff.join("; ")));
+            }
+            Ok(msg)
+        })();
         self.message = Some(match result {
-            Ok(()) => (format!("Saved {}", path.display()), false),
+            Ok(m) => {
+                let bad = m.contains("Read back differs");
+                (m, bad)
+            }
             Err(e) => (format!("Could not save: {e}"), true),
         });
     }

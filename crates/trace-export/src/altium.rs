@@ -22,6 +22,14 @@ pub fn to_altium(board: &Board, name: &str) -> std::io::Result<Vec<u8>> {
     Writer::new(board).run(name)
 }
 
+/// The same, keeping coordinates as they are: for boards that came from
+/// Altium (an ASCII PcbDoc), whose coordinates are already Altium's.
+pub fn to_altium_in_place(board: &Board, name: &str) -> std::io::Result<Vec<u8>> {
+    let mut w = Writer::new(board);
+    w.shift = (0, 0);
+    w.run(name)
+}
+
 /// A footprint library as the bytes of a `.PcbLib` file: one storage per
 /// footprint, whose `Data` stream holds its name and then its primitives,
 /// each as in a board's streams. `name` is the file name Altium shows.
@@ -1290,6 +1298,17 @@ impl<'a> Writer<'a> {
             for (k, s) in sizes.iter().enumerate() {
                 put_i32(&mut r, 75 + 4 * k, *s);
             }
+            // Solder mask expansion of its own: value at 54, manual at 66.
+            if let Some(m) = v.fab.mask {
+                put_i32(&mut r, 54, unit(m));
+                r[66] |= 0x02;
+            }
+            if v.fab.tent_top {
+                r[1] |= 0x20;
+            }
+            if v.fab.tent_bottom {
+                r[1] |= 0x40;
+            }
             binary_record(&mut out, 3, &[&r]);
         }
         out
@@ -1541,6 +1560,12 @@ impl<'a> Writer<'a> {
                 outline: q.outline.clone(),
                 holes: q.holes.iter().filter(|h| h.len() >= 3).cloned().collect(),
             });
+        }
+        // Silkscreen, mask, paste and mechanical areas.
+        for q in &self.b.geometry.areas {
+            if let Some(r) = self.area_region(q) {
+                all.push(r);
+            }
         }
         all.extend(extra.iter().cloned());
         let mut out = Vec::new();

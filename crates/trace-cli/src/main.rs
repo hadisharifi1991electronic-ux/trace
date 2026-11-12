@@ -761,9 +761,7 @@ fn convert(file: &str, out: &str) -> Res {
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
             .unwrap_or_default();
-        let binary = file.to_ascii_lowercase().ends_with(".pcbdoc")
-            && std::fs::read(file)?.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]);
-        if binary {
+        if file.to_ascii_lowercase().ends_with(".pcbdoc") {
             // Saved over the original's records: nothing it holds is lost.
             let (bytes, report) =
                 trace_export::to_altium_over(std::path::Path::new(file), &b, &name)?;

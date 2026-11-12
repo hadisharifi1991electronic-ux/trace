@@ -331,6 +331,11 @@ pub(crate) fn parse_via(b: &[u8], layers: &LayerMap) -> Option<Via> {
         fab: Fab {
             tent_top: flags & 0x20 != 0,
             tent_bottom: flags & 0x40 != 0,
+            // Mask expansion of its own: manual flag at 66, value at 54.
+            mask: b
+                .get(66)
+                .filter(|&&m| m & 0x02 != 0)
+                .and_then(|_| len_at(b, 54)),
             ..Default::default()
         },
     })

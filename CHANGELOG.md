@@ -32,8 +32,12 @@ is moved to the Recycle Bin.
   stream; with parts moved, turned and flipped, routing removed and added,
   pads moved to other nets, a new net, a new part and pours poured again,
   each board reads back exactly as edited.
-- Not yet: boards from an ASCII `.PcbDoc`, Allegro or Gerber are still
-  written fresh; new pours and new polygon cutouts are written as copper
+- Boards from an ASCII `.PcbDoc` are written fresh with their own
+  coordinates (no longer moved), now with their silkscreen, mask, paste and
+  mechanical areas and via mask expansions. The DAC39RF12 EVM reads back
+  with every via, part, net and area; left out are 149 drill-drawing
+  lines and 6 pads of negative size.
+- Not yet: boards from Allegro or Gerber are still written fresh; new pours and new polygon cutouts are written as copper
   only (pours) or not at all (cutouts); a changed board
   shape or new stack-up layers are not written.
 ## 0.29.0 (2026-11-12)

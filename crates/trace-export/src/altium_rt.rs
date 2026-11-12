@@ -81,7 +81,7 @@ pub fn to_altium_over(
         let mut r = SaveReport::default();
         r.notes
             .push("the original is not a binary PcbDoc, so the board was written fresh".into());
-        return Ok((crate::to_altium(board, name)?, r));
+        return Ok((crate::altium::to_altium_in_place(board, name)?, r));
     }
     let base = trace_altium::read_pcbdoc(original).map_err(bad)?;
     let file = Cfb::read(data)?;
@@ -2283,8 +2283,26 @@ pub fn compare(saved: &Board, back: &Board) -> Vec<String> {
         }
     }
     let (g, h) = (&saved.geometry, &back.geometry);
+    // Text drawn as strokes may come back as text or as plain strokes.
     let real = |v: &[Track]| v.iter().filter(|t| !t.text).cloned().collect::<Vec<_>>();
-    check(&mut out, "tracks", &real(&g.tracks), &real(&h.tracks), |t| t.start, same_track, |t, s| {
+    let text = |v: &[Track]| v.iter().filter(|t| t.text).cloned().collect::<Vec<_>>();
+    let back_real = {
+        let mut b = real(&h.tracks);
+        let strokes = text(&g.tracks);
+        let mut used = vec![false; b.len()];
+        let mut text_keys: Vec<Track> = strokes;
+        for t in &mut text_keys {
+            t.text = false;
+        }
+        pair(&text_keys, &b, |t| t.start, same_track, &mut used);
+        let mut k = 0;
+        b.retain(|_| {
+            k += 1;
+            !used[k - 1]
+        });
+        b
+    };
+    check(&mut out, "tracks", &real(&g.tracks), &back_real, |t| t.start, same_track, |t, s| {
         name(if s { saved } else { back }, t.net)
     });
     check(&mut out, "arcs", &g.arcs, &h.arcs, |a| a.center, same_arc, |t, s| {
@@ -2303,7 +2321,8 @@ pub fn compare(saved: &Board, back: &Board) -> Vec<String> {
         &areas(g),
         &areas(h),
         |q| first(&q.outline),
-        same_area,
+        // A fresh file keeps poured copper without its pour.
+        |a, b| same_area(a, &Polygon { pour: a.pour, ..b.clone() }),
         |_, _| None,
     );
     if saved.components.len() != back.components.len() {

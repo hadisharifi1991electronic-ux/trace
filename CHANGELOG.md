@@ -3,6 +3,23 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.31.0 (2026-11-12)
+
+- Altium rooms are read (room definitions, enabled or not) and drawn on
+  the board as dashed outlines with their names.
+- Rule scopes understand `WithinRoom('…')` and `TouchesRoom('…')`: an
+  object is within a room when it lies wholly inside it, touches it when
+  they overlap. A room the board does not define holds nothing, as in
+  Altium (TI's DAC39RF12 EVM has a clearance rule for rooms that are not
+  on the board, which is now simply passed over).
+- The design rule check judges a clearance rule on the two objects
+  themselves when their nets and kinds cannot decide it: parts
+  (`InComponent`, `HasFootprint`, `InComponentClass`), layers
+  (`OnLayer`), rooms. Before, such rules were only a maybe. Answers are
+  kept per object, so checks stay as fast (DAC board: 1.5 s, same 296
+  results).
+- Polygon connect rules for rooms apply to the pads and vias in them.
+
 ## 0.30.0 (2026-11-12)
 
 - Boards save back into Altium: File → Save as Altium board on a board

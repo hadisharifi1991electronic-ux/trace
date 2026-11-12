@@ -47,7 +47,11 @@ fn edits(b: &mut Board) {
     let n = b.components.len();
     // Move and turn one part, flip another (pick parts that own pads).
     let with_pads = |b: &Board, k: usize| {
-        b.geometry.pads.iter().filter(|p| p.component == Some(k as u32)).count()
+        b.geometry
+            .pads
+            .iter()
+            .filter(|p| p.component == Some(k as u32))
+            .count()
     };
     let parts: Vec<usize> = (0..n).filter(|&k| with_pads(b, k) >= 2).collect();
     let (pm, pf) = (parts[parts.len() / 3], parts[parts.len() / 2]);
@@ -61,7 +65,11 @@ fn edits(b: &mut Board) {
     place(b, pm, from, to);
     let from = Placement::of(b, pf).unwrap();
     let to = Placement {
-        side: if from.side == Side::Top { Side::Bottom } else { Side::Top },
+        side: if from.side == Side::Top {
+            Side::Bottom
+        } else {
+            Side::Top
+        },
         ..from
     };
     place(b, pf, from, to);

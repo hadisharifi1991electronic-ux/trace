@@ -270,7 +270,11 @@ impl Text {
         // A Unicode copy of the old value would win over the new one.
         let utf = format!("%UTF8%{k}");
         self.fields.retain(|(a, _)| !a.eq_ignore_ascii_case(&utf));
-        match self.fields.iter_mut().find(|(a, _)| a.eq_ignore_ascii_case(k)) {
+        match self
+            .fields
+            .iter_mut()
+            .find(|(a, _)| a.eq_ignore_ascii_case(k))
+        {
             Some(f) => f.1 = v,
             None => self.fields.push((k.to_string(), v)),
         }
@@ -469,8 +473,7 @@ fn same_via(a: &Via, b: &Via) -> bool {
         && near_len(a.hole, b.hole)
         && a.fab == b.fab
         && a.rings.len() == b.rings.len()
-        && a
-            .rings
+        && a.rings
             .iter()
             .zip(&b.rings)
             .all(|(x, y)| x.0 == y.0 && near_len(x.1, y.1))
@@ -683,7 +686,11 @@ impl<'a> Merge<'a> {
     }
 
     fn set_net(b: &mut [u8], net: Option<u32>) {
-        put_u16(b, 3, net.map_or(NONE16, |n| n.min(NONE16 as u32 - 1) as u16));
+        put_u16(
+            b,
+            3,
+            net.map_or(NONE16, |n| n.min(NONE16 as u32 - 1) as u16),
+        );
     }
 
     /// The layer byte a flip sends `id` to.
@@ -780,7 +787,10 @@ impl<'a> Merge<'a> {
             Self::xy(b, i + 1, m);
             if round {
                 Self::xy(b, i + 9, m);
-                let (s, e) = (f64_at(b, i + 21).unwrap_or(0.0), f64_at(b, i + 29).unwrap_or(0.0));
+                let (s, e) = (
+                    f64_at(b, i + 21).unwrap_or(0.0),
+                    f64_at(b, i + 29).unwrap_or(0.0),
+                );
                 let (s, e) = (m.angle(s), m.angle(e));
                 let (s, e) = if m.flips() { (e, s) } else { (s, e) };
                 put_f64(b, i + 21, s);
@@ -886,7 +896,11 @@ impl<'a> Merge<'a> {
                     if b.side != c.side {
                         t.set(
                             "LAYER",
-                            if c.side == Side::Bottom { "BOTTOM" } else { "TOP" },
+                            if c.side == Side::Bottom {
+                                "BOTTOM"
+                            } else {
+                                "TOP"
+                            },
                         );
                         changed = true;
                     }
@@ -917,7 +931,8 @@ impl<'a> Merge<'a> {
         }
         self.report.removed += self.comp_map.iter().filter(|c| c.is_none()).count();
         self.renumber.insert("Components6", self.comp_map.clone());
-        self.file.set_records("Components6", out.len(), join_text(&out));
+        self.file
+            .set_records("Components6", out.len(), join_text(&out));
     }
 
     // --- primitives ----------------------------------------------------------
@@ -1108,8 +1123,7 @@ impl<'a> Merge<'a> {
                 "{skipped_text} strokes of new text left out (new parts get designator texts)"
             ));
         }
-        self.file
-            .set_records("Tracks6", out.len(), join(&out));
+        self.file.set_records("Tracks6", out.len(), join(&out));
     }
 
     fn arcs(&mut self) {
@@ -1448,7 +1462,10 @@ impl<'a> Merge<'a> {
         // Shape-based regions: one for each region when the file keeps
         // them that way, which then change with their region.
         let regions_old = self.file.get("/Regions6/Data").map(|d| split(d, 1));
-        let shapes_old = self.file.get("/ShapeBasedRegions6/Data").map(|d| split(d, 1));
+        let shapes_old = self
+            .file
+            .get("/ShapeBasedRegions6/Data")
+            .map(|d| split(d, 1));
         let twins = match (&regions_old, &shapes_old) {
             (Some(r), Some(s)) => r.len() == s.len() && !r.is_empty(),
             _ => false,
@@ -1463,7 +1480,9 @@ impl<'a> Merge<'a> {
             let rold = regions_old.unwrap();
             let mut placed: Vec<Option<Rec>> = vec![None; out.len()];
             for (i, mut r) in olds.into_iter().enumerate() {
-                let Some(Some(n)) = renum.get(i) else { continue };
+                let Some(Some(n)) = renum.get(i) else {
+                    continue;
+                };
                 let b = &mut r.blocks[0];
                 let comp = u16_at(&rold[i].blocks[0], 7)
                     .filter(|&c| c != NONE16)
@@ -1683,9 +1702,7 @@ impl<'a> Merge<'a> {
                         Self::move_rings(b, m);
                     }
                     Self::edit_props(b, |t| {
-                        let len = |k: &str| {
-                            t.get(k).and_then(Length::parse).map(|l| l.mil())
-                        };
+                        let len = |k: &str| t.get(k).and_then(Length::parse).map(|l| l.mil());
                         if let (Some(x), Some(y)) = (len("MODEL.2D.X"), len("MODEL.2D.Y")) {
                             let [u, v] = m.xy([x, y]);
                             t.set("MODEL.2D.X", format!("{}mil", trim(u, 4)));
@@ -1777,7 +1794,10 @@ impl<'a> Merge<'a> {
         let mut out = Vec::new();
         for mut g in groups {
             let id = g[0].1.get("ID").unwrap_or("").to_string();
-            if let Some(n) = id.strip_prefix("Component#").and_then(|n| n.parse::<usize>().ok()) {
+            if let Some(n) = id
+                .strip_prefix("Component#")
+                .and_then(|n| n.parse::<usize>().ok())
+            {
                 let Some(Some(nn)) = self.comp_map.get(n) else {
                     continue;
                 };
@@ -1785,7 +1805,10 @@ impl<'a> Merge<'a> {
                 let plain = g[0].1.get("VARIANTGUID").unwrap_or("").is_empty()
                     && g[0].1.get("APPURTENANCE").is_none();
                 if plain {
-                    let (was, now) = (&self.base.components[n].params, &self.ed.components[*nn as usize].params);
+                    let (was, now) = (
+                        &self.base.components[n].params,
+                        &self.ed.components[*nn as usize].params,
+                    );
                     if was != now {
                         let head = g[0].clone();
                         g = vec![head];
@@ -1793,7 +1816,10 @@ impl<'a> Merge<'a> {
                             g.push((
                                 Vec::new(),
                                 Text {
-                                    fields: vec![("NAME".into(), k.clone()), ("VALUE".into(), v.clone())],
+                                    fields: vec![
+                                        ("NAME".into(), k.clone()),
+                                        ("VALUE".into(), v.clone()),
+                                    ],
                                     nul: true,
                                 },
                             ));
@@ -1807,7 +1833,8 @@ impl<'a> Merge<'a> {
         }
         // The header counts owners, not records.
         let n = out.iter().filter(|(_, t)| t.get("ID").is_some()).count();
-        self.file.set_records("PrimitiveParameters", n, join_text(&out));
+        self.file
+            .set_records("PrimitiveParameters", n, join_text(&out));
     }
 
     // --- tables that point at records by position -----------------------------
@@ -1831,7 +1858,10 @@ impl<'a> Merge<'a> {
                 let Some(map) = self.renumber.get(stream) else {
                     return true;
                 };
-                let Some(i) = t.get("PRIMITIVEINDEX").and_then(|v| v.parse::<usize>().ok()) else {
+                let Some(i) = t
+                    .get("PRIMITIVEINDEX")
+                    .and_then(|v| v.parse::<usize>().ok())
+                else {
                     return true;
                 };
                 match map.get(i) {
@@ -1843,7 +1873,8 @@ impl<'a> Merge<'a> {
                 }
             });
             let n = recs.len();
-            self.file.set_records("UniqueIDPrimitiveInformation", n, join_text(&recs));
+            self.file
+                .set_records("UniqueIDPrimitiveInformation", n, join_text(&recs));
         }
         // GUIDs: (kind, index, 16-byte guid).
         let guid_streams: [(u32, &str); 11] = [
@@ -1884,7 +1915,11 @@ impl<'a> Merge<'a> {
             self.file.set_records("PrimitiveGuids", n, out);
         }
         // Pad and via library links: (0, index, kind 2 pad / 3 via, entry).
-        if let Some(data) = self.file.get("/PadViaCacheLibraryLinksSection/Data").cloned() {
+        if let Some(data) = self
+            .file
+            .get("/PadViaCacheLibraryLinksSection/Data")
+            .cloned()
+        {
             let mut out = Vec::new();
             for e in data.chunks_exact(10) {
                 let idx = u32_at(e, 1).unwrap() as usize;
@@ -1905,7 +1940,8 @@ impl<'a> Merge<'a> {
                 out.extend_from_slice(&e[5..]);
             }
             let n = out.len() / 10;
-            self.file.set_records("PadViaCacheLibraryLinksSection", n, out);
+            self.file
+                .set_records("PadViaCacheLibraryLinksSection", n, out);
         }
     }
 
@@ -1970,7 +2006,9 @@ impl<'a> Merge<'a> {
                     },
                 };
                 t.remove_where(|k| {
-                    k.len() > 1 && k.starts_with(['M', 'm']) && k[1..].chars().all(|c| c.is_ascii_digit())
+                    k.len() > 1
+                        && k.starts_with(['M', 'm'])
+                        && k[1..].chars().all(|c| c.is_ascii_digit())
                 });
                 t.set("NAME", c.name.clone());
                 for (k, m) in c.members.iter().enumerate() {
@@ -2027,7 +2065,10 @@ impl<'a> Merge<'a> {
             }
         }
         for d in &self.ed.diff_pairs {
-            if recs.iter().any(|(_, t)| t.get("NAME") == Some(d.name.as_str())) {
+            if recs
+                .iter()
+                .any(|(_, t)| t.get("NAME") == Some(d.name.as_str()))
+            {
                 continue;
             }
             let id = self.w.unique_id();
@@ -2054,7 +2095,8 @@ impl<'a> Merge<'a> {
             self.report.added += 1;
         }
         let n = out.len();
-        self.file.set_records("DifferentialPairs6", n, join_text(&out));
+        self.file
+            .set_records("DifferentialPairs6", n, join_text(&out));
     }
 
     fn rules(&mut self) {
@@ -2067,7 +2109,10 @@ impl<'a> Merge<'a> {
         for (pre, mut t) in recs.iter().cloned() {
             let kind = t.get("RULEKIND").unwrap_or("").to_ascii_uppercase();
             let name = t.get("NAME").unwrap_or("").to_string();
-            let find = |rs: &'a [Rule]| rs.iter().find(|r| rule_key(r) == (kind.clone(), name.clone()));
+            let find = |rs: &'a [Rule]| {
+                rs.iter()
+                    .find(|r| rule_key(r) == (kind.clone(), name.clone()))
+            };
             let (was, now) = (find(&self.base.rules), find(&self.ed.rules));
             match (was, now) {
                 (Some(w), Some(n)) => {
@@ -2081,7 +2126,8 @@ impl<'a> Merge<'a> {
                         changed = true;
                     }
                     if w.scope != n.scope {
-                        for (k, key) in ["SCOPE1EXPRESSION", "SCOPE2EXPRESSION"].iter().enumerate() {
+                        for (k, key) in ["SCOPE1EXPRESSION", "SCOPE2EXPRESSION"].iter().enumerate()
+                        {
                             if let Some(s) = n.scope.get(k) {
                                 t.set(key, s.clone());
                             }
@@ -2110,9 +2156,10 @@ impl<'a> Merge<'a> {
                 t.get("RULEKIND")
                     .is_some_and(|k| k.eq_ignore_ascii_case(&r.kind))
             }) else {
-                self.report
-                    .notes
-                    .push(format!("rule {} ({}) has no like rule to copy, left out", r.name, r.kind));
+                self.report.notes.push(format!(
+                    "rule {} ({}) has no like rule to copy, left out",
+                    r.name, r.kind
+                ));
                 continue;
             };
             let mut t = tpl.clone();
@@ -2141,7 +2188,9 @@ impl<'a> Merge<'a> {
             return;
         };
         let mut recs = split_text(data, 0);
-        let Some((_, t)) = recs.first_mut() else { return };
+        let Some((_, t)) = recs.first_mut() else {
+            return;
+        };
         let (was, now) = (&self.base.stackup.layers, &self.ed.stackup.layers);
         let mut changed = false;
         if was.len() == now.len() {
@@ -2248,7 +2297,6 @@ fn write_wide(w: &[(u32, Vec<u8>)]) -> Vec<u8> {
     out
 }
 
-
 /// Differences between a board that was saved and the board read back
 /// from the file: objects missing on either side, nets that differ. Text
 /// drawn as strokes is left out (it is kept as text). Empty when the file
@@ -2256,7 +2304,8 @@ fn write_wide(w: &[(u32, Vec<u8>)]) -> Vec<u8> {
 pub fn compare(saved: &Board, back: &Board) -> Vec<String> {
     let mut out = Vec::new();
     let name = |b: &Board, n: Option<u32>| {
-        n.and_then(|n| b.nets.get(n as usize)).map(|n| n.name.clone())
+        n.and_then(|n| b.nets.get(n as usize))
+            .map(|n| n.name.clone())
     };
     fn check<T>(
         out: &mut Vec<String>,
@@ -2302,19 +2351,49 @@ pub fn compare(saved: &Board, back: &Board) -> Vec<String> {
         });
         b
     };
-    check(&mut out, "tracks", &real(&g.tracks), &back_real, |t| t.start, same_track, |t, s| {
-        name(if s { saved } else { back }, t.net)
-    });
-    check(&mut out, "arcs", &g.arcs, &h.arcs, |a| a.center, same_arc, |t, s| {
-        name(if s { saved } else { back }, t.net)
-    });
-    check(&mut out, "vias", &g.vias, &h.vias, |v| v.at, same_via, |t, s| {
-        name(if s { saved } else { back }, t.net)
-    });
-    check(&mut out, "pads", &g.pads, &h.pads, |p| p.at, same_pad, |t, s| {
-        name(if s { saved } else { back }, t.net)
-    });
-    let areas = |g: &Geometry| g.polygons.iter().chain(&g.areas).cloned().collect::<Vec<_>>();
+    check(
+        &mut out,
+        "tracks",
+        &real(&g.tracks),
+        &back_real,
+        |t| t.start,
+        same_track,
+        |t, s| name(if s { saved } else { back }, t.net),
+    );
+    check(
+        &mut out,
+        "arcs",
+        &g.arcs,
+        &h.arcs,
+        |a| a.center,
+        same_arc,
+        |t, s| name(if s { saved } else { back }, t.net),
+    );
+    check(
+        &mut out,
+        "vias",
+        &g.vias,
+        &h.vias,
+        |v| v.at,
+        same_via,
+        |t, s| name(if s { saved } else { back }, t.net),
+    );
+    check(
+        &mut out,
+        "pads",
+        &g.pads,
+        &h.pads,
+        |p| p.at,
+        same_pad,
+        |t, s| name(if s { saved } else { back }, t.net),
+    );
+    let areas = |g: &Geometry| {
+        g.polygons
+            .iter()
+            .chain(&g.areas)
+            .cloned()
+            .collect::<Vec<_>>()
+    };
     check(
         &mut out,
         "areas",
@@ -2322,7 +2401,15 @@ pub fn compare(saved: &Board, back: &Board) -> Vec<String> {
         &areas(h),
         |q| first(&q.outline),
         // A fresh file keeps poured copper without its pour.
-        |a, b| same_area(a, &Polygon { pour: a.pour, ..b.clone() }),
+        |a, b| {
+            same_area(
+                a,
+                &Polygon {
+                    pour: a.pour,
+                    ..b.clone()
+                },
+            )
+        },
         |_, _| None,
     );
     if saved.components.len() != back.components.len() {
@@ -2400,7 +2487,12 @@ mod tests {
             fab: Fab::default(),
         };
         let g = &mut b.geometry;
-        g.outline = vec![pt(0.0, 0.0), pt(2000.0, 0.0), pt(2000.0, 2000.0), pt(0.0, 2000.0)];
+        g.outline = vec![
+            pt(0.0, 0.0),
+            pt(2000.0, 0.0),
+            pt(2000.0, 2000.0),
+            pt(0.0, 2000.0),
+        ];
         g.pads.push(pad("1", 970.0, 0));
         g.pads.push(pad("2", 1030.0, 1));
         for k in 0..3 {
@@ -2422,7 +2514,10 @@ mod tests {
         // Unchanged: every stream as it was.
         let (same, r) = to_altium_over(&orig, &b, "a.PcbDoc").unwrap();
         assert_eq!((r.changed, r.added, r.removed), (0, 0, 0));
-        let (a, c) = (Cfb::read(std::fs::read(&orig).unwrap()).unwrap(), Cfb::read(same).unwrap());
+        let (a, c) = (
+            Cfb::read(std::fs::read(&orig).unwrap()).unwrap(),
+            Cfb::read(same).unwrap(),
+        );
         assert_eq!(a.streams, c.streams);
 
         // Turn the part, drop a track, add one, move a pad to GND.

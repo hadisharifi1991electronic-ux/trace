@@ -4,12 +4,14 @@
 //! mask slivers, silkscreen over mask openings, copper near the board
 //! edge), in `fab`.
 //!
-//! Rule scopes are read as Altium query expressions. Terms Trace can judge
-//! from nets alone are understood (`All`, `InNet`, `InNetClass`,
-//! `InDifferentialPair`, `InAnyDifferentialPair`, `InDifferentialPairClass`,
-//! `InPolygon`, `IsTrack`, `IsVia`, `IsPad`, ...); a rule whose scope uses
-//! anything else (rooms, components, footprints) is left out, so it neither
-//! raises nor hides a violation.
+//! Rule scopes are read as Altium query expressions: nets, classes and
+//! pairs (`InNet`, `InNetClass`, `InDifferentialPair`, ...), kinds of
+//! object (`IsTrack`, `IsVia`, `IsPad`, `InPolygon`, ...), parts
+//! (`InComponent`, `HasFootprint`, `InComponentClass`), `OnLayer`,
+//! `HoleSize`, and rooms (`WithinRoom`, `TouchesRoom`, from the board's
+//! room definitions). Each rule is first judged by net and kind of object;
+//! where that cannot decide, on the two objects themselves. A term Trace
+//! cannot judge leaves the rule as a maybe, and the smaller gap wins.
 
 use crate::route::{inside, land, pt, seg_seg, Shape, P};
 use crate::{Board, LayerRef, Length, Rule};
@@ -253,6 +255,97 @@ struct Subject<'a> {
     hole: Option<f64>,
     /// The copper layer's name, for `OnLayer`.
     layer: Option<&'a str>,
+    /// The object's extent (mil), for `WithinRoom` and `TouchesRoom`.
+    bbox: Option<[f64; 4]>,
+    rooms: &'a [Room],
+}
+
+/// The board's rooms (Altium room definitions): each name and outline in
+/// mil, for drawing.
+pub fn rooms(board: &Board) -> Vec<(String, Vec<[f64; 2]>)> {
+    Room::all(board)
+        .into_iter()
+        .map(|r| (r.name, r.ring))
+        .collect()
+}
+
+/// An Altium room: a named area that rule scopes can ask about.
+pub(crate) struct Room {
+    name: String,
+    ring: Vec<P>,
+    bb: [f64; 4],
+}
+
+impl Room {
+    /// Rooms are `RoomDefinition` rules with an outline as `VX0`/`VY0`...
+    /// (arc vertices taken as corners). Disabled ones still name an area.
+    fn all(board: &Board) -> Vec<Room> {
+        board
+            .rules
+            .iter()
+            .filter(|r| r.kind.eq_ignore_ascii_case("RoomDefinition"))
+            .filter_map(|r| {
+                let mut ring = Vec::new();
+                for i in 0.. {
+                    let at = |k: &str| param(r, &format!("{k}{i}")).and_then(Length::parse);
+                    let (Some(x), Some(y)) = (at("VX"), at("VY")) else {
+                        break;
+                    };
+                    ring.push([x.mil(), y.mil()]);
+                }
+                if ring.len() > 1 && ring.first() == ring.last() {
+                    ring.pop();
+                }
+                (ring.len() >= 3).then(|| Room {
+                    name: r.name.clone(),
+                    bb: ring
+                        .iter()
+                        .fold([f64::MAX, f64::MAX, f64::MIN, f64::MIN], |b, p| {
+                            [
+                                b[0].min(p[0]),
+                                b[1].min(p[1]),
+                                b[2].max(p[0]),
+                                b[3].max(p[1]),
+                            ]
+                        }),
+                    ring,
+                })
+            })
+            .collect()
+    }
+
+    fn corners(b: [f64; 4]) -> [P; 4] {
+        [[b[0], b[1]], [b[2], b[1]], [b[2], b[3]], [b[0], b[3]]]
+    }
+
+    /// Whether the extent lies wholly inside the room.
+    fn holds(&self, b: [f64; 4]) -> bool {
+        Self::corners(b).iter().all(|&c| inside(c, &self.ring))
+    }
+
+    /// Whether the extent and the room overlap.
+    fn touches(&self, b: [f64; 4]) -> bool {
+        let r = self.bb;
+        if b[2] < r[0] || b[0] > r[2] || b[3] < r[1] || b[1] > r[3] {
+            return false;
+        }
+        let edges = |v: &[P]| {
+            (0..v.len())
+                .map(|i| (v[i], v[(i + 1) % v.len()]))
+                .collect::<Vec<_>>()
+        };
+        let mine = Self::corners(b);
+        Self::corners(b).iter().any(|&c| inside(c, &self.ring))
+            || self
+                .ring
+                .iter()
+                .any(|p| p[0] >= b[0] && p[0] <= b[2] && p[1] >= b[1] && p[1] <= b[3])
+            || edges(&mine).iter().any(|e| {
+                edges(&self.ring)
+                    .iter()
+                    .any(|f| seg_seg(e.0, e.1, f.0, f.1) <= 0.0)
+            })
+    }
 }
 
 /// Altium footprint patterns: `*` for any run of characters, `?` for one,
@@ -290,7 +383,8 @@ struct Parser<'a> {
 }
 
 // Three-valued (Kleene): `None` where a term asks about something Trace
-// cannot judge, such as a room; `false and unknown` is still false. A
+// cannot judge here, such as a room without the object's place; `false
+// and unknown` is still false. A
 // scope that does not parse is unknown as a whole.
 type Tri = Option<bool>;
 
@@ -455,6 +549,18 @@ impl Parser<'_> {
             "isfree" => return part(&|_, _, _| true).map(|v| !v),
             "hasfootprintpad" if matches!(s.part, Part::Free) => return Some(false),
             "isthrucomponent" => return thru,
+            "withinroom" | "touchesroom" => {
+                // A room the board does not have holds nothing.
+                let Some(room) = s.rooms.iter().find(|r| eq(&r.name, arg)) else {
+                    return Some(false);
+                };
+                let b = s.bbox?;
+                return Some(if w == "withinroom" {
+                    room.holds(b)
+                } else {
+                    room.touches(b)
+                });
+            }
             "issmtcomponent" => return thru.map(|t| !t),
             _ => {}
         }
@@ -490,23 +596,19 @@ pub(crate) struct Thing {
     pub hole: Option<f64>,
     /// Copper layer index.
     pub layer: Option<u8>,
+    /// Extent in mil, for rooms.
+    pub bbox: Option<[f64; 4]>,
 }
 
 /// Judges rule scopes against single objects of one board.
 pub(crate) struct Scopes {
     info: NetInfo,
-    layers: Vec<String>,
 }
 
 impl Scopes {
     pub(crate) fn new(board: &Board) -> Scopes {
         Scopes {
             info: NetInfo::new(board),
-            layers: board
-                .stackup
-                .copper_layers()
-                .map(|l| l.name.clone())
-                .collect(),
         }
     }
 
@@ -521,8 +623,9 @@ impl Scopes {
         s.hole = t.hole;
         s.layer = t
             .layer
-            .and_then(|l| self.layers.get(l as usize))
+            .and_then(|l| self.info.layers.get(l as usize))
             .map(String::as_str);
+        s.bbox = t.bbox;
         judge(scope, &s)
     }
 }
@@ -549,6 +652,9 @@ struct NetInfo {
     parts: Vec<(String, String, Vec<String>)>,
     /// Whether each component has a pad with a hole.
     thru: Vec<bool>,
+    rooms: Vec<Room>,
+    /// Copper layer names, top first.
+    layers: Vec<String>,
 }
 
 impl NetInfo {
@@ -618,6 +724,12 @@ impl NetInfo {
             pair_classes,
             parts,
             thru,
+            rooms: Room::all(board),
+            layers: board
+                .stackup
+                .copper_layers()
+                .map(|l| l.name.clone())
+                .collect(),
         }
     }
 
@@ -655,6 +767,8 @@ impl NetInfo {
                 part,
                 hole: None,
                 layer: None,
+                bbox: None,
+                rooms: &self.rooms,
             },
             None => Subject {
                 net: "No Net",
@@ -665,6 +779,8 @@ impl NetInfo {
                 part,
                 hole: None,
                 layer: None,
+                bbox: None,
+                rooms: &self.rooms,
             },
         }
     }
@@ -682,6 +798,7 @@ struct ClearanceRule {
     /// asks about something Trace cannot judge (a room, a footprint).
     covers: [Vec<[Option<bool>; 8]>; 2],
     pad_pad_in_part: bool,
+    scopes: [String; 2],
 }
 
 fn param<'a>(r: &'a Rule, k: &str) -> Option<&'a str> {
@@ -738,6 +855,7 @@ impl ClearanceRule {
             covers,
             pad_pad_in_part: !param(r, "IGNOREPADTOPADCLEARANCEINFOOTPRINT")
                 .is_some_and(|v| v.eq_ignore_ascii_case("TRUE")),
+            scopes: scopes.map(String::from),
         })
     }
 
@@ -765,12 +883,73 @@ impl ClearanceRule {
         )
     }
 
+    /// As `applies`, judged on the two objects themselves: their parts,
+    /// layer and extent (for rooms). Answers are kept in `seen` by rule
+    /// `k`, scope and object.
+    fn applies_to(
+        &self,
+        k: usize,
+        info: &NetInfo,
+        a: &Copper,
+        b: &Copper,
+        seen: &Seen,
+    ) -> Option<bool> {
+        let one = |scope: usize, c: &Copper| -> Option<bool> {
+            let key = (k, scope, c.item);
+            if let Some(v) = seen.borrow().get(&key) {
+                return *v;
+            }
+            let mut s = if c.obj == Obj::Pour {
+                info.subject(c.net, c.obj)
+            } else {
+                info.subject_in(c.net, c.obj, c.component)
+            };
+            s.layer = c
+                .layer
+                .and_then(|l| info.layers.get(l as usize))
+                .map(String::as_str);
+            s.bbox = Some(c.shape.bbox());
+            let v = judge(&self.scopes[scope], &s);
+            seen.borrow_mut().insert(key, v);
+            v
+        };
+        let and = |x: Option<bool>, y: Option<bool>| match (x, y) {
+            (Some(false), _) | (_, Some(false)) => Some(false),
+            (Some(true), Some(true)) => Some(true),
+            _ => None,
+        };
+        let either = |x: Option<bool>, y: Option<bool>| match (x, y) {
+            (Some(true), _) | (_, Some(true)) => Some(true),
+            (Some(false), Some(false)) => Some(false),
+            _ => None,
+        };
+        let first = and(self.covers(0, a.net, a.obj), self.covers(1, b.net, b.obj));
+        let first = if first.is_none() {
+            and(one(0, a), one(1, b))
+        } else {
+            first
+        };
+        if first == Some(true) {
+            return first;
+        }
+        let second = and(self.covers(0, b.net, b.obj), self.covers(1, a.net, a.obj));
+        let second = if second.is_none() {
+            and(one(0, b), one(1, a))
+        } else {
+            second
+        };
+        either(first, second)
+    }
+
     fn gap(&self, a: Obj, b: Obj) -> f64 {
         self.gaps.get(&(a, b)).copied().unwrap_or(self.gap)
     }
 }
 
 // ---------------------------------------------------------------- copper
+
+/// Scope answers per clearance rule, scope and object.
+type Seen = std::cell::RefCell<HashMap<(usize, usize, Item), Option<bool>>>;
 
 struct Copper {
     layer: Option<u8>,
@@ -1035,10 +1214,15 @@ pub fn check(board: &Board, limit: usize) -> Vec<Violation> {
     // The first rule by priority that takes the pair. A rule that may take
     // it (its scope names a room or a footprint Trace does not judge) is
     // given the benefit of the doubt: the smaller gap wins.
+    let seen: Seen = Default::default();
     let need = |a: &Copper, b: &Copper| -> Option<(f64, &str)> {
         let mut maybe: Option<(f64, &str)> = None;
-        for r in &clearances {
-            match r.applies((a.net, a.obj), (b.net, b.obj)) {
+        for (k, r) in clearances.iter().enumerate() {
+            let fits = match r.applies((a.net, a.obj), (b.net, b.obj)) {
+                None => r.applies_to(k, &info, a, b, &seen),
+                known => known,
+            };
+            match fits {
                 Some(false) => {}
                 None => {
                     let g = r.gap(a.obj, b.obj);
@@ -1457,7 +1641,8 @@ mod tests {
             Some(true)
         );
         assert_eq!(judge("(InNet('A') or IsVia)", &s), Some(false));
-        assert_eq!(judge("WithinRoom('X')", &s), None);
+        // A room the board does not have holds nothing.
+        assert_eq!(judge("WithinRoom('X')", &s), Some(false));
         assert_eq!(judge("IsPad and HoleSize = 45", &s), Some(false));
         assert_eq!(judge("IsTrack and HoleSize = 45", &s), None);
         let mut s = info.subject(Some(2), Obj::ThPad);
@@ -1468,6 +1653,82 @@ mod tests {
         s.layer = Some("L2");
         assert_eq!(judge("OnLayer('L2') and IsPad", &s), Some(true));
         assert_eq!(judge("not InNet('A') or WithinRoom('X')", &s), Some(true));
+    }
+
+    #[test]
+    fn rooms() {
+        let mut b = board();
+        let mut room = rule("RoomDefinition", ["All", "All"], 1, &[]);
+        room.name = "DAC".into();
+        room.enabled = false;
+        for (i, (x, y)) in [(0, 0), (100, 0), (100, 100), (0, 100), (0, 0)]
+            .into_iter()
+            .enumerate()
+        {
+            room.params.insert(format!("VX{i}"), format!("{x}mil"));
+            room.params.insert(format!("VY{i}"), format!("{y}mil"));
+        }
+        b.rules.push(room);
+        let info = NetInfo::new(&b);
+        let mut s = info.subject(Some(0), Obj::Via);
+        assert_eq!(judge("WithinRoom('DAC')", &s), None, "no place");
+        s.bbox = Some([10.0, 10.0, 20.0, 20.0]);
+        assert_eq!(judge("WithinRoom('DAC')", &s), Some(true));
+        assert_eq!(judge("WithinRoom('FMC')", &s), Some(false));
+        s.bbox = Some([90.0, 10.0, 110.0, 20.0]);
+        assert_eq!(judge("WithinRoom('DAC')", &s), Some(false));
+        assert_eq!(judge("TouchesRoom('DAC')", &s), Some(true));
+        s.bbox = Some([-50.0, -50.0, 150.0, 150.0]);
+        assert_eq!(judge("TouchesRoom('DAC')", &s), Some(true), "around it");
+        s.bbox = Some([200.0, 10.0, 210.0, 20.0]);
+        assert_eq!(judge("TouchesRoom('DAC')", &s), Some(false));
+    }
+
+    #[test]
+    fn room_rules_apply_inside_their_room() {
+        let mut b = board();
+        // A and B 10 mil apart edge to edge: fine under 8 mil, not under
+        // the 12 mil of a rule for room R.
+        b.geometry.tracks.push(track(0, 0.0, 10.0));
+        b.geometry.tracks.push(track(1, 20.0, 10.0));
+        b.rules.push(rule(
+            "Clearance",
+            ["WithinRoom('R')", "All"],
+            1,
+            &[("GAP", "12mil")],
+        ));
+        let mut room = rule("RoomDefinition", ["All", "All"], 1, &[]);
+        room.name = "R".into();
+        let mut add = |x: f64, y: f64, i: usize| {
+            room.params.insert(format!("VX{i}"), format!("{x}mil"));
+            room.params.insert(format!("VY{i}"), format!("{y}mil"));
+        };
+        // Far from the tracks first: the rule does not apply.
+        for (i, (x, y)) in [(0.0, 500.0), (100.0, 500.0), (100.0, 600.0), (0.0, 600.0)]
+            .into_iter()
+            .enumerate()
+        {
+            add(x, y, i);
+        }
+        b.rules.push(room.clone());
+        assert!(check(&b, 100).is_empty());
+        // Around them: it does.
+        let room = b.rules.last_mut().unwrap();
+        for (i, (x, y)) in [
+            (-50.0, -50.0),
+            (1050.0, -50.0),
+            (1050.0, 50.0),
+            (-50.0, 50.0),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            room.params.insert(format!("VX{i}"), format!("{x}mil"));
+            room.params.insert(format!("VY{i}"), format!("{y}mil"));
+        }
+        let v = check(&b, 100);
+        assert_eq!(v.len(), 1, "{v:?}");
+        assert_eq!(v[0].need, 12.0);
     }
 
     #[test]

@@ -130,6 +130,8 @@ pub struct Scene {
     pub layers: Vec<Layer>,
     pub copper_count: u8,
     pub outline: Vec<[f32; 2]>,
+    /// Rooms: name and outline.
+    pub rooms: Vec<(String, Vec<[f32; 2]>)>,
     pub bounds: [f32; 4],
     pub by_net: HashMap<u32, Vec<usize>>,
     grid: HashMap<(i32, i32), Vec<usize>>,
@@ -473,6 +475,10 @@ impl Scene {
         }
 
         let (fills, fill_verts, fill_tris) = triangulate(&board, &slot);
+        let rooms = trace_core::drc::rooms(&board)
+            .into_iter()
+            .map(|(n, r)| (n, r.iter().map(|p| [p[0] as f32, p[1] as f32]).collect()))
+            .collect();
 
         Scene {
             from_sheets: false,
@@ -486,6 +492,7 @@ impl Scene {
             layers,
             copper_count: n,
             outline,
+            rooms,
             bounds,
             by_net,
             grid,

@@ -248,8 +248,9 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   DAC39RF12 EVM (16 layers, 46 pours) Trace's pour is within 1% of TI's
   Gerbers by copper area, and the design rule check finds the same as on
   TI's own copper. Polygon cutouts, removed via pads, and connect rules
-  for kinds of pads, hole sizes, parts and layers are followed; rules for
-  rooms are not, necks are not removed, and the board edge is kept by the
+  for kinds of pads, hole sizes, parts, layers and rooms are followed;
+  clearance rules for pours are taken per net (not per room), necks are
+  not removed, and the board edge is kept by the
   board outline clearance rule (TI's copper came 10 mil closer). Pours
   from Gerber, ODB++ and Allegro files are not poured again.
   Moving a part stretches only the last segment of each track on its
@@ -258,11 +259,14 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   on Altium boards (other formats do not say which silk is a part's).
   Push moves tracks only (not vias or pads), one
   track deep: a track that would have to push another is not moved.
-- The design rule check takes a rule whose scope it cannot judge (rooms,
-  layers, hole sizes) as possibly applying, and uses the smaller gap of it
-  and the rule that surely applies, so it errs towards fewer reports.
-  Clearance rules do not yet tell parts apart (the manufacturing rules
-  do). Component clearance takes each part as the rectangle around its
+- The design rule check judges clearance rules on the two objects
+  themselves where their nets alone cannot decide: parts and footprints,
+  layers, and rooms (`WithinRoom`, `TouchesRoom`; a room the board does
+  not define holds nothing). Rooms are drawn as dashed outlines with their
+  names. A rule whose scope it still cannot judge is taken as possibly
+  applying, and the smaller gap of it and the rule that surely applies is
+  used, so it errs towards fewer reports. Routing uses one clearance for
+  the whole board, not room or class rules. Component clearance takes each part as the rectangle around its
   pads (turned with the part), not its 3D body, so a part whose pins
   spread wide reaches further than its body does; a part wholly inside
   another's rectangle (under a shield can) is not reported, and heights

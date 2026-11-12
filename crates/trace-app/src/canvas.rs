@@ -647,6 +647,37 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
+    // Rooms: a dashed outline with the room's name at its top left.
+    let room_color = Color32::from_rgba_unmultiplied(200, 160, 255, 170);
+    for (name, ring) in &scene.rooms {
+        let mut pts: Vec<Pos2> = ring.iter().map(|p| view.to_screen(p[0], p[1])).collect();
+        if pts.len() < 3 {
+            continue;
+        }
+        let (min, max) = pts.iter().fold(
+            (Pos2::new(f32::MAX, f32::MAX), Pos2::new(f32::MIN, f32::MIN)),
+            |(a, b), p| (a.min(*p), b.max(*p)),
+        );
+        if !rect.intersects(egui::Rect::from_min_max(min, max)) {
+            continue;
+        }
+        pts.push(pts[0]);
+        shapes.extend(Shape::dashed_line(
+            &pts,
+            Stroke::new(1.2_f32, room_color),
+            8.0,
+            5.0,
+        ));
+        shapes.push(Shape::text(
+            &ui.fonts(|f| f.clone()),
+            min + egui::vec2(4.0, 3.0),
+            egui::Align2::LEFT_TOP,
+            name,
+            egui::FontId::proportional(12.0),
+            room_color,
+        ));
+    }
+
     // Design rule violations on the layers shown: an X in the colour of
     // its kind, the one picked in the list larger.
     if app.drc.markers {

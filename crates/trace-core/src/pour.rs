@@ -233,8 +233,9 @@ enum Style {
     },
 }
 
-/// What a connect style depends on: object kind, part and hole size.
-type Asked = (Obj, Option<u32>, u64);
+/// What a connect style depends on: object kind, part, hole size, and
+/// where it is when the board has rooms.
+type Asked = (Obj, Option<u32>, u64, Option<[i64; 2]>);
 
 /// Polygon connect styles from the board's `PolygonConnect` rules, judged
 /// for each pad and via: the first rule by priority whose scopes take the
@@ -244,12 +245,14 @@ struct Connect<'a> {
     rules: Vec<&'a Rule>,
     scopes: Scopes,
     pour: Thing,
+    /// Whether the board has rooms, so answers depend on place.
+    rooms: bool,
     /// Answers so far, by object kind, part and hole.
     seen: std::cell::RefCell<std::collections::HashMap<Asked, Style>>,
 }
 
 impl<'a> Connect<'a> {
-    fn of(board: &'a Board, net: Option<u32>, layer: u8) -> Connect<'a> {
+    fn of(board: &'a Board, net: Option<u32>, layer: u8, extent: [f64; 4]) -> Connect<'a> {
         let mut rules: Vec<&Rule> = board
             .rules
             .iter()
@@ -265,13 +268,22 @@ impl<'a> Connect<'a> {
                 component: None,
                 hole: None,
                 layer: Some(layer),
+                bbox: Some(extent),
             },
+            rooms: board
+                .rules
+                .iter()
+                .any(|r| r.kind.eq_ignore_ascii_case("RoomDefinition")),
             seen: Default::default(),
         }
     }
 
     fn style(&self, t: &Thing) -> Style {
-        let key = (t.obj, t.component, t.hole.unwrap_or(-1.0).to_bits());
+        let at = t
+            .bbox
+            .filter(|_| self.rooms)
+            .map(|b| [(b[0] * 100.0) as i64, (b[1] * 100.0) as i64]);
+        let key = (t.obj, t.component, t.hole.unwrap_or(-1.0).to_bits(), at);
         if let Some(s) = self.seen.borrow().get(&key) {
             return *s;
         }
@@ -468,7 +480,7 @@ fn pour_among(board: &Board, areas: &[Polygon], index: usize) -> Vec<Polygon> {
             cuts.push(ring);
         }
     };
-    let connect = Connect::of(board, def.net, layer);
+    let connect = Connect::of(board, def.net, layer, b);
     let mut reliefs: Vec<Vec<P>> = Vec::new();
     let mut spokes: Vec<Vec<P>> = Vec::new();
     let mut relieve = |c: P, sx: f64, sy: f64, deg: f64, shape: PadShape, style: &Style| {
@@ -550,6 +562,12 @@ fn pour_among(board: &Board, areas: &[Polygon], index: usize) -> Vec<Polygon> {
                 component: None,
                 hole: Some(v.hole.mil()),
                 layer: Some(layer),
+                bbox: Some([
+                    c[0] - d / 2.0,
+                    c[1] - d / 2.0,
+                    c[0] + d / 2.0,
+                    c[1] + d / 2.0,
+                ]),
             });
             relieve(c, d, d, 0.0, PadShape::Round, &style);
             continue;
@@ -604,6 +622,10 @@ fn pour_among(board: &Board, areas: &[Polygon], index: usize) -> Vec<Polygon> {
                     component: p.component,
                     hole: (p.hole.0 > 0).then(|| p.hole.mil()),
                     layer: Some(layer),
+                    bbox: Some({
+                        let r = sx.max(sy) / 2.0;
+                        [c[0] - r, c[1] - r, c[0] + r, c[1] + r]
+                    }),
                 });
                 relieve(c, sx, sy, deg, sh, &style);
             }

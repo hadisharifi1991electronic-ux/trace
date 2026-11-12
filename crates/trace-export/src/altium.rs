@@ -647,8 +647,16 @@ impl<'a> Writer<'a> {
     fn copper_layer(&self, n: u8) -> AltLayer {
         if let Some(&id) = self.copper_ids.get(n as usize) {
             return match id {
-                1 => AltLayer { v6: 1, v7: 0x0100_0001, name: "TOP" },
-                32 => AltLayer { v6: 32, v7: 0x0100_FFFF, name: "BOTTOM" },
+                1 => AltLayer {
+                    v6: 1,
+                    v7: 0x0100_0001,
+                    name: "TOP",
+                },
+                32 => AltLayer {
+                    v6: 32,
+                    v7: 0x0100_FFFF,
+                    name: "BOTTOM",
+                },
                 id => AltLayer {
                     v6: id,
                     v7: 0x0100_0000 + id as u32,

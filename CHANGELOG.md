@@ -3,6 +3,25 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.26.0 (2026-11-12)
+
+- ODB++ export: File → Export ODB++…, or `trace odb <board> out.tgz`
+  (or a folder). One job with every copper, mask, paste, silkscreen and
+  mechanical layer, the drill layers (plated, non-plated, and one per
+  blind or buried span, slots as routed lines), the board profile, top
+  and bottom component layers with packages and pins, and the EDA data
+  that ties every pad, via, track and copper area to its net and pin.
+  The layers are drawn by the same code as the Gerber files, so the two
+  always agree. Standard symbols are used where they fit (round, rect,
+  oval); other pad shapes become user symbols.
+- The stack-up goes with it: copper layers carry their weight, and
+  dielectric layers their thickness, Er and material.
+- Reading ODB++ now also takes the stack-up from the job (dielectric
+  layers and layer attributes), so impedance works on ODB++ boards.
+- Checked on the DAC39RF12 EVM: the exported job reads back with the
+  same 16 layers and stack-up, 596 parts, 375 nets, 1862 vias and holes,
+  and per-layer pad counts that match the ODB++ Altium wrote for it.
+
 ## 0.25.0 (2026-11-12)
 
 - Footprint libraries can be saved as Altium `.PcbLib`: "Save as PcbLib…"

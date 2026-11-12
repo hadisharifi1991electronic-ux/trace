@@ -898,7 +898,88 @@ pub fn read(job: &Job) -> Result<Import> {
             "ODB++ step {step} has no copper layers"
         )));
     }
-    Ok(crate::build::build_with(layers, "the ODB++ netlist", parts))
+    let mut imp = crate::build::build_with(layers, "the ODB++ netlist", parts);
+    if let Some(st) = stackup(job, &dir, &board_layers) {
+        if st.copper_layers().count() == imp.board.stackup.copper_layers().count() {
+            imp.board.stackup = st;
+        }
+    }
+    Ok(imp)
+}
+
+/// A layer's attribute list (`.name = value`), values in mm where `unit`
+/// says the file is in inches.
+fn attrlist(t: &str) -> (HashMap<String, String>, f64) {
+    let mut unit = 1.0;
+    let mut kv = HashMap::new();
+    for line in t.lines() {
+        let l = line.trim();
+        if let Some(u) = l.strip_prefix("UNITS=") {
+            unit = if u.trim().eq_ignore_ascii_case("INCH") {
+                25.4
+            } else {
+                1.0
+            };
+        } else if let Some((k, v)) = l.split_once('=') {
+            kv.entry(k.trim().to_ascii_lowercase())
+                .or_insert_with(|| v.trim().trim_matches('"').to_string());
+        }
+    }
+    (kv, unit)
+}
+
+/// The stack-up from the matrix's copper and dielectric layers and their
+/// attribute lists (copper weight, dielectric thickness, permittivity,
+/// material), when the job has dielectric layers.
+fn stackup(job: &Job, dir: &str, layers: &[&MatrixLayer]) -> Option<trace_core::Stackup> {
+    use trace_core::{LayerKind, Length, StackLayer};
+    if !layers.iter().any(|l| l.kind == "DIELECTRIC") {
+        return None;
+    }
+    let mut st = trace_core::Stackup::default();
+    for l in layers {
+        let copper = matches!(l.kind.as_str(), "SIGNAL" | "POWER_GROUND" | "MIXED");
+        if !copper && l.kind != "DIELECTRIC" {
+            continue;
+        }
+        let (kv, unit) = job
+            .text(&format!(
+                "{dir}/layers/{}/attrlist",
+                l.name.to_ascii_lowercase()
+            ))
+            .map(|t| attrlist(&t))
+            .unwrap_or_default();
+        let num = |k: &str| kv.get(k).and_then(|v| v.parse::<f64>().ok());
+        // The design's own name when it is the layer's name spelled out.
+        let name = match kv.get(".eda_layers") {
+            Some(e) if e.to_ascii_lowercase().replace(' ', "_") == l.name.to_ascii_lowercase() => {
+                e.clone()
+            }
+            _ => l.name.clone(),
+        };
+        let (thickness, er, material) = if copper {
+            (num(".copper_weight").map(|oz| oz * 0.035), None, None)
+        } else {
+            (
+                num(".layer_dielectric").map(|t| t * unit),
+                num(".dielectric_constant"),
+                kv.get(".comment").filter(|c| !c.is_empty()).cloned(),
+            )
+        };
+        st.layers.push(StackLayer {
+            name,
+            altium_id: None,
+            kind: if copper {
+                LayerKind::Copper
+            } else {
+                LayerKind::Dielectric
+            },
+            thickness: Length::from_mm(thickness.unwrap_or(0.0)),
+            dielectric_constant: er,
+            material,
+        });
+    }
+    Some(st)
 }
 
 fn to_gerber(f: &Features, syms: &mut Symbols, names: Option<&HashMap<usize, ObjAttrs>>) -> Gerber {

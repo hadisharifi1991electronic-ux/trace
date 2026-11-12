@@ -27,6 +27,7 @@ USAGE:
     trace convert <file> <out.PcbDoc>           Write an Altium Designer board
     trace convert <file.SchDoc> <out.svg>       Draw a schematic sheet as SVG
     trace fab <board> <out.zip|folder>          Gerber X2, drill, IPC-356, pick-and-place and BOM files
+    trace odb <board> <out.tgz|folder>          ODB++ job: layers, drills, parts and nets in one package
     trace layers <gerber folder|zip>            Show which layer each Gerber or drill file was taken as
     trace symbols <lib.SchLib> [out.svg]        List the symbols of an Altium schematic library;
                                                 with out, draw them all as SVG
@@ -58,6 +59,7 @@ fn main() -> ExitCode {
         ["convert", file, out] => convert(file, out),
         ["layers", file] => layers(file),
         ["fab", file, out] => fab(file, out),
+        ["odb", file, out] => odb(file, out),
         ["symbols", file] => symbols(file, None),
         ["symbols", file, out] => symbols(file, Some(out)),
         ["footprints", file] => footprints(file, None),
@@ -654,6 +656,47 @@ fn fab(file: &str, out: &str) -> Res {
         println!("  {:<40} {:>9} bytes", f.name, f.data.len());
     }
     println!("wrote {} files to {out}", files.len());
+    Ok(())
+}
+
+fn odb(file: &str, out: &str) -> Res {
+    let b = board(file)?;
+    let opt = trace_export::FabOptions::from_board(&b);
+    let path = Path::new(out);
+    let job = path
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "board".into());
+    let job = job
+        .strip_suffix(".tgz")
+        .or_else(|| job.strip_suffix(".TGZ"))
+        .unwrap_or(&job)
+        .to_string();
+    let files = trace_export::odb_files(&b, &job, &opt);
+    if out.to_ascii_lowercase().ends_with(".tgz") {
+        std::fs::write(path, trace_export::odb_tgz(&files)?)?;
+    } else {
+        // The job's own folder is the one named.
+        for f in &files {
+            let rel = f.name.split_once('/').map(|r| r.1).unwrap_or(&f.name);
+            let to = path.join(rel);
+            if let Some(d) = to.parent() {
+                std::fs::create_dir_all(d)?;
+            }
+            std::fs::write(to, &f.data)?;
+        }
+    }
+    let layers = files
+        .iter()
+        .filter(|f| f.name.ends_with("/features"))
+        .count();
+    let bytes: usize = files.iter().map(|f| f.data.len()).sum();
+    println!(
+        "wrote ODB++ job {job} to {out}: {} files, {layers} feature layers, {} parts, {} nets, {bytes} bytes",
+        files.len(),
+        b.components.len(),
+        b.nets.len()
+    );
     Ok(())
 }
 

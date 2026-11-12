@@ -475,6 +475,42 @@ impl App {
         });
     }
 
+    /// The board as one ODB++ job, packed as .tgz.
+    fn export_odb(&mut self) {
+        let Some(scene) = &self.scene else { return };
+        let stem = scene
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "board".into());
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("ODB++ job", &["tgz"])
+            .set_file_name(format!("{stem}-odb.tgz"))
+            .save_file()
+        else {
+            return;
+        };
+        let opt = trace_export::FabOptions::from_board(&scene.board);
+        let files = trace_export::odb_files(&scene.board, &stem, &opt);
+        let result = trace_export::odb_tgz(&files).and_then(|z| std::fs::write(&path, z));
+        self.message = Some(match result {
+            Ok(()) => (
+                format!(
+                    "Saved the ODB++ job to {} ({} layers, {} parts, {} nets)",
+                    path.display(),
+                    files
+                        .iter()
+                        .filter(|f| f.name.contains("/layers/") && f.name.ends_with("/features"))
+                        .count(),
+                    scene.board.components.len(),
+                    scene.board.nets.len()
+                ),
+                false,
+            ),
+            Err(e) => (format!("Could not save: {e}"), true),
+        });
+    }
+
     fn export_pairs(&mut self) {
         let Some(scene) = &self.scene else { return };
         let Some(path) = rfd::FileDialog::new()
@@ -906,6 +942,17 @@ impl App {
                 {
                     ui.close_menu();
                     self.export_fab();
+                }
+                if ui
+                    .add_enabled(
+                        self.scene.is_some(),
+                        egui::Button::new("Export ODB++…"),
+                    )
+                    .on_hover_text("One ODB++ job (.tgz): every layer, the drills, the parts, the nets and the stack-up")
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.export_odb();
                 }
                 if ui
                     .add_enabled(

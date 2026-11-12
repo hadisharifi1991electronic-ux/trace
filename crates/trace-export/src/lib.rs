@@ -4,6 +4,7 @@
 pub mod altium;
 pub mod fab;
 pub mod kicad;
+pub mod odb;
 pub mod svg;
 
 pub use altium::{to_altium, to_pcblib};
@@ -11,4 +12,5 @@ pub use fab::{fab_files, fab_zip, FabFile, FabOptions};
 #[doc(hidden)]
 pub use kicad::fracture;
 pub use kicad::to_kicad;
+pub use odb::{odb_files, odb_tgz, to_odb};
 pub use svg::sheet_svg;

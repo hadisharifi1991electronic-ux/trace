@@ -189,7 +189,7 @@ fn field(s: &str) -> String {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-enum Ap {
+pub(crate) enum Ap {
     Circle(i64),
     Rect(i64, i64),
     Obround(i64, i64),
@@ -198,6 +198,53 @@ enum Ap {
     Outline(Vec<(i64, i64)>, i64),
     /// A round-ended bar between two points around the flash point.
     Bar((i64, i64), (i64, i64), i64),
+}
+
+/// Who a copper object belongs to, for writers that list nets by object
+/// (ODB++ EDA data).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub(crate) enum Owner {
+    /// A pad, by index in the board's pads.
+    Pad(usize),
+    /// A via, by index.
+    Via(usize),
+    /// A track or arc of a net.
+    Trace(Option<u32>),
+    /// A copper area of a net.
+    Plane(Option<u32>),
+}
+
+/// Where a layer's objects are drawn: a Gerber file or an ODB++ layer.
+pub(crate) trait Plot {
+    fn attrs(&mut self, net: &str, pin: &str);
+    fn owner(&mut self, _o: Owner) {}
+    fn flash(&mut self, ap: Ap, function: &'static str, at: Point);
+    fn line(&mut self, d: i64, function: &'static str, a: Point, b: Point);
+    fn arc(&mut self, d: i64, function: &'static str, a: &trace_core::Arc);
+    fn polygon(&mut self, outline: &[Point], holes: &[Vec<Point>]);
+    /// The conductors (tracks and arcs) follow.
+    fn conductors(&mut self) {}
+}
+
+impl Plot for Gerber {
+    fn attrs(&mut self, net: &str, pin: &str) {
+        Gerber::attrs(self, net, pin)
+    }
+    fn flash(&mut self, ap: Ap, function: &'static str, at: Point) {
+        Gerber::flash(self, ap, function, at)
+    }
+    fn line(&mut self, d: i64, function: &'static str, a: Point, b: Point) {
+        Gerber::line(self, d, function, a, b)
+    }
+    fn arc(&mut self, d: i64, function: &'static str, a: &trace_core::Arc) {
+        Gerber::arc(self, d, function, a)
+    }
+    fn polygon(&mut self, outline: &[Point], holes: &[Vec<Point>]) {
+        Gerber::polygon(self, outline, holes)
+    }
+    fn conductors(&mut self) {
+        self.body.push_str("%TA.AperFunction,Conductor*%\n");
+    }
 }
 
 #[derive(Default)]
@@ -629,28 +676,37 @@ fn copper(board: &Board, l: u8, n: u8) -> String {
         .map(|s| s.name.clone())
         .unwrap_or_else(|| format!("Copper {}", l + 1));
     let mut g = Gerber::new(&function, &format!("Copper layer {}: {name}", l + 1), true);
+    plot_copper(&mut g, board, l, n);
+    g.finish()
+}
+
+/// The copper of layer `l` of `n`: areas, tracks, arcs, pads and vias.
+pub(crate) fn plot_copper(g: &mut dyn Plot, board: &Board, l: u8, n: u8) {
     let geo = &board.geometry;
     let on = LayerRef::Copper(l);
     let mut polys: Vec<_> = geo.polygons.iter().filter(|p| p.layer == on).collect();
     polys.sort_by_key(|p| p.net);
     for p in polys {
         g.attrs(net_name(board, p.net), "");
+        g.owner(Owner::Plane(p.net));
         g.polygon(&p.outline, &p.holes);
     }
-    g.body.push_str("%TA.AperFunction,Conductor*%\n");
+    g.conductors();
     let mut tracks: Vec<_> = geo.tracks.iter().filter(|t| t.layer == on).collect();
     tracks.sort_by_key(|t| t.net);
     for t in tracks {
         g.attrs(net_name(board, t.net), "");
+        g.owner(Owner::Trace(t.net));
         g.line(t.width.0, "Conductor", t.start, t.end);
     }
     let mut arcs: Vec<_> = geo.arcs.iter().filter(|a| a.layer == on).collect();
     arcs.sort_by_key(|a| a.net);
     for a in arcs {
         g.attrs(net_name(board, a.net), "");
+        g.owner(Owner::Trace(a.net));
         g.arc(a.width.0, "Conductor", a);
     }
-    for p in &geo.pads {
+    for (i, p) in geo.pads.iter().enumerate() {
         let Some(land) = land_on(p, l, n) else {
             continue;
         };
@@ -663,9 +719,10 @@ fn copper(board: &Board, l: u8, n: u8) -> String {
             "SMDPad,CuDef"
         };
         g.attrs(net_name(board, p.net), &pin_key(board, p));
+        g.owner(Owner::Pad(i));
         g.flash(ap, function, p.at);
     }
-    for v in &geo.vias {
+    for (i, v) in geo.vias.iter().enumerate() {
         if l < v.from_layer || l > v.to_layer {
             continue;
         }
@@ -679,9 +736,9 @@ fn copper(board: &Board, l: u8, n: u8) -> String {
             continue;
         }
         g.attrs(net_name(board, v.net), "");
+        g.owner(Owner::Via(i));
         g.flash(Ap::Circle(d.0), "ViaPad", v.at);
     }
-    g.finish()
 }
 
 fn mask(board: &Board, side: Side, n: u8, opt: &FabOptions) -> String {
@@ -695,6 +752,13 @@ fn mask(board: &Board, side: Side, n: u8, opt: &FabOptions) -> String {
         "Solder mask openings",
         false,
     );
+    plot_mask(&mut g, board, side, n, opt);
+    g.finish()
+}
+
+/// Solder mask openings on one side.
+pub(crate) fn plot_mask(g: &mut dyn Plot, board: &Board, side: Side, n: u8, opt: &FabOptions) {
+    let top = side == Side::Top;
     let l = if top { 0 } else { n - 1 };
     let only = LayerRef::Other(if top { TOP_MASK } else { BOTTOM_MASK });
     let geo = &board.geometry;
@@ -733,8 +797,7 @@ fn mask(board: &Board, side: Side, n: u8, opt: &FabOptions) -> String {
             g.flash(Ap::Circle(v.diameter.0 + 2 * e), "", v.at);
         }
     }
-    draw_layer(&mut g, board, &only);
-    g.finish()
+    draw_layer(g, board, &only);
 }
 
 fn paste(board: &Board, side: Side, n: u8, opt: &FabOptions) -> String {
@@ -744,6 +807,13 @@ fn paste(board: &Board, side: Side, n: u8, opt: &FabOptions) -> String {
         "Solder paste",
         false,
     );
+    plot_paste(&mut g, board, side, n, opt);
+    g.finish()
+}
+
+/// Solder paste openings on one side.
+pub(crate) fn plot_paste(g: &mut dyn Plot, board: &Board, side: Side, n: u8, opt: &FabOptions) {
+    let top = side == Side::Top;
     let l = if top { 0 } else { n - 1 };
     let only = LayerRef::Other(if top { TOP_PASTE } else { BOTTOM_PASTE });
     for p in &board.geometry.pads {
@@ -761,12 +831,21 @@ fn paste(board: &Board, side: Side, n: u8, opt: &FabOptions) -> String {
             g.flash(ap, "", p.at);
         }
     }
-    draw_layer(&mut g, board, &only);
-    g.finish()
+    draw_layer(g, board, &only);
+}
+
+/// Pads, tracks, arcs and areas drawn on a non-copper layer.
+pub(crate) fn plot_other(g: &mut dyn Plot, board: &Board, layer: &LayerRef) {
+    for p in board.geometry.pads.iter().filter(|p| &p.layer == layer) {
+        if let Some(ap) = aperture(&own_land(p), p.at, 0) {
+            g.flash(ap, "", p.at);
+        }
+    }
+    draw_layer(g, board, layer);
 }
 
 /// Tracks, arcs and areas drawn on a non-copper layer.
-fn draw_layer(g: &mut Gerber, board: &Board, layer: &LayerRef) {
+fn draw_layer(g: &mut dyn Plot, board: &Board, layer: &LayerRef) {
     let geo = &board.geometry;
     for p in geo
         .polygons
@@ -796,12 +875,7 @@ fn silk(board: &Board, side: Side) -> String {
     } else {
         LayerRef::BottomSilk
     };
-    for p in board.geometry.pads.iter().filter(|p| p.layer == layer) {
-        if let Some(ap) = aperture(&own_land(p), p.at, 0) {
-            g.flash(ap, "", p.at);
-        }
-    }
-    draw_layer(&mut g, board, &layer);
+    plot_other(&mut g, board, &layer);
     g.finish()
 }
 
@@ -820,6 +894,22 @@ fn outline(board: &Board) -> String {
 
 /// Mechanical layers that have something on them, by number.
 fn mechanical(board: &Board) -> Vec<(u8, String)> {
+    mechanical_layers(board)
+        .into_iter()
+        .map(|m| {
+            let mut g = Gerber::new(
+                &format!("Other,Mechanical {m}"),
+                &format!("Mechanical layer {m}"),
+                false,
+            );
+            plot_other(&mut g, board, &LayerRef::Mechanical(m));
+            (m, g.finish())
+        })
+        .collect()
+}
+
+/// The numbers of the mechanical layers that have something on them.
+pub(crate) fn mechanical_layers(board: &Board) -> Vec<u8> {
     let geo = &board.geometry;
     let mut used: Vec<u8> = geo
         .tracks
@@ -834,29 +924,13 @@ fn mechanical(board: &Board) -> Vec<(u8, String)> {
         .collect();
     used.sort_unstable();
     used.dedup();
-    used.into_iter()
-        .map(|m| {
-            let mut g = Gerber::new(
-                &format!("Other,Mechanical {m}"),
-                &format!("Mechanical layer {m}"),
-                false,
-            );
-            let layer = LayerRef::Mechanical(m);
-            for p in geo.pads.iter().filter(|p| p.layer == layer) {
-                if let Some(ap) = aperture(&own_land(p), p.at, 0) {
-                    g.flash(ap, "", p.at);
-                }
-            }
-            draw_layer(&mut g, board, &layer);
-            (m, g.finish())
-        })
-        .collect()
+    used
 }
 
 // ---------------------------------------------------------------- Drill
 
 /// Whether a pad's hole is plated.
-fn plated(p: &Pad) -> bool {
+pub(crate) fn plated(p: &Pad) -> bool {
     !p.fab.unplated
 }
 
@@ -1251,18 +1325,18 @@ pub fn copper_count(board: &Board) -> usize {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use trace_core::*;
 
-    fn pt(x: f64, y: f64) -> Point {
+    pub(crate) fn pt(x: f64, y: f64) -> Point {
         Point {
             x: Length::from_mm(x),
             y: Length::from_mm(y),
         }
     }
 
-    fn board() -> Board {
+    pub(crate) fn board() -> Board {
         let mut b = Board::default();
         for n in ["Top", "Bottom"] {
             b.stackup.layers.push(StackLayer {

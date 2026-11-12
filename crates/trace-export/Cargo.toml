@@ -15,4 +15,6 @@ serde_json = "1"
 [dependencies]
 trace-core.workspace = true
 cfb = "0.10"
+flate2 = "1"
+tar = "0.4"
 zip = { version = "2", default-features = false, features = ["deflate"] }

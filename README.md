@@ -114,6 +114,12 @@ checker and simulator all read.
   Zdiff of every routed net and pair against its target. Per-net rules set
   other targets by name pattern (USB pairs start at 90 Ω, PCIe at 85 Ω).
   Stack-up edits and rules are kept per board in Trace's settings
+- export ODB++ (File → Export ODB++): one `.tgz` job with every copper,
+  mask, paste, silkscreen, drill (plated, non-plated, blind and buried
+  spans) and mechanical layer, the board profile, both component layers,
+  the EDA netlist that ties each pad, via, track and area to its net and
+  pin, and the stack-up (copper weight, dielectric thickness, Er and
+  material). ODB++ jobs read in Trace also take their stack-up from the job.
 - export fab outputs (File → Export fab outputs): one `.zip` with Gerber X2
   for every copper layer, solder mask, paste, silkscreen, mechanical layer
   and the board outline (Altium names: GTL, G1…, GBL, GTS, GTO, GKO…),
@@ -171,6 +177,7 @@ trace convert <file> out.kicad_pcb   write a KiCad board
 trace convert <file> out.PcbDoc      write an Altium Designer board
 trace convert sheet.SchDoc out.svg   draw a schematic sheet as SVG
 trace fab board.PcbDoc out.zip   Gerber X2, drill, IPC-356, pick-and-place and BOM (or a folder)
+trace odb board.PcbDoc out.tgz   ODB++ job: layers, drills, parts, nets and stack-up (or a folder)
 trace symbols lib.SchLib [out.svg]     list a schematic library's symbols; draw them all as SVG
 trace footprints lib.PcbLib [out]   list a library's (or a board's) footprints; save as .tracelib or .PcbLib
 ```
@@ -289,7 +296,7 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
 | `crates/trace-altium` | Altium `.PcbDoc` / `.SchDoc` reader (OLE compound files) |
 | `crates/trace-allegro` | Allegro `.brd` reader, ported from KiCad's Allegro importer |
 | `crates/trace-gerber` | Gerber, Excellon, IPC-356 and ODB++ import with layer detection and net tracing |
-| `crates/trace-export` | Writes boards in other tools' formats (KiCad, Altium) and fab outputs (Gerber X2, Excellon, IPC-356, pick-and-place, BOM) |
+| `crates/trace-export` | Writes boards in other tools' formats (KiCad, Altium) and fab outputs (Gerber X2, Excellon, IPC-356, pick-and-place, BOM, ODB++) |
 | `crates/trace-step` | STEP part models to coloured triangle meshes (geometry via the `truck` crates) |
 | `crates/trace-cli` | The `trace` command |
 | `crates/trace-app` | The desktop app (egui) |

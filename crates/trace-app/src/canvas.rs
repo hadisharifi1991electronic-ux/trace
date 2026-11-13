@@ -262,9 +262,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if let (Some(layer), Some([x, y])) = (app.router.active.as_ref().map(|a| a.layer()), pointer) {
         let snap = route_snap(x, y, layer);
         let board = &scene.board;
+        // A bus's far pads can spread wider than a pair's.
+        let reach = if app.router.active.as_ref().is_some_and(|a| a.is_bus()) {
+            2000.0
+        } else {
+            400.0
+        };
         app.router
             .update(board, [x as f64, y as f64], snap, |p, net| {
-                partner_pad(board, p, net, layer)
+                partner_pad(board, p, net, layer, reach)
             });
     }
     let mut pending: Option<Vec<trace_core::edit::Edit>> = None;
@@ -302,8 +308,31 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     }
                 }
                 Tool::Route => {
+                    let ctrl = ui.input(|i| i.modifiers.command);
                     if app.router.active.is_some() {
                         pending = app.router.click(&scene.board);
+                    } else if let (true, Slot::Copper(layer)) = (ctrl, app.active) {
+                        // Ctrl+click gathers a bus.
+                        match route_snap(x, y, layer) {
+                            Some((p, Some(net))) => {
+                                let n = app.router.pick_bus(p, net);
+                                app.router.message = None;
+                                app.message = Some((format!("Bus: {n} nets"), false));
+                            }
+                            _ => {
+                                app.router.message = Some(
+                                    "Ctrl+click a pad or track end of a net to add it to the bus."
+                                        .into(),
+                                )
+                            }
+                        }
+                    } else if let (true, Slot::Copper(layer)) =
+                        (app.router.bus.len() >= 2, app.active)
+                    {
+                        let n = app.router.bus.len();
+                        if app.router.start_bus(layer) {
+                            app.message = Some((format!("Routing a bus of {n} nets"), false));
+                        }
                     } else if let Slot::Copper(layer) = app.active {
                         match route_snap(x, y, layer) {
                             Some((p, Some(net))) => {
@@ -630,6 +659,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     if let Some(a) = &app.router.active {
         draw_route(&mut shapes, &view, &app.router, a);
+    }
+    // Pads gathered for a bus, ringed.
+    for (p, _) in &app.router.bus {
+        shapes.push(Shape::circle_stroke(
+            view.to_screen(p[0] as f32, p[1] as f32),
+            7.0,
+            Stroke::new(2.0_f32, Color32::from_rgb(255, 220, 120)),
+        ));
     }
     if let Some(p) = &app.router.tune.preview {
         let color = if p.hit.is_some() {
@@ -1178,6 +1215,7 @@ fn partner_pad(
     at: [f64; 2],
     net: Option<u32>,
     layer: u8,
+    reach: f64,
 ) -> Option<[f64; 2]> {
     let net = net?;
     board
@@ -1194,7 +1232,7 @@ fn partner_pad(
         })
         .map(|p| [p.at.x.mil(), p.at.y.mil()])
         .map(|p| ((p[0] - at[0]).hypot(p[1] - at[1]), p))
-        .filter(|(d, _)| *d < 400.0)
+        .filter(|(d, _)| *d < reach)
         .min_by(|a, b| a.0.total_cmp(&b.0))
         .map(|(_, p)| p)
 }
@@ -1212,7 +1250,7 @@ fn pair_start(
     let name = &scene.board.nets.get(net as usize)?.name;
     let (pair, partner) = scene.pair_of.get(name)?;
     let partner = *scene.net_by_name.get(partner)?;
-    let b = partner_pad(&scene.board, at, Some(partner), layer)?;
+    let b = partner_pad(&scene.board, at, Some(partner), layer, 400.0)?;
     let fallback = (router.width, router.width.max(router.clearance));
     let sizes = imp
         .pair_sizes(name, scene.copper_count as usize)

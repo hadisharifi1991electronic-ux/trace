@@ -807,7 +807,7 @@ impl Obstacles {
         net: Option<u32>,
         clearance: f64,
     ) -> Option<Hit> {
-        self.check(Some(layer), a, b, w / 2.0, [net, None], clearance)
+        self.check(Some(layer), a, b, w / 2.0, &[net], clearance)
     }
 
     /// As [`Obstacles::check_track`] for one track of a pair: copper of
@@ -818,7 +818,7 @@ impl Obstacles {
         a: P,
         b: P,
         w: f64,
-        nets: [Option<u32>; 2],
+        nets: &[Option<u32>],
         clearance: f64,
     ) -> Option<Hit> {
         self.check(Some(layer), a, b, w / 2.0, nets, clearance)
@@ -829,7 +829,7 @@ impl Obstacles {
         &self,
         c: P,
         d: f64,
-        nets: [Option<u32>; 2],
+        nets: &[Option<u32>],
         clearance: f64,
     ) -> Option<Hit> {
         self.check(None, c, c, d / 2.0, nets, clearance)
@@ -841,7 +841,7 @@ impl Obstacles {
         &self,
         c: P,
         d: f64,
-        nets: [Option<u32>; 2],
+        nets: &[Option<u32>],
         clearance: f64,
         from: u8,
         to: u8,
@@ -853,7 +853,7 @@ impl Obstacles {
 
     /// The same for a through via of diameter `d` at `c`.
     pub fn check_via(&self, c: P, d: f64, net: Option<u32>, clearance: f64) -> Option<Hit> {
-        self.check(None, c, c, d / 2.0, [net, None], clearance)
+        self.check(None, c, c, d / 2.0, &[net], clearance)
     }
 
     fn check(
@@ -862,7 +862,7 @@ impl Obstacles {
         a: P,
         b: P,
         r: f64,
-        nets: [Option<u32>; 2],
+        nets: &[Option<u32>],
         clearance: f64,
     ) -> Option<Hit> {
         self.check_skip(layer, a, b, r, nets, clearance, &|_| false)
@@ -877,7 +877,7 @@ impl Obstacles {
         a: P,
         b: P,
         r: f64,
-        nets: [Option<u32>; 2],
+        nets: &[Option<u32>],
         clearance: f64,
         skip: &dyn Fn(usize) -> bool,
     ) -> bool {
@@ -894,7 +894,7 @@ impl Obstacles {
         a: P,
         b: P,
         r: f64,
-        nets: [Option<u32>; 2],
+        nets: &[Option<u32>],
         clearance: f64,
         out: &mut Vec<usize>,
     ) -> bool {
@@ -926,7 +926,7 @@ impl Obstacles {
         a: P,
         b: P,
         r: f64,
-        nets: [Option<u32>; 2],
+        nets: &[Option<u32>],
         clearance: f64,
         skip: &dyn Fn(usize) -> bool,
     ) -> Option<Hit> {
@@ -962,7 +962,7 @@ impl Obstacles {
         a: P,
         b: P,
         r: f64,
-        nets: [Option<u32>; 2],
+        nets: &[Option<u32>],
         clearance: f64,
         f: &mut dyn FnMut(&Obstacle, f64),
     ) {

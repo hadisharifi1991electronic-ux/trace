@@ -102,7 +102,13 @@ checker and simulator all read.
   route; Ctrl+Z puts them back); Stop at obstacle draws a route that breaks
   clearance red and does not place it. Starting on a net of a differential pair
   routes both nets together at the width and gap the Impedance window
-  works out for the pair. Ctrl+Z / Ctrl+Y undo and redo; Delete
+  works out for the pair. Ctrl+click several pads (or track ends) to
+  gather a bus, then click to route it: the nets run side by side in the
+  order of their pads, at the track width and the Bus gap, joining their
+  pads with 45° jogs; V puts a row of vias across the bus; landing on a
+  pad of one of its nets ends every track on its own net's pad. Match bus
+  then brings the bus's nets to the length of the longest (or the Target
+  box) with meanders where they fit. Ctrl+Z / Ctrl+Y undo and redo; Delete
   removes the clicked track or via; Shift+Delete unroutes the selected net
 - move parts as in Altium: press on a part and drag it; Space turns it 90°
   about the cursor, L flips it to the other side, Escape puts it back. Its
@@ -183,6 +189,9 @@ trace drc board.PcbDoc [--all]   design rule check: clearance, shorts, width, un
                                  part clearance, board edge), and signal integrity (return paths over
                                  plane voids and splits, crosstalk between parallel tracks)
 trace impedance board.PcbDoc     stack-up widths for 50 Ω and 100 Ω pairs, and each pair's Zdiff
+trace match board.PcbDoc D0,D1,D2 [out.tracepcb] [--target 1500mil] [--amp 40mil]
+                                 match the nets' lengths to the longest (or the target) with meanders where
+                                 they fit; with out, save the board tuned
 trace stubs board.PcbDoc [out.tracepcb]   via stubs longer than their rule allows; with out, backdrill them,
                                  pour again and save the board
 trace panel board.PcbDoc 2x3 out.tracepcb [--gap 2mm] [--rail 5mm] [--tabs N] [--vscore]
@@ -335,6 +344,16 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   parts not fitted.
 - Length tuning places one row of square meanders on one straight track
   at a time; pick another track if one is too short for the length needed.
+- Matching a bus (Match bus, `trace match`) tunes each net on its own,
+  longest straight tracks first: a meander keeps the clearance from other
+  copper and from the meanders placed for the other nets, and may stay as
+  close as the straight track already was to a neighbour inside the
+  clearance (a pair partner at the pair gap). Where no meander fits, as
+  between the inner tracks of a tight bus, the net is reported short.
+  Nets of a pair are tuned one at a time, not as a pair. The bus router
+  walks round obstacles as one band and checks each track against the
+  other lanes' pads; bring the bus in square to its far pads (a corner
+  first) so the jogs can land.
 - Impedance uses closed-form models (Hammerstad–Jensen microstrip, Wheeler
   stripline, IPC-2141 coupling). Every copper layer is taken as a reference
   plane and solder mask is ignored, so expect a few percent against a field

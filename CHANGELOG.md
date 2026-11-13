@@ -3,6 +3,22 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.35.0 (2026-11-13)
+
+- Bus routing: with the router on, Ctrl+click several pads or track ends
+  to gather a bus, then click to route it. Its nets run side by side in
+  the order of their pads, at the track width and the Bus gap on the
+  route bar, and join their pads with 45° jogs. V places a row of vias
+  across the bus; landing on a pad of one of its nets ends every track on
+  its own net's pad. Walkaround and push work for the bus as a band.
+- Match bus (route bar) brings the nets of the bus placed last to the
+  length of the longest, or to the tuning target, with meanders that keep
+  their clearance; nets with no room are named.
+- `trace match board net,net,... [out] [--target L] [--amp L]` matches
+  any nets' lengths from the command line. On TI's DAC39RF12 EVM, the
+  positive nets of eight JESD lanes (1573 to 1775 mil) are brought to
+  1775 mil on six lanes, with the design rule check unchanged.
+
 ## 0.34.0 (2026-11-13)
 
 - Panelization: File > Panelize… lays copies of the board out in a grid

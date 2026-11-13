@@ -1840,6 +1840,24 @@ impl App {
             "Clearance",
             "Gap kept to copper of other nets",
         );
+        mm(
+            ui,
+            &mut r.bus_gap,
+            "Bus gap",
+            "Gap between neighbouring tracks of a bus (Ctrl+click several pads to route a bus)",
+        );
+        let mut match_bus = false;
+        if !r.last_bus.is_empty()
+            && ui
+                .button("Match bus")
+                .on_hover_text(
+                    "Bring every net of the bus placed last to the length of its longest net \
+                     (or the tuning target), with meanders where they fit",
+                )
+                .clicked()
+        {
+            match_bus = true;
+        }
         // Which via a layer change places, and its size.
         let name = |k: &trace_core::route::ViaKind| {
             format!("L{}-L{} {}", k.from + 1, k.to + 1, k.kind_name(n))
@@ -1943,14 +1961,63 @@ impl App {
                 ui.label(RichText::new(&name.name).strong());
             }
         }
+        let gathered = format!(
+            "Bus: {} nets. Ctrl+click more pads, click to route them, Esc to clear.",
+            self.router.bus.len()
+        );
         let hint = match &self.router.active {
-            None => "Click a pad, via or track end to start.",
+            None if !self.router.bus.is_empty() => gathered.as_str(),
+            None => "Click a pad, via or track end to start; Ctrl+click several pads to route a bus.",
             Some(_) => "Click: corner · Shift+Space: corner style · Space: flip bend · Shift+R: obstacles · V / Shift+V: via · Backspace: undo · Enter: finish · Esc: cancel",
         };
         match &self.router.message {
             Some(m) => ui.label(RichText::new(m).color(Color32::from_rgb(255, 120, 100))),
             None => ui.label(RichText::new(hint).weak()),
         };
+        if match_bus {
+            self.match_bus();
+        }
+    }
+
+    /// Matches the lengths of the bus placed last.
+    fn match_bus(&mut self) {
+        let Some(scene) = &self.scene else { return };
+        let board = &scene.board;
+        let nets = self.router.last_bus.clone();
+        let t = &self.router.tune;
+        let space = (t.space > 0.0).then_some(t.space);
+        let m = trace_core::bus::match_lengths(
+            board,
+            &nets,
+            t.target,
+            t.amp,
+            space,
+            self.router.clearance,
+        );
+        let name = |n: u32| board.nets[n as usize].name.clone();
+        let short: Vec<String> = m
+            .short(1.0)
+            .map(|t| format!("{} ({:.1} mil short)", name(t.net), m.target - t.after))
+            .collect();
+        let tuned = m.nets.iter().filter(|t| t.after > t.before + 0.5).count();
+        let text = if short.is_empty() {
+            format!(
+                "Matched {} nets to {:.1} mil. Ctrl+Z undoes it.",
+                nets.len(),
+                m.target
+            )
+        } else {
+            format!(
+                "Matched to {:.1} mil; no room for meanders on {}",
+                m.target,
+                short.join(", ")
+            )
+        };
+        let bad = !short.is_empty();
+        if !m.edits.is_empty() {
+            self.apply_edits(&format!("Matched bus lengths ({tuned} nets)"), m.edits);
+        }
+        self.message = Some((text, bad));
     }
 
     fn side_panel(&mut self, ui: &mut egui::Ui) {

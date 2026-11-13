@@ -3,9 +3,12 @@
 //! net or with Enter. Shift+Space cycles the corner style and Space flips
 //! the bend, as in Altium. Starting on a net of a differential pair routes
 //! both nets together along a centre line at the pair's width and gap.
+//! Ctrl+click on several pads gathers a bus: its nets are routed side by
+//! side, in the order of their pads, at the track width and the bus gap.
 //! Copper of other nets keeps its clearance; a route that would break it is
 //! drawn red and is not placed.
 
+use trace_core::bus;
 use trace_core::edit::{Edit, History};
 use trace_core::route::{self, Corner, Hit, Obstacles, Piece, ViaKind, P};
 use trace_core::walk::{self, Ask, Shove};
@@ -18,10 +21,10 @@ struct Run {
     layer: u8,
     start: P,
     clicks: Vec<Vec<Piece>>,
-    /// Pairs: where the routed net's track and its partner's start (pads
-    /// or vias), and where they end when vias closed the run.
-    from: Option<(P, P)>,
-    to: Option<(P, P)>,
+    /// Pairs and buses: where each lane's track starts (pads or vias), in
+    /// lane order, and where they end when vias closed the run.
+    from: Option<Vec<P>>,
+    to: Option<Vec<P>>,
 }
 
 impl Run {
@@ -76,6 +79,11 @@ impl Mode {
 pub struct Active {
     pub net: Option<u32>,
     pub pair: Option<PairInfo>,
+    /// Every net routed, in lane order across the route: one, the two of a
+    /// pair, or a bus.
+    pub lanes: Vec<Option<u32>>,
+    /// A bus: the gap between neighbouring tracks.
+    pub bus_gap: Option<f64>,
     runs: Vec<Run>,
     /// Vias placed so far, with their nets and kinds.
     vias: Vec<(P, Option<u32>, ViaKind)>,
@@ -87,7 +95,7 @@ pub struct Active {
     /// The preview ends on copper of the route's own net (for a pair: on
     /// the pair's pads, the routed net's first).
     pub lands: bool,
-    landing: Option<(P, P)>,
+    landing: Option<Vec<P>>,
     pub hit: Option<Hit>,
     /// Tracks the preview pushes aside, shown moved and placed with the
     /// next click.
@@ -125,14 +133,26 @@ impl Active {
         }
     }
     fn size(&self, layer: u8, single: f64) -> (f64, f64) {
-        match &self.pair {
-            Some(p) => p
+        match (&self.pair, self.bus_gap) {
+            (Some(p), _) => p
                 .sizes
                 .get(layer as usize)
                 .copied()
                 .unwrap_or((single, single)),
-            None => (single, 0.0),
+            (None, Some(gap)) => (single, gap),
+            (None, None) => (single, 0.0),
         }
+    }
+
+    /// A bus of more than two nets (whose lanes fan in at 45°).
+    pub fn is_bus(&self) -> bool {
+        self.lanes.len() > 2
+    }
+
+    /// Half the width of everything routed along the centre line.
+    fn half_width(&self, layer: u8, single: f64) -> f64 {
+        let (w, gap) = self.size(layer, single);
+        (self.lanes.len().max(1) as f64 - 1.0) / 2.0 * (w + gap) + w / 2.0
     }
 
     /// Every piece of copper the route would place now, including the part
@@ -143,10 +163,12 @@ impl Active {
         for (ri, run) in self.runs.iter().enumerate() {
             let live = ri == last;
             let mut centre: Vec<Piece> = run.clicks.iter().flatten().copied().collect();
-            let mut to = run.to;
+            let mut to = run.to.clone();
             if live {
                 centre.extend(self.preview.iter().copied());
-                to = to.or(self.landing.filter(|_| self.lands));
+                if to.is_none() && self.lands {
+                    to = self.landing.clone();
+                }
             }
             let (w, gap) = self.size(run.layer, single);
             let mut push = |net: Option<u32>, piece: Piece| {
@@ -160,34 +182,19 @@ impl Active {
                     });
                 }
             };
-            match (&self.pair, run.from) {
-                (Some(pair), Some((fa, fb))) => {
-                    let Some(dir) = centre.first().and_then(|p| p.chords().first().copied()) else {
+            match &run.from {
+                Some(from) if self.lanes.len() >= 2 && from.len() == self.lanes.len() => {
+                    if centre.is_empty() {
                         continue;
-                    };
-                    let d = [dir.1[0] - dir.0[0], dir.1[1] - dir.0[1]];
-                    let side =
-                        if d[0] * (fa[1] - run.start[1]) - d[1] * (fa[0] - run.start[0]) >= 0.0 {
-                            1.0
-                        } else {
-                            -1.0
-                        };
-                    let half = (w + gap) / 2.0;
-                    for (net, from, to, k) in [
-                        (self.net, fa, to.map(|t| t.0), side),
-                        (pair.partner, fb, to.map(|t| t.1), -side),
-                    ] {
-                        let off = route::offset(&centre, k * half);
-                        let (Some(first), Some(lastp)) = (off.first(), off.last()) else {
-                            continue;
-                        };
-                        push(net, Piece::Line(from, first.start()));
-                        let end = lastp.end();
-                        for p in off {
+                    }
+                    let n = self.lanes.len();
+                    let side = bus::side(&centre, run.start, from);
+                    let fan = self.is_bus();
+                    for (i, &net) in self.lanes.iter().enumerate() {
+                        let k = side * bus::slot(i, n) * (w + gap);
+                        let t = to.as_ref().and_then(|t| t.get(i).copied());
+                        for p in bus::lane(&centre, k, from[i], t, fan) {
                             push(net, p);
-                        }
-                        if let Some(t) = to {
-                            push(net, Piece::Line(end, t));
                         }
                     }
                 }
@@ -281,6 +288,13 @@ pub struct Router {
     pub arc: f64,
     /// Route both nets of a differential pair together.
     pub pairs: bool,
+    /// Gap between neighbouring tracks of a bus.
+    pub bus_gap: f64,
+    /// Bus starts gathered with Ctrl+click (pad or track end, net), before
+    /// the bus is routed.
+    pub bus: Vec<(P, u32)>,
+    /// The nets of the bus placed last, for matching their lengths.
+    pub last_bus: Vec<u32>,
     pub active: Option<Active>,
     pub history: History,
     pub message: Option<String>,
@@ -314,6 +328,9 @@ impl Router {
             flip: false,
             arc: 1.0,
             pairs: true,
+            bus_gap: route::DEFAULT_CLEARANCE,
+            bus: Vec::new(),
+            last_bus: Vec::new(),
             active: None,
             history: History::default(),
             message: None,
@@ -332,6 +349,7 @@ impl Router {
         (self.corner, self.arc, self.pairs, self.mode) = (corner, arc, pairs, mode);
         self.width = route::board_width(board);
         self.clearance = route::board_clearance(board);
+        self.bus_gap = self.clearance;
         let n = board.stackup.copper_layers().count().max(1) as u8;
         let kinds = route::via_kinds(board);
         match kinds.iter().find(|k| k.from == 0 && k.to >= n - 1) {
@@ -401,17 +419,79 @@ impl Router {
     pub fn start(&mut self, at: P, net: Option<u32>, layer: u8, pair: Option<(PairInfo, P)>) {
         self.seen = None;
         self.message = None;
+        self.bus.clear();
         let (pair, from, start) = match pair {
             Some((info, b)) => (
                 Some(info),
-                Some((at, b)),
+                Some(vec![at, b]),
                 [(at[0] + b[0]) / 2.0, (at[1] + b[1]) / 2.0],
             ),
             None => (None, None, at),
         };
+        let lanes = match &pair {
+            Some(p) => vec![net, p.partner],
+            None => vec![net],
+        };
+        self.begin(net, pair, lanes, None, layer, start, from);
+    }
+
+    /// Adds a bus start (Ctrl+click), or takes it back when its net is
+    /// already in the bus. Returns how many nets the bus has.
+    pub fn pick_bus(&mut self, at: P, net: u32) -> usize {
+        self.seen = None;
+        match self.bus.iter().position(|b| b.1 == net) {
+            Some(i) => {
+                self.bus.remove(i);
+            }
+            None => self.bus.push((at, net)),
+        }
+        self.bus.len()
+    }
+
+    /// Starts routing the gathered bus on `layer`; false when fewer than
+    /// two nets were gathered.
+    pub fn start_bus(&mut self, layer: u8) -> bool {
+        if self.bus.len() < 2 {
+            return false;
+        }
+        self.seen = None;
+        self.message = None;
+        let mut starts = std::mem::take(&mut self.bus);
+        bus::order(&mut starts);
+        let n = starts.len() as f64;
+        let start = starts
+            .iter()
+            .fold([0.0, 0.0], |s, (p, _)| [s[0] + p[0] / n, s[1] + p[1] / n]);
+        let lanes: Vec<Option<u32>> = starts.iter().map(|s| Some(s.1)).collect();
+        let from = starts.iter().map(|s| s.0).collect();
+        self.begin(
+            lanes[0],
+            None,
+            lanes,
+            Some(self.bus_gap),
+            layer,
+            start,
+            Some(from),
+        );
+        true
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn begin(
+        &mut self,
+        net: Option<u32>,
+        pair: Option<PairInfo>,
+        lanes: Vec<Option<u32>>,
+        bus_gap: Option<f64>,
+        layer: u8,
+        start: P,
+        from: Option<Vec<P>>,
+    ) {
         self.active = Some(Active {
             net,
             pair,
+            lanes,
+            bus_gap,
             runs: vec![Run {
                 layer,
                 start,
@@ -432,6 +512,7 @@ impl Router {
     pub fn cancel(&mut self) {
         self.seen = None;
         self.active = None;
+        self.bus.clear();
         self.message = None;
     }
 
@@ -456,8 +537,8 @@ impl Router {
         let (width, clearance) = (self.width, self.clearance);
         let (corner, flip, arc) = (self.corner, self.flip, self.arc);
         let Some(a) = &self.active else { return };
-        let (net, from) = (a.net, a.last_point());
-        let partner = a.pair.as_ref().map(|p| p.partner);
+        let from = a.last_point();
+        let lanes = a.lanes.clone();
         let clicks: usize = a.runs.iter().map(|r| r.clicks.len()).sum();
         let key = format!(
             "{cursor:?} {snap:?} {from:?} {} {} {clicks} {:?} {corner:?} {flip} {arc} {width} {clearance}",
@@ -470,16 +551,28 @@ impl Router {
         }
         self.seen = Some(key);
         let mut landing = None;
-        let (target, lands) = match (snap, partner) {
-            (Some((p, n)), None) if n.is_some() && n == net => (p, true),
-            (Some((p, n)), Some(pn)) if n.is_some() && (n == net || n == pn) => {
-                let other = if n == net { pn } else { net };
-                match partner_pad(p, other) {
-                    Some(q) => {
-                        landing = Some(if n == net { (p, q) } else { (q, p) });
-                        ([(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0], true)
+        // Landing: on copper of a routed net, with every other lane's pad
+        // next to it.
+        let (target, lands) = match snap {
+            Some((p, n)) if n.is_some() && lanes.contains(&n) => {
+                if lanes.len() == 1 {
+                    (p, true)
+                } else {
+                    let ends: Option<Vec<P>> = lanes
+                        .iter()
+                        .map(|&m| if m == n { Some(p) } else { partner_pad(p, m) })
+                        .collect();
+                    match ends {
+                        Some(v) => {
+                            let k = v.len() as f64;
+                            let c = v
+                                .iter()
+                                .fold([0.0, 0.0], |s, q| [s[0] + q[0] / k, s[1] + q[1] / k]);
+                            landing = Some(v);
+                            (c, true)
+                        }
+                        None => (cursor, false),
                     }
-                    None => (cursor, false),
                 }
             }
             _ => (cursor, false),
@@ -489,9 +582,9 @@ impl Router {
         a.preview = preview;
         a.lands = lands && (target[0] - from[0]).hypot(target[1] - from[1]) > 0.01;
         a.landing = landing;
-        let nets = [net, partner.flatten()];
+        let nets = lanes;
         let mode = self.mode;
-        let mut hit = self.live_hit(board, nets, clearance);
+        let mut hit = self.live_hit(board, &nets, clearance);
         let a = self.active.as_mut().unwrap();
         a.shove = None;
         if hit.is_none() || mode == Mode::Stop {
@@ -499,12 +592,7 @@ impl Router {
             return;
         }
         let layer = a.layer();
-        let (w, gap) = a.size(layer, width);
-        let half = if a.pair.is_some() {
-            w + gap / 2.0
-        } else {
-            w / 2.0
-        };
+        let half = a.half_width(layer, width);
         // Push: move the tracks in the way, if nothing else is.
         if mode == Mode::Push {
             let caps: Vec<walk::Capsule> = a
@@ -517,11 +605,11 @@ impl Router {
                 })
                 .collect();
             let obstacles = self.obstacles(board);
-            if let Some(s) = walk::shove(board, obstacles, layer, &caps, nets, clearance) {
+            if let Some(s) = walk::shove(board, obstacles, layer, &caps, &nets, clearance) {
                 let skip = |t: usize| s.remove.contains(&t);
                 let clear = caps
                     .iter()
-                    .all(|&(x, y, r)| obstacles.clear(layer, x, y, r, nets, clearance, &skip));
+                    .all(|&(x, y, r)| obstacles.clear(layer, x, y, r, &nets, clearance, &skip));
                 if clear {
                     let a = self.active.as_mut().unwrap();
                     a.shove = Some(s);
@@ -536,7 +624,7 @@ impl Router {
             obstacles,
             layer,
             r: half,
-            nets,
+            nets: &nets,
             clearance,
             extra: &[],
             skip: &[],
@@ -547,12 +635,12 @@ impl Router {
             let pieces: Vec<Piece> = path.windows(2).map(|w| Piece::Line(w[0], w[1])).collect();
             let a = self.active.as_mut().unwrap();
             let keep = std::mem::replace(&mut a.preview, pieces);
-            let (lands, landing) = (a.lands, a.landing);
+            let (lands, landing) = (a.lands, a.landing.clone());
             if !reached {
                 a.lands = false;
                 a.landing = None;
             }
-            let again = self.live_hit(board, nets, clearance);
+            let again = self.live_hit(board, &nets, clearance);
             let a = self.active.as_mut().unwrap();
             if again.is_none() {
                 hit = None;
@@ -566,23 +654,29 @@ impl Router {
 
     /// The worst clearance break of the part of the route that follows the
     /// cursor.
-    fn live_hit(&mut self, board: &Board, nets: [Option<u32>; 2], clearance: f64) -> Option<Hit> {
+    /// A pair's tracks may come close to the partner's pads; a bus track
+    /// keeps its clearance from the other lanes' copper.
+    fn live_hit(&mut self, board: &Board, nets: &[Option<u32>], clearance: f64) -> Option<Hit> {
         let width = self.width;
-        let placed: Vec<(u8, P, P, f64)> = self
-            .active
-            .as_ref()?
+        let a = self.active.as_ref()?;
+        let own = a.is_bus();
+        let placed: Vec<(u8, P, P, f64, Option<u32>)> = a
             .layout(width)
             .into_iter()
             .filter(|p| p.live)
             .flat_map(|p| {
-                let (l, w) = (p.layer, p.width);
-                p.piece.chords().into_iter().map(move |(x, y)| (l, x, y, w))
+                let (l, w, n) = (p.layer, p.width, p.net);
+                p.piece
+                    .chords()
+                    .into_iter()
+                    .map(move |(x, y)| (l, x, y, w, n))
             })
             .collect();
         let obstacles = self.obstacles(board);
         let mut hit: Option<Hit> = None;
-        for (l, p, q, w) in placed {
-            if let Some(h) = obstacles.check_pair_track(l, p, q, w, nets, clearance) {
+        for (l, p, q, w, n) in placed {
+            let skip = if own { std::slice::from_ref(&n) } else { nets };
+            if let Some(h) = obstacles.check_pair_track(l, p, q, w, skip, clearance) {
                 if hit.as_ref().is_none_or(|x| h.gap < x.gap) {
                     hit = Some(h);
                 }
@@ -603,7 +697,7 @@ impl Router {
         let shove = a.shove.take();
         let lands = a.lands;
         if lands {
-            let landing = a.landing;
+            let landing = a.landing.clone();
             if let Some(l) = landing {
                 a.runs.last_mut().unwrap().to = Some(l);
             }
@@ -654,47 +748,40 @@ impl Router {
         };
         let at = a.last_point();
         let net = a.net;
-        // Pairs: one via per net, either side of the centre line, far
-        // enough apart for both pads and the clearance between them.
-        let pair_vias = a.pair.as_ref().and_then(|pair| {
+        // Pairs and buses: one via per net in a row across the route, far
+        // enough apart for the via pads and the clearance between them.
+        let multi = a.lanes.len() >= 2;
+        let mut spots: Vec<P> = vec![at];
+        if multi {
             let run = a.runs.last().unwrap();
-            let lay = a.layout(self.width);
-            let mine: Vec<&Placed> = lay.iter().filter(|p| p.live && p.net == net).collect();
-            let (fa, _) = run.from?;
-            let a_end = mine.last().map(|p| p.piece.end()).unwrap_or(fa);
-            let dir = run
-                .clicks
-                .iter()
-                .flatten()
-                .last()
-                .and_then(|p| p.chords().last().copied())
-                .map(|(x, y)| [y[0] - x[0], y[1] - x[1]])
-                .unwrap_or([a_end[0] - at[0], a_end[1] - at[1]]);
+            let centre: Vec<Piece> = run.clicks.iter().flatten().copied().collect();
+            let (Some(from), Some(last)) = (
+                run.from.as_ref(),
+                centre.last().and_then(|p| p.chords().last().copied()),
+            ) else {
+                self.message = Some("Route away from the pads before changing layer.".into());
+                return;
+            };
+            let side = bus::side(&centre, run.start, from);
+            let dir = [last.1[0] - last.0[0], last.1[1] - last.0[1]];
             let l = dir[0].hypot(dir[1]).max(1e-9);
             let n = [-dir[1] / l, dir[0] / l];
-            let side = if n[0] * (a_end[0] - at[0]) + n[1] * (a_end[1] - at[1]) >= 0.0 {
-                1.0
-            } else {
-                -1.0
-            };
             let (w, gap) = a.size(run.layer, self.width);
-            let half = (w + gap).max(d + clearance) / 2.0 * side;
-            Some((
-                [at[0] + n[0] * half, at[1] + n[1] * half],
-                [at[0] - n[0] * half, at[1] - n[1] * half],
-                pair.partner,
-            ))
-        });
-        let nets = [net, a.pair.as_ref().and_then(|p| p.partner)];
-        let spots: Vec<P> = match pair_vias {
-            Some((va, vb, _)) => vec![va, vb],
-            None => vec![at],
-        };
+            let step = (w + gap).max(d + clearance);
+            let k = a.lanes.len();
+            spots = (0..k)
+                .map(|i| {
+                    let o = side * bus::slot(i, k) * step;
+                    [at[0] + n[0] * o, at[1] + n[1] * o]
+                })
+                .collect();
+        }
+        let nets = a.lanes.clone();
         for &v in &spots {
             for k in &stack {
                 if let Some(h) = self
                     .obstacles(board)
-                    .check_span_via(v, k.diameter, nets, clearance, k.from, k.to)
+                    .check_span_via(v, k.diameter, &nets, clearance, k.from, k.to)
                 {
                     self.message = Some(format!(
                         "No room for a via here: {}",
@@ -705,22 +792,20 @@ impl Router {
             }
         }
         let a = self.active.as_mut().unwrap();
-        let (from, to) = match pair_vias {
-            Some((va, vb, partner)) => {
+        let (from, to) = if multi {
+            for (&v, &lane) in spots.iter().zip(&nets) {
                 for k in &stack {
-                    a.vias.push((va, net, *k));
-                    a.vias.push((vb, partner, *k));
+                    a.vias.push((v, lane, *k));
                 }
-                a.via_groups.push(stack.len() * 2);
-                (Some((va, vb)), Some((va, vb)))
             }
-            None => {
-                for k in &stack {
-                    a.vias.push((at, net, *k));
-                }
-                a.via_groups.push(stack.len());
-                (None, None)
+            a.via_groups.push(stack.len() * spots.len());
+            (Some(spots.clone()), Some(spots))
+        } else {
+            for k in &stack {
+                a.vias.push((at, net, *k));
             }
+            a.via_groups.push(stack.len());
+            (None, None)
         };
         a.runs.last_mut().unwrap().to = to;
         a.runs.push(Run {
@@ -746,9 +831,9 @@ impl Router {
             return;
         }
         if a.runs.len() > 1 {
-            let pair = a.runs.last().unwrap().from.is_some();
+            let lanes = a.lanes.len();
             a.runs.pop();
-            let n = a.via_groups.pop().unwrap_or(if pair { 2 } else { 1 });
+            let n = a.via_groups.pop().unwrap_or(lanes);
             for _ in 0..n {
                 a.vias.pop();
             }
@@ -763,6 +848,9 @@ impl Router {
     pub fn finish(&mut self, board: &Board) -> Option<Vec<Edit>> {
         let mut a = self.active.take()?;
         a.preview.clear();
+        if a.is_bus() {
+            self.last_bus = a.lanes.iter().flatten().copied().collect();
+        }
         let point = |p: P| Point {
             x: Length::from_mil(p[0]),
             y: Length::from_mil(p[1]),
@@ -1087,8 +1175,129 @@ mod tests {
         let obs = Obstacles::new(&b);
         for p in a.layout(r.width).iter().filter(|p| p.live) {
             for (x, y) in p.piece.chords() {
-                let hit = obs.check_pair_track(0, x, y, p.width, [Some(0), Some(1)], 5.0);
+                let hit = obs.check_pair_track(0, x, y, p.width, &[Some(0), Some(1)], 5.0);
                 assert!(hit.is_none(), "{x:?} {y:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn bus_routes_lanes_in_pad_order_and_lands_on_every_pad() {
+        let mut b = Board::default();
+        for i in 0..2 {
+            b.stackup.layers.push(StackLayer {
+                name: format!("L{i}"),
+                altium_id: None,
+                kind: LayerKind::Copper,
+                thickness: Length::from_mil(1.4),
+                dielectric_constant: None,
+                material: None,
+            });
+        }
+        b.nets = (0..4)
+            .map(|i| Net {
+                name: format!("D{i}"),
+                ..Default::default()
+            })
+            .collect();
+        // Starts in a column at 25 mil pitch, ends in a column at 2000.
+        for i in 0..4u32 {
+            let y = 25.0 * i as f64 - 37.5;
+            b.geometry.pads.push(pad(i, 0.0, y));
+            let mut far = pad(i, 2000.0, y + 300.0);
+            far.layer = LayerRef::AllCopper;
+            b.geometry.pads.push(far);
+        }
+        let mut r = Router::new();
+        r.width = 5.0;
+        r.clearance = 5.0;
+        r.bus_gap = 5.0;
+        r.mode = Mode::Stop;
+        // Gathered out of order; the bus sorts them.
+        for i in [2u32, 0, 3, 1] {
+            r.pick_bus([0.0, 25.0 * i as f64 - 37.5], i);
+        }
+        assert!(r.start_bus(0));
+        let lanes = r.active.as_ref().unwrap().lanes.clone();
+        assert!(
+            lanes == [0, 1, 2, 3].map(Some) || lanes == [3, 2, 1, 0].map(Some),
+            "{lanes:?}"
+        );
+        let no_pad = |_: P, _: Option<u32>| None;
+        r.update(&b, [800.0, 0.0], None, no_pad);
+        assert!(
+            r.active.as_ref().unwrap().hit.is_none(),
+            "{:?}",
+            r.active.as_ref().unwrap().hit
+        );
+        assert!(r.click(&b).is_none());
+        r.via(&b, 1);
+        assert_eq!(
+            r.active.as_ref().unwrap().via_points().count(),
+            4,
+            "{:?}",
+            r.message
+        );
+        let ends = |_: P, n: Option<u32>| -> Option<P> {
+            let i = n? as f64;
+            Some([2000.0, 25.0 * i - 37.5 + 300.0])
+        };
+        // A corner first, so the bus comes in square to the far pads.
+        r.update(&b, [1500.0, 300.0], None, no_pad);
+        assert!(r.active.as_ref().unwrap().hit.is_none());
+        assert!(r.click(&b).is_none());
+        r.update(&b, [2000.0, 262.5], Some(([2000.0, 262.5], Some(0))), ends);
+        let a = r.active.as_ref().unwrap();
+        assert!(a.lands);
+        assert!(a.hit.is_none(), "{:?}", a.hit);
+        let edits = r.click(&b).expect("landed");
+        let mut tracks: Vec<Track> = Vec::new();
+        for e in &edits {
+            if let Edit::InsertTrack { track, .. } = e {
+                tracks.push(track.clone());
+            }
+        }
+        for i in 0..4u32 {
+            let y = 25.0 * i as f64 - 37.5;
+            let at = |t: &Track, x: f64, y: f64| {
+                let m = |p: Point| (p.x.mil() - x).abs() < 1e-3 && (p.y.mil() - y).abs() < 1e-3;
+                m(t.start) || m(t.end)
+            };
+            assert!(
+                tracks.iter().any(|t| t.net == Some(i) && at(t, 0.0, y)),
+                "start {i}"
+            );
+            assert!(
+                tracks
+                    .iter()
+                    .any(|t| t.net == Some(i) && at(t, 2000.0, y + 300.0)),
+                "end {i}"
+            );
+        }
+        // No two lanes on the same layer come closer than the gap.
+        for (i, t) in tracks.iter().enumerate() {
+            for u in &tracks[i + 1..] {
+                if t.net == u.net || t.layer != u.layer {
+                    continue;
+                }
+                let p = |q: Point| [q.x.mil(), q.y.mil()];
+                let obs = Obstacles::new(&Board {
+                    geometry: trace_core::Geometry {
+                        tracks: vec![u.clone()],
+                        ..Default::default()
+                    },
+                    stackup: b.stackup.clone(),
+                    ..Default::default()
+                });
+                let layer = match t.layer {
+                    LayerRef::Copper(l) => l,
+                    _ => 0,
+                };
+                assert!(
+                    obs.check_track(layer, p(t.start), p(t.end), 5.0, t.net, 4.9)
+                        .is_none(),
+                    "{t:?} {u:?}"
+                );
             }
         }
     }

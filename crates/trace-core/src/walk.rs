@@ -21,7 +21,7 @@ pub struct Ask<'a> {
     /// Half the width of what is routed (for a pair, of both tracks and
     /// the gap between them).
     pub r: f64,
-    pub nets: [Option<u32>; 2],
+    pub nets: &'a [Option<u32>],
     pub clearance: f64,
     /// More copper to keep clear of: the new route, when shoving.
     pub extra: &'a [Capsule],
@@ -306,7 +306,7 @@ pub fn shove(
     obstacles: &Obstacles,
     layer: u8,
     route: &[Capsule],
-    nets: [Option<u32>; 2],
+    nets: &[Option<u32>],
     clearance: f64,
 ) -> Option<Shove> {
     let mut hit = Vec::new();
@@ -334,7 +334,7 @@ pub fn shove(
             obstacles,
             layer,
             r,
-            nets: [t.net, None],
+            nets: &[t.net],
             clearance,
             extra: &extra,
             skip: &hit,
@@ -419,7 +419,7 @@ mod tests {
             obstacles: &obs,
             layer: 0,
             r: 3.0,
-            nets: [Some(0), None],
+            nets: &[Some(0)],
             clearance: 5.0,
             extra: &[],
             skip: &[],
@@ -448,7 +448,7 @@ mod tests {
             obstacles: &obs,
             layer: 0,
             r: 3.0,
-            nets: [Some(0), None],
+            nets: &[Some(0)],
             clearance: 5.0,
             extra: &[],
             skip: &[],
@@ -478,7 +478,7 @@ mod tests {
         // A new track along y = 0 from x 100 to 200: 10 mil centre to
         // centre, too close for 5 mil clearance.
         let route = [([100.0, 0.0], [200.0, 0.0], 3.0)];
-        let s = shove(&b, &obs, 0, &route, [Some(0), None], 5.0).expect("shoved");
+        let s = shove(&b, &obs, 0, &route, &[Some(0)], 5.0).expect("shoved");
         assert_eq!(s.remove, vec![0]);
         for t in &s.add {
             let (a, c) = (

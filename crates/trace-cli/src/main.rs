@@ -25,6 +25,9 @@ USAGE:
     trace panel <board> <cols>x<rows> <out.tracepcb> [--gap 2mm] [--rail 5mm] [--tabs N] [--vscore]
                                                 Panel of copies with rails, fiducials, tooling holes, and
                                                 tabs with mouse bites (or V-score lines); then fab or odb it
+    trace match <board> <net,net,...> [out.tracepcb] [--target L] [--amp L]
+                                                Match the nets' lengths (to the longest, or the target) with
+                                                meanders where they fit; with out, save the board tuned
     trace stubs <board> [out.tracepcb]          Via stubs on nets with a stub rule (default: pair nets, 10 mil);
                                                 with out, backdrill those too long and save the board
     trace view <board> [out.html]               Open the board in the viewer (in your browser)
@@ -65,6 +68,7 @@ fn main() -> ExitCode {
         ["drc", file, "--all"] => drc(file, usize::MAX),
         ["impedance", file] => impedance(file),
         ["panel", file, grid, out, rest @ ..] => panel(file, grid, out, rest),
+        ["match", file, nets, rest @ ..] => match_nets(file, nets, rest),
         ["stubs", file] => stubs(file, None),
         ["stubs", file, out] => stubs(file, Some(out)),
         ["convert", file, out] => convert(file, out),
@@ -708,6 +712,64 @@ fn stubs(file: &str, out: Option<&str>) -> Res {
             "Backdrilled {} vias ({n} in all); saved {out}",
             edits.len() / 2
         );
+    }
+    Ok(())
+}
+
+fn match_nets(file: &str, nets: &str, rest: &[&str]) -> Res {
+    let mut b = board(file)?;
+    let mut out = None;
+    let (mut target, mut amp) = (None, 40.0);
+    let mut it = rest.iter();
+    while let Some(&a) = it.next() {
+        let len = |v: Option<&&str>| -> Result<f64, Box<dyn std::error::Error>> {
+            let v = v.ok_or(format!("{a} needs a length"))?;
+            Ok(Length::parse(v).ok_or(format!("not a length: {v}"))?.mil())
+        };
+        match a {
+            "--target" => target = Some(len(it.next())?),
+            "--amp" => amp = len(it.next())?,
+            _ if out.is_none() && !a.starts_with("--") => out = Some(a),
+            _ => return Err(format!("unknown option {a}").into()),
+        }
+    }
+    let mut ids = Vec::new();
+    for name in nets.split(',').map(str::trim).filter(|n| !n.is_empty()) {
+        let i = b
+            .nets
+            .iter()
+            .position(|n| n.name == name)
+            .ok_or(format!("no net {name}"))?;
+        ids.push(i as u32);
+    }
+    let clearance = trace_core::route::board_clearance(&b);
+    let m = trace_core::bus::match_lengths(&b, &ids, target, amp, None, clearance);
+    println!("Target {:.1} mil", m.target);
+    for t in &m.nets {
+        let short = m.target - t.after;
+        println!(
+            "  {:<28} {:>9.1} -> {:>9.1}{}",
+            b.nets[t.net as usize].name,
+            t.before,
+            t.after,
+            if short > 1.0 {
+                format!("  ({short:.1} mil short: no room for meanders)")
+            } else {
+                String::new()
+            }
+        );
+    }
+    if let Some(out) = out {
+        let edits = m.edits;
+        for e in &edits {
+            e.apply(&mut b);
+        }
+        if let Some(e) = trace_core::pour::repour_after(&b, &edits) {
+            e.apply(&mut b);
+        }
+        trace_core::connectivity::analyse(&mut b);
+        trace_core::file::save(&b, Path::new(out))?;
+        println!("Saved {out}");
     }
     Ok(())
 }

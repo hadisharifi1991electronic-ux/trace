@@ -32,6 +32,10 @@ pub struct SimWindow {
     term_r: f64,
     term_v: f64,
     pair: bool,
+    lossy: bool,
+    tan_d: f64,
+    rough_um: f64,
+    crosstalk: bool,
     result: Option<Result<(Run, String), String>>,
 }
 
@@ -51,6 +55,10 @@ impl Default for SimWindow {
             term_r: 50.0,
             term_v: 0.0,
             pair: true,
+            lossy: true,
+            tan_d: sim::Loss::default().tan_d,
+            rough_um: sim::Loss::default().rough_um,
+            crosstalk: true,
             result: None,
         }
     }
@@ -242,6 +250,49 @@ impl SimWindow {
                 );
             }
         });
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut self.lossy, "Track loss")
+                .on_hover_text("Copper (DC, skin effect, roughness) and dielectric loss");
+            ui.add_enabled_ui(self.lossy, |ui| {
+                ui.label("Df");
+                ui.add(
+                    egui::DragValue::new(&mut self.tan_d)
+                        .range(0.0..=0.1)
+                        .speed(0.0005)
+                        .max_decimals(4),
+                )
+                .on_hover_text("Dielectric loss tangent");
+                egui::ComboBox::from_id_salt("sim_material")
+                    .selected_text("material")
+                    .show_ui(ui, |ui| {
+                        for (name, df) in [
+                            ("FR-4 (0.020)", 0.02),
+                            ("Mid-loss FR-4 (0.010)", 0.01),
+                            ("Low loss, e.g. Megtron 4 (0.005)", 0.005),
+                            ("Very low loss, e.g. Megtron 6 (0.002)", 0.002),
+                            ("PTFE / Rogers 4350B (0.0037)", 0.0037),
+                        ] {
+                            if ui.selectable_label(false, name).clicked() {
+                                self.tan_d = df;
+                            }
+                        }
+                    });
+                ui.label("Roughness");
+                ui.add(
+                    egui::DragValue::new(&mut self.rough_um)
+                        .range(0.0..=10.0)
+                        .speed(0.05)
+                        .suffix(" µm"),
+                )
+                .on_hover_text(
+                    "Copper surface roughness, RMS (about 1 µm for standard foil, 0.4 for HVLP)",
+                );
+            });
+            ui.checkbox(&mut self.crosstalk, "Crosstalk").on_hover_text(
+                "Drive the nets running beside the route (with the driver and receiver models) \
+                 and add their near- and far-end crosstalk",
+            );
+        });
         ui.horizontal(|ui| {
             if ui.button("Simulate").clicked() {
                 self.result = Some(self.run(board, partner.is_some()));
@@ -262,8 +313,9 @@ impl SimWindow {
             None => {
                 ui.label(
                     RichText::new(
-                        "Lossless lines from the stack-up, vias and stubs, IBIS buffers with their \
-                         package; a PRBS7 pattern. Losses and crosstalk are not modelled.",
+                        "Lines from the stack-up, vias and stubs, with copper and dielectric loss; \
+                         IBIS buffers with their package; a PRBS7 pattern; crosstalk from the nets \
+                         beside the route.",
                     )
                     .weak(),
                 );
@@ -328,6 +380,11 @@ impl SimWindow {
                 },
                 TermKind::Across => Term::Across(self.term_r),
             },
+            loss: self.lossy.then_some(sim::Loss {
+                tan_d: self.tan_d,
+                rough_um: self.rough_um,
+            }),
+            crosstalk: self.crosstalk,
         };
         let run = sim::simulate(
             board,
@@ -387,6 +444,34 @@ fn results(ui: &mut egui::Ui, run: &Run) {
         run.switch.1 * 1e12,
         run.dt * 1e12
     ));
+    if run.loss_db > 0.0 {
+        ui.label(format!(
+            "Loss {:.2} dB at {:.2} GHz (half the bit rate)",
+            run.loss_db,
+            0.5 / e.ui / 1e9
+        ));
+    }
+    if let Some(q) = &run.quiet {
+        ui.label(format!(
+            "Crosstalk up to {:.1} mV at the receiver; without it the eye is {:.3} V, {:.0} % UI",
+            run.noise * 1e3,
+            q.height,
+            q.width / q.ui * 100.0
+        ));
+        for a in &run.aggressors {
+            ui.label(
+                RichText::new(format!(
+                    "  {} driven from {}{}: {:.0} mil beside the route, Kb {:.3}",
+                    a.net,
+                    a.from,
+                    if a.inverted { " (inverted)" } else { "" },
+                    a.coupled,
+                    a.kb
+                ))
+                .weak(),
+            );
+        }
+    }
     for n in &run.notes {
         ui.label(RichText::new(n).weak());
     }

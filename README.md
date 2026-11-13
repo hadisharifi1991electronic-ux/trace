@@ -137,7 +137,14 @@ checker and simulator all read.
   track from the stack-up, via barrels, stubs as branches; pairs at their
   odd-mode impedance), drives a PRBS7 pattern through the IBIS buffers and
   packages, and shows the waveforms at the driver and receiver and an eye
-  diagram with its height and width. Save picture… writes it as SVG
+  diagram with its height and width. Track loss takes in the copper (DC
+  resistance, skin effect, roughness) and the dielectric's loss tangent
+  (Df, with presets from FR-4 to Megtron 6), and reports the loss at half
+  the bit rate. Crosstalk drives the nets that run beside the route (with
+  the same driver and receiver models, pairs against each other, each with
+  its own pattern) and adds their near- and far-end crosstalk; the window
+  lists them and gives the noise at the receiver and the eye without it.
+  Save picture… writes it as SVG
 - export ODB++ (File → Export ODB++): one `.tgz` job with every copper,
   mask, paste, silkscreen, drill (plated, non-plated, blind and buried
   spans) and mechanical layer, the board profile, both component layers,
@@ -207,9 +214,11 @@ trace panel board.PcbDoc 2x3 out.tracepcb [--gap 2mm] [--rail 5mm] [--tabs N] [-
                                  panelize: copies in a grid with rails, tabs and mouse bites (or V-score),
                                  fiducials and tooling holes; then export fab outputs or ODB++ from out
 trace sim board.PcbDoc U1.A3 U2.B7 --ibis drv.ibs [--rx-ibis rx.ibs] [--model M] [--rx-model M]
-         [--rate 2G] [--bits 160] [--corner typ|min|max] [--term 50|50@1.65|100diff] [--single] [out.svg]
-                                 IBIS simulation from driver pin to receiver pin: route delay, eye height and
-                                 width; a net with a pair partner is simulated as the pair (unless --single)
+         [--rate 2G] [--bits 160] [--corner typ|min|max] [--term 50|50@1.65|100diff] [--single]
+         [--df 0.02] [--rough 1um] [--lossless] [--no-xtalk] [out.svg]
+                                 IBIS simulation from driver pin to receiver pin: route delay, loss, eye height
+                                 and width, crosstalk from nets beside the route; a net with a pair partner is
+                                 simulated as the pair (unless --single)
 trace convert <file> out.json    export to Trace's open JSON model
 trace convert <file> out.kicad_pcb   write a KiCad board
 trace convert <file> out.PcbDoc      write an Altium Designer board
@@ -367,10 +376,17 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   walks round obstacles as one band and checks each track against the
   other lanes' pads; bring the bus in square to its far pads (a corner
   first) so the jogs can land.
-- Signal simulation is lossless: tracks are ideal transmission lines
-  (no copper or dielectric loss, so long or fast routes look better than
-  they will be), there is no crosstalk from other nets, and a pair is taken
-  as two lines at its odd-mode impedance. Drivers switch along their IBIS
+- Signal simulation takes a pair as two lines at its odd-mode impedance.
+  Loss uses closed-form estimates: copper current on the faces towards the
+  planes, Hammerstad's roughness factor, one loss tangent for the whole
+  board (the stack-up's own Df is not read yet), and a characteristic
+  impedance that does not change with frequency. Crosstalk is counted only
+  between parallel straight tracks on the same layer, within four
+  dielectric heights (50 mil at most), from the eight strongest nets, and
+  the victim does not disturb its aggressors (weak coupling); coupling
+  between layers, at vias and on arcs is left out. Aggressors are driven
+  from their pad nearest the route's driver into their farthest pad.
+  Drivers switch along their IBIS
   [Ramp] (the rising and falling waveforms are read but not yet used), so
   edges are approximate for buffers with strong pre-emphasis. IBIS-AMI,
   [External Model], submodels and series models are not supported; a pin

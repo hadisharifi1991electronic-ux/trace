@@ -1,7 +1,7 @@
 //! Signal integrity simulation: a routed net (or pair) driven by an IBIS
 //! buffer into an IBIS receiver, in the time domain, with an eye diagram.
 //!
-//! The net's copper becomes lossless transmission lines: each track and arc
+//! The net's copper becomes transmission lines: each track and arc
 //! at the impedance and delay the stack-up gives its width and layer (for a
 //! pair, the odd-mode impedance, half the differential), and each via
 //! barrel as a short line of its own. Branches the route does not take,
@@ -12,12 +12,22 @@
 //!
 //! The driver switches between its pullup and pulldown tables, the
 //! switching time set so its edge into the [Ramp] load matches the ramp.
-//! Losses, coupling to other nets and power noise are not modelled.
+//!
+//! Lines lose signal to their copper (DC resistance, skin effect,
+//! roughness) and dielectric (loss tangent) through a causal filter per
+//! line ([`loss`]). Tracks of other nets running beside the route are
+//! driven with patterns of their own, and their near- and far-end
+//! crosstalk enters the route's lines ([`xtalk`]). Power noise is not
+//! modelled.
+
+pub mod loss;
+pub mod xtalk;
 
 use crate::backdrill::faces;
 use crate::ibis::{Corner, Model, Rlc};
 use crate::impedance::DEFAULT_ER;
 use crate::{Board, LayerRef};
+pub use loss::{Atten, Loss};
 use std::collections::HashMap;
 
 /// Speed of light, inches per second.
@@ -34,6 +44,8 @@ pub struct Line {
     pub z: f64,
     /// Delay, seconds.
     pub delay: f64,
+    /// Loss along the line.
+    pub att: Atten,
 }
 
 /// A net's copper as nodes joined by transmission lines.
@@ -50,6 +62,19 @@ pub struct Network {
     pub vias: usize,
     /// Lowest and highest line impedance, ohm.
     pub z_range: (f64, f64),
+    /// Board track index and the line it became (its `a` end at the
+    /// track's start).
+    pub track_lines: Vec<(usize, usize)>,
+}
+
+/// Where a line of a network went when it was reduced: the new line and
+/// the map from delay along the old line (from its `a` end) to delay
+/// along the new one, `off + sign * t`.
+#[derive(Clone, Copy, Debug)]
+pub struct Moved {
+    pub line: usize,
+    pub sign: f64,
+    pub off: f64,
 }
 
 impl Network {
@@ -91,8 +116,8 @@ pub fn network(board: &Board, net: u32, odd: bool) -> Network {
     let pt = |p: crate::Point| [p.x.mil(), p.y.mil()];
     // Anchors: layer, point, reach.
     let mut anchors: Vec<(u8, P, f64)> = Vec::new();
-    // Edges between anchors: z, delay.
-    let mut edges: Vec<(usize, usize, f64, f64)> = Vec::new();
+    // Edges between anchors: z, delay, loss, the track they come from.
+    let mut edges: Vec<Edge> = Vec::new();
     let mut pads = Vec::new();
     let mut length = 0.0;
     let delay_of = |l: u8, w: f64, len: f64| -> f64 {
@@ -107,7 +132,7 @@ pub fn network(board: &Board, net: u32, odd: bool) -> Network {
     };
     // A plated barrel through `layers` at `at`: its anchors and edges.
     let barrel = |anchors: &mut Vec<(u8, P, f64)>,
-                  edges: &mut Vec<(usize, usize, f64, f64)>,
+                  edges: &mut Vec<Edge>,
                   layers: &[u8],
                   at: P,
                   d: f64,
@@ -122,11 +147,12 @@ pub fn network(board: &Board, net: u32, odd: bool) -> Network {
         for w in ids.windows(2).zip(layers.windows(2)) {
             let ((a, b), (la, lb)) = ((w.0[0], w.0[1]), (w.1[0], w.1[1]));
             let len = (mid(lb) - mid(la)).abs();
-            edges.push((a, b, zv, len / 1000.0 * er.sqrt() / C_IN));
+            let tau = len / 1000.0 * er.sqrt() / C_IN;
+            edges.push((a, b, zv, tau, loss::dielectric(tau), None));
         }
         ids
     };
-    for t in &g.tracks {
+    for (ti, t) in g.tracks.iter().enumerate() {
         let LayerRef::Copper(l) = t.layer else {
             continue;
         };
@@ -147,7 +173,9 @@ pub fn network(board: &Board, net: u32, odd: bool) -> Network {
         anchors.push((l, a, w / 2.0));
         anchors.push((l, b, w / 2.0));
         let n = anchors.len();
-        edges.push((n - 2, n - 1, z, delay_of(l, w, len)));
+        let tau = delay_of(l, w, len);
+        let att = loss::track(geo.get(l as usize), w, len, z, tau);
+        edges.push((n - 2, n - 1, z, tau, att, Some(ti)));
         length += len;
     }
     for arc in &g.arcs {
@@ -171,7 +199,9 @@ pub fn network(board: &Board, net: u32, odd: bool) -> Network {
         anchors.push((l, at(arc.start_deg), w / 2.0));
         anchors.push((l, at(arc.start_deg + sweep), w / 2.0));
         let n = anchors.len();
-        edges.push((n - 2, n - 1, z_of(l, w), delay_of(l, w, len)));
+        let (z, tau) = (z_of(l, w), delay_of(l, w, len));
+        let att = loss::track(geo.get(l as usize), w, len, z, tau);
+        edges.push((n - 2, n - 1, z, tau, att, None));
         length += len;
     }
     let mut vias = 0;
@@ -265,14 +295,19 @@ pub fn network(board: &Board, net: u32, odd: bool) -> Network {
         *ids.entry(r).or_insert(n)
     };
     let mut lines = Vec::new();
-    for &(a, b, z, delay) in &edges {
+    let mut track_lines = Vec::new();
+    for &(a, b, z, delay, att, track) in &edges {
         let (na, nb) = (node(&mut uf, a), node(&mut uf, b));
         if na != nb {
+            if let Some(t) = track {
+                track_lines.push((t, lines.len()));
+            }
             lines.push(Line {
                 a: na,
                 b: nb,
                 z,
                 delay,
+                att,
             });
         }
     }
@@ -291,17 +326,26 @@ pub fn network(board: &Board, net: u32, odd: bool) -> Network {
         length,
         vias,
         z_range,
+        track_lines,
     }
 }
 
+type Edge = (usize, usize, f64, f64, Atten, Option<usize>);
+
 impl Network {
     /// Lines shorter than half a step become capacitance at a node
-    /// (their two ends joined): C = delay / Z. Returns the reduced network
-    /// and where each old node went.
-    fn reduce(&self, dt: f64) -> (Network, Vec<usize>) {
+    /// (their two ends joined): C = delay / Z. Returns the reduced network,
+    /// where each old node went, and where each old line went (`None` for
+    /// lines that became capacitance).
+    fn reduce(&self, dt: f64) -> (Network, Vec<usize>, Vec<Option<Moved>>) {
         // First join lines in series through nodes nothing else touches:
-        // their delays add, and the impedance is the delay-weighted mean.
+        // their delays and losses add, and the impedance is the
+        // delay-weighted mean.
         let mut slots: Vec<Option<Line>> = self.lines.iter().copied().map(Some).collect();
+        // Each old line: its slot, and sign and offset into it.
+        let mut moved: Vec<(usize, f64, f64)> =
+            (0..self.lines.len()).map(|i| (i, 1.0, 0.0)).collect();
+        let mut members: Vec<Vec<usize>> = (0..self.lines.len()).map(|i| vec![i]).collect();
         let mut ends: Vec<Vec<usize>> = vec![Vec::new(); self.nodes];
         for (i, l) in self.lines.iter().enumerate() {
             ends[l.a].push(i);
@@ -336,11 +380,31 @@ impl Network {
             } else {
                 (x.z + y.z) / 2.0
             };
+            // The new line runs p → node → q.
+            for &m in &members[i] {
+                let (_, sg, off) = moved[m];
+                moved[m] = if x.a == p {
+                    (i, sg, off)
+                } else {
+                    (i, -sg, x.delay - off)
+                };
+            }
+            for &m in &members[j] {
+                let (_, sg, off) = moved[m];
+                moved[m] = if y.a == node {
+                    (i, sg, x.delay + off)
+                } else {
+                    (i, -sg, x.delay + y.delay - off)
+                };
+            }
+            let taken = std::mem::take(&mut members[j]);
+            members[i].extend(taken);
             slots[i] = Some(Line {
                 a: p,
                 b: q,
                 z,
                 delay: d,
+                att: x.att + y.att,
             });
             slots[j] = None;
             // The far end of the dropped line now meets line i.
@@ -351,13 +415,18 @@ impl Network {
             }
             ends[node].clear();
         }
-        let merged: Vec<Line> = slots.into_iter().flatten().collect();
         let mut uf = Uf((0..self.nodes).collect());
         let mut caps: Vec<(usize, f64)> = self.caps.clone();
-        for l in &merged {
+        let mut index = vec![None; slots.len()];
+        let mut kept = Vec::new();
+        for (si, l) in slots.iter().enumerate() {
+            let Some(l) = l else { continue };
             if l.delay < dt / 2.0 {
                 uf.join(l.a, l.b);
                 caps.push((l.a, l.delay / l.z));
+            } else {
+                index[si] = Some(kept.len());
+                kept.push(*l);
             }
         }
         let mut ids: HashMap<usize, usize> = HashMap::new();
@@ -367,9 +436,8 @@ impl Network {
             let n = ids.len();
             *m = *ids.entry(r).or_insert(n);
         }
-        let lines = merged
+        let lines = kept
             .iter()
-            .filter(|l| l.delay >= dt / 2.0)
             .map(|l| Line {
                 a: map[l.a],
                 b: map[l.b],
@@ -378,6 +446,10 @@ impl Network {
             .collect();
         let caps = caps.into_iter().map(|(n, c)| (map[n], c)).collect();
         let pads = self.pads.iter().map(|&(p, n)| (p, map[n])).collect();
+        let lines_moved = moved
+            .iter()
+            .map(|&(slot, sign, off)| index[slot].map(|line| Moved { line, sign, off }))
+            .collect();
         (
             Network {
                 nodes: ids.len(),
@@ -387,6 +459,7 @@ impl Network {
                 ..self.clone()
             },
             map,
+            lines_moved,
         )
     }
 
@@ -399,25 +472,31 @@ impl Network {
         uf.find(a) == uf.find(b)
     }
 
-    /// The shortest delay between two nodes, seconds.
-    pub fn delay_between(&self, a: usize, b: usize) -> Option<f64> {
-        let mut adj: Vec<Vec<(usize, f64)>> = vec![Vec::new(); self.nodes];
+    /// The shortest delay between two nodes, seconds, and the loss along
+    /// that path.
+    pub fn path(&self, a: usize, b: usize) -> Option<(f64, Atten)> {
+        let mut adj: Vec<Vec<(usize, f64, Atten)>> = vec![Vec::new(); self.nodes];
         for l in &self.lines {
-            adj[l.a].push((l.b, l.delay));
-            adj[l.b].push((l.a, l.delay));
+            adj[l.a].push((l.b, l.delay, l.att));
+            adj[l.b].push((l.a, l.delay, l.att));
         }
-        let mut best = vec![f64::MAX; self.nodes];
-        best[a] = 0.0;
+        let mut best = vec![(f64::MAX, Atten::default()); self.nodes];
+        best[a].0 = 0.0;
         let mut todo = vec![a];
         while let Some(i) = todo.pop() {
-            for &(j, d) in &adj[i] {
-                if best[i] + d < best[j] - 1e-18 {
-                    best[j] = best[i] + d;
+            for &(j, d, att) in &adj[i] {
+                if best[i].0 + d < best[j].0 - 1e-18 {
+                    best[j] = (best[i].0 + d, best[i].1 + att);
                     todo.push(j);
                 }
             }
         }
-        (best[b] < f64::MAX).then_some(best[b])
+        (best[b].0 < f64::MAX).then_some(best[b])
+    }
+
+    /// The shortest delay between two nodes, seconds.
+    pub fn delay_between(&self, a: usize, b: usize) -> Option<f64> {
+        self.path(a, b).map(|p| p.0)
     }
 }
 
@@ -443,6 +522,10 @@ pub struct Setup {
     /// Bits of the pseudo-random (PRBS7) pattern.
     pub bits: usize,
     pub term: Term,
+    /// Track losses; `None` for lossless lines.
+    pub loss: Option<Loss>,
+    /// Drive the nets running beside the route and add their crosstalk.
+    pub crosstalk: bool,
 }
 
 impl Default for Setup {
@@ -452,8 +535,24 @@ impl Default for Setup {
             rate: 1e9,
             bits: 160,
             term: Term::None,
+            loss: Some(Loss::default()),
+            crosstalk: true,
         }
     }
+}
+
+/// A net whose crosstalk the simulation added.
+#[derive(Clone, Debug)]
+pub struct Aggressor {
+    pub net: String,
+    /// Pad it was driven from (designator.pin).
+    pub from: String,
+    /// Length it runs beside the route, mil.
+    pub coupled: f64,
+    /// Strongest backward (near-end) coupling over that length.
+    pub kb: f64,
+    /// Whether it was driven inverted, as the negative of a pair.
+    pub inverted: bool,
 }
 
 /// One buffer end: its model and package.
@@ -502,6 +601,15 @@ pub struct Run {
     pub switch: (f64, f64),
     pub bits: Vec<bool>,
     pub notes: Vec<String>,
+    /// Loss from driver to receiver at the Nyquist frequency (half the bit
+    /// rate), dB; 0 when lossless.
+    pub loss_db: f64,
+    /// Nets whose crosstalk is in the waveforms.
+    pub aggressors: Vec<Aggressor>,
+    /// The eye without crosstalk, when there was any.
+    pub quiet: Option<Eye>,
+    /// Largest crosstalk at the receiver (with minus without), volts.
+    pub noise: f64,
 }
 
 /// PRBS7 (x^7 + x^6 + 1).
@@ -516,10 +624,32 @@ pub fn prbs7(n: usize) -> Vec<bool> {
         .collect()
 }
 
+/// A line as the solver steps it: its whole steps of delay, and the
+/// filter its loss gives (one tap of 1 when lossless).
+struct Stepped {
+    line: Line,
+    k: usize,
+    taps: Vec<f64>,
+    /// One pole after the taps: decay per step, first value.
+    tail: (f64, f64),
+}
+
+impl Stepped {
+    fn gain(&self) -> f64 {
+        let (a, b) = self.tail;
+        self.taps.iter().sum::<f64>() + if b != 0.0 { b / (1.0 - a) } else { 0.0 }
+    }
+
+    /// Length of its ring buffers.
+    fn ring(&self) -> usize {
+        self.k + self.taps.len() + 1
+    }
+}
+
 /// The circuit the solver steps: nodes, lines, and elements.
 struct Circuit<'a> {
     n: usize,
-    lines: Vec<(Line, usize)>,
+    lines: Vec<Stepped>,
     /// Shunt capacitors: node, farads.
     caps: Vec<(usize, f64)>,
     /// Shunt resistors: node, ohm, to volts.
@@ -532,19 +662,28 @@ struct Circuit<'a> {
 
 struct Solved {
     v: Vec<Vec<f32>>,
+    /// For each line asked for, the wave it launched at its `a` and `b`
+    /// ends each step (f = 2v/Z − h).
+    waves: Vec<(Vec<f32>, Vec<f32>)>,
 }
 
 /// A starting state: node voltages, the current into each line at its
-/// `a` end (out at `b`), and through each inductor.
+/// two ends, and through each inductor.
 struct Init {
     v: Vec<f64>,
-    line_i: Vec<f64>,
+    line_i: Vec<(f64, f64)>,
     ind_i: Vec<f64>,
 }
 
+/// Extra waves arriving at lines' ends from crosstalk, volts per step:
+/// line index, at `a`, at `b`.
+type Inject = Vec<(usize, Vec<f32>, Vec<f32>)>;
+
 impl<'a> Circuit<'a> {
     /// Steps the circuit for `steps` of `dt`, the drivers' pullup share
-    /// given by `ku(driver, step)`, recording the voltages of `record`.
+    /// given by `ku(driver, step)`, recording the voltages of `record` and
+    /// the waves of the lines `waves`.
+    #[allow(clippy::too_many_arguments)]
     fn run(
         &self,
         dt: f64,
@@ -553,13 +692,15 @@ impl<'a> Circuit<'a> {
         ku: &dyn Fn(usize, usize) -> f64,
         record: &[usize],
         init: Option<&Init>,
+        waves: &[usize],
+        inject: &Inject,
     ) -> Solved {
         let n = self.n;
         // Linear conductance to ground per node, and history sources.
         let mut g = vec![0.0; n];
-        for (l, _) in &self.lines {
-            g[l.a] += 1.0 / l.z;
-            g[l.b] += 1.0 / l.z;
+        for s in &self.lines {
+            g[s.line.a] += 1.0 / s.line.z;
+            g[s.line.b] += 1.0 / s.line.z;
         }
         for &(node, c) in &self.caps {
             g[node] += 2.0 * c / dt;
@@ -609,31 +750,67 @@ impl<'a> Circuit<'a> {
         let mut cap_v = vec![0.0; self.caps.len()];
         let mut ind_i = vec![0.0; self.series.len()];
         let mut ind_h = vec![0.0; self.series.len()];
-        let mut fa: Vec<Vec<f64>> = self.lines.iter().map(|(_, k)| vec![0.0; *k]).collect();
+        // Ring buffers of launched waves, long enough for delay and filter.
+        let mut fa: Vec<Vec<f64>> = self.lines.iter().map(|s| vec![0.0; s.ring()]).collect();
         let mut fb = fa.clone();
+        // The tails' states at each end.
+        let mut tails = vec![(0.0, 0.0); self.lines.len()];
         if let Some(init) = init {
             v.copy_from_slice(&init.v);
-            for (li, (l, _)) in self.lines.iter().enumerate() {
-                let i = init.line_i[li];
-                fa[li].iter_mut().for_each(|x| *x = v[l.a] / l.z + i);
-                fb[li].iter_mut().for_each(|x| *x = v[l.b] / l.z - i);
+            for (li, s) in self.lines.iter().enumerate() {
+                let (ia, ib) = init.line_i[li];
+                let l = &s.line;
+                let (wa, wb) = (v[l.a] / l.z + ia, v[l.b] / l.z + ib);
+                fa[li].iter_mut().for_each(|x| *x = wa);
+                fb[li].iter_mut().for_each(|x| *x = wb);
+                let (a, b) = s.tail;
+                if b != 0.0 {
+                    tails[li] = (b * wb / (1.0 - a), b * wa / (1.0 - a));
+                }
             }
             for (ci, &(node, _)) in self.caps.iter().enumerate() {
                 cap_v[ci] = v[node];
             }
             ind_i.copy_from_slice(&init.ind_i);
         }
+        let mut extra: Vec<Option<(&[f32], &[f32])>> = vec![None; self.lines.len()];
+        for (li, a, b) in inject {
+            extra[*li] = Some((a, b));
+        }
         let mut out: Vec<Vec<f32>> = vec![Vec::with_capacity(steps); record.len()];
+        let mut wave_out: Vec<(Vec<f32>, Vec<f32>)> = waves
+            .iter()
+            .map(|_| (Vec::with_capacity(steps), Vec::with_capacity(steps)))
+            .collect();
         let mut src = vec![0.0; n];
         let mut hist = vec![(0.0, 0.0); self.lines.len()];
         for step in 0..steps {
             src.iter_mut().for_each(|s| *s = 0.0);
-            for (li, (l, k)) in self.lines.iter().enumerate() {
-                let idx = step % k;
-                let (ha, hb) = (fb[li][idx], fa[li][idx]);
+            for (li, s) in self.lines.iter().enumerate() {
+                let len = s.ring() as isize;
+                let (mut ha, mut hb) = (0.0, 0.0);
+                for (m, &t) in s.taps.iter().enumerate() {
+                    let idx = (step as isize - s.k as isize - m as isize).rem_euclid(len) as usize;
+                    ha += t * fb[li][idx];
+                    hb += t * fa[li][idx];
+                }
+                let (a, b) = s.tail;
+                if b != 0.0 {
+                    let idx = (step as isize - s.k as isize - s.taps.len() as isize).rem_euclid(len)
+                        as usize;
+                    let (ya, yb) = tails[li];
+                    let (ya, yb) = (a * ya + b * fb[li][idx], a * yb + b * fa[li][idx]);
+                    tails[li] = (ya, yb);
+                    ha += ya;
+                    hb += yb;
+                }
+                if let Some((ea, eb)) = extra[li] {
+                    ha += 2.0 * ea.get(step).copied().unwrap_or(0.0) as f64 / s.line.z;
+                    hb += 2.0 * eb.get(step).copied().unwrap_or(0.0) as f64 / s.line.z;
+                }
                 hist[li] = (ha, hb);
-                src[l.a] += ha;
-                src[l.b] += hb;
+                src[s.line.a] += ha;
+                src[s.line.b] += hb;
             }
             for (ci, &(node, c)) in self.caps.iter().enumerate() {
                 let gc = 2.0 * c / dt;
@@ -713,11 +890,16 @@ impl<'a> Circuit<'a> {
                 }
             }
             // Histories.
-            for (li, (l, k)) in self.lines.iter().enumerate() {
-                let idx = step % k;
+            for (li, s) in self.lines.iter().enumerate() {
+                let idx = step % s.ring();
                 let (ha, hb) = hist[li];
-                fa[li][idx] = 2.0 * v[l.a] / l.z - ha;
-                fb[li][idx] = 2.0 * v[l.b] / l.z - hb;
+                fa[li][idx] = 2.0 * v[s.line.a] / s.line.z - ha;
+                fb[li][idx] = 2.0 * v[s.line.b] / s.line.z - hb;
+            }
+            for (o, &li) in wave_out.iter_mut().zip(waves) {
+                let idx = step % self.lines[li].ring();
+                o.0.push(fa[li][idx] as f32);
+                o.1.push(fb[li][idx] as f32);
             }
             for (ci, &(node, c)) in self.caps.iter().enumerate() {
                 let gc = 2.0 * c / dt;
@@ -734,7 +916,10 @@ impl<'a> Circuit<'a> {
                 o.push(v[node] as f32);
             }
         }
-        Solved { v: out }
+        Solved {
+            v: out,
+            waves: wave_out,
+        }
     }
 }
 
@@ -826,7 +1011,9 @@ pub fn switch_time(model: &Model, corner: Corner, rising: bool) -> f64 {
                 1.0 - k
             }
         };
-        let v = &circuit.run(dt, steps, corner, &ku, &[0], None).v[0];
+        let v = &circuit
+            .run(dt, steps, corner, &ku, &[0], None, &[], &Vec::new())
+            .v[0];
         let (v0, v1) = (v[start.saturating_sub(1)] as f64, v[steps - 1] as f64);
         let at = |f: f64| {
             let lvl = v0 + f * (v1 - v0);
@@ -866,57 +1053,72 @@ pub struct Pins {
     pub receiver_n: Option<usize>,
 }
 
-/// Simulates the route from the driver's pad to the receiver's (and, for a
-/// pair, the partner's pads driven the other way) with the PRBS7 pattern.
-pub fn simulate(
+/// A net of a built circuit: where its nodes and lines start, and where
+/// its tracks' lines went.
+struct Part {
+    net: u32,
+    line0: usize,
+    /// Board track → (delay of its line before reduction, where that line
+    /// went).
+    tracks: HashMap<usize, (f64, Moved)>,
+}
+
+/// A circuit built from nets of the board, with buffers at their ends.
+struct Built<'a> {
+    c: Circuit<'a>,
+    /// Driver pad node and receiver pad node per net.
+    at: Vec<(usize, usize)>,
+    /// Receiver die nodes per net.
+    rx_dies: Vec<usize>,
+    parts: Vec<Part>,
+    delay: f64,
+    /// Loss along the route, the worst net.
+    att: Atten,
+    notes: Vec<String>,
+}
+
+fn pad_net(board: &Board, p: usize) -> Result<u32, String> {
+    let pad = board
+        .geometry
+        .pads
+        .get(p)
+        .ok_or_else(|| format!("no pad {p}"))?;
+    pad.net.ok_or_else(|| "the pad has no net".to_string())
+}
+
+/// Builds the circuit of the nets from each `(driver pad, receiver pad)`,
+/// the first driven by drive 0, the next by drive 1.
+#[allow(clippy::too_many_arguments)]
+fn build<'a>(
     board: &Board,
-    pins: Pins,
-    driver: End,
-    receiver: End,
-    setup: &Setup,
-) -> Result<Run, String> {
-    let pad_net = |p: usize| -> Result<u32, String> {
-        let pad = board
-            .geometry
-            .pads
-            .get(p)
-            .ok_or_else(|| format!("no pad {p}"))?;
-        pad.net.ok_or_else(|| "the pad has no net".to_string())
-    };
-    if !driver.model.kind.drives() {
-        return Err(format!(
-            "model {} is a {:?}, which cannot drive",
-            driver.model.name, driver.model.kind
-        ));
-    }
-    let diff = pins.driver_n.is_some() && pins.receiver_n.is_some();
-    let mut ends = vec![(pins.driver, pins.receiver)];
-    if let (Some(a), Some(b)) = (pins.driver_n, pins.receiver_n) {
-        ends.push((a, b));
-    }
-    let corner = setup.corner;
-    let t_r = switch_time(driver.model, corner, true);
-    let t_f = switch_time(driver.model, corner, false);
-    let ui = 1.0 / setup.rate.max(1.0);
-    let dt = (t_r.min(t_f) / 25.0).min(ui / 40.0).clamp(0.2e-12, 5e-12);
+    ends: &[(usize, usize)],
+    odd: bool,
+    driver: End<'a>,
+    receiver: End<'a>,
+    term: Term,
+    corner: Corner,
+    dt: f64,
+    loss: Option<&Loss>,
+) -> Result<Built<'a>, String> {
     let mut notes = Vec::new();
-    // Each net's network, reduced, its nodes offset into the circuit.
     let mut n = 0;
     let mut lines = Vec::new();
     let mut caps = Vec::new();
     let mut at: Vec<(usize, usize)> = Vec::new();
+    let mut parts = Vec::new();
     let mut delay: f64 = 0.0;
-    for &(dp, rp) in &ends {
-        let net = pad_net(dp)?;
-        if pad_net(rp)? != net {
+    let mut att = Atten::default();
+    for &(dp, rp) in ends {
+        let net = pad_net(board, dp)?;
+        if pad_net(board, rp)? != net {
             return Err(format!(
                 "the driver and receiver pads are on different nets ({} and {})",
                 board.nets[net as usize].name,
-                board.nets[pad_net(rp)? as usize].name
+                board.nets[pad_net(board, rp)? as usize].name
             ));
         }
-        let full = network(board, net, diff);
-        let (nw, _) = full.reduce(dt);
+        let full = network(board, net, odd);
+        let (nw, _, moved) = full.reduce(dt);
         let (Some(a), Some(b)) = (nw.node_of_pad(dp), nw.node_of_pad(rp)) else {
             return Err("pad not on a copper layer".into());
         };
@@ -926,7 +1128,12 @@ pub fn simulate(
                 board.nets[net as usize].name
             ));
         }
-        delay = delay.max(nw.delay_between(a, b).unwrap_or(0.0));
+        if let Some((d, path)) = nw.path(a, b) {
+            delay = delay.max(d);
+            if path.dc + path.skin + path.diel > att.dc + att.skin + att.diel {
+                att = path;
+            }
+        }
         if nw.pads.len() > 2 {
             notes.push(format!(
                 "{} has {} other pads; they load the net as open stubs",
@@ -934,16 +1141,32 @@ pub fn simulate(
                 nw.pads.len() - 2
             ));
         }
+        let tracks = full
+            .track_lines
+            .iter()
+            .filter_map(|&(t, li)| moved[li].map(|m| (t, (full.lines[li].delay, m))))
+            .collect();
+        parts.push(Part {
+            net,
+            line0: lines.len(),
+            tracks,
+        });
         for l in &nw.lines {
             let k = ((l.delay / dt).round() as usize).max(1);
-            lines.push((
-                Line {
+            let f = match loss {
+                Some(loss) => loss::filter(&l.att, loss, dt),
+                None => loss::Filter::lossless(),
+            };
+            lines.push(Stepped {
+                line: Line {
                     a: l.a + n,
                     b: l.b + n,
                     ..*l
                 },
                 k,
-            ));
+                taps: f.taps,
+                tail: f.tail,
+            });
         }
         caps.extend(nw.caps.iter().map(|&(i, c)| (i + n, c)));
         at.push((a + n, b + n));
@@ -953,7 +1176,7 @@ pub fn simulate(
     let mut shunts = Vec::new();
     let mut series = Vec::new();
     let mut buffers = Vec::new();
-    let mut dies = Vec::new();
+    let mut rx_dies = Vec::new();
     let mut hook: Vec<(End, usize, Option<usize>)> = Vec::new();
     for (k, &(a, b)) in at.iter().enumerate() {
         hook.push((driver, a, Some(k)));
@@ -980,32 +1203,105 @@ pub fn simulate(
         }
         buffers.push((die, end.model, drive));
         if drive.is_none() {
-            dies.push(die);
+            rx_dies.push(die);
         }
     }
-    match setup.term {
+    match term {
         Term::None => {}
         Term::ToRef { r, v } => {
-            for &d in &dies {
+            for &d in &rx_dies {
                 shunts.push((d, r.max(1e-3), v));
             }
         }
         Term::Across(r) => {
-            if dies.len() == 2 {
-                series.push((dies[0], dies[1], r.max(1e-3), true));
+            if rx_dies.len() == 2 {
+                series.push((rx_dies[0], rx_dies[1], r.max(1e-3), true));
             } else {
                 notes.push("a termination across the pair needs a pair".into());
             }
         }
     }
-    let circuit = Circuit {
-        n,
-        lines,
-        caps,
-        shunts,
-        series,
-        buffers,
-    };
+    Ok(Built {
+        c: Circuit {
+            n,
+            lines,
+            caps,
+            shunts,
+            series,
+            buffers,
+        },
+        at,
+        rx_dies,
+        parts,
+        delay,
+        att,
+        notes,
+    })
+}
+
+/// A driver's pullup share at each step: `bits` after a settling time of
+/// `start` steps on the first bit, slewing at `t_r` and `t_f`.
+#[allow(clippy::too_many_arguments)]
+fn drive(
+    bits: &[bool],
+    invert: bool,
+    start: usize,
+    per_bit: f64,
+    steps: usize,
+    dt: f64,
+    t_r: f64,
+    t_f: f64,
+) -> Vec<f64> {
+    let want = |b: bool| if b ^ invert { 1.0 } else { 0.0 };
+    let mut cur = want(bits[0]);
+    let mut list = Vec::with_capacity(steps);
+    for s in 0..steps {
+        let bit = if s < start {
+            bits[0]
+        } else {
+            bits[(((s - start) as f64 / per_bit) as usize).min(bits.len() - 1)]
+        };
+        let w = want(bit);
+        if w > cur {
+            cur = (cur + dt / t_r).min(w);
+        } else if w < cur {
+            cur = (cur - dt / t_f).max(w);
+        }
+        list.push(cur);
+    }
+    list
+}
+
+/// Simulates the route from the driver's pad to the receiver's (and, for a
+/// pair, the partner's pads driven the other way) with the PRBS7 pattern.
+pub fn simulate(
+    board: &Board,
+    pins: Pins,
+    driver: End,
+    receiver: End,
+    setup: &Setup,
+) -> Result<Run, String> {
+    if !driver.model.kind.drives() {
+        return Err(format!(
+            "model {} is a {:?}, which cannot drive",
+            driver.model.name, driver.model.kind
+        ));
+    }
+    let diff = pins.driver_n.is_some() && pins.receiver_n.is_some();
+    let mut ends = vec![(pins.driver, pins.receiver)];
+    if let (Some(a), Some(b)) = (pins.driver_n, pins.receiver_n) {
+        ends.push((a, b));
+    }
+    let corner = setup.corner;
+    let t_r = switch_time(driver.model, corner, true);
+    let t_f = switch_time(driver.model, corner, false);
+    let ui = 1.0 / setup.rate.max(1.0);
+    let dt = (t_r.min(t_f) / 25.0).min(ui / 40.0).clamp(0.2e-12, 5e-12);
+    let loss = setup.loss.as_ref();
+    let victim = build(
+        board, &ends, diff, driver, receiver, setup.term, corner, dt, loss,
+    )?;
+    let mut notes = victim.notes.clone();
     // Settle with the first bit, then the pattern.
     let bits = prbs7(setup.bits.max(16));
     let settle = (2.0 * t_r.max(t_f)).max(0.5e-9);
@@ -1019,66 +1315,82 @@ pub fn simulate(
             dt * 1e12
         ));
     }
-    // The drivers' pullup share at each step, slewing toward each bit.
-    let mut ku: Vec<Vec<f64>> = Vec::new();
-    for k in 0..at.len() {
-        let want = |b: bool| if b ^ (k == 1) { 1.0 } else { 0.0 };
-        let mut cur = want(bits[0]);
-        let mut list = Vec::with_capacity(steps);
-        for s in 0..steps {
-            let bit = if s < start {
-                bits[0]
-            } else {
-                bits[(((s - start) as f64 / per_bit) as usize).min(bits.len() - 1)]
-            };
-            let w = want(bit);
-            if w > cur {
-                cur = (cur + dt / t_r).min(w);
-            } else if w < cur {
-                cur = (cur - dt / t_f).max(w);
-            }
-            list.push(cur);
-        }
-        ku.push(list);
-    }
+    let ku: Vec<Vec<f64>> = (0..victim.at.len())
+        .map(|k| drive(&bits, k == 1, start, per_bit, steps, dt, t_r, t_f))
+        .collect();
     let mut record = Vec::new();
-    for (k, &(a, _)) in at.iter().enumerate() {
+    for (k, &(a, _)) in victim.at.iter().enumerate() {
         record.push(a);
-        record.push(dies[k]);
+        record.push(victim.rx_dies[k]);
     }
-    let init = dc(&circuit, &at, &dies, setup.term, corner, &|d| ku[d][0]);
-    let solved = circuit.run(dt, steps, corner, &|d, s| ku[d][s], &record, Some(&init));
-    let probes: Vec<Probe> = if diff {
-        let d = |x: &[f32], y: &[f32]| x.iter().zip(y).map(|(a, b)| a - b).collect::<Vec<f32>>();
-        vec![
-            Probe {
-                name: "Driver pins, P − N".into(),
-                v: d(&solved.v[0], &solved.v[2]),
-            },
-            Probe {
-                name: "Receiver die, P − N".into(),
-                v: d(&solved.v[1], &solved.v[3]),
-            },
-            Probe {
-                name: "Receiver die, P".into(),
-                v: solved.v[1].clone(),
-            },
-            Probe {
-                name: "Receiver die, N".into(),
-                v: solved.v[3].clone(),
-            },
-        ]
+    let init = dc(&victim.c, corner, &|d| ku[d][0]);
+    let ku_at = |d: usize, s: usize| ku[d][s];
+    let (inject, aggressors) = if setup.crosstalk {
+        crosstalk(
+            board, &victim, &pins, driver, receiver, setup, dt, start, per_bit, steps, t_r, t_f,
+            &mut notes,
+        )
     } else {
-        vec![
-            Probe {
-                name: "Driver pin".into(),
-                v: solved.v[0].clone(),
-            },
-            Probe {
-                name: "Receiver die".into(),
-                v: solved.v[1].clone(),
-            },
-        ]
+        (Vec::new(), Vec::new())
+    };
+    let quiet = victim.c.run(
+        dt,
+        steps,
+        corner,
+        &ku_at,
+        &record,
+        Some(&init),
+        &[],
+        &Vec::new(),
+    );
+    let solved = if inject.is_empty() {
+        None
+    } else {
+        Some(victim.c.run(
+            dt,
+            steps,
+            corner,
+            &ku_at,
+            &record,
+            Some(&init),
+            &[],
+            &inject,
+        ))
+    };
+    let probes_of = |v: &[Vec<f32>]| -> Vec<Probe> {
+        if diff {
+            let d =
+                |x: &[f32], y: &[f32]| x.iter().zip(y).map(|(a, b)| a - b).collect::<Vec<f32>>();
+            vec![
+                Probe {
+                    name: "Driver pins, P − N".into(),
+                    v: d(&v[0], &v[2]),
+                },
+                Probe {
+                    name: "Receiver die, P − N".into(),
+                    v: d(&v[1], &v[3]),
+                },
+                Probe {
+                    name: "Receiver die, P".into(),
+                    v: v[1].clone(),
+                },
+                Probe {
+                    name: "Receiver die, N".into(),
+                    v: v[3].clone(),
+                },
+            ]
+        } else {
+            vec![
+                Probe {
+                    name: "Driver pin".into(),
+                    v: v[0].clone(),
+                },
+                Probe {
+                    name: "Receiver die".into(),
+                    v: v[1].clone(),
+                },
+            ]
+        }
     };
     let threshold = if diff {
         0.0
@@ -1086,17 +1398,280 @@ pub fn simulate(
         let (lo, hi) = receiver.model.thresholds(corner);
         (lo + hi) / 2.0
     };
-    let eye = eye(&probes[1].v, dt, start, ui, &bits, threshold);
+    let quiet_probes = probes_of(&quiet.v);
+    let quiet_eye = eye(&quiet_probes[1].v, dt, start, ui, &bits, threshold);
+    let (probes, eye_, quiet, noise) = match solved {
+        Some(sv) => {
+            let probes = probes_of(&sv.v);
+            let e = eye(&probes[1].v, dt, start, ui, &bits, threshold);
+            let noise = probes[1].v[start.min(probes[1].v.len())..]
+                .iter()
+                .zip(&quiet_probes[1].v[start.min(quiet_probes[1].v.len())..])
+                .map(|(a, b)| (a - b).abs() as f64)
+                .fold(0.0, f64::max);
+            (probes, e, Some(quiet_eye), noise)
+        }
+        None => (quiet_probes, quiet_eye, None, 0.0),
+    };
+    let nyquist = setup.rate / 2.0;
+    let loss_db = loss.map_or(0.0, |l| victim.att.at(nyquist, l) * 8.686);
     Ok(Run {
         dt,
         start: start as f64 * dt,
         probes,
-        eye,
-        delay,
+        eye: eye_,
+        delay: victim.delay,
         switch: (t_r, t_f),
         bits,
         notes,
+        loss_db,
+        aggressors,
+        quiet,
+        noise,
     })
+}
+
+/// Finds the nets beside the route, drives each from its pad nearest the
+/// route's driver into its farthest pad (with the route's driver and
+/// receiver models, pairs driven against each other), and turns their
+/// waves into crosstalk arriving at the route's lines.
+#[allow(clippy::too_many_arguments)]
+fn crosstalk(
+    board: &Board,
+    victim: &Built,
+    pins: &Pins,
+    driver: End,
+    receiver: End,
+    setup: &Setup,
+    dt: f64,
+    start: usize,
+    per_bit: f64,
+    steps: usize,
+    t_r: f64,
+    t_f: f64,
+    notes: &mut Vec<String>,
+) -> (Inject, Vec<Aggressor>) {
+    let victims: Vec<u32> = victim.parts.iter().map(|p| p.net).collect();
+    let raw = xtalk::find(board, &victims);
+    if raw.is_empty() {
+        return (Vec::new(), Vec::new());
+    }
+    // The strongest few nets.
+    let mut score: HashMap<u32, (f64, f64, f64)> = HashMap::new();
+    for r in &raw {
+        let e = score.entry(r.aggressor).or_insert((0.0, 0.0, 0.0));
+        e.0 += r.kb.abs() * r.len;
+        e.1 += r.len;
+        e.2 = e.2.max(r.kb);
+    }
+    let mut nets: Vec<(u32, (f64, f64, f64))> = score.into_iter().collect();
+    nets.sort_by(|a, b| b.1 .0.total_cmp(&a.1 .0).then(a.0.cmp(&b.0)));
+    let mut dropped = 0;
+    if nets.len() > 8 {
+        dropped = nets.len() - 8;
+        nets.truncate(8);
+    }
+    let g = &board.geometry;
+    let from = g.pads.get(pins.driver).map(|p| p.at);
+    let partners = board.pair_partners();
+    let negatives: std::collections::HashSet<u32> = board
+        .diff_pairs
+        .iter()
+        .filter_map(|d| board.nets.iter().position(|n| n.name == d.negative))
+        .map(|i| i as u32)
+        .collect();
+    let chosen: Vec<u32> = nets.iter().map(|n| n.0).collect();
+    let corner = setup.corner;
+    let mut inj: HashMap<usize, (Vec<f32>, Vec<f32>)> = HashMap::new();
+    let mut out = Vec::new();
+    for (gi, &(net, (_, coupled, kb))) in nets.iter().enumerate() {
+        let name = board.nets[net as usize].name.clone();
+        let pads: Vec<usize> = g
+            .pads
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| {
+                p.net == Some(net) && matches!(p.layer, LayerRef::Copper(_) | LayerRef::AllCopper)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        if pads.len() < 2 {
+            notes.push(format!(
+                "{name} runs beside the route but has no two pads to drive"
+            ));
+            continue;
+        }
+        let d2 = |p: usize, q: crate::Point| {
+            let a = g.pads[p].at;
+            (a.x.mil() - q.x.mil()).powi(2) + (a.y.mil() - q.y.mil()).powi(2)
+        };
+        let dp = match from {
+            Some(f) => *pads
+                .iter()
+                .min_by(|&&a, &&b| d2(a, f).total_cmp(&d2(b, f)))
+                .unwrap(),
+            None => pads[0],
+        };
+        let far = g.pads[dp].at;
+        let rp = *pads
+            .iter()
+            .filter(|&&p| p != dp)
+            .max_by(|&&a, &&b| d2(a, far).total_cmp(&d2(b, far)))
+            .unwrap();
+        // Pairs: the negative runs inverted on the positive's pattern.
+        let partner = partners.get(&net).copied().filter(|p| chosen.contains(p));
+        let inverted = partner.is_some() && negatives.contains(&net);
+        let group = match partner {
+            Some(p) if inverted => chosen.iter().position(|&c| c == p).unwrap_or(gi),
+            _ => gi,
+        };
+        let term = match setup.term {
+            Term::ToRef { r, v } => Term::ToRef { r, v },
+            Term::Across(r) if partner.is_some() => Term::ToRef {
+                r: r / 2.0,
+                v: (driver.model.vcc(corner) + driver.model.vss(corner)) / 2.0,
+            },
+            _ => Term::None,
+        };
+        let none = Rlc::default();
+        let built = match build(
+            board,
+            &[(dp, rp)],
+            false,
+            End {
+                model: driver.model,
+                pkg: none,
+            },
+            End {
+                model: receiver.model,
+                pkg: none,
+            },
+            term,
+            corner,
+            dt,
+            setup.loss.as_ref(),
+        ) {
+            Ok(b) => b,
+            Err(e) => {
+                notes.push(format!("{name} not driven: {e}"));
+                continue;
+            }
+        };
+        let shift = 23 * (group + 1);
+        let all = prbs7(setup.bits.max(16) + shift);
+        let bits = &all[shift..];
+        let ku = drive(bits, inverted, start, per_bit, steps, dt, t_r, t_f);
+        let part = &built.parts[0];
+        // The aggressor lines that couple, and where the victim's are.
+        let mine: Vec<&xtalk::Raw> = raw.iter().filter(|r| r.aggressor == net).collect();
+        let mut wanted: Vec<usize> = Vec::new();
+        let mut couples = Vec::new();
+        for r in mine {
+            let Some(vp) = victim.parts.iter().find(|p| p.net == r.victim) else {
+                continue;
+            };
+            let (Some(&(vd, vm)), Some(&(ad, am))) =
+                (vp.tracks.get(&r.vtrack), part.tracks.get(&r.atrack))
+            else {
+                continue;
+            };
+            let vl = vp.line0 + vm.line;
+            let al = part.line0 + am.line;
+            let pos = |m: Moved, d: f64, x: f64| m.off + m.sign * x * d;
+            let (t1, t2) = (pos(vm, vd, r.x.0), pos(vm, vd, r.x.1));
+            let (u1, u2) = (pos(am, ad, r.r.0), pos(am, ad, r.r.1));
+            // In the victim's direction.
+            let (t1, t2, u1, u2) = if t1 <= t2 {
+                (t1, t2, u1, u2)
+            } else {
+                (t2, t1, u2, u1)
+            };
+            if !wanted.contains(&al) {
+                wanted.push(al);
+            }
+            couples.push((vl, t1, t2, al, u1, u2, r.kb, r.kf));
+        }
+        if couples.is_empty() {
+            continue;
+        }
+        let init = dc(&built.c, corner, &|_| ku[0]);
+        let solved = built.c.run(
+            dt,
+            steps,
+            corner,
+            &|_, s| ku[s],
+            &[],
+            Some(&init),
+            &wanted,
+            &Vec::new(),
+        );
+        let dl = |x: f64| (x / dt).round().max(0.0) as usize;
+        for (vl, t1, t2, al, u1, u2, kb, kf) in couples {
+            let wi = wanted.iter().position(|&w| w == al).unwrap();
+            let (fa, fb) = &solved.waves[wi];
+            let za = built.c.lines[al].line.z;
+            let ta = built.c.lines[al].line.delay;
+            let tv = victim.c.lines[vl].line.delay;
+            // The aggressor's waves heading the victim's + and − ways,
+            // as series with the delay to the stretch's entry.
+            let (plus, plus_d, minus, minus_d) = if u2 >= u1 {
+                (fa, u1, fb, ta - u2)
+            } else {
+                (fb, ta - u1, fa, u2)
+            };
+            let w = |f: &Vec<f32>, s: isize| -> f64 {
+                let i = s.clamp(0, f.len() as isize - 1) as usize;
+                f[i] as f64 * za / 2.0
+            };
+            let span = (t2 - t1).max(0.0);
+            let e = inj
+                .entry(vl)
+                .or_insert_with(|| (vec![0.0; steps], vec![0.0; steps]));
+            let (pd, md) = (dl(plus_d) as isize, dl(minus_d) as isize);
+            let (d_t1, d_2span) = (dl(t1) as isize, dl(2.0 * span) as isize);
+            let d_end = dl(tv - t2) as isize;
+            let d_span = dl(span) as isize;
+            for s in 0..steps as isize {
+                // Near end, from the wave heading +: back to a.
+                let p0 = s - d_t1 - pd;
+                let next_a = kb * (w(plus, p0) - w(plus, p0 - d_2span));
+                // Far end, at b.
+                let pf = s - d_span - d_end - pd;
+                let fext_b = kf * span * (w(plus, pf) - w(plus, pf - 1)) / dt;
+                // From the wave heading −: near end at b, far end at a.
+                let m0 = s - d_end - md;
+                let next_b = kb * (w(minus, m0) - w(minus, m0 - d_2span));
+                let mf = s - d_span - d_t1 - md;
+                let fext_a = kf * span * (w(minus, mf) - w(minus, mf - 1)) / dt;
+                e.0[s as usize] += (next_a + fext_a) as f32;
+                e.1[s as usize] += (next_b + fext_b) as f32;
+            }
+        }
+        out.push(Aggressor {
+            net: name,
+            from: pad_label(board, dp),
+            coupled,
+            kb,
+            inverted,
+        });
+    }
+    if dropped > 0 {
+        notes.push(format!(
+            "{dropped} more nets run beside the route more weakly; left out"
+        ));
+    }
+    (inj.into_iter().map(|(l, (a, b))| (l, a, b)).collect(), out)
+}
+
+/// A pad as designator.pin.
+pub fn pad_label(board: &Board, pad: usize) -> String {
+    let Some(p) = board.geometry.pads.get(pad) else {
+        return format!("pad {pad}");
+    };
+    match p.component.and_then(|c| board.components.get(c as usize)) {
+        Some(c) => format!("{}.{}", c.designator, p.name),
+        None => format!("pad {}", p.name),
+    }
 }
 
 /// Folds the receiver's voltage into an eye two unit intervals wide,
@@ -1189,169 +1764,195 @@ pub fn eye(v: &[f32], dt: f64, start: usize, ui: f64, bits: &[bool], threshold: 
     }
 }
 
-/// The steady state before the first edge: the lines are shorts, the
-/// capacitors open and the inductors shorts, so each net is one voltage
-/// between its driver's and receiver's dies. Solved by Newton's method,
-/// then spread over the circuit with the current along each route.
-fn dc(
-    c: &Circuit<'_>,
-    at: &[(usize, usize)],
-    dies: &[usize],
-    term: Term,
-    corner: Corner,
-    ku: &dyn Fn(usize) -> f64,
-) -> Init {
-    // Package resistance between each die and its net, by buffer.
-    let r_of = |die: usize| -> f64 {
-        c.series
-            .iter()
-            .filter(|s| s.3 && (s.0 == die || s.1 == die))
-            // Not the termination across the pair's receiver dies.
-            .filter(|s| !(dies.contains(&s.0) && dies.contains(&s.1)))
-            .map(|s| s.2)
-            .sum::<f64>()
-            .max(1e-3)
-    };
-    let drivers: Vec<(usize, &Model, f64)> = c
-        .buffers
-        .iter()
-        .filter_map(|&(n, m, d)| d.map(|k| (n, m, ku(k))))
-        .collect();
-    let rx: Vec<(usize, &Model)> = c
-        .buffers
-        .iter()
-        .filter(|b| b.2.is_none())
-        .map(|&(n, m, _)| (n, m))
-        .collect();
-    let k = at.len();
-    // x = [net, driver die, receiver die] per net.
-    let resid = |x: &[f64]| -> Vec<f64> {
-        let mut r = vec![0.0; 3 * k];
-        for j in 0..k {
-            let (vn, vd, vr) = (x[3 * j], x[3 * j + 1], x[3 * j + 2]);
-            let (dn, dm, u) = drivers[j];
-            let (rn, rm) = rx[j];
-            let (rd, rr) = (r_of(dn), r_of(rn));
-            r[3 * j] = (vn - vd) / rd + (vn - vr) / rr;
-            r[3 * j + 1] = dm.current(vd, u, 1.0 - u, corner) + (vd - vn) / rd;
-            r[3 * j + 2] = rm.current(vr, 0.0, 0.0, corner) + (vr - vn) / rr;
-            match term {
-                Term::None => {}
-                Term::ToRef { r: t, v } => r[3 * j + 2] += (vr - v) / t.max(1e-3),
-                Term::Across(t) if k == 2 => {
-                    r[3 * j + 2] += (vr - x[3 * (1 - j) + 2]) / t.max(1e-3)
-                }
-                Term::Across(_) => {}
-            }
+/// The steady state before the first edge, with each driver held at
+/// `ku(driver)`. Capacitors are open; inductors and lossless lines are
+/// shorts, so the nodes they join are one voltage; a lossy line is the
+/// two-port its DC gain g gives (Y11 = (1 + g²)/(1 − g²)/Z, Y12 =
+/// −2g/(1 − g²)/Z). Solved by Newton's method; the currents through the
+/// shorts then follow from the currents leaving each node.
+fn dc(c: &Circuit<'_>, corner: Corner, ku: &dyn Fn(usize) -> f64) -> Init {
+    let n = c.n;
+    let gains: Vec<f64> = c.lines.iter().map(|s| s.gain()).collect();
+    let short = |li: usize| 1.0 - gains[li] < 1e-9;
+    let mut uf = Uf((0..n).collect());
+    for (li, s) in c.lines.iter().enumerate() {
+        if short(li) {
+            uf.join(s.line.a, s.line.b);
         }
-        r
+    }
+    for &(a, b, _, is_r) in &c.series {
+        if !is_r {
+            uf.join(a, b);
+        }
+    }
+    let mut ids: HashMap<usize, usize> = HashMap::new();
+    let mut sid = vec![0; n];
+    for (i, x) in sid.iter_mut().enumerate() {
+        let r = uf.find(i);
+        let k = ids.len();
+        *x = *ids.entry(r).or_insert(k);
+    }
+    let m = ids.len();
+    // The linear part: G x = b.
+    let mut gm = vec![0.0; m * m];
+    let mut bv = vec![0.0; m];
+    let stamp = |gm: &mut Vec<f64>, p: usize, q: usize, y: f64| {
+        let (p, q) = (sid[p], sid[q]);
+        gm[p * m + p] += y;
+        gm[q * m + q] += y;
+        gm[p * m + q] -= y;
+        gm[q * m + p] -= y;
     };
-    let mut x: Vec<f64> = (0..k)
-        .flat_map(|j| {
-            let (_, m, u) = drivers[j];
-            let v = if u > 0.5 {
-                m.vcc(corner)
-            } else {
-                m.vss(corner)
-            };
-            [v, v, v]
+    let ys: Vec<(f64, f64)> = c
+        .lines
+        .iter()
+        .enumerate()
+        .map(|(li, s)| {
+            if short(li) {
+                return (0.0, 0.0);
+            }
+            let (g, y) = (gains[li].clamp(0.0, 1.0), 1.0 / s.line.z);
+            let d = 1.0 - g * g;
+            (y * (1.0 + g * g) / d, -2.0 * g * y / d)
         })
         .collect();
-    let m = 3 * k;
-    for _ in 0..60 {
-        let r0 = resid(&x);
-        let mut jac = vec![0.0; m * m];
-        for col in 0..m {
-            let mut y = x.clone();
-            y[col] += 1e-6;
-            let r1 = resid(&y);
-            for row in 0..m {
-                jac[row * m + col] = (r1[row] - r0[row]) / 1e-6;
-            }
+    for (li, s) in c.lines.iter().enumerate() {
+        if short(li) {
+            continue;
         }
-        let mut rhs = r0.clone();
-        let dx = solve(&mut jac, &mut rhs, m);
+        let (y11, y12) = ys[li];
+        let (p, q) = (sid[s.line.a], sid[s.line.b]);
+        gm[p * m + p] += y11;
+        gm[q * m + q] += y11;
+        gm[p * m + q] += y12;
+        gm[q * m + p] += y12;
+    }
+    for &(a, b, r, is_r) in &c.series {
+        if is_r {
+            stamp(&mut gm, a, b, 1.0 / r);
+        }
+    }
+    for &(node, r, vr) in &c.shunts {
+        let k = sid[node];
+        gm[k * m + k] += 1.0 / r;
+        bv[k] += vr / r;
+    }
+    for k in 0..m {
+        gm[k * m + k] += 1e-12;
+    }
+    let level =
+        |model: &Model, u: f64| model.vss(corner) + u * (model.vcc(corner) - model.vss(corner));
+    let guess = c
+        .buffers
+        .iter()
+        .find_map(|&(_, model, d)| d.map(|d| level(model, ku(d))))
+        .unwrap_or(0.0);
+    let mut x = vec![guess; m];
+    let drive = |d: Option<usize>| match d {
+        Some(d) => (ku(d), 1.0 - ku(d)),
+        None => (0.0, 0.0),
+    };
+    for _ in 0..200 {
+        let mut jac = gm.clone();
+        let mut r: Vec<f64> = (0..m)
+            .map(|k| (0..m).map(|j| gm[k * m + j] * x[j]).sum::<f64>() - bv[k])
+            .collect();
+        for &(node, model, d) in &c.buffers {
+            let k = sid[node];
+            let (u, dn) = drive(d);
+            r[k] += model.current(x[k], u, dn, corner);
+            jac[k * m + k] += model.conductance(x[k], u, dn, corner).max(0.0);
+        }
+        let dx = solve(&mut jac, &mut r, m);
         let mut worst: f64 = 0.0;
-        for i in 0..m {
-            let s = dx[i].clamp(-0.5, 0.5);
-            x[i] -= s;
+        for k in 0..m {
+            let s = dx[k].clamp(-0.5, 0.5);
+            x[k] -= s;
             worst = worst.max(s.abs());
         }
-        if worst < 1e-9 {
+        if worst < 1e-10 {
             break;
         }
     }
-    // Spread: every node of a net at its voltage, dies at theirs.
-    let mut v = vec![0.0; c.n];
-    let mut uf = Uf((0..c.n).collect());
-    for (l, _) in &c.lines {
-        uf.join(l.a, l.b);
-    }
-    for s in c.series.iter().filter(|s| !s.3) {
-        uf.join(s.0, s.1);
-    }
-    for (j, &(a, _)) in at.iter().enumerate() {
-        let root = uf.find(a);
-        for (i, vi) in v.iter_mut().enumerate() {
-            if uf.find(i) == root {
-                *vi = x[3 * j];
-            }
+    let v: Vec<f64> = (0..n).map(|i| x[sid[i]]).collect();
+    // Currents leaving each node through everything but the shorts.
+    let mut leave = vec![0.0; n];
+    let mut line_i = vec![(0.0, 0.0); c.lines.len()];
+    for (li, s) in c.lines.iter().enumerate() {
+        if short(li) {
+            continue;
         }
-        v[drivers[j].0] = x[3 * j + 1];
-        v[dies[j]] = x[3 * j + 2];
+        let (y11, y12) = ys[li];
+        let (va, vb) = (v[s.line.a], v[s.line.b]);
+        let (ia, ib) = (y11 * va + y12 * vb, y11 * vb + y12 * va);
+        line_i[li] = (ia, ib);
+        leave[s.line.a] += ia;
+        leave[s.line.b] += ib;
     }
-    // The current from driver to receiver along the route's lines.
-    let mut line_i = vec![0.0; c.lines.len()];
+    for &(a, b, r, is_r) in &c.series {
+        if is_r {
+            let i = (v[a] - v[b]) / r;
+            leave[a] += i;
+            leave[b] -= i;
+        }
+    }
+    for &(node, r, vr) in &c.shunts {
+        leave[node] += (v[node] - vr) / r;
+    }
+    for &(node, model, d) in &c.buffers {
+        let (u, dn) = drive(d);
+        leave[node] += model.current(v[node], u, dn, corner);
+    }
+    // The shorts: a spanning tree of each group carries what its far side
+    // sends out; edges closing loops carry nothing.
+    // Edge: node, node, line (true) or inductor, index.
+    let mut adj: Vec<Vec<(usize, bool, usize)>> = vec![Vec::new(); n];
+    for (li, s) in c.lines.iter().enumerate() {
+        if short(li) {
+            adj[s.line.a].push((s.line.b, true, li));
+            adj[s.line.b].push((s.line.a, true, li));
+        }
+    }
+    for (si, &(a, b, _, is_r)) in c.series.iter().enumerate() {
+        if !is_r {
+            adj[a].push((b, false, si));
+            adj[b].push((a, false, si));
+        }
+    }
     let mut ind_i = vec![0.0; c.series.len()];
-    for (j, &(a, b)) in at.iter().enumerate() {
-        let i_net = (x[3 * j + 1] - x[3 * j]) / r_of(drivers[j].0);
-        // Breadth-first from the driver pad to the receiver pad.
-        let mut from: Vec<Option<(usize, usize)>> = vec![None; c.n];
-        let mut seen = vec![false; c.n];
-        seen[a] = true;
-        let mut queue = std::collections::VecDeque::from([a]);
-        while let Some(n) = queue.pop_front() {
-            if n == b {
-                break;
-            }
-            for (li, (l, _)) in c.lines.iter().enumerate() {
-                let other = if l.a == n {
-                    l.b
-                } else if l.b == n {
-                    l.a
-                } else {
-                    continue;
-                };
-                if !seen[other] {
-                    seen[other] = true;
-                    from[other] = Some((li, n));
-                    queue.push_back(other);
+    let mut seen = vec![false; n];
+    let mut sub = leave.clone();
+    for root in 0..n {
+        if seen[root] || adj[root].is_empty() {
+            continue;
+        }
+        seen[root] = true;
+        // Breadth-first order with each node's parent edge.
+        let mut order = vec![(root, None::<(usize, bool, usize)>)];
+        let mut head = 0;
+        while head < order.len() {
+            let i = order[head].0;
+            head += 1;
+            for &(j, is_line, e) in &adj[i] {
+                if !seen[j] {
+                    seen[j] = true;
+                    order.push((j, Some((i, is_line, e))));
                 }
             }
         }
-        let mut n = b;
-        while let Some((li, prev)) = from[n] {
-            // Current flows prev → n.
-            line_i[li] = if c.lines[li].0.a == prev {
-                i_net
-            } else {
-                -i_net
-            };
-            n = prev;
-        }
-        for (si, s) in c.series.iter().enumerate() {
-            if s.3 {
+        for &(child, up) in order.iter().rev() {
+            let Some((parent, is_line, e)) = up else {
                 continue;
-            }
-            // Driver side: mid → pad carries the current out; receiver
-            // side: pad → mid carries it in (mid → pad is negative).
-            let into_net = uf.find(s.1) == uf.find(a);
-            let driver_side = c
-                .series
-                .iter()
-                .any(|t| t.3 && t.1 == s.0 && t.0 == drivers[j].0);
-            if into_net {
-                ind_i[si] = if driver_side { i_net } else { -i_net };
+            };
+            // Flow from child to parent.
+            let f = -sub[child];
+            sub[parent] += sub[child];
+            if is_line {
+                let l = &c.lines[e].line;
+                line_i[e] = if l.a == child { (f, -f) } else { (-f, f) };
+            } else {
+                let (a, _, _, _) = c.series[e];
+                ind_i[e] = if a == child { f } else { -f };
             }
         }
     }
@@ -1528,7 +2129,21 @@ pub fn svg(run: &Run, title: &str) -> String {
             e.ui * 1e12,
             e.threshold
         ),
-        format!("Route delay {:.1} ps", run.delay * 1e12),
+        format!(
+            "Route delay {:.1} ps, loss {:.2} dB at {:.2} GHz",
+            run.delay * 1e12,
+            run.loss_db,
+            0.5 / e.ui / 1e9
+        ),
+        match &run.quiet {
+            Some(q) => format!(
+                "Crosstalk {:.1} mV peak from {} nets (quiet eye {:.3} V)",
+                run.noise * 1e3,
+                run.aggressors.len(),
+                q.height
+            ),
+            None => "No crosstalk added".to_string(),
+        },
         format!(
             "Driver edges {:.0} / {:.0} ps (switching)",
             run.switch.0 * 1e12,
@@ -1716,6 +2331,223 @@ mod tests {
             .iter()
             .fold((f32::MAX, f32::MIN), |(a, b), &x| (a.min(x), b.max(x)));
         assert!(hi - lo < 1e-3, "{lo} {hi}");
+    }
+
+    #[test]
+    fn stripline_neighbour_adds_its_near_end_crosstalk() {
+        use crate::{LayerKind, Length, Net, Pad, PadShape, Point, StackLayer, Track};
+        let mut b = Board::default();
+        let layer = |name: &str, kind, t: f64, er: Option<f64>| StackLayer {
+            name: name.into(),
+            altium_id: None,
+            kind,
+            thickness: Length::from_mil(t),
+            dielectric_constant: er,
+            material: None,
+        };
+        b.stackup.layers = vec![
+            layer("Top", LayerKind::Copper, 1.4, None),
+            layer("D1", LayerKind::Dielectric, 5.0, Some(4.2)),
+            layer("In1", LayerKind::Copper, 0.7, None),
+            layer("D2", LayerKind::Dielectric, 5.0, Some(4.2)),
+            layer("Bottom", LayerKind::Copper, 1.4, None),
+        ];
+        b.nets = vec![
+            Net {
+                name: "V".into(),
+                ..Default::default()
+            },
+            Net {
+                name: "A".into(),
+                ..Default::default()
+            },
+        ];
+        let geo = b.layer_geometry();
+        let w = geo[1].width_for(50.0).unwrap();
+        let gap = w;
+        let p = |x: f64, y: f64| Point {
+            x: Length::from_mil(x),
+            y: Length::from_mil(y),
+        };
+        let pad = |x: f64, y: f64, net: u32| Pad {
+            layer: LayerRef::Copper(1),
+            net: Some(net),
+            component: None,
+            name: "1".into(),
+            at: p(x, y),
+            size_x: Length::from_mil(w),
+            size_y: Length::from_mil(w),
+            hole: Length(0),
+            shape: PadShape::Rect,
+            rotation_deg: 0.0,
+            outline: Vec::new(),
+            stack: Vec::new(),
+            fab: Default::default(),
+        };
+        let len = 3000.0;
+        let off = w + gap;
+        b.geometry.pads = vec![
+            pad(0.0, 0.0, 0),
+            pad(len, 0.0, 0),
+            pad(0.0, off, 1),
+            pad(len, off, 1),
+        ];
+        let track = |y: f64, net: u32| Track {
+            component: None,
+            layer: LayerRef::Copper(1),
+            net: Some(net),
+            start: p(0.0, y),
+            end: p(len, y),
+            width: Length::from_mil(w),
+            text: false,
+        };
+        b.geometry.tracks = vec![track(0.0, 0), track(off, 1)];
+        let f = ibis::parse(ibis::SAMPLE).unwrap();
+        let (drv, rcv) = (f.model("drv33").unwrap(), f.model("rcv33").unwrap());
+        let none = Rlc::default();
+        let pins = Pins {
+            driver: 0,
+            receiver: 1,
+            driver_n: None,
+            receiver_n: None,
+        };
+        let setup = Setup {
+            rate: 200e6,
+            bits: 32,
+            term: Term::ToRef { r: 50.0, v: 1.65 },
+            loss: None,
+            crosstalk: true,
+            ..Default::default()
+        };
+        let run = simulate(
+            &b,
+            pins,
+            End {
+                model: drv,
+                pkg: none,
+            },
+            End {
+                model: rcv,
+                pkg: none,
+            },
+            &setup,
+        )
+        .unwrap();
+        assert_eq!(run.aggressors.len(), 1);
+        let (ze, zo, ee, eo) = xtalk::modes(&geo[1], w, gap).unwrap();
+        let (kb, kf) = xtalk::coefficients(ze, zo, ee, eo);
+        assert!(kf.abs() < 1e-9);
+        // The aggressor launches 2.2 V edges (25 ohm into 50); its
+        // near-end crosstalk, Kb of that, reaches the victim's driver,
+        // which sends back -1/3 of it to the matched receiver: a plateau
+        // as long as the coupled stretch's round trip (the capacitance at
+        // the driver adds a spike at its front).
+        let want = kb * 2.2 / 3.0;
+        let mut q = setup;
+        q.crosstalk = false;
+        let calm = simulate(
+            &b,
+            pins,
+            End {
+                model: drv,
+                pkg: none,
+            },
+            End {
+                model: rcv,
+                pkg: none,
+            },
+            &q,
+        )
+        .unwrap();
+        let mut d: Vec<f64> = run.probes[1]
+            .v
+            .iter()
+            .zip(&calm.probes[1].v)
+            .map(|(a, c)| (a - c).abs() as f64)
+            .filter(|x| *x > want / 2.0)
+            .collect();
+        d.sort_by(f64::total_cmp);
+        let level = d[d.len() / 2];
+        assert!((level - want).abs() < 0.15 * want, "{level} against {want}");
+        assert!(run.noise < 2.0 * want, "{}", run.noise);
+        let quiet = run.quiet.as_ref().unwrap();
+        assert!(run.eye.height <= quiet.height + 1e-6);
+    }
+
+    #[test]
+    fn reduced_lines_keep_where_tracks_were() {
+        // One route as two tracks meeting in the middle, the second drawn
+        // backwards: one line after reduction, with both tracks mapped
+        // onto it the right way round.
+        let mut b = board(3000.0);
+        let mut t = b.geometry.tracks[0].clone();
+        b.geometry.tracks[0].end.x = crate::Length::from_mil(1500.0);
+        t.start.x = crate::Length::from_mil(3000.0);
+        t.end.x = crate::Length::from_mil(1500.0);
+        b.geometry.tracks.push(t);
+        let full = network(&b, 0, false);
+        let (nw, nodes, moved) = full.reduce(1e-12);
+        assert_eq!(nw.lines.len(), 1);
+        let l = nw.lines[0];
+        let pad0 = nodes[full.node_of_pad(0).unwrap()];
+        let at = |track: usize, x: f64| {
+            let &(_, li) = full.track_lines.iter().find(|t| t.0 == track).unwrap();
+            let m = moved[li].unwrap();
+            m.off + m.sign * x * full.lines[li].delay
+        };
+        // Distance (as delay) from the line's a end of each track's start.
+        let from_pad0 = |d: f64| if l.a == pad0 { d } else { l.delay - d };
+        assert!((from_pad0(at(0, 0.0))).abs() < 1e-15);
+        assert!((from_pad0(at(0, 1.0)) - l.delay / 2.0).abs() < 1e-14);
+        assert!((from_pad0(at(1, 0.0)) - l.delay).abs() < 1e-14);
+        assert!((from_pad0(at(1, 1.0)) - l.delay / 2.0).abs() < 1e-14);
+    }
+
+    #[test]
+    fn loss_closes_a_fast_eye_but_keeps_the_levels() {
+        let f = ibis::parse(ibis::SAMPLE).unwrap();
+        let (drv, rcv) = (f.model("drv33").unwrap(), f.model("rcv33").unwrap());
+        let b = board(10000.0);
+        let pins = Pins {
+            driver: 0,
+            receiver: 1,
+            driver_n: None,
+            receiver_n: None,
+        };
+        let none = Rlc::default();
+        let run = |rate: f64, loss: Option<Loss>| {
+            let setup = Setup {
+                rate,
+                bits: 64,
+                term: Term::ToRef { r: 50.0, v: 0.0 },
+                loss,
+                crosstalk: false,
+                ..Default::default()
+            };
+            simulate(
+                &b,
+                pins,
+                End {
+                    model: drv,
+                    pkg: none,
+                },
+                End {
+                    model: rcv,
+                    pkg: none,
+                },
+                &setup,
+            )
+            .unwrap()
+        };
+        let lossy = Some(Loss::default());
+        // Ten inches of FR-4 microstrip: a couple of dB at 1 GHz.
+        let fast = run(2e9, lossy);
+        assert!(fast.loss_db > 1.0 && fast.loss_db < 6.0, "{}", fast.loss_db);
+        let ideal = run(2e9, None);
+        assert!(fast.eye.height < ideal.eye.height - 0.05);
+        // Slowly, the ones settle near 2.2 V either way.
+        let slow = run(50e6, lossy);
+        assert!((slow.eye.high - 2.2).abs() < 0.1, "{}", slow.eye.high);
     }
 
     #[test]

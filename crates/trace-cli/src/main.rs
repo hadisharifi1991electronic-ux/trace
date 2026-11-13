@@ -29,9 +29,11 @@ USAGE:
                                                 Match the nets' lengths (to the longest, or the target) with
                                                 meanders where they fit; with out, save the board tuned
     trace sim <board> <U1.pin> <U2.pin> --ibis drv.ibs [--rx-ibis rx.ibs] [--model M] [--rx-model M]
-              [--rate 1G] [--bits N] [--corner typ|min|max] [--term 50|50@0.9|100diff] [--single] [out.svg]
+              [--rate 1G] [--bits N] [--corner typ|min|max] [--term 50|50@0.9|100diff] [--single]
+              [--df 0.02] [--rough 1um] [--lossless] [--no-xtalk] [out.svg]
                                                 Simulate the route from a driver pin to a receiver pin with IBIS
-                                                models (a pair when the net has a partner): waveforms and eye
+                                                models (a pair when the net has a partner): waveforms and eye,
+                                                with track loss and crosstalk from nets beside the route
     trace stubs <board> [out.tracepcb]          Via stubs on nets with a stub rule (default: pair nets, 10 mil);
                                                 with out, backdrill those too long and save the board
     trace view <board> [out.html]               Open the board in the viewer (in your browser)
@@ -786,10 +788,13 @@ fn sim(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     let mut opt: std::collections::HashMap<&str, &str> = Default::default();
     let mut out = None;
     let mut single = false;
+    let (mut lossless, mut quiet) = (false, false);
     let mut it = rest.iter();
     while let Some(&a) = it.next() {
         match a {
             "--single" => single = true,
+            "--lossless" => lossless = true,
+            "--no-xtalk" => quiet = true,
             _ if a.starts_with("--") => {
                 let v = it.next().ok_or(format!("{a} needs a value"))?;
                 opt.insert(a, v);
@@ -856,6 +861,21 @@ fn sim(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
             .transpose()?
             .unwrap_or(160),
         term,
+        loss: if lossless {
+            None
+        } else {
+            let mut l = sim::Loss::default();
+            if let Some(d) = opt.get("--df") {
+                l.tan_d = d.parse().map_err(|_| format!("not a loss tangent: {d}"))?;
+            }
+            if let Some(r) = opt.get("--rough") {
+                let um = ibis::num(r.trim_end_matches("um").trim_end_matches('u'))
+                    .ok_or(format!("not a roughness: {r}"))?;
+                l.rough_um = um;
+            }
+            Some(l)
+        },
+        crosstalk: !quiet,
     };
     let t0 = std::time::Instant::now();
     let run = sim::simulate(
@@ -907,6 +927,34 @@ fn sim(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
         e.width / e.ui * 100.0,
         e.ui * 1e12
     );
+    match &setup.loss {
+        Some(l) => println!(
+            "  loss {:.2} dB at {:.2} GHz (Nyquist), Df {}, roughness {} um",
+            run.loss_db,
+            rate / 2e9,
+            l.tan_d,
+            l.rough_um
+        ),
+        None => println!("  lossless lines"),
+    }
+    if let Some(q) = &run.quiet {
+        println!(
+            "  crosstalk: peak {:.1} mV at the receiver; without it the eye is {:.3} V, {:.0} % UI",
+            run.noise * 1e3,
+            q.height,
+            q.width / q.ui * 100.0
+        );
+    }
+    for a in &run.aggressors {
+        println!(
+            "    aggressor {} from {}{}: {:.0} mil beside, Kb {:.3}",
+            a.net,
+            a.from,
+            if a.inverted { " (inverted)" } else { "" },
+            a.coupled,
+            a.kb
+        );
+    }
     for n in &run.notes {
         println!("  {n}");
     }

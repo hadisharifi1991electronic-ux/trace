@@ -3,6 +3,28 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.37.0 (2026-11-13)
+
+- Track loss in signal simulation: each line loses signal to its copper
+  (DC resistance, skin effect, copper roughness) and its dielectric (loss
+  tangent), through a causal (minimum-phase) filter, so long and fast
+  routes show the slower edges and smaller eyes they will have. The
+  window and `trace sim` give the loss at half the bit rate; Df and
+  roughness can be set, with presets from FR-4 to Megtron 6.
+- Crosstalk in signal simulation: nets running beside the route on the
+  same layer are found, driven with patterns of their own (pairs against
+  each other), and their near- and far-end crosstalk is added from the
+  tracks' even and odd modes (Garg and Bahl for microstrip, Cohn for
+  stripline). The results list the aggressors, the peak noise at the
+  receiver and the eye without crosstalk.
+- The starting state before the first edge is now solved for the whole
+  circuit (lossy lines, terminations and packages included), so lossy
+  routes start without ringing too.
+- `trace sim` takes `--df`, `--rough`, `--lossless` and `--no-xtalk`. On
+  TI's DAC39RF12 EVM, LMK_SDI (U30.7 to U22.20) at 200 Mb/s picks up
+  509 mV of crosstalk from LMK_SCLK, LMK_C\S\ and two more nets, and the
+  6SRX pair at 2 Gb/s loses 0.31 dB, its eye going from 3.27 to 3.12 V.
+
 ## 0.36.0 (2026-11-13)
 
 - IBIS signal simulation: View > Signal simulation (IBIS)… simulates a

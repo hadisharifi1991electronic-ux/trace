@@ -1,0 +1,46 @@
+name: Release
+# Each version in Cargo.toml gets one GitHub release with the Windows
+# build: trace-app-<version>.exe and trace.exe, built the same way as the
+# hand-made releases (cross-compiled with MinGW, so the exe has its icon).
+on:
+  push:
+    branches: [master]
+    paths: [Cargo.toml, .github/workflows/release.yml]
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  windows:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Version
+        id: v
+        run: |
+          v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          echo "version=$v" >> "$GITHUB_OUTPUT"
+          if gh release view "v$v" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          fi
+        env:
+          GH_TOKEN: ${{ github.token }}
+      - if: steps.v.outputs.exists != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-gnu
+      - if: steps.v.outputs.exists != 'true'
+        run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
+      - if: steps.v.outputs.exists != 'true'
+        run: cargo build --release --target x86_64-pc-windows-gnu -p trace-app -p trace
+      - if: steps.v.outputs.exists != 'true'
+        name: Publish
+        run: |
+          v=${{ steps.v.outputs.version }}
+          out=target/x86_64-pc-windows-gnu/release
+          cp "$out/trace-app.exe" "trace-app-$v.exe"
+          cp "$out/trace.exe" trace.exe
+          awk -v h="## $v " 'index($0, h) == 1 {f = 1; next} /^## / {if (f) exit} f' CHANGELOG.md > notes.md
+          gh release create "v$v" --target "$GITHUB_SHA" --title "Trace $v" \
+            --notes-file notes.md "trace-app-$v.exe" trace.exe
+        env:
+          GH_TOKEN: ${{ github.token }}

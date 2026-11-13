@@ -3,6 +3,12 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.38.1 (2026-11-13)
+
+- New logo: the T drawn as a differential pair, with a via pad at each
+  end, on navy. It is the app window's icon and the exe's icon, from
+  16 to 256 px; the source is `crates/trace-app/assets/icon.svg`.
+
 ## 0.38.0 (2026-11-13)
 
 - Loss from the board's own materials: each dielectric's loss tangent

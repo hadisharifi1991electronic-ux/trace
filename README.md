@@ -235,6 +235,7 @@ trace odb board.PcbDoc out.tgz   ODB++ job: layers, drills, parts, nets and stac
 trace assembly board.PcbDoc out.pdf [--a4]   Assembly drawing: top and bottom views, parts list
 trace field board.PcbDoc         2D field solver on each layer (50/100 ohm widths, delay, loss)
 trace field board.PcbDoc 1 11 --ground 6 out.svg   One cross-section, with its field drawn
+trace ir board.PcbDoc DVDD --source U19 --volts 1.0 --load U1=2A out.svg   IR drop over a supply net, drop maps per layer
 trace symbols lib.SchLib [out.svg]     list a schematic library's (or IntLib's) symbols; draw them all as SVG
 trace footprints lib.PcbLib [out]   list a library's (or a board's) footprints; save as .tracelib or .PcbLib
 ```
@@ -360,6 +361,11 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   as a solid reference plane, and pour on only one side of a track is
   taken as the mean of none and both sides. A whole board solves in
   seconds to tens of seconds the first time; results are kept after.
+- Power integrity (IR drop): DC voltage drop over a supply net's pours,
+  tracks and vias from the source part to the loads (View > "Power
+  integrity (IR drop)…", `trace ir`). The return path (ground) is taken
+  as ideal, current spreads evenly over each load's pads, and copper is
+  at 20 °C (no self-heating).
 - Assembly drawings: File > Export assembly drawing (PDF)… (or `trace
   assembly`) writes the top view, the bottom view seen from below
   (mirrored), and the parts list grouped by value and footprint. Part

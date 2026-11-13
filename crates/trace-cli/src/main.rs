@@ -2,7 +2,7 @@
 
 mod view;
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use trace_core::{Board, LayerKind, Length, Sheet};
 
@@ -42,6 +42,10 @@ USAGE:
                                                 Simulate the route from a driver pin to a receiver pin with IBIS
                                                 models (a pair when the net has a partner): waveforms and eye,
                                                 with track loss and crosstalk from nets beside the route
+    trace ir <board> <net> [--source U5] [--volts 1.0] [--load U1=5A ...] [--total 10A] [--plating 0.8mil] [out.svg]
+                                                DC voltage drop (IR drop) over a supply net's pours, tracks and
+                                                vias from the source part to the loads (no --load: the total,
+                                                default 1 A, shared by pad count); with out, a drop map per layer
     trace stubs <board> [out.tracepcb]          Via stubs on nets with a stub rule (default: pair nets, 10 mil);
                                                 with out, backdrill those too long and save the board
     trace view <board> [out.html]               Open the board in the viewer (in your browser)
@@ -89,6 +93,7 @@ fn main() -> ExitCode {
         ["panel", file, grid, out, rest @ ..] => panel(file, grid, out, rest),
         ["match", file, nets, rest @ ..] => match_nets(file, nets, rest),
         ["sim", file, from, to, rest @ ..] => sim(file, from, to, rest),
+        ["ir", file, net, rest @ ..] => ir(file, net, rest),
         ["stubs", file] => stubs(file, None),
         ["stubs", file, out] => stubs(file, Some(out)),
         ["convert", file, out] => convert(file, out),
@@ -1217,6 +1222,205 @@ fn sim(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     if let Some(out) = out {
         std::fs::write(out, sim::svg(&run, &format!("{what}: {from} to {to}")))?;
         println!("Saved {out}");
+    }
+    Ok(())
+}
+
+/// Parses a current such as `5A`, `500mA` or `2.5`.
+fn amps(s: &str) -> Option<f64> {
+    let t = s.trim().to_ascii_lowercase();
+    if let Some(v) = t.strip_suffix("ma") {
+        return v.trim().parse::<f64>().ok().map(|v| v / 1000.0);
+    }
+    t.strip_suffix('a').unwrap_or(&t).trim().parse().ok()
+}
+
+fn ir(file: &str, net: &str, rest: &[&str]) -> Res {
+    use trace_core::pi;
+    let b = board(file)?;
+    let id = b
+        .nets
+        .iter()
+        .position(|n| n.name == net || n.name.eq_ignore_ascii_case(net))
+        .ok_or(format!("no net {net}"))? as u32;
+    let part = |d: &str| -> Result<usize, Box<dyn std::error::Error>> {
+        Ok(b.components
+            .iter()
+            .position(|c| c.designator.eq_ignore_ascii_case(d))
+            .ok_or(format!("no part {d}"))?)
+    };
+    let (mut source, mut volts, mut total, mut plating) = (None, 1.0, 1.0, 0.8);
+    let mut loads: Vec<(usize, f64)> = Vec::new();
+    let mut out = None;
+    let mut it = rest.iter();
+    while let Some(&a) = it.next() {
+        let mut val = || it.next().copied().ok_or(format!("{a} needs a value"));
+        match a {
+            "--source" => source = Some(part(val()?)?),
+            "--volts" => {
+                let v = val()?;
+                volts = v
+                    .trim_end_matches(['V', 'v'])
+                    .parse()
+                    .map_err(|_| format!("not a voltage: {v}"))?
+            }
+            "--total" => {
+                let v = val()?;
+                total = amps(v).ok_or(format!("not a current: {v}"))?
+            }
+            "--plating" => {
+                let v = val()?;
+                plating = Length::parse(v).ok_or(format!("not a length: {v}"))?.mil()
+            }
+            "--load" => {
+                let v = val()?;
+                let (d, i) = v
+                    .split_once('=')
+                    .ok_or(format!("--load wants PART=AMPS, not {v}"))?;
+                loads.push((part(d)?, amps(i).ok_or(format!("not a current: {i}"))?));
+            }
+            _ if out.is_none() && !a.starts_with("--") => out = Some(a),
+            _ => return Err(format!("unknown option {a}").into()),
+        }
+    }
+    let source = match source {
+        Some(s) => s,
+        None => {
+            pi::guess_source(&b, id).ok_or("no likely source on the net: name one with --source")?
+        }
+    };
+    let guessed = loads.is_empty();
+    if guessed {
+        // Share the total among the other parts by their pad count.
+        let parts = pi::default_loads(&b, id, source);
+        let pads: usize = parts.iter().map(|p| p.1).sum();
+        if pads == 0 {
+            return Err("no other parts on the net to load it".into());
+        }
+        loads = parts
+            .iter()
+            .map(|p| (p.0, total * p.1 as f64 / pads as f64))
+            .collect();
+    }
+    let mut setup = pi::Setup::new(id, source, volts);
+    setup.loads = loads;
+    setup.plating_mil = plating;
+    let t = std::time::Instant::now();
+    let r = pi::solve(&b, &setup)?;
+    let des = |i: usize| b.components[i].designator.as_str();
+    println!(
+        "{}: {:.3} V from {}, {:.3} A into {} loads{}",
+        b.nets[id as usize].name,
+        volts,
+        des(source),
+        r.loads.iter().map(|l| l.amps).sum::<f64>(),
+        r.loads.len(),
+        if guessed {
+            " (shared by pad count)"
+        } else {
+            ""
+        }
+    );
+    println!(
+        "Grid {:.2} mil, {} x {} cells, {} vias carrying current; solved in {:.1} s",
+        r.cell,
+        r.cols,
+        r.rows,
+        r.vias,
+        t.elapsed().as_secs_f64()
+    );
+    println!(
+        "  {:<12} {:>8} {:>10} {:>10} {:>9}",
+        "Load", "A", "V min", "V mean", "drop mV"
+    );
+    let mut rows: Vec<_> = r.loads.iter().collect();
+    rows.sort_by(|a, b| a.v_min.total_cmp(&b.v_min));
+    let hidden = rows.len().saturating_sub(20);
+    for l in rows.into_iter().take(20) {
+        if l.connected {
+            println!(
+                "  {:<12} {:>8.3} {:>10.4} {:>10.4} {:>9.2}",
+                des(l.part),
+                l.amps,
+                l.v_min,
+                l.v_mean,
+                (volts - l.v_min) * 1000.0
+            );
+        } else {
+            println!(
+                "  {:<12} {:>8.3}   not joined to the source on this net",
+                des(l.part),
+                l.amps
+            );
+        }
+    }
+    if hidden > 0 {
+        println!("  ... and {hidden} more with less drop");
+    }
+    println!(
+        "Largest drop {:.2} mV ({:.2}%), copper loss {:.1} mW",
+        r.max_drop * 1000.0,
+        r.max_drop / volts * 100.0,
+        r.loss_w * 1000.0
+    );
+    if let Some((p, a)) = r.worst_via {
+        println!("Busiest via at ({:.0}, {:.0}) mil: {:.3} A", p[0], p[1], a);
+    }
+    if let Some((p, a, j)) = r.worst_track {
+        println!(
+            "Densest track at ({:.0}, {:.0}) mil: {:.3} A, {:.1} A/mm2",
+            p[0], p[1], a, j
+        );
+    }
+    for n in &r.notes {
+        println!("Note: {n}");
+    }
+    if let Some(out) = out {
+        // Marks: the source and each load at the middle of its pads.
+        let mid = |part: usize| -> Option<[f64; 2]> {
+            let ps: Vec<_> = b
+                .geometry
+                .pads
+                .iter()
+                .filter(|p| p.component == Some(part as u32) && p.net == Some(id))
+                .map(|p| [p.at.x.mil(), p.at.y.mil()])
+                .collect();
+            (!ps.is_empty()).then(|| {
+                let n = ps.len() as f64;
+                [
+                    ps.iter().map(|p| p[0]).sum::<f64>() / n,
+                    ps.iter().map(|p| p[1]).sum::<f64>() / n,
+                ]
+            })
+        };
+        let mut marks = Vec::new();
+        if let Some(p) = mid(source) {
+            marks.push((p, format!("{} (source)", des(source))));
+        }
+        let mut heavy: Vec<_> = r.loads.iter().collect();
+        heavy.sort_by(|a, b| b.amps.total_cmp(&a.amps));
+        for l in heavy.into_iter().take(12) {
+            if let Some(p) = mid(l.part) {
+                marks.push((p, des(l.part).to_string()));
+            }
+        }
+        let path = Path::new(out);
+        let stem = path.with_extension("");
+        for m in &r.maps {
+            let f = if r.maps.len() == 1 {
+                path.to_path_buf()
+            } else {
+                let safe: String = m
+                    .name
+                    .chars()
+                    .map(|c| if c.is_alphanumeric() { c } else { '_' })
+                    .collect();
+                PathBuf::from(format!("{}-{safe}.svg", stem.display()))
+            };
+            let title = format!("{} on {}", b.nets[id as usize].name, m.name);
+            std::fs::write(&f, r.svg(m, 1200.0, &title, &marks))?;
+            println!("Saved {}", f.display());
+        }
     }
     Ok(())
 }

@@ -3,6 +3,33 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.41.0 (2026-11-13)
+
+- Power integrity: DC voltage drop (IR drop) over a supply net. The
+  net's pours and pads on every layer are laid on a grid (about 250 000
+  cells a layer, finer for small nets) with each layer's copper
+  thickness; tracks and arcs keep their own width's resistance; vias join
+  the layers through their plated barrels. The source part's pads are held
+  at the supply voltage, each load draws its current from its pads, and
+  the network is solved by conjugate gradients.
+- It reports each load's lowest and mean voltage, the largest drop, the
+  copper's power loss, the via carrying most current, the track with the
+  densest current (A/mm²), loads the source does not reach, and a drop
+  map per layer.
+- Checked against hand results: a pour strip's drop within 3 % of
+  I·ρL/(W·t), a thin track's within 2 %, and two layers joined by vias
+  halve the drop.
+- View > "Power integrity (IR drop)…": pick a supply net (nets with pours
+  are listed first), the source (guessed: an output pin, the regulator's
+  inductor, a small IC with several pins on the net, or a connector), the
+  voltage (guessed from names like 3p3V or 1V8), and the loads' currents
+  (the total shared by pad count; capacitors and test points left out).
+  Drop maps per layer, and "Save maps (SVG)".
+- `trace ir board net [--source U5] [--volts 1.0] [--load U1=5A ...]
+  [--total 10A] [--plating 0.8mil] [out.svg]`.
+- CI: an example in trace-export renamed so Windows builds no longer
+  clash over two `brdcheck.exe` files.
+
 ## 0.40.0 (2026-11-13)
 
 - 2D field solver for transmission lines. Each cross-section is meshed

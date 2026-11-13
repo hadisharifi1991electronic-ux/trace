@@ -10,6 +10,7 @@ mod fpview;
 mod imp;
 mod panelize;
 mod placing;
+mod power;
 mod router;
 mod scene;
 mod schview;
@@ -112,6 +113,7 @@ pub struct App {
     pub drc: drc::Drc,
     panel: panelize::PanelWindow,
     sim: simwin::SimWindow,
+    power: power::PowerWindow,
     /// The part being dragged.
     moving: Option<placing::Moving>,
     /// The next board edit joins the last step (a part placed then dropped).
@@ -185,6 +187,7 @@ impl App {
             drc: drc::Drc::default(),
             panel: panelize::PanelWindow::default(),
             sim: simwin::SimWindow::default(),
+            power: power::PowerWindow::default(),
             moving: None,
             join_next: false,
             new_span: (1, 2),
@@ -1314,6 +1317,17 @@ impl App {
                 {
                     ui.close_menu();
                     self.sim.open = true;
+                }
+                if ui
+                    .add_enabled(
+                        self.scene.is_some(),
+                        egui::Button::new("Power integrity (IR drop)…"),
+                    )
+                    .on_hover_text("DC voltage drop over a supply net's pours, tracks and vias, from its source to the loads")
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.power.open = true;
                 }
             });
             ui.menu_button("Help", |ui| {
@@ -3038,6 +3052,7 @@ impl eframe::App for App {
         if let Some(scene) = &self.scene {
             self.sim
                 .show(ctx, &scene.board, self.imp.stackup(), self.selected);
+            self.power.show(ctx, &scene.board, self.selected);
         }
     }
 

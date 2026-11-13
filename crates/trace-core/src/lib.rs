@@ -19,6 +19,7 @@ pub mod geometry;
 pub mod ibis;
 pub mod impedance;
 pub mod panel;
+pub mod pi;
 pub mod place;
 pub mod pour;
 pub mod route;

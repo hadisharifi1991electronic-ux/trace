@@ -577,8 +577,10 @@ impl<'a> Writer<'a> {
 
     fn graphics(&mut self) {
         let b = self.b;
-        let outline = &b.geometry.outline;
-        if outline.len() >= 3 {
+        for outline in std::iter::once(&b.geometry.outline).chain(&b.geometry.slots) {
+            if outline.len() < 3 {
+                continue;
+            }
             for i in 0..outline.len() {
                 let (a, c) = (&outline[i], &outline[(i + 1) % outline.len()]);
                 if a == c {

@@ -711,7 +711,7 @@ impl NetInfo {
                 }
             }
         }
-        let parts = board
+        let parts: Vec<(String, String, Vec<String>)> = board
             .components
             .iter()
             .map(|c| {
@@ -738,8 +738,25 @@ impl NetInfo {
                 *t = true;
             }
         }
+        let mut names: Vec<String> = board.nets.iter().map(|x| x.name.clone()).collect();
+        let mut parts: Vec<(String, String, Vec<String>)> = parts;
+        // A panel's copies answer to the board's own names, so its rules
+        // reach every copy.
+        if let Some(p) = &board.panel {
+            for (i, n) in names.iter_mut().enumerate() {
+                *n = p.base(n, i, p.nets).to_string();
+            }
+            for (i, pair) in pairs.iter_mut().enumerate() {
+                if let Some(x) = pair {
+                    *x = p.base(x, i, p.nets).to_string();
+                }
+            }
+            for (i, part) in parts.iter_mut().enumerate() {
+                part.0 = p.base(&part.0, i, p.parts).to_string();
+            }
+        }
         NetInfo {
-            names: board.nets.iter().map(|x| x.name.clone()).collect(),
+            names,
             classes,
             pairs,
             pair_classes,
@@ -1111,6 +1128,11 @@ fn copper(board: &Board) -> (Vec<Copper>, Vec<Area>) {
         }
     }
     for (i, p) in g.pads.iter().enumerate() {
+        // An unplated hole with no land round it has no copper.
+        if p.fab.unplated && p.size_x.0 <= p.hole.0 && p.size_y.0 <= p.hole.0 && p.stack.is_empty()
+        {
+            continue;
+        }
         let c = pt(p.at);
         let obj = if p.hole.0 > 0 {
             Obj::ThPad

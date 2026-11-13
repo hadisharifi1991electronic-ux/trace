@@ -130,6 +130,8 @@ pub struct Scene {
     pub layers: Vec<Layer>,
     pub copper_count: u8,
     pub outline: Vec<[f32; 2]>,
+    /// Openings milled inside the outline (a panel's gaps).
+    pub slots: Vec<Vec<[f32; 2]>>,
     /// Rooms: name and outline.
     pub rooms: Vec<(String, Vec<[f32; 2]>)>,
     pub bounds: [f32; 4],
@@ -428,6 +430,11 @@ impl Scene {
         }
 
         let outline: Vec<[f32; 2]> = g.outline.iter().map(|p| [mil(p.x), mil(p.y)]).collect();
+        let slots: Vec<Vec<[f32; 2]>> = g
+            .slots
+            .iter()
+            .map(|r| r.iter().map(|p| [mil(p.x), mil(p.y)]).collect())
+            .collect();
         let mut bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
         let pts: Vec<[f32; 2]> = if outline.len() >= 3 {
             outline.clone()
@@ -492,6 +499,7 @@ impl Scene {
             layers,
             copper_count: n,
             outline,
+            slots,
             rooms,
             bounds,
             by_net,

@@ -22,6 +22,9 @@ USAGE:
                                                 part clearance, board edge, return paths over plane voids
                                                 and splits, crosstalk between parallel tracks
     trace impedance <board>                     Stack-up, widths for 50/100 ohm, and the impedance of each pair
+    trace panel <board> <cols>x<rows> <out.tracepcb> [--gap 2mm] [--rail 5mm] [--tabs N] [--vscore]
+                                                Panel of copies with rails, fiducials, tooling holes, and
+                                                tabs with mouse bites (or V-score lines); then fab or odb it
     trace stubs <board> [out.tracepcb]          Via stubs on nets with a stub rule (default: pair nets, 10 mil);
                                                 with out, backdrill those too long and save the board
     trace view <board> [out.html]               Open the board in the viewer (in your browser)
@@ -61,6 +64,7 @@ fn main() -> ExitCode {
         ["drc", file] => drc(file, 15),
         ["drc", file, "--all"] => drc(file, usize::MAX),
         ["impedance", file] => impedance(file),
+        ["panel", file, grid, out, rest @ ..] => panel(file, grid, out, rest),
         ["stubs", file] => stubs(file, None),
         ["stubs", file, out] => stubs(file, Some(out)),
         ["convert", file, out] => convert(file, out),
@@ -574,6 +578,63 @@ fn drc(file: &str, show: usize) -> Res {
         }
     }
     println!("{} violations in {:.2} s", found.len(), took.as_secs_f64());
+    Ok(())
+}
+
+fn panel(file: &str, grid: &str, out: &str, opts: &[&str]) -> Res {
+    use trace_core::panel::{panelize, PanelSpec, Separation};
+    let b = board(file)?;
+    let (c, r) = grid
+        .to_ascii_lowercase()
+        .split_once('x')
+        .and_then(|(c, r)| Some((c.trim().parse::<u32>().ok()?, r.trim().parse::<u32>().ok()?)))
+        .filter(|&(c, r)| c >= 1 && r >= 1 && c * r <= 400)
+        .ok_or("the grid is columns x rows, such as 3x2")?;
+    let mut spec = PanelSpec {
+        cols: c,
+        rows: r,
+        ..Default::default()
+    };
+    let len = |v: Option<&&str>| -> Result<f64, String> {
+        v.and_then(|v| Length::parse(v))
+            .map(|l| l.mil())
+            .ok_or_else(|| "a length such as 2mm or 80mil".to_string())
+    };
+    let mut i = 0;
+    while i < opts.len() {
+        match opts[i] {
+            "--gap" => {
+                spec.gap = len(opts.get(i + 1))?;
+                i += 1;
+            }
+            "--rail" => {
+                spec.rail = len(opts.get(i + 1))?;
+                i += 1;
+            }
+            "--tabs" => {
+                spec.tabs = opts
+                    .get(i + 1)
+                    .and_then(|v| v.parse().ok())
+                    .ok_or("--tabs takes a number")?;
+                i += 1;
+            }
+            "--vscore" => spec.separation = Separation::VScore,
+            o => return Err(format!("unknown option {o}").into()),
+        }
+        i += 1;
+    }
+    let (p, made) = panelize(&b, &spec)?;
+    trace_core::file::save(&p, Path::new(out))?;
+    println!(
+        "{c} x {r} panel, {:.1} x {:.1} mm: {} tabs, {} mouse bite holes{}; saved {out}",
+        made.size[0] * 0.0254,
+        made.size[1] * 0.0254,
+        made.tabs,
+        made.bites,
+        made.vscore_layer
+            .map(|m| format!(", V-score lines on mechanical layer {m}"))
+            .unwrap_or_default()
+    );
     Ok(())
 }
 

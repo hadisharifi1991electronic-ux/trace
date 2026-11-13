@@ -586,7 +586,7 @@ pub fn odb_files(board: &Board, job: &str, opt: &FabOptions) -> Vec<FabFile> {
 
     // The profile: the board outline as one surface.
     let mut profile = Feats::new();
-    profile.surface(&board.geometry.outline, &[]);
+    profile.surface(&board.geometry.outline, &board.geometry.slots);
     out.push(FabFile {
         name: format!("{job}/steps/{STEP}/profile"),
         data: profile.finish().into_bytes(),

@@ -8,6 +8,7 @@ mod cm;
 mod drc;
 mod fpview;
 mod imp;
+mod panelize;
 mod placing;
 mod router;
 mod scene;
@@ -108,6 +109,7 @@ pub struct App {
     /// Scroll the layer tabs to the current layer on the next frame.
     scroll_tab: bool,
     pub drc: drc::Drc,
+    panel: panelize::PanelWindow,
     /// The part being dragged.
     moving: Option<placing::Moving>,
     /// The next board edit joins the last step (a part placed then dropped).
@@ -179,6 +181,7 @@ impl App {
             repour: None,
             scroll_tab: false,
             drc: drc::Drc::default(),
+            panel: panelize::PanelWindow::default(),
             moving: None,
             join_next: false,
             new_span: (1, 2),
@@ -391,6 +394,57 @@ impl App {
                 self.message = None;
             }
             Err(e) => self.message = Some((format!("Could not open these files: {e}"), true)),
+        }
+    }
+
+    /// Makes a panel of the board and opens it in its place, unsaved.
+    fn make_panel(&mut self, spec: &trace_core::panel::PanelSpec) {
+        let Some(scene) = &self.scene else { return };
+        if self.dirty {
+            self.message = Some((
+                "Save the board first: the panel opens in its place".into(),
+                true,
+            ));
+            return;
+        }
+        match trace_core::panel::panelize(&scene.board, spec) {
+            Ok((board, made)) => {
+                let stem = scene
+                    .path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "board".into());
+                let path = scene
+                    .path
+                    .with_file_name(format!("{stem}-panel.{}", trace_core::file::EXTENSION));
+                self.scene = Some(Scene::from_board(path, board));
+                self.drc.reset();
+                self.moving = None;
+                self.view3d.reset();
+                self.selected = None;
+                self.marker = None;
+                self.measure = None;
+                self.single = None;
+                self.needs_fit = true;
+                self.dirty = true;
+                self.title_dirty = true;
+                self.message = Some((
+                    format!(
+                        "Panel {} × {}, {:.1} × {:.1} mm: {} tabs, {} mouse bite holes{}. Save it with File > Save as Trace board.",
+                        spec.cols,
+                        spec.rows,
+                        made.size[0] * 0.0254,
+                        made.size[1] * 0.0254,
+                        made.tabs,
+                        made.bites,
+                        made.vscore_layer
+                            .map(|m| format!(", V-score lines on mechanical layer {m}"))
+                            .unwrap_or_default()
+                    ),
+                    false,
+                ));
+            }
+            Err(e) => self.message = Some((format!("Could not panelize: {e}"), true)),
         }
     }
 
@@ -1001,6 +1055,14 @@ impl App {
                 {
                     ui.close_menu();
                     self.save_altium();
+                }
+                if ui
+                    .add_enabled(self.scene.is_some(), egui::Button::new("Panelize…"))
+                    .on_hover_text("Copies of the board in a panel, with rails, tabs and mouse bites or V-score")
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.panel.open = true;
                 }
                 if ui
                     .add_enabled(
@@ -2751,6 +2813,21 @@ impl eframe::App for App {
                 .resizable(true)
                 .default_height(220.0)
                 .show(ctx, |ui| self.pairs_panel(ui));
+        }
+        if self.panel.open && !self.mode_sch && !self.mode_fp {
+            let size = self.scene.as_ref().and_then(|s| {
+                let o = &s.board.geometry.outline;
+                (o.len() >= 3).then(|| {
+                    let xs = o.iter().map(|p| p.x.mm());
+                    let ys = o.iter().map(|p| p.y.mm());
+                    let (x0, x1) = xs.fold((f64::MAX, f64::MIN), |a, v| (a.0.min(v), a.1.max(v)));
+                    let (y0, y1) = ys.fold((f64::MAX, f64::MIN), |a, v| (a.0.min(v), a.1.max(v)));
+                    [x1 - x0, y1 - y0]
+                })
+            });
+            if let Some(spec) = self.panel.show(ctx, size) {
+                self.make_panel(&spec);
+            }
         }
         if !self.mode_sch && !self.mode_fp {
             let hit = match &self.scene {

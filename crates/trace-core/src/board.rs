@@ -16,6 +16,34 @@ pub struct Board {
     pub rules: Vec<Rule>,
     pub stats: BoardStats,
     pub geometry: crate::Geometry,
+    /// Set on a panel Trace made: copies of one board, numbered copy by
+    /// copy, so rules written for the board apply to every copy.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub panel: Option<PanelOf>,
+}
+
+/// How a panel's nets and parts follow from its board: `nets` nets and
+/// `parts` parts per copy, copies after the first named with `_2`, `_3`...
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PanelOf {
+    pub copies: u32,
+    pub nets: u32,
+    pub parts: u32,
+}
+
+impl PanelOf {
+    /// The board's own name for net or part `i` named `name` in the panel.
+    pub fn base<'a>(&self, name: &'a str, i: usize, per_copy: u32) -> &'a str {
+        let k = if per_copy == 0 {
+            0
+        } else {
+            i / per_copy as usize
+        };
+        if k == 0 {
+            return name;
+        }
+        name.strip_suffix(&format!("_{}", k + 1)).unwrap_or(name)
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

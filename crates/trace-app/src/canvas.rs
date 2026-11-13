@@ -384,6 +384,13 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             Stroke::new(1.5_f32, Color32::from_rgb(217, 194, 122)),
         ));
     }
+    for slot in scene.slots.iter().filter(|s| s.len() >= 3) {
+        let pts: Vec<Pos2> = slot.iter().map(|p| view.to_screen(p[0], p[1])).collect();
+        shapes.push(Shape::closed_line(
+            pts,
+            Stroke::new(1.0_f32, Color32::from_rgb(217, 194, 122)),
+        ));
+    }
 
     // Layers back to front: bottom copper first unless viewing from below.
     let mut order: Vec<(Slot, [u8; 3])> = scene

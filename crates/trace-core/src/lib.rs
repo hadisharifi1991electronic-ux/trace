@@ -15,6 +15,7 @@ pub mod font;
 pub mod footprint;
 pub mod geometry;
 pub mod impedance;
+pub mod panel;
 pub mod place;
 pub mod pour;
 pub mod route;

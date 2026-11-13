@@ -267,6 +267,10 @@ pub struct Geometry {
     /// `AllCopper` keeps every layer empty there.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cutouts: Vec<Polygon>,
+    /// Openings milled through the board inside its outline (a panel's
+    /// gaps between boards, a board's own slots), each a closed ring.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slots: Vec<Vec<Point>>,
     /// True when pads and vias carry their copper layer by layer (`stack`,
     /// `rings`), as boards rebuilt from fabrication data do: a pad or via
     /// without that list then has the same copper on every layer it spans.

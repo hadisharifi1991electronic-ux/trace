@@ -989,8 +989,17 @@ fn edge(board: &Board, info: &NetInfo, items: &[Copper], out: &mut Vec<Violation
         .flat_map(|(g, per)| std::iter::once(*g).chain(per.values().copied()))
         .fold(0.0, f64::max)
         + 0.01;
-    let segs: Vec<(P, P)> = (0..outline.len())
-        .map(|i| (outline[i], outline[(i + 1) % outline.len()]))
+    // Milled slots (a panel's gaps between boards) are board edge too.
+    let slots: Vec<Vec<P>> = board
+        .geometry
+        .slots
+        .iter()
+        .filter(|s| s.len() >= 3)
+        .map(|s| s.iter().map(|&q| pt(q)).collect())
+        .collect();
+    let segs: Vec<(P, P)> = std::iter::once(&outline)
+        .chain(&slots)
+        .flat_map(|r| (0..r.len()).map(move |i| (r[i], r[(i + 1) % r.len()])))
         .collect();
     let mut grid: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
     for (i, (a, b)) in segs.iter().enumerate() {
@@ -1022,7 +1031,8 @@ fn edge(board: &Board, info: &NetInfo, items: &[Copper], out: &mut Vec<Violation
                 }
             }
         }
-        let within = inside(center(&c.shape), &outline);
+        let at = center(&c.shape);
+        let within = inside(at, &outline) && !slots.iter().any(|s| inside(at, s));
         if d >= reach && (within || c.net.is_none()) {
             // Clear of the edge; or copper without a net drawn wholly off
             // the board, such as layer names beside it.

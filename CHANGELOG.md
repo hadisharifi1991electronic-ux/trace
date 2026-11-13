@@ -3,6 +3,23 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.34.0 (2026-11-13)
+
+- Panelization: File > Panelize… lays copies of the board out in a grid
+  (columns × rows) with rails top and bottom, and opens the panel in place
+  of the board, unsaved. Copies come apart by tabs with mouse bites across
+  a milled gap, or by V-score lines on a free mechanical layer. The rails
+  carry fiducials and tooling holes.
+- The milled gaps between copies are slots in the board outline, and fab
+  outputs, ODB++ and KiCad boards carry them; mouse bites are unplated
+  holes in the NPTH drill file.
+- The design rule check on a panel applies the board's rules to every copy
+  (nets and designators renamed `_2`, `_3`… are mapped back) and treats the
+  milled gaps as board edge.
+- `trace panel board 2x3 out.tracepcb [--gap L] [--rail L] [--tabs N]
+  [--vscore]` makes a panel from the command line. TI's DAC39RF12 EVM as a
+  2 × 2 panel is 259.6 × 154.0 mm with 20 tabs and 196 mouse bite holes.
+
 ## 0.33.0 (2026-11-13)
 
 - Via stubs: Trace measures each via's stub from the stack-up and the

@@ -881,12 +881,14 @@ fn silk(board: &Board, side: Side) -> String {
 
 fn outline(board: &Board) -> String {
     let mut g = Gerber::new("Profile,NP", "Board outline", false);
-    let o = &board.geometry.outline;
     let w = Length::from_mm(0.1).0;
-    for (i, a) in o.iter().enumerate() {
-        let b = o[(i + 1) % o.len()];
-        if *a != b {
-            g.line(w, "Profile", *a, b);
+    // The outline, then the openings milled inside it.
+    for o in std::iter::once(&board.geometry.outline).chain(&board.geometry.slots) {
+        for (i, a) in o.iter().enumerate() {
+            let b = o[(i + 1) % o.len()];
+            if *a != b {
+                g.line(w, "Profile", *a, b);
+            }
         }
     }
     g.finish()

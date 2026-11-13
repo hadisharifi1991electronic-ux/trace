@@ -185,6 +185,9 @@ trace drc board.PcbDoc [--all]   design rule check: clearance, shorts, width, un
 trace impedance board.PcbDoc     stack-up widths for 50 Ω and 100 Ω pairs, and each pair's Zdiff
 trace stubs board.PcbDoc [out.tracepcb]   via stubs longer than their rule allows; with out, backdrill them,
                                  pour again and save the board
+trace panel board.PcbDoc 2x3 out.tracepcb [--gap 2mm] [--rail 5mm] [--tabs N] [--vscore]
+                                 panelize: copies in a grid with rails, tabs and mouse bites (or V-score),
+                                 fiducials and tooling holes; then export fab outputs or ODB++ from out
 trace convert <file> out.json    export to Trace's open JSON model
 trace convert <file> out.kicad_pcb   write a KiCad board
 trace convert <file> out.PcbDoc      write an Altium Designer board
@@ -310,6 +313,20 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   one drill layer spanning the layers drilled. Backdrills are not read
   from ODB++, Gerber or Allegro files, nor written to Altium or KiCad
   boards (Altium recomputes them from its rule).
+- Panelization: File > Panelize… (or `trace panel`) lays copies of the
+  board out in a grid and opens the panel in place of the board, unsaved.
+  Copies come apart by tabs with mouse bites across a milled gap (2 mm by
+  default; one tab per 2 inches of edge unless a count is given, 0.5 mm
+  holes at 0.75 mm pitch) or by V-score (boards butted, score lines drawn
+  on the first free mechanical layer). Rails top and bottom (5 mm) carry
+  three fiducials on each outer copper layer and four 3.2 mm tooling
+  holes. The panel's outline is its outer edge and the milled gaps are
+  slots, written to the Gerber outline, ODB++ profile and KiCad Edge.Cuts;
+  mouse bites go in the NPTH drill file. Each copy's nets and designators
+  get a `_2`, `_3`… suffix, and the design rule check maps them back to
+  the original names so the board's rules apply to every copy, and treats
+  the milled gaps as board edge. Saved as an Altium board, a panel keeps
+  only its outer outline (the slots are not written).
 - Fab outputs draw text in one stroke font, so silkscreen text is placed
   and sized as in Altium but its letters are shaped differently (TrueType
   text too). Text on mechanical layers and Altium special strings other

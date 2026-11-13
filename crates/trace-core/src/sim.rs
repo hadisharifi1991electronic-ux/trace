@@ -103,7 +103,50 @@ impl Uf {
 /// Builds the network of `net`. With `odd`, tracks running beside the
 /// pair partner take half the pair's differential impedance.
 pub fn network(board: &Board, net: u32, odd: bool) -> Network {
+    network_with(board, net, odd, false)
+}
+
+/// As [`network`], with track impedance, delay and loss from the field
+/// solver when `field`.
+pub fn network_with(board: &Board, net: u32, odd: bool, field: bool) -> Network {
     let geo = board.layer_geometry();
+    // Pour copper beside each track (coplanar ground), for the solver;
+    // arcs take the gap of the net's tracks of their layer and width.
+    type Sides = [Option<f64>; 2];
+    let side_of: HashMap<usize, Sides> = if field {
+        let sg = crate::impedance::SideGround::new(board);
+        board
+            .geometry
+            .tracks
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.net == Some(net) && !t.text)
+            .filter_map(|(i, t)| {
+                let LayerRef::Copper(l) = t.layer else {
+                    return None;
+                };
+                let g = geo.get(l as usize)?;
+                let s = sg.sides(t, crate::impedance::side_reach(g));
+                (s != [None, None]).then_some((i, s))
+            })
+            .collect()
+    } else {
+        HashMap::new()
+    };
+    let mut arc_side: HashMap<(u8, i64), Sides> = HashMap::new();
+    for (&i, &gap) in &side_of {
+        let t = &board.geometry.tracks[i];
+        if let LayerRef::Copper(l) = t.layer {
+            arc_side.insert((l, t.width.0), gap);
+        }
+    }
+    let solved = |l: u8, w: f64, side: Sides| -> Option<crate::field::Line> {
+        if field {
+            crate::field::single_sides(geo.get(l as usize)?, w, side)
+        } else {
+            None
+        }
+    };
     let depth = faces(board);
     let mid = |l: u8| depth.get(l as usize).map_or(0.0, |(a, b)| (a + b) / 2.0);
     let er = geo.first().map_or(DEFAULT_ER, |g| g.er);
@@ -123,15 +166,33 @@ pub fn network(board: &Board, net: u32, odd: bool) -> Network {
     let mut edges: Vec<Edge> = Vec::new();
     let mut pads = Vec::new();
     let mut length = 0.0;
-    let delay_of = |l: u8, w: f64, len: f64| -> f64 {
-        let ps = geo.get(l as usize).map_or(170.0, |g| g.delay_ps_per_in(w));
+    let delay_of = |l: u8, w: f64, len: f64, side: Sides| -> f64 {
+        let ps = match solved(l, w, side) {
+            Some(s) => s.ps_per_in(),
+            None => geo.get(l as usize).map_or(170.0, |g| g.delay_ps_per_in(w)),
+        };
         len / 1000.0 * ps * 1e-12
     };
-    let z_of = |l: u8, w: f64| -> f64 {
-        geo.get(l as usize)
-            .map(|g| g.z0(w))
+    let z_of = |l: u8, w: f64, side: Sides| -> f64 {
+        solved(l, w, side)
+            .map(|s| s.z0)
+            .or_else(|| geo.get(l as usize).map(|g| g.z0(w)))
             .filter(|z| z.is_finite() && *z > 1.0)
             .unwrap_or(50.0)
+    };
+    let att_of = |l: u8, w: f64, len: f64, z: f64, tau: f64, side: Sides| -> Atten {
+        let g = geo.get(l as usize);
+        match solved(l, w, side) {
+            Some(s) => loss::track_field(
+                &s,
+                len,
+                z,
+                tau,
+                g.and_then(|g| g.rough_um),
+                g.is_some_and(|g| g.tan_d.is_some()),
+            ),
+            None => loss::track(g, w, len, z, tau),
+        }
     };
     // A plated barrel through `layers` at `at`: its anchors and edges.
     let barrel = |anchors: &mut Vec<(u8, P, f64)>,
@@ -165,19 +226,28 @@ pub fn network(board: &Board, net: u32, odd: bool) -> Network {
         let (a, b) = (pt(t.start), pt(t.end));
         let w = t.width.mil();
         let len = (b[0] - a[0]).hypot(b[1] - a[1]);
+        let side = side_of.get(&ti).copied().unwrap_or_default();
         let z = match partner.and_then(|p| board.pair_gap(t, p)) {
             Some(gap) => geo
                 .get(l as usize)
-                .map(|g| g.zdiff(w, gap) / 2.0)
+                .map(|g| {
+                    if field {
+                        let gap = (gap * 20.0).round().max(1.0) / 20.0;
+                        crate::field::pair_with(g, w, gap, crate::field::both(side))
+                            .map_or(f64::NAN, |p| p.z_odd)
+                    } else {
+                        g.zdiff(w, gap) / 2.0
+                    }
+                })
                 .filter(|z| z.is_finite() && *z > 1.0)
-                .unwrap_or_else(|| z_of(l, w)),
-            None => z_of(l, w),
+                .unwrap_or_else(|| z_of(l, w, side)),
+            None => z_of(l, w, side),
         };
         anchors.push((l, a, w / 2.0));
         anchors.push((l, b, w / 2.0));
         let n = anchors.len();
-        let tau = delay_of(l, w, len);
-        let att = loss::track(geo.get(l as usize), w, len, z, tau);
+        let tau = delay_of(l, w, len, side);
+        let att = att_of(l, w, len, z, tau, side);
         edges.push((n - 2, n - 1, z, tau, att, Some(ti)));
         length += len;
     }
@@ -202,8 +272,9 @@ pub fn network(board: &Board, net: u32, odd: bool) -> Network {
         anchors.push((l, at(arc.start_deg), w / 2.0));
         anchors.push((l, at(arc.start_deg + sweep), w / 2.0));
         let n = anchors.len();
-        let (z, tau) = (z_of(l, w), delay_of(l, w, len));
-        let att = loss::track(geo.get(l as usize), w, len, z, tau);
+        let side = arc_side.get(&(l, arc.width.0)).copied().unwrap_or_default();
+        let (z, tau) = (z_of(l, w, side), delay_of(l, w, len, side));
+        let att = att_of(l, w, len, z, tau, side);
         edges.push((n - 2, n - 1, z, tau, att, None));
         length += len;
     }
@@ -529,6 +600,9 @@ pub struct Setup {
     pub loss: Option<Loss>,
     /// Drive the nets running beside the route and add their crosstalk.
     pub crosstalk: bool,
+    /// Track impedance, delay, loss and coupling from the 2D field solver
+    /// rather than closed-form formulas.
+    pub field: bool,
 }
 
 impl Default for Setup {
@@ -540,6 +614,7 @@ impl Default for Setup {
             term: Term::None,
             loss: Some(Loss::default()),
             crosstalk: true,
+            field: true,
         }
     }
 }
@@ -1104,6 +1179,7 @@ fn build<'a>(
     corner: Corner,
     dt: f64,
     loss: Option<&Loss>,
+    field: bool,
 ) -> Result<Built<'a>, String> {
     let mut notes = Vec::new();
     let mut n = 0;
@@ -1122,7 +1198,7 @@ fn build<'a>(
                 board.nets[pad_net(board, rp)? as usize].name
             ));
         }
-        let full = network(board, net, odd);
+        let full = network_with(board, net, odd, field);
         let (nw, _, moved) = full.reduce(dt);
         let (Some(a), Some(b)) = (nw.node_of_pad(dp), nw.node_of_pad(rp)) else {
             return Err("pad not on a copper layer".into());
@@ -1304,7 +1380,16 @@ pub fn simulate(
     let dt = (t_r.min(t_f) / 25.0).min(ui / 40.0).clamp(0.2e-12, 5e-12);
     let loss = setup.loss.as_ref();
     let victim = build(
-        board, &ends, diff, driver, receiver, setup.term, corner, dt, loss,
+        board,
+        &ends,
+        diff,
+        driver,
+        receiver,
+        setup.term,
+        corner,
+        dt,
+        loss,
+        setup.field,
     )?;
     let mut notes = victim.notes.clone();
     // Settle with the first bit, then the pattern.
@@ -1506,7 +1591,7 @@ fn crosstalk(
     notes: &mut Vec<String>,
 ) -> (Inject, Vec<Aggressor>) {
     let victims: Vec<u32> = victim.parts.iter().map(|p| p.net).collect();
-    let raw = xtalk::find(board, &victims);
+    let raw = xtalk::find(board, &victims, setup.field);
     if raw.is_empty() {
         return (Vec::new(), Vec::new());
     }
@@ -1604,6 +1689,7 @@ fn crosstalk(
             corner,
             dt,
             setup.loss.as_ref(),
+            setup.field,
         ) {
             Ok(b) => b,
             Err(e) => {
@@ -2492,9 +2578,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(run.aggressors.len(), 1);
-        let (ze, zo, ee, eo) = xtalk::modes(&geo[1], w, gap).unwrap();
-        let (kb, kf) = xtalk::coefficients(ze, zo, ee, eo);
-        assert!(kf.abs() < 1e-9);
+        // The simulation takes its coupling from the field solver.
+        let (kb, kf) = xtalk::field_coupling(&geo[1], w, gap).unwrap();
+        assert!(kf.abs() < 1e-3, "{kf}");
         // The aggressor launches 2.2 V edges (25 ohm into 50); its
         // near-end crosstalk, Kb of that, reaches the victim's driver,
         // which sends back -1/3 of it to the matched receiver: a plateau

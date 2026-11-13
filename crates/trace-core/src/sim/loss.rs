@@ -83,7 +83,7 @@ impl std::ops::Add for Atten {
 }
 
 /// Hammerstad's roughness factor at frequency `f`.
-fn rough(f: f64, rough_um: f64) -> f64 {
+pub fn rough(f: f64, rough_um: f64) -> f64 {
     if rough_um <= 0.0 || f <= 0.0 {
         return 1.0;
     }
@@ -157,6 +157,41 @@ pub fn track(g: Option<&LayerGeometry>, w: f64, len: f64, z: f64, tau: f64) -> A
         diel,
         diel_own: df.map_or(0.0, |_| diel),
         diel_lost: df.map_or(0.0, |d| diel * d),
+    }
+}
+
+/// The attenuation of a track `len` mil long solved by the field solver
+/// (`line`), at impedance `z` with delay `tau` seconds, its copper
+/// `rough_um` rough where known.
+pub fn track_field(
+    line: &crate::field::Line,
+    len: f64,
+    z: f64,
+    tau: f64,
+    rough_um: Option<f64>,
+    df_given: bool,
+) -> Atten {
+    let l = len * MIL;
+    let z = z.max(1.0);
+    let skin = line.r_ghz * l / (2.0 * z);
+    let rough = rough_um.filter(|r| *r >= 0.0);
+    let diel = PI * 1e9 * tau * line.fill;
+    Atten {
+        dc: line.r_dc * l / (2.0 * z),
+        skin,
+        skin_own: rough.map_or(0.0, |_| skin),
+        skin_rough: rough.map_or(0.0, |r| skin * r),
+        diel,
+        diel_own: if df_given {
+            PI * 1e9 * tau * line.fill_given
+        } else {
+            0.0
+        },
+        diel_lost: if df_given {
+            PI * 1e9 * tau * line.tan_eff
+        } else {
+            0.0
+        },
     }
 }
 
@@ -369,6 +404,9 @@ mod tests {
             er: 3.3,
             tan_d: Some(0.003),
             rough_um: Some(0.4),
+            slabs_above: Vec::new(),
+            slabs_below: Vec::new(),
+            mask: None,
         };
         let a = track(Some(&g), 5.0, 1000.0, 50.0, 150e-12);
         let fr4 = Loss {
@@ -404,6 +442,9 @@ mod tests {
             er: 4.2,
             tan_d: None,
             rough_um: None,
+            slabs_above: Vec::new(),
+            slabs_below: Vec::new(),
+            mask: None,
         };
         let tau = 4.2f64.sqrt() * 0.0254 / 3e8;
         let a = track(Some(&g), 5.0, 1000.0, 50.0, tau);

@@ -233,6 +233,8 @@ trace convert sheets.tracesch folder  write every sheet of a Trace schematic as 
 trace fab board.PcbDoc out.zip   Gerber X2, drill, IPC-356, pick-and-place and BOM (or a folder)
 trace odb board.PcbDoc out.tgz   ODB++ job: layers, drills, parts, nets and stack-up (or a folder)
 trace assembly board.PcbDoc out.pdf [--a4]   Assembly drawing: top and bottom views, parts list
+trace field board.PcbDoc         2D field solver on each layer (50/100 ohm widths, delay, loss)
+trace field board.PcbDoc 1 11 --ground 6 out.svg   One cross-section, with its field drawn
 trace symbols lib.SchLib [out.svg]     list a schematic library's (or IntLib's) symbols; draw them all as SVG
 trace footprints lib.PcbLib [out]   list a library's (or a board's) footprints; save as .tracelib or .PcbLib
 ```
@@ -350,6 +352,14 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   one drill layer spanning the layers drilled. Backdrills are not read
   from ODB++, Gerber or Allegro files, nor written to Altium or KiCad
   boards (Altium recomputes them from its rule).
+- Field solver: impedance, delay, coupling and loss come from a 2D
+  finite-volume solve of each cross-section (Impedance window, signal
+  simulation, `trace field`, `trace impedance --field`). It is
+  quasi-static: Er and Df do not change with frequency, copper is
+  rectangular (no etch trapezoid), every adjacent copper layer is taken
+  as a solid reference plane, and pour on only one side of a track is
+  taken as the mean of none and both sides. A whole board solves in
+  seconds to tens of seconds the first time; results are kept after.
 - Assembly drawings: File > Export assembly drawing (PDF)… (or `trace
   assembly`) writes the top view, the bottom view seen from below
   (mirrored), and the parts list grouped by value and footprint. Part

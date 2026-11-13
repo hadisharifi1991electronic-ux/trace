@@ -112,6 +112,17 @@ pub struct LayerGeometry {
     /// The copper's roughness (RMS, µm), where the stack-up gives it.
     #[serde(default)]
     pub rough_um: Option<f64>,
+    /// Each dielectric between this layer and the copper above, and
+    /// below, nearest first: thickness (mil), permittivity, loss tangent
+    /// (−1 when not given). Empty when only `above`/`below` and `er` are
+    /// known, as for a hand-made geometry.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slabs_above: Vec<crate::field::Slab>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub slabs_below: Vec<crate::field::Slab>,
+    /// Solder mask over an outer layer, as a slab.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mask: Option<crate::field::Slab>,
 }
 
 impl LayerGeometry {
@@ -146,6 +157,43 @@ impl LayerGeometry {
     /// The gap that gives `target` ohms differential at width `w`, mil.
     pub fn gap_for(&self, w: f64, target: f64) -> Option<f64> {
         solve(|s| self.zdiff(w, s), target, 0.5, 200.0)
+    }
+
+    /// Single-ended impedance from the field solver (NaN if it cannot
+    /// solve this layer).
+    pub fn z0_field(&self, w: f64) -> f64 {
+        crate::field::single(self, w).map_or(f64::NAN, |l| l.z0)
+    }
+
+    /// Differential impedance from the field solver.
+    pub fn zdiff_field(&self, w: f64, s: f64) -> f64 {
+        crate::field::pair(self, w, s).map_or(f64::NAN, |p| p.zdiff)
+    }
+
+    /// The width for `target` ohms single-ended, from the field solver.
+    pub fn width_for_field(&self, target: f64) -> Option<f64> {
+        crate::field::solve_for(
+            |w| crate::field::single(self, w).map(|l| l.z0),
+            target,
+            0.5,
+            100.0,
+        )
+    }
+
+    /// The gap for `target` ohms differential at width `w`, from the
+    /// field solver.
+    pub fn gap_for_field(&self, w: f64, target: f64) -> Option<f64> {
+        crate::field::solve_for(
+            |s| crate::field::pair(self, w, s).map(|p| p.zdiff),
+            target,
+            0.5,
+            200.0,
+        )
+    }
+
+    /// Propagation delay from the field solver, ps per inch.
+    pub fn delay_field(&self, w: f64) -> f64 {
+        crate::field::single(self, w).map_or_else(|| self.delay_ps_per_in(w), |l| l.ps_per_in())
     }
 
     /// Propagation delay, ps per inch.
@@ -195,6 +243,39 @@ impl Board {
     pub fn net_impedance(&self) -> Vec<NetImpedance> {
         self.net_impedance_with(&self.layer_geometry())
     }
+}
+
+/// The dielectric slabs of `layers`, nearest the copper first (`rev` when
+/// the copper is below them).
+fn slabs(layers: &[crate::StackLayer], rev: bool) -> Vec<crate::field::Slab> {
+    let mut v: Vec<crate::field::Slab> = layers
+        .iter()
+        .filter(|l| l.kind == LayerKind::Dielectric && l.thickness.mil() > 0.0)
+        .map(|l| {
+            [
+                l.thickness.mil(),
+                l.dielectric_constant
+                    .filter(|e| *e >= 1.0)
+                    .unwrap_or(DEFAULT_ER),
+                l.loss_tangent.filter(|d| *d >= 0.0).unwrap_or(-1.0),
+            ]
+        })
+        .collect();
+    if rev {
+        v.reverse();
+    }
+    v
+}
+
+/// Solder mask, as a slab, if `l` is one with a thickness.
+fn mask(l: &crate::StackLayer) -> Option<crate::field::Slab> {
+    (l.kind == LayerKind::SolderMask && l.thickness.mil() > 0.0).then(|| {
+        [
+            l.thickness.mil(),
+            l.dielectric_constant.filter(|e| *e >= 1.0).unwrap_or(3.5),
+            l.loss_tangent.filter(|d| *d >= 0.0).unwrap_or(-1.0),
+        ]
+    })
 }
 
 /// The geometry of each copper layer, top to bottom. Every copper layer is
@@ -271,6 +352,23 @@ pub fn layer_geometry(stackup: &crate::Stackup) -> Vec<LayerGeometry> {
                         (h > 0.0).then(|| dh / h)
                     },
                     rough_um: layers[i].roughness_um,
+                    slabs_above: if ci > 0 {
+                        slabs(&layers[coppers[ci - 1] + 1..i], true)
+                    } else {
+                        Vec::new()
+                    },
+                    slabs_below: if ci + 1 < coppers.len() {
+                        slabs(&layers[i + 1..coppers[ci + 1]], false)
+                    } else {
+                        Vec::new()
+                    },
+                    mask: if ci == 0 {
+                        layers[..i].iter().rev().find_map(mask)
+                    } else if ci + 1 == coppers.len() {
+                        layers[i + 1..].iter().find_map(mask)
+                    } else {
+                        None
+                    },
                 }
             })
             .collect()
@@ -281,9 +379,16 @@ impl Board {
     /// Impedance of every routed net for a given layer geometry (an edited
     /// stack-up, say).
     pub fn net_impedance_with(&self, geo: &[LayerGeometry]) -> Vec<NetImpedance> {
+        self.net_impedance_model(geo, false)
+    }
+
+    /// As [`Board::net_impedance_with`], from the field solver when
+    /// `field` (slower the first time each width and gap is met).
+    pub fn net_impedance_model(&self, geo: &[LayerGeometry], field: bool) -> Vec<NetImpedance> {
         let pair_of = self.pair_partners();
-        let mut acc: std::collections::HashMap<(u32, u8, i64), (f64, Vec<f64>)> =
-            Default::default();
+        type Acc = (f64, Vec<f64>, [Vec<(f64, f64)>; 2]);
+        let mut acc: std::collections::HashMap<(u32, u8, i64), Acc> = Default::default();
+        let side = field.then(|| SideGround::new(self));
         for t in &self.geometry.tracks {
             let (Some(n), LayerRef::Copper(c)) = (t.net, &t.layer) else {
                 continue;
@@ -291,6 +396,14 @@ impl Board {
             let len = (t.end.x.mil() - t.start.x.mil()).hypot(t.end.y.mil() - t.start.y.mil());
             let e = acc.entry((n, *c, t.width.0)).or_default();
             e.0 += len;
+            if let (Some(sg), Some(g)) = (&side, geo.get(*c as usize)) {
+                let sides = sg.sides(t, side_reach(g));
+                for (k, gap) in sides.iter().enumerate() {
+                    if let Some(gap) = gap {
+                        e.2[k].push((*gap, len));
+                    }
+                }
+            }
             if let Some(&other) = pair_of.get(&n) {
                 if let Some(g) = self.pair_gap(t, other) {
                     e.1.push(g);
@@ -299,11 +412,14 @@ impl Board {
         }
         let mut out: Vec<NetImpedance> = acc
             .into_iter()
-            .filter_map(|((net, c, w), (length, mut gaps))| {
+            .filter_map(|((net, c, w), (length, mut gaps, sides))| {
                 let g = geo.get(c as usize)?;
                 let width = Length(w).mil();
                 gaps.sort_by(f64::total_cmp);
                 let gap = (!gaps.is_empty()).then(|| gaps[gaps.len() / 2]);
+                // On each side, coplanar where most of the length has pour
+                // beside it: the gap at the middle of that length.
+                let side = typical_sides(sides, length);
                 Some(NetImpedance {
                     net,
                     layer: c,
@@ -311,10 +427,38 @@ impl Board {
                     length,
                     z0: g.z0(width),
                     gap,
+                    side,
                     zdiff: gap.map(|s| g.zdiff(width, s)),
                 })
             })
             .collect();
+        if field {
+            // Solve on every core; the solver keeps what it finds, so the
+            // same width and gaps solve once.
+            let threads = std::thread::available_parallelism()
+                .map_or(2, |n| n.get())
+                .clamp(1, 16);
+            let chunk = out.len().div_ceil(threads).max(1);
+            std::thread::scope(|sc| {
+                for part in out.chunks_mut(chunk) {
+                    sc.spawn(move || {
+                        for r in part {
+                            let Some(g) = geo.get(r.layer as usize) else {
+                                continue;
+                            };
+                            r.z0 = crate::field::single_sides(g, r.width, r.side)
+                                .map_or(f64::NAN, |l| l.z0);
+                            r.zdiff = r.gap.map(|s| {
+                                // Gaps to 0.05 mil, so nearby ones solve once.
+                                let s = (s * 20.0).round().max(1.0) / 20.0;
+                                crate::field::pair_with(g, r.width, s, crate::field::both(r.side))
+                                    .map_or(f64::NAN, |p| p.zdiff)
+                            });
+                        }
+                    });
+                }
+            });
+        }
         out.sort_by(|a, b| {
             (a.net, a.layer)
                 .cmp(&(b.net, b.layer))
@@ -381,6 +525,164 @@ impl Board {
     }
 }
 
+/// Copper of other nets beside tracks on their own layer (pours, as
+/// coplanar ground), found through a grid of the pours' edges.
+pub struct SideGround {
+    cell: f64,
+    /// Per copper layer: grid cell -> pour edges (x0, y0, x1, y1 in mil)
+    /// and the pour's net.
+    grid: Vec<std::collections::HashMap<(i64, i64), Vec<PourEdge>>>,
+}
+
+/// A pour's edge (x0, y0, x1, y1 in mil) and its net.
+type PourEdge = ([f64; 4], Option<u32>);
+
+impl SideGround {
+    pub fn new(board: &Board) -> SideGround {
+        let cell = 50.0;
+        let layers = board
+            .geometry
+            .polygons
+            .iter()
+            .filter_map(|p| match p.layer {
+                LayerRef::Copper(l) => Some(l as usize + 1),
+                _ => None,
+            })
+            .max()
+            .unwrap_or(0);
+        let mut grid = vec![std::collections::HashMap::new(); layers];
+        let c = |v: f64| (v / cell).floor() as i64;
+        for p in &board.geometry.polygons {
+            let LayerRef::Copper(l) = p.layer else {
+                continue;
+            };
+            for ring in std::iter::once(&p.outline).chain(&p.holes) {
+                for i in 0..ring.len() {
+                    let (a, b) = (ring[i], ring[(i + 1) % ring.len()]);
+                    let e = [a.x.mil(), a.y.mil(), b.x.mil(), b.y.mil()];
+                    for gx in c(e[0].min(e[2]))..=c(e[0].max(e[2])) {
+                        for gy in c(e[1].min(e[3]))..=c(e[1].max(e[3])) {
+                            let v: &mut Vec<_> = grid[l as usize].entry((gx, gy)).or_default();
+                            v.push((e, p.net));
+                        }
+                    }
+                }
+            }
+        }
+        SideGround { cell, grid }
+    }
+
+    /// Distances from `p` to the nearest pour edge of another net than
+    /// `net` on copper layer `l`, on the left and right of direction `u`,
+    /// where one is within `reach` mil.
+    fn nearest(
+        &self,
+        l: u8,
+        net: Option<u32>,
+        p: [f64; 2],
+        u: [f64; 2],
+        reach: f64,
+    ) -> [Option<f64>; 2] {
+        let mut best = [None::<f64>; 2];
+        let Some(g) = self.grid.get(l as usize) else {
+            return best;
+        };
+        let c = |v: f64| (v / self.cell).floor() as i64;
+        for gx in c(p[0] - reach)..=c(p[0] + reach) {
+            for gy in c(p[1] - reach)..=c(p[1] + reach) {
+                for (e, n) in g.get(&(gx, gy)).into_iter().flatten() {
+                    if *n == net && net.is_some() {
+                        continue;
+                    }
+                    let (dx, dy) = (e[2] - e[0], e[3] - e[1]);
+                    let len2 = dx * dx + dy * dy;
+                    let t = if len2 > 0.0 {
+                        (((p[0] - e[0]) * dx + (p[1] - e[1]) * dy) / len2).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    let q = [e[0] + t * dx - p[0], e[1] + t * dy - p[1]];
+                    let d = q[0].hypot(q[1]);
+                    // Only copper off to the side counts, not ahead.
+                    let across = u[0] * q[1] - u[1] * q[0];
+                    if d > reach || across.abs() < 0.7 * d {
+                        continue;
+                    }
+                    let k = usize::from(across < 0.0);
+                    if best[k].is_none_or(|b| d < b) {
+                        best[k] = Some(d);
+                    }
+                }
+            }
+        }
+        best
+    }
+
+    /// Edge gaps from a track to pour copper of another net on its left
+    /// and right on its layer (each the median of five points along it,
+    /// when at least three see pour within `reach` mil of the edge).
+    pub fn sides(&self, t: &crate::Track, reach: f64) -> [Option<f64>; 2] {
+        let LayerRef::Copper(l) = t.layer else {
+            return [None, None];
+        };
+        let w = t.width.mil();
+        let (a, b) = (
+            [t.start.x.mil(), t.start.y.mil()],
+            [t.end.x.mil(), t.end.y.mil()],
+        );
+        let len = (b[0] - a[0]).hypot(b[1] - a[1]);
+        if len < 1.0 {
+            return [None, None];
+        }
+        let u = [(b[0] - a[0]) / len, (b[1] - a[1]) / len];
+        let mut d: [Vec<f64>; 2] = [Vec::new(), Vec::new()];
+        for f in [0.1, 0.3, 0.5, 0.7, 0.9] {
+            let p = [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
+            let n = self.nearest(l, t.net, p, u, reach + w / 2.0);
+            for k in 0..2 {
+                if let Some(x) = n[k] {
+                    d[k].push(x - w / 2.0);
+                }
+            }
+        }
+        d.map(|mut v| {
+            if v.len() < 3 {
+                return None;
+            }
+            v.sort_by(f64::total_cmp);
+            let g = v[v.len() / 2];
+            (g > 0.05).then(|| (g * 20.0).round() / 20.0)
+        })
+    }
+}
+
+/// The typical pour gap on each side over tracks of total `length`:
+/// (gap, length) per side, from each track.
+fn typical_sides(mut sides: [Vec<(f64, f64)>; 2], length: f64) -> [Option<f64>; 2] {
+    sides.each_mut().map(|v| {
+        v.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let along: f64 = v.iter().map(|s| s.1).sum();
+        if 2.0 * along <= length {
+            return None;
+        }
+        let mut run = 0.0;
+        v.iter().find_map(|&(g, l)| {
+            run += l;
+            (2.0 * run >= along).then_some(g)
+        })
+    })
+}
+
+/// How far beside a track pour copper still counts, mil: three
+/// dielectric heights on `g`.
+pub fn side_reach(g: &LayerGeometry) -> f64 {
+    3.0 * match (g.above, g.below) {
+        (Some(a), Some(b)) => a.min(b),
+        (Some(a), None) | (None, Some(a)) => a,
+        _ => 0.0,
+    }
+}
+
 /// One net's impedance on one layer at one width.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NetImpedance {
@@ -395,6 +697,10 @@ pub struct NetImpedance {
     /// Typical edge gap to the pair partner, mil.
     pub gap: Option<f64>,
     pub zdiff: Option<f64>,
+    /// Typical edge gaps to pour copper on each side of the track on its
+    /// layer, when the field solver counted it (coplanar), mil.
+    #[serde(default)]
+    pub side: [Option<f64>; 2],
 }
 
 #[cfg(test)]
@@ -462,6 +768,9 @@ mod tests {
             copper: 0,
             tan_d: None,
             rough_um: None,
+            slabs_above: Vec::new(),
+            slabs_below: Vec::new(),
+            mask: None,
             name: "Top".into(),
             t: 1.4,
             above: None,

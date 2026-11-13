@@ -21,7 +21,15 @@ USAGE:
                                                 holes, annular rings, mask slivers, silk on pads, silk to silk,
                                                 part clearance, board edge, return paths over plane voids
                                                 and splits, crosstalk between parallel tracks
-    trace impedance <board>                     Stack-up, widths for 50/100 ohm, and the impedance of each pair
+    trace impedance <board> [--field]           Stack-up, widths for 50/100 ohm, and the impedance of each pair;
+                                                with --field, nets from the field solver, pour beside tracks
+                                                counted as coplanar ground
+    trace field <board>                         2D field solver on each layer: widths for 50 ohm and 100 ohm
+                                                pairs, delay and loss, beside the formulas' answers
+    trace field <board> <layer> <w> [s] [--ground G] [out.svg]
+                                                Solve one cross-section (a track, or a pair with gap s; mil,
+                                                or mm with an mm suffix; --ground: copper G beside it on its layer):
+                                                impedance, modes, coupling, RLGC and loss; with out, draw the field
     trace panel <board> <cols>x<rows> <out.tracepcb> [--gap 2mm] [--rail 5mm] [--tabs N] [--vscore]
                                                 Panel of copies with rails, fiducials, tooling holes, and
                                                 tabs with mouse bites (or V-score lines); then fab or odb it
@@ -30,7 +38,7 @@ USAGE:
                                                 meanders where they fit; with out, save the board tuned
     trace sim <board> <U1.pin> <U2.pin> --ibis drv.ibs [--rx-ibis rx.ibs] [--model M] [--rx-model M]
               [--rate 1G] [--bits N] [--corner typ|min|max] [--term 50|50@0.9|100diff] [--single]
-              [--df 0.02] [--rough 1um] [--lossless] [--no-xtalk] [out.svg]
+              [--df 0.02] [--rough 1um] [--lossless] [--no-xtalk] [--formulas] [out.svg]
                                                 Simulate the route from a driver pin to a receiver pin with IBIS
                                                 models (a pair when the net has a partner): waveforms and eye,
                                                 with track loss and crosstalk from nets beside the route
@@ -74,7 +82,10 @@ fn main() -> ExitCode {
         ["check", file] => check(file),
         ["drc", file] => drc(file, 15),
         ["drc", file, "--all"] => drc(file, usize::MAX),
-        ["impedance", file] => impedance(file),
+        ["impedance", file] => impedance(file, false),
+        ["impedance", file, "--field"] => impedance(file, true),
+        ["field", file] => field_layers(file),
+        ["field", file, layer, w, rest @ ..] => field_one(file, layer, w, rest),
         ["panel", file, grid, out, rest @ ..] => panel(file, grid, out, rest),
         ["match", file, nets, rest @ ..] => match_nets(file, nets, rest),
         ["sim", file, from, to, rest @ ..] => sim(file, from, to, rest),
@@ -500,7 +511,214 @@ fn rules(file: &str) -> Res {
     Ok(())
 }
 
-fn impedance(file: &str) -> Res {
+/// The field solver on every copper layer.
+fn field_layers(file: &str) -> Res {
+    let Design::Board(b) = load(file)? else {
+        return Err("field needs a board".into());
+    };
+    let geo = b.layer_geometry();
+    let t0 = std::time::Instant::now();
+    println!(
+        "{:<14} {:>15} {:>12} {:>15} {:>7} {:>7} {:>8}",
+        "layer", "50R w field/ipc", "Z0 at w ipc", "100R w/s field", "ps/in", "dB/in", "dB/in"
+    );
+    println!(
+        "{:<14} {:>15} {:>12} {:>15} {:>7} {:>7} {:>8}",
+        "", "mil", "ohm", "mil", "", "1 GHz", "10 GHz"
+    );
+    for g in &geo {
+        let Some(w) = g.width_for_field(50.0) else {
+            println!("{:<14} -", g.name);
+            continue;
+        };
+        let wd = w * 0.75;
+        let s = g.gap_for_field(wd, 100.0);
+        let l = trace_core::field::single(g, w).ok_or("solver failed")?;
+        let td = g.tan_d.unwrap_or(0.02);
+        println!(
+            "{:<14} {:>7.2}/{:<7} {:>12.1} {:>15} {:>7.0} {:>7.3} {:>8.3}",
+            g.name,
+            w,
+            g.width_for(50.0)
+                .map(|x| format!("{x:.2}"))
+                .unwrap_or_else(|| "-".into()),
+            g.z0(w),
+            s.map(|s| format!("{wd:.2}/{s:.2}"))
+                .unwrap_or_else(|| "-".into()),
+            l.ps_per_in(),
+            l.db_per_in(1e9, td, g.rough_um),
+            l.db_per_in(1e10, td, g.rough_um)
+        );
+    }
+    println!(
+        "\n(Df {} where the stack-up gives none; solved in {:.1} s)",
+        0.02,
+        t0.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+/// One cross-section from the field solver.
+fn field_one(file: &str, layer: &str, w: &str, rest: &[&str]) -> Res {
+    let Design::Board(b) = load(file)? else {
+        return Err("field needs a board".into());
+    };
+    let geo = b.layer_geometry();
+    let g = layer
+        .parse::<usize>()
+        .ok()
+        .and_then(|n| geo.get(n.checked_sub(1)?))
+        .or_else(|| geo.iter().find(|g| g.name.eq_ignore_ascii_case(layer)))
+        .ok_or_else(|| {
+            format!(
+                "no copper layer {layer}; layers: {}",
+                geo.iter()
+                    .map(|g| g.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+    let len = |v: &str| -> Result<f64, String> {
+        let (n, k) = match v.strip_suffix("mm") {
+            Some(n) => (n, 1.0 / 0.0254),
+            None => (v.trim_end_matches("mil"), 1.0),
+        };
+        n.parse::<f64>()
+            .map(|x| x * k)
+            .map_err(|_| format!("not a length: {v}"))
+    };
+    let w = len(w)?;
+    // `--ground G`: ground copper G beside the track on its own layer.
+    let mut side = None;
+    let mut args: Vec<&str> = Vec::new();
+    let mut it = rest.iter();
+    while let Some(&a) = it.next() {
+        if a == "--ground" {
+            side = Some(len(it.next().ok_or("--ground needs a gap")?)?);
+        } else {
+            args.push(a);
+        }
+    }
+    let rest = args.as_slice();
+    let (s, out) = match rest {
+        [] => (None, None),
+        [x] if x.ends_with(".svg") => (None, Some(*x)),
+        [x] => (Some(len(x)?), None),
+        [x, o] => (Some(len(x)?), Some(*o)),
+        _ => return Err("too many arguments".into()),
+    };
+    let fmt = |v: Option<f64>| v.map_or("-".into(), |x| format!("{x:.2}"));
+    println!(
+        "{}: copper {:.2} mil, {} mil above, {} mil below, Er {:.2}{}",
+        g.name,
+        g.t,
+        fmt(g.above),
+        fmt(g.below),
+        g.er,
+        g.mask
+            .map(|m| format!(", solder mask {:.2} mil Er {:.2}", m[0], m[1]))
+            .unwrap_or_default()
+    );
+    for (side, sl) in [("above", &g.slabs_above), ("below", &g.slabs_below)] {
+        if !sl.is_empty() {
+            let v: Vec<String> = sl
+                .iter()
+                .map(|x| {
+                    format!(
+                        "{:.2} mil Er {:.2}{}",
+                        x[0],
+                        x[1],
+                        if x[2] >= 0.0 {
+                            format!(" Df {:.4}", x[2])
+                        } else {
+                            String::new()
+                        }
+                    )
+                })
+                .collect();
+            println!("  {side}: {}", v.join(", "));
+        }
+    }
+    let t0 = std::time::Instant::now();
+    let td = g.tan_d.unwrap_or(0.02);
+    let (pic, title) = match s {
+        None => {
+            let (l, pic) = trace_core::field::single_picture(g, w, side).ok_or("solver failed")?;
+            if let Some(gap) = side {
+                println!("ground beside the track {gap:.2} mil from each edge (coplanar)");
+            }
+            println!(
+                "track {w:.2} mil: Z0 {:.2} ohm (microstrip/stripline formula {:.2}), Er eff {:.3}, {:.1} ps/in",
+                l.z0,
+                g.z0(w),
+                l.eeff,
+                l.ps_per_in()
+            );
+            println!(
+                "  L {:.2} nH/in, C {:.3} pF/in, R dc {:.3} ohm/in, R 1 GHz {:.3} ohm/in (smooth)",
+                l.l * 0.0254 * 1e9,
+                l.c * 0.0254 * 1e12,
+                l.r_dc * 0.0254,
+                l.r_ghz * 0.0254
+            );
+            println!(
+                "  loss {:.3} dB/in at 1 GHz, {:.3} at 10 GHz (Df {:.4}, roughness {})",
+                l.db_per_in(1e9, td, g.rough_um),
+                l.db_per_in(1e10, td, g.rough_um),
+                if l.fill_given > 0.0 {
+                    l.tan_eff / l.fill_given
+                } else {
+                    td
+                },
+                g.rough_um.map_or("none".into(), |r| format!("{r} um"))
+            );
+            (pic, format!("{} · {w:.2} mil · Z0 {:.1} Ω", g.name, l.z0))
+        }
+        Some(s) => {
+            let (p, pic) = trace_core::field::pair_picture(g, w, s, side).ok_or("solver failed")?;
+            println!(
+                "pair {w:.2}/{s:.2} mil: Zdiff {:.2} ohm (formula {:.2}), Zcomm {:.2} ohm",
+                p.zdiff,
+                g.zdiff(w, s),
+                p.zcomm
+            );
+            println!(
+                "  Z odd {:.2}, Z even {:.2} ohm; Er eff odd {:.3}, even {:.3}; single Z0 {:.2} ohm",
+                p.z_odd, p.z_even, p.e_odd, p.e_even, p.single.z0
+            );
+            println!(
+                "  coupling: near end {:.2} %, far end {:.3} ps/in of rise time",
+                100.0 * p.kb,
+                // Far-end crosstalk = Kf · delay · dV/dt.
+                p.kf * p.single.ps_per_in()
+            );
+            let alpha_c = p.r_odd_ghz / (2.0 * p.z_odd);
+            let alpha_d = PI_ * 1e9 * p.e_odd.sqrt() / 2.998e8
+                * (p.tan_odd + (1.0 - p.single.fill_given) * td * p.single.fill);
+            println!(
+                "  differential loss {:.3} dB/in at 1 GHz (smooth copper)",
+                8.686 * (alpha_c + alpha_d) * 0.0254
+            );
+            (
+                pic,
+                format!(
+                    "{} · {w:.2}/{s:.2} mil · Zdiff {:.1} Ω (odd mode)",
+                    g.name, p.zdiff
+                ),
+            )
+        }
+    };
+    println!("  solved in {:.2} s", t0.elapsed().as_secs_f64());
+    if let Some(out) = out {
+        std::fs::write(out, pic.svg(900.0, &title))?;
+        println!("Wrote {out}");
+    }
+    Ok(())
+}
+
+const PI_: f64 = std::f64::consts::PI;
+
+fn impedance(file: &str, field: bool) -> Res {
     let Design::Board(b) = load(file)? else {
         return Err("impedance needs a board".into());
     };
@@ -529,7 +747,38 @@ fn impedance(file: &str) -> Res {
             g.delay_ps_per_in(w50.unwrap_or(5.0))
         );
     }
-    let rows = b.net_impedance();
+    let t0 = std::time::Instant::now();
+    let rows = b.net_impedance_model(&geo, field);
+    if field {
+        println!("\nfield solver: {:.1} s", t0.elapsed().as_secs_f64());
+        let mut cpw: Vec<_> = rows
+            .iter()
+            .filter(|r| r.side != [None, None] && r.zdiff.is_none())
+            .collect();
+        cpw.sort_by(|a, b| b.length.total_cmp(&a.length));
+        if !cpw.is_empty() {
+            println!("\ntracks with pour beside them (coplanar), longest first");
+            println!(
+                "{:<28} {:<10} {:>6} {:>13} {:>7} {:>7} {:>8}",
+                "net", "layer", "w", "pour gaps", "Z0", "no pour", "length"
+            );
+            for r in cpw.iter().take(25) {
+                let g = &geo[r.layer as usize];
+                println!(
+                    "{:<28} {:<10} {:>6.2} {:>13} {:>7.1} {:>7.1} {:>8.0}",
+                    clip(&b.nets[r.net as usize].name, 28),
+                    g.name,
+                    r.width,
+                    r.side
+                        .map(|s| s.map_or("-".into(), |x| format!("{x:.2}")))
+                        .join(" / "),
+                    r.z0,
+                    g.z0_field(r.width),
+                    r.length
+                );
+            }
+        }
+    }
     let mut pairs: Vec<_> = rows.iter().filter(|r| r.zdiff.is_some()).collect();
     pairs.sort_by(|a, b| b.length.total_cmp(&a.length));
     if !pairs.is_empty() {
@@ -792,13 +1041,14 @@ fn sim(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     let mut opt: std::collections::HashMap<&str, &str> = Default::default();
     let mut out = None;
     let mut single = false;
-    let (mut lossless, mut quiet) = (false, false);
+    let (mut lossless, mut quiet, mut formulas) = (false, false, false);
     let mut it = rest.iter();
     while let Some(&a) = it.next() {
         match a {
             "--single" => single = true,
             "--lossless" => lossless = true,
             "--no-xtalk" => quiet = true,
+            "--formulas" => formulas = true,
             _ if a.starts_with("--") => {
                 let v = it.next().ok_or(format!("{a} needs a value"))?;
                 opt.insert(a, v);
@@ -882,6 +1132,7 @@ fn sim(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
             Some(l)
         },
         crosstalk: !quiet,
+        field: !formulas,
     };
     let t0 = std::time::Instant::now();
     let run = sim::simulate(

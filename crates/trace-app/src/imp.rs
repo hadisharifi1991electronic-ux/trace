@@ -5,6 +5,8 @@
 use eframe::egui::{self, Color32, RichText};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
+use std::sync::{mpsc, Arc};
+use trace_core::field::{Line, Pair, Picture};
 use trace_core::impedance::{layer_geometry, LayerGeometry, NetImpedance, DEFAULT_ER};
 use trace_core::{Board, LayerKind, Length, Stackup};
 
@@ -67,8 +69,95 @@ fn matches(name: &str, pattern: &str) -> bool {
     true
 }
 
+/// Work done off the window's thread: the latest result for a key, and
+/// the job running for another.
+struct Bg<T> {
+    done: Option<(u64, T)>,
+    running: Option<(u64, mpsc::Receiver<T>)>,
+}
+
+impl<T: Send + 'static> Bg<T> {
+    fn new() -> Self {
+        Bg {
+            done: None,
+            running: None,
+        }
+    }
+
+    /// The newest result (perhaps for an older key), starting the job
+    /// `make` gives when nothing is running and the result is not for
+    /// `key`.
+    fn get<F: FnOnce() -> T + Send + 'static>(
+        &mut self,
+        key: u64,
+        ctx: &egui::Context,
+        make: impl FnOnce() -> F,
+    ) -> Option<&T> {
+        if let Some((k, rx)) = &self.running {
+            match rx.try_recv() {
+                Ok(v) => {
+                    self.done = Some((*k, v));
+                    self.running = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100))
+                }
+                Err(mpsc::TryRecvError::Disconnected) => self.running = None,
+            }
+        }
+        if self.running.is_none() && self.done.as_ref().is_none_or(|d| d.0 != key) {
+            let f = make();
+            let (tx, rx) = mpsc::channel();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(f());
+                ctx.request_repaint();
+            });
+            self.running = Some((key, rx));
+            self.done.as_ref().map(|d| &d.1)
+        } else {
+            self.done.as_ref().map(|d| &d.1)
+        }
+    }
+
+    fn busy(&self) -> bool {
+        self.running.is_some()
+    }
+
+    fn fresh(&self, key: u64) -> bool {
+        self.done.as_ref().is_some_and(|d| d.0 == key)
+    }
+}
+
+/// One layer's widths from the field solver: 50 Ω-style width, pair width
+/// and gap, delay.
+#[derive(Clone, Copy)]
+struct LayerSolve {
+    w: Option<f64>,
+    pair: Option<(f64, f64)>,
+    ps: f64,
+}
+
+/// The calculator's cross-section, solved.
+struct Calc {
+    line: Option<Line>,
+    pair: Option<Pair>,
+    picture: Option<Arc<Picture>>,
+}
+
 pub struct Imp {
     pub open: bool,
+    /// Use the 2D field solver rather than formulas.
+    field: bool,
+    /// Bumped when the stack-up or board changes.
+    gen: u64,
+    field_rows: Bg<Vec<NetImpedance>>,
+    field_layers: Bg<Vec<LayerSolve>>,
+    calc: Bg<Calc>,
+    /// Pour beside the calculator's track on its layer, and its gap.
+    calc_ground: bool,
+    calc_g: f64,
+    show_field: bool,
     saved: HashMap<String, Saved>,
     key: String,
     board_stackup: Stackup,
@@ -93,6 +182,14 @@ impl Imp {
     pub fn new(stored: Option<String>) -> Self {
         Imp {
             open: false,
+            field: true,
+            gen: 0,
+            field_rows: Bg::new(),
+            field_layers: Bg::new(),
+            calc: Bg::new(),
+            calc_ground: false,
+            calc_g: 6.0,
+            show_field: true,
             saved: stored
                 .and_then(|s| serde_json::from_str(&s).ok())
                 .unwrap_or_default(),
@@ -118,6 +215,7 @@ impl Imp {
     /// The board's copper changed; results are worked out again.
     pub fn board_changed(&mut self) {
         self.rows = None;
+        self.gen += 1;
     }
 
     pub fn to_store(&self) -> String {
@@ -162,6 +260,7 @@ impl Imp {
     fn changed(&mut self, keep: bool) {
         self.geo = layer_geometry(&self.stackup);
         self.rows = None;
+        self.gen += 1;
         if keep {
             self.saved.insert(
                 self.key.clone(),
@@ -245,7 +344,55 @@ impl Imp {
             }
             self.rows = Some(board.net_impedance_with(&self.geo));
         }
+        if self.field && self.field_rows.fresh(self.gen) {
+            if let Some((_, r)) = &self.field_rows.done {
+                return r;
+            }
+        }
         self.rows.as_ref().unwrap()
+    }
+
+    /// Starts (or polls) the field solver on the routed nets and on each
+    /// layer's widths.
+    fn solve_field(&mut self, ctx: &egui::Context, board: &Board) {
+        if !self.field {
+            return;
+        }
+        let gen = self.gen;
+        let geo = &self.geo;
+        self.field_rows.get(gen, ctx, || {
+            let (b, geo) = (board.clone(), geo.clone());
+            move || b.net_impedance_model(&geo, true)
+        });
+        let (se, diff) = (self.se, self.diff);
+        let key = gen ^ ((se * 1000.0) as u64) << 20 ^ ((diff * 1000.0) as u64) << 40;
+        self.field_layers.get(key, ctx, || {
+            let geo = geo.clone();
+            move || {
+                let solve = |g: &LayerGeometry| {
+                    let w = g.width_for_field(se);
+                    let pw = g.width_for_field(diff / 2.0).map(|w| w * 0.8);
+                    let pair = pw.and_then(|pw| Some((pw, g.gap_for_field(pw, diff)?)));
+                    LayerSolve {
+                        w,
+                        pair,
+                        ps: g.delay_field(w.unwrap_or(5.0)),
+                    }
+                };
+                std::thread::scope(|sc| {
+                    let hs: Vec<_> = geo.iter().map(|g| sc.spawn(move || solve(g))).collect();
+                    hs.into_iter()
+                        .map(|h| {
+                            h.join().unwrap_or(LayerSolve {
+                                w: None,
+                                pair: None,
+                                ps: f64::NAN,
+                            })
+                        })
+                        .collect()
+                })
+            }
+        });
     }
 
     /// Shows the window; returns a net the person clicked.
@@ -266,7 +413,19 @@ impl Imp {
 
     fn body(&mut self, ui: &mut egui::Ui, board: &Board) -> Option<u32> {
         let mut edited = false;
+        let ctx = ui.ctx().clone();
+        self.solve_field(&ctx, board);
         ui.horizontal(|ui| {
+            ui.checkbox(&mut self.field, "Field solver").on_hover_text(
+                "Solve each cross-section numerically (2D field solver): every dielectric with \
+                 its own Er and Df, the copper's thickness, the solder mask, and pour beside \
+                 the tracks as coplanar ground. Off: closed-form formulas",
+            );
+            if self.field && (self.field_rows.busy() || self.field_layers.busy()) {
+                ui.spinner();
+                ui.label(RichText::new("solving…").weak());
+            }
+            ui.separator();
             ui.label("Single-ended target");
             edited |= ui
                 .add(
@@ -495,9 +654,30 @@ impl Imp {
                                 ci += 1;
                                 match g {
                                     Some(g) => {
-                                        let w = g.width_for(self.se);
-                                        let pw = g.width_for(self.diff / 2.0).map(|w| w * 0.8);
-                                        let ps = pw.and_then(|w| g.gap_for(w, self.diff));
+                                        let solved = self
+                                            .field
+                                            .then(|| {
+                                                self.field_layers
+                                                    .done
+                                                    .as_ref()
+                                                    .and_then(|d| d.1.get(ci - 1).copied())
+                                            })
+                                            .flatten();
+                                        let (w, pw, ps, delay) = match solved {
+                                            Some(f) => (
+                                                f.w,
+                                                f.pair.map(|p| p.0),
+                                                f.pair.map(|p| p.1),
+                                                f.ps,
+                                            ),
+                                            None => {
+                                                let w = g.width_for(self.se);
+                                                let pw =
+                                                    g.width_for(self.diff / 2.0).map(|w| w * 0.8);
+                                                let ps = pw.and_then(|w| g.gap_for(w, self.diff));
+                                                (w, pw, ps, g.delay_ps_per_in(w.unwrap_or(5.0)))
+                                            }
+                                        };
                                         let f = |v: Option<f64>| {
                                             v.map(|x| {
                                                 if self.mm {
@@ -513,10 +693,7 @@ impl Imp {
                                             (Some(_), Some(_)) => format!("{} / {}", f(pw), f(ps)),
                                             _ => "–".into(),
                                         });
-                                        ui.label(format!(
-                                            "{:.0}",
-                                            g.delay_ps_per_in(w.unwrap_or(5.0))
-                                        ));
+                                        ui.label(format!("{delay:.0}"));
                                     }
                                     None => {
                                         ui.label("");
@@ -563,9 +740,52 @@ impl Imp {
                 self.calc_s = s / k;
             }
             ui.label(unit);
-            if let Some(g) = self.geo.get(self.calc_layer) {
-                let z0 = g.z0(self.calc_w);
-                let zd = g.zdiff(self.calc_w, self.calc_s);
+            ui.checkbox(&mut self.calc_ground, "pour beside, gap")
+                .on_hover_text("Ground copper on the track's own layer, this far from each edge (coplanar waveguide with ground)");
+            let mut gg = self.calc_g * k;
+            if ui
+                .add_enabled(
+                    self.calc_ground,
+                    egui::DragValue::new(&mut gg).speed(0.01).range(0.01..=500.0),
+                )
+                .changed()
+            {
+                self.calc_g = gg / k;
+            }
+            if let Some(g) = self.geo.get(self.calc_layer).cloned() {
+                let (w, sp) = (self.calc_w, self.calc_s);
+                let side = self.calc_ground.then_some(self.calc_g);
+                let key = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    (self.gen, self.calc_layer, w.to_bits(), sp.to_bits(), side.map(f64::to_bits))
+                        .hash(&mut h);
+                    h.finish()
+                };
+                let solved = if self.field {
+                    let gc = g.clone();
+                    self.calc.get(key, &ctx, || {
+                        move || {
+                            let pair = trace_core::field::pair_picture(&gc, w, sp, side);
+                            let line = trace_core::field::single_with(&gc, w, side);
+                            Calc {
+                                line,
+                                picture: pair.as_ref().map(|p| p.1.clone()),
+                                pair: pair.map(|p| p.0),
+                            }
+                        }
+                    });
+                    self.calc.done.as_ref().filter(|d| d.0 == key).map(|d| &d.1)
+                } else {
+                    None
+                };
+                let (z0, zd) = match solved {
+                    Some(c) => (
+                        c.line.as_ref().map_or(f64::NAN, |l| l.z0),
+                        c.pair.as_ref().map_or(f64::NAN, |p| p.zdiff),
+                    ),
+                    None => (g.z0(w), g.zdiff(w, sp)),
+                };
                 ui.separator();
                 ui.label(
                     RichText::new(format!("Z0 {z0:.1} Ω"))
@@ -578,15 +798,67 @@ impl Imp {
                         .color(if self.off(zd, self.diff) { FAIL } else { PASS }),
                 );
                 ui.label(
-                    RichText::new(if g.is_outer() {
-                        "microstrip"
-                    } else {
-                        "stripline"
+                    RichText::new(match (g.is_outer(), side.is_some()) {
+                        (true, false) => "microstrip",
+                        (false, false) => "stripline",
+                        (true, true) => "coplanar, microstrip",
+                        (false, true) => "coplanar, stripline",
                     })
                     .weak(),
                 );
+                if self.field && self.calc.busy() {
+                    ui.spinner();
+                }
             }
         });
+        if self.field {
+            let details = self.calc.done.as_ref().map(|d| &d.1);
+            if let Some(Calc {
+                line: Some(l),
+                pair,
+                picture,
+            }) = details
+            {
+                let td = self
+                    .geo
+                    .get(self.calc_layer)
+                    .and_then(|g| g.tan_d)
+                    .unwrap_or(0.02);
+                let rough = self.geo.get(self.calc_layer).and_then(|g| g.rough_um);
+                ui.horizontal_wrapped(|ui| {
+                    ui.label(
+                        RichText::new(format!(
+                            "Er eff {:.2} · {:.0} ps/in · L {:.2} nH/in · C {:.2} pF/in · loss {:.3} dB/in at 1 GHz, {:.2} at 10 GHz",
+                            l.eeff,
+                            l.ps_per_in(),
+                            l.l * 0.0254e9,
+                            l.c * 0.0254e12,
+                            l.db_per_in(1e9, td, rough),
+                            l.db_per_in(1e10, td, rough)
+                        ))
+                        .small(),
+                    );
+                    if let Some(p) = pair {
+                        ui.label(
+                            RichText::new(format!(
+                                "· pair: Z odd {:.1}, Z even {:.1}, Zcomm {:.1} Ω, near-end coupling {:.1} %",
+                                p.z_odd,
+                                p.z_even,
+                                p.zcomm,
+                                p.kb * 100.0
+                            ))
+                            .small(),
+                        );
+                    }
+                    ui.checkbox(&mut self.show_field, "Show the field");
+                });
+                if self.show_field {
+                    if let Some(pic) = picture.clone() {
+                        draw_picture(ui, &pic, self.mm);
+                    }
+                }
+            }
+        }
         ui.separator();
         // Routed nets.
         ui.horizontal(|ui| {
@@ -687,12 +959,93 @@ impl Imp {
             });
         ui.label(
             RichText::new(
-                "Closed-form models (Hammerstad–Jensen microstrip, Wheeler stripline, IPC-2141 coupling); every copper layer is taken as a reference plane and solder mask is ignored. Expect a few percent against a field solver.",
+                if self.field {
+                    "2D field solver: each cross-section meshed and solved (finite volumes), with every dielectric's Er and Df, the copper's thickness, the solder mask, and pour beside a track (within 3 dielectric heights) as coplanar ground; loss by Wheeler's rule. Every copper layer is taken as a reference plane."
+                } else {
+                    "Closed-form models (Hammerstad–Jensen microstrip, Wheeler stripline, IPC-2141 coupling); every copper layer is taken as a reference plane and solder mask is ignored. Expect a few percent against a field solver."
+                },
             )
             .weak()
             .small(),
         );
         pick
+    }
+}
+
+/// The calculator's pair cross-section: the odd mode's potential, the
+/// dielectric slabs and the copper.
+fn draw_picture(ui: &mut egui::Ui, pic: &Picture, mm: bool) {
+    let [x0, x1, y0, y1] = pic.view();
+    let width = ui.available_width().clamp(200.0, 900.0);
+    let height = (width * ((y1 - y0) / (x1 - x0)) as f32).clamp(80.0, 260.0);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(width, height), egui::Sense::hover());
+    let painter = ui.painter_at(rect);
+    let sx = |x: f64| rect.left() + ((x - x0) / (x1 - x0)) as f32 * width;
+    let sy = |y: f64| rect.bottom() - ((y - y0) / (y1 - y0)) as f32 * height;
+    let mut mesh = egui::Mesh::default();
+    let (cols, rows) = (140usize, ((140.0 * height / width) as usize).max(20));
+    for r in 0..rows {
+        for c in 0..cols {
+            let (fx, fy) = (
+                x0 + (x1 - x0) * (c as f64 + 0.5) / cols as f64,
+                y1 - (y1 - y0) * (r as f64 + 0.5) / rows as f64,
+            );
+            let [cr, cg, cb] = Picture::color(pic.at(fx, fy));
+            let cell = egui::Rect::from_min_size(
+                egui::pos2(
+                    rect.left() + c as f32 * width / cols as f32,
+                    rect.top() + r as f32 * height / rows as f32,
+                ),
+                egui::vec2(width / cols as f32 + 0.5, height / rows as f32 + 0.5),
+            );
+            mesh.add_colored_rect(cell, Color32::from_rgb(cr, cg, cb));
+        }
+    }
+    painter.add(egui::Shape::mesh(mesh));
+    for &(_, b, _) in &pic.slabs {
+        if b > y0 && b < y1 {
+            painter.line_segment(
+                [
+                    egui::pos2(rect.left(), sy(b)),
+                    egui::pos2(rect.right(), sy(b)),
+                ],
+                egui::Stroke::new(0.5_f32, Color32::from_white_alpha(70)),
+            );
+        }
+    }
+    for c in &pic.copper {
+        let r = egui::Rect::from_min_max(
+            egui::pos2(sx(c[0].max(x0)), sy(c[3].min(y1))),
+            egui::pos2(
+                sx(c[1].min(x1)),
+                sy(c[2].max(y0)).max(sy(c[3].min(y1)) + 1.5),
+            ),
+        );
+        painter.rect_filled(r, 0.0, Color32::from_rgb(217, 130, 43));
+    }
+    let shown = pic.slabs.iter().filter(|s| {
+        s.2 > 1.0 && (s.0 + s.1) / 2.0 < y1 && (s.1 - s.0) / (y1 - y0) * height as f64 > 12.0
+    });
+    for &(a, b, er) in shown {
+        painter.text(
+            egui::pos2(rect.left() + 4.0, sy((a + b) / 2.0)),
+            egui::Align2::LEFT_CENTER,
+            format!("Er {er:.2}"),
+            egui::FontId::proportional(11.0),
+            Color32::from_white_alpha(200),
+        );
+    }
+    if let Some(p) = resp.hover_pos() {
+        let x = x0 + ((p.x - rect.left()) / width) as f64 * (x1 - x0);
+        let y = y0 + ((rect.bottom() - p.y) / height) as f64 * (y1 - y0);
+        let k = if mm { 0.0254 } else { 1.0 };
+        resp.on_hover_text(format!(
+            "{:.3}, {:.3} {}: {:+.3} V (odd mode, ±1 V)",
+            x * k,
+            y * k,
+            if mm { "mm" } else { "mil" },
+            pic.at(x, y)
+        ));
     }
 }
 

@@ -96,10 +96,40 @@ pub struct Raw {
     pub len: f64,
 }
 
+/// Kb and Kf of two tracks `w` wide `s` apart on layer `g`, from the
+/// field solver: solved at a few gaps from 0.1 to 6 dielectric heights
+/// (kept for the next call) and interpolated on the log of the gap.
+pub fn field_coupling(g: &LayerGeometry, w: f64, s: f64) -> Option<(f64, f64)> {
+    let h = match (g.above, g.below) {
+        (Some(a), Some(b)) => a.min(b),
+        (Some(a), None) | (None, Some(a)) => a,
+        _ => return None,
+    };
+    let w = (w * 20.0).round().max(1.0) / 20.0;
+    let gaps: Vec<f64> = (0..8)
+        .map(|i| 0.1 * h * 60f64.powf(i as f64 / 7.0))
+        .collect();
+    let s = s.clamp(gaps[0], gaps[7]);
+    let k = gaps.iter().position(|&x| x >= s).unwrap_or(7).max(1);
+    let (a, b) = (
+        crate::field::pair(g, w, gaps[k - 1])?,
+        crate::field::pair(g, w, gaps[k])?,
+    );
+    let f = (s / gaps[k - 1]).ln() / (gaps[k] / gaps[k - 1]).ln();
+    // Kb falls about as a power of the gap: interpolate its log.
+    let kb = if a.kb > 0.0 && b.kb > 0.0 {
+        (a.kb.ln() * (1.0 - f) + b.kb.ln() * f).exp()
+    } else {
+        a.kb * (1.0 - f) + b.kb * f
+    };
+    Some((kb, a.kf * (1.0 - f) + b.kf * f))
+}
+
 /// Every stretch where tracks of `victims` run parallel to tracks of
 /// other nets within reach (four dielectric heights, at most 50 mil edge
-/// to edge). Nets with copper areas (planes) are left out.
-pub fn find(board: &Board, victims: &[u32]) -> Vec<Raw> {
+/// to edge). Nets with copper areas (planes) are left out. With `field`,
+/// the coupling comes from the field solver.
+pub fn find(board: &Board, victims: &[u32], field: bool) -> Vec<Raw> {
     let geo = board.layer_geometry();
     let g = &board.geometry;
     let planes: std::collections::HashSet<u32> = g.polygons.iter().filter_map(|p| p.net).collect();
@@ -174,7 +204,10 @@ pub fn find(board: &Board, victims: &[u32]) -> Vec<Raw> {
             if !(ze.is_finite() && zo.is_finite() && ze > zo) {
                 continue;
             }
-            let (kb, kf) = coefficients(ze, zo, ee, eo);
+            let (kb, kf) = match field.then(|| field_coupling(lg, w, gap)).flatten() {
+                Some(k) => k,
+                None => coefficients(ze, zo, ee, eo),
+            };
             let r = |x: f64| (x - p1) / (p2 - p1);
             out.push(Raw {
                 victim: vn,
@@ -206,6 +239,9 @@ mod tests {
             er: 4.2,
             tan_d: None,
             rough_um: None,
+            slabs_above: Vec::new(),
+            slabs_below: Vec::new(),
+            mask: None,
         }
     }
 

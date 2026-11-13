@@ -3,6 +3,31 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.40.0 (2026-11-13)
+
+- 2D field solver for transmission lines. Each cross-section is meshed
+  (graded, fine at the copper's edges) and Laplace's equation solved by
+  finite volumes, with every dielectric's own Er and Df, the copper's
+  thickness, the solder mask over outer layers, and pour beside a track
+  on its own layer as coplanar ground (found by itself, each side apart).
+  It gives Z0, Zdiff, odd and even modes, Er eff, delay, L and C, near-
+  and far-end coupling, and loss (Wheeler's incremental inductance rule
+  for the copper, field energy per slab for the dielectric).
+- Checked against exact results: thin stripline within 1 % of Cohn's
+  formula, thin microstrip within 2 % of Hammerstad-Jensen, edge-coupled
+  stripline modes within 2 % of Cohn, coplanar waveguide with ground
+  within 1-3 % of conformal mapping, wide-strip loss equal to Rs/w.
+- Impedance window: "Field solver" (on by default) solves the stack-up's
+  widths and every routed net in the background; the calculator takes a
+  pour gap and shows the modes, delay, L, C, loss and a picture of the
+  field.
+- Signal simulation takes track impedance, delay, loss and crosstalk
+  coupling from the solver ("Field solver" in the window, `--formulas`
+  for the old closed forms).
+- `trace field board` (each layer) and `trace field board layer w [s]
+  [--ground G] [out.svg]` (one cross-section, with a picture);
+  `trace impedance board --field`.
+
 ## 0.39.0 (2026-11-13)
 
 - Assembly drawings as PDF: File > Export assembly drawing (PDF)… or

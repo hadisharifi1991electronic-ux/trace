@@ -51,6 +51,7 @@ pub struct SimWindow {
     tan_d: f64,
     rough_um: f64,
     crosstalk: bool,
+    field: bool,
     result: Option<Result<(Run, String), String>>,
 }
 
@@ -75,6 +76,7 @@ impl Default for SimWindow {
             tan_d: sim::Loss::default().tan_d,
             rough_um: sim::Loss::default().rough_um,
             crosstalk: true,
+            field: true,
             result: None,
         }
     }
@@ -321,6 +323,11 @@ impl SimWindow {
                 "Drive the nets running beside the route (with the driver and receiver models) \
                  and add their near- and far-end crosstalk",
             );
+            ui.checkbox(&mut self.field, "Field solver").on_hover_text(
+                "Track impedance, delay, loss and coupling from the 2D field solver (each \
+                 dielectric, the solder mask and the copper's thickness), rather than \
+                 closed-form formulas. Slower the first time each width is met",
+            );
         });
         ui.horizontal(|ui| {
             if ui.button("Simulate").clicked() {
@@ -422,6 +429,7 @@ impl SimWindow {
                 stackup_rough: self.from_stackup,
             }),
             crosstalk: self.crosstalk,
+            field: self.field,
         };
         let run = sim::simulate(
             board,

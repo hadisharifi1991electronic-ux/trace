@@ -15,6 +15,7 @@ pub mod file;
 pub mod font;
 pub mod footprint;
 pub mod geometry;
+pub mod ibis;
 pub mod impedance;
 pub mod panel;
 pub mod place;
@@ -22,6 +23,7 @@ pub mod pour;
 pub mod route;
 pub mod sch_edit;
 pub mod schematic;
+pub mod sim;
 pub mod units;
 pub mod walk;
 

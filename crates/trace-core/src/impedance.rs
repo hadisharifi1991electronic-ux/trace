@@ -308,7 +308,7 @@ impl Board {
 
     /// Edge gap from a track to the nearest parallel track of `other` on the
     /// same layer, when they run side by side.
-    fn pair_gap(&self, t: &crate::Track, other: u32) -> Option<f64> {
+    pub(crate) fn pair_gap(&self, t: &crate::Track, other: u32) -> Option<f64> {
         let (ax, ay) = (t.start.x.mil(), t.start.y.mil());
         let (bx, by) = (t.end.x.mil(), t.end.y.mil());
         let (dx, dy) = (bx - ax, by - ay);

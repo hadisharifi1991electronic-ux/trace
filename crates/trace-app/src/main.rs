@@ -13,6 +13,7 @@ mod placing;
 mod router;
 mod scene;
 mod schview;
+mod simwin;
 mod symlib;
 mod toolbar;
 mod view3d;
@@ -110,6 +111,7 @@ pub struct App {
     scroll_tab: bool,
     pub drc: drc::Drc,
     panel: panelize::PanelWindow,
+    sim: simwin::SimWindow,
     /// The part being dragged.
     moving: Option<placing::Moving>,
     /// The next board edit joins the last step (a part placed then dropped).
@@ -182,6 +184,7 @@ impl App {
             scroll_tab: false,
             drc: drc::Drc::default(),
             panel: panelize::PanelWindow::default(),
+            sim: simwin::SimWindow::default(),
             moving: None,
             join_next: false,
             new_span: (1, 2),
@@ -1260,6 +1263,17 @@ impl App {
                 {
                     ui.close_menu();
                     self.imp.open = true;
+                }
+                if ui
+                    .add_enabled(
+                        self.scene.is_some(),
+                        egui::Button::new("Signal simulation (IBIS)…"),
+                    )
+                    .on_hover_text("Waveforms and the eye of the selected net, driven and received by IBIS models")
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.sim.open = true;
                 }
             });
             ui.menu_button("Help", |ui| {
@@ -2980,6 +2994,9 @@ impl eframe::App for App {
         if let Some(n) = pick {
             self.mode3d = false;
             self.select_net(n, true);
+        }
+        if let Some(scene) = &self.scene {
+            self.sim.show(ctx, &scene.board, self.selected);
         }
     }
 

@@ -28,6 +28,10 @@ USAGE:
     trace match <board> <net,net,...> [out.tracepcb] [--target L] [--amp L]
                                                 Match the nets' lengths (to the longest, or the target) with
                                                 meanders where they fit; with out, save the board tuned
+    trace sim <board> <U1.pin> <U2.pin> --ibis drv.ibs [--rx-ibis rx.ibs] [--model M] [--rx-model M]
+              [--rate 1G] [--bits N] [--corner typ|min|max] [--term 50|50@0.9|100diff] [--single] [out.svg]
+                                                Simulate the route from a driver pin to a receiver pin with IBIS
+                                                models (a pair when the net has a partner): waveforms and eye
     trace stubs <board> [out.tracepcb]          Via stubs on nets with a stub rule (default: pair nets, 10 mil);
                                                 with out, backdrill those too long and save the board
     trace view <board> [out.html]               Open the board in the viewer (in your browser)
@@ -69,6 +73,7 @@ fn main() -> ExitCode {
         ["impedance", file] => impedance(file),
         ["panel", file, grid, out, rest @ ..] => panel(file, grid, out, rest),
         ["match", file, nets, rest @ ..] => match_nets(file, nets, rest),
+        ["sim", file, from, to, rest @ ..] => sim(file, from, to, rest),
         ["stubs", file] => stubs(file, None),
         ["stubs", file, out] => stubs(file, Some(out)),
         ["convert", file, out] => convert(file, out),
@@ -769,6 +774,144 @@ fn match_nets(file: &str, nets: &str, rest: &[&str]) -> Res {
         }
         trace_core::connectivity::analyse(&mut b);
         trace_core::file::save(&b, Path::new(out))?;
+        println!("Saved {out}");
+    }
+    Ok(())
+}
+
+fn sim(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
+    use trace_core::ibis::{self, Corner};
+    use trace_core::sim::{self, End, Pins, Setup, Term};
+    let b = board(file)?;
+    let mut opt: std::collections::HashMap<&str, &str> = Default::default();
+    let mut out = None;
+    let mut single = false;
+    let mut it = rest.iter();
+    while let Some(&a) = it.next() {
+        match a {
+            "--single" => single = true,
+            _ if a.starts_with("--") => {
+                let v = it.next().ok_or(format!("{a} needs a value"))?;
+                opt.insert(a, v);
+            }
+            _ => out = Some(a),
+        }
+    }
+    let part = |s: &str| -> Result<(String, String), String> {
+        let (d, p) = s.split_once('.').ok_or(format!(
+            "{s}: give the pin as designator.pin, such as U1.A5"
+        ))?;
+        Ok((d.to_string(), p.to_string()))
+    };
+    let ((dd, dp), (rd, rp)) = (part(from)?, part(to)?);
+    let pad = |d: &str, p: &str| sim::find_pad(&b, d, p).ok_or(format!("no pad {p} on {d}"));
+    let (dpad, rpad) = (pad(&dd, &dp)?, pad(&rd, &rp)?);
+    let ibs = opt.get("--ibis").ok_or("--ibis file.ibs is needed")?;
+    let fd = ibis::load(Path::new(ibs))?;
+    let fr = match opt.get("--rx-ibis") {
+        Some(p) => ibis::load(Path::new(p))?,
+        None => fd.clone(),
+    };
+    let (dm, dpkg) = sim::pin_model(&fd, &dp, opt.get("--model").copied(), true)?;
+    let (rm, rpkg) = sim::pin_model(&fr, &rp, opt.get("--rx-model").copied(), false)?;
+    let corner = match opt.get("--corner").copied().unwrap_or("typ") {
+        "min" | "slow" => Corner::Min,
+        "max" | "fast" => Corner::Max,
+        _ => Corner::Typ,
+    };
+    let rate = match opt.get("--rate") {
+        Some(r) => ibis::num(r).ok_or(format!("not a rate: {r}"))?,
+        None => 1e9,
+    };
+    let term = match opt.get("--term").copied() {
+        None | Some("none") => Term::None,
+        Some(t) if t.ends_with("diff") => Term::Across(
+            ibis::num(t.trim_end_matches("diff")).ok_or(format!("not a resistance: {t}"))?,
+        ),
+        Some(t) => {
+            let (r, v) = t.split_once('@').unwrap_or((t, "0"));
+            Term::ToRef {
+                r: ibis::num(r).ok_or(format!("not a resistance: {r}"))?,
+                v: ibis::num(v).ok_or(format!("not a voltage: {v}"))?,
+            }
+        }
+    };
+    let (dn, rn) = if single {
+        (None, None)
+    } else {
+        (sim::partner_pad(&b, dpad), sim::partner_pad(&b, rpad))
+    };
+    let pins = Pins {
+        driver: dpad,
+        receiver: rpad,
+        driver_n: dn,
+        receiver_n: rn.filter(|_| dn.is_some()),
+    };
+    let setup = Setup {
+        corner,
+        rate,
+        bits: opt
+            .get("--bits")
+            .map(|v| v.parse())
+            .transpose()?
+            .unwrap_or(160),
+        term,
+    };
+    let t0 = std::time::Instant::now();
+    let run = sim::simulate(
+        &b,
+        pins,
+        End {
+            model: dm,
+            pkg: dpkg,
+        },
+        End {
+            model: rm,
+            pkg: rpkg,
+        },
+        &setup,
+    )?;
+    let net = |p: usize| {
+        b.geometry.pads[p]
+            .net
+            .map_or("?".to_string(), |n| b.nets[n as usize].name.clone())
+    };
+    let what = match pins.driver_n {
+        Some(n) => format!("pair {} / {}", net(dpad), net(n)),
+        None => net(dpad),
+    };
+    println!(
+        "{what}: {} ({}) to {} ({}), {} at {:.3} Gb/s",
+        from,
+        dm.name,
+        to,
+        rm.name,
+        corner.label(),
+        rate / 1e9
+    );
+    println!(
+        "  route delay {:.1} ps, driver switching {:.0}/{:.0} ps, step {:.2} ps ({:.2} s)",
+        run.delay * 1e12,
+        run.switch.0 * 1e12,
+        run.switch.1 * 1e12,
+        run.dt * 1e12,
+        t0.elapsed().as_secs_f64()
+    );
+    let e = &run.eye;
+    println!(
+        "  eye height {:.3} V (ones from {:.3} V, zeros to {:.3} V), width {:.1} ps = {:.0} % of {:.1} ps",
+        e.height,
+        e.high,
+        e.low,
+        e.width * 1e12,
+        e.width / e.ui * 100.0,
+        e.ui * 1e12
+    );
+    for n in &run.notes {
+        println!("  {n}");
+    }
+    if let Some(out) = out {
+        std::fs::write(out, sim::svg(&run, &format!("{what}: {from} to {to}")))?;
         println!("Saved {out}");
     }
     Ok(())

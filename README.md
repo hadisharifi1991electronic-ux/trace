@@ -129,6 +129,15 @@ checker and simulator all read.
   Zdiff of every routed net and pair against its target. Per-net rules set
   other targets by name pattern (USB pairs start at 90 Ω, PCIe at 85 Ω).
   Stack-up edits and rules are kept per board in Trace's settings
+- simulate a signal (View → Signal simulation (IBIS)…): select a routed
+  net, pick the driver and receiver pins, load their IBIS files (`.ibs`)
+  and models, and set the bit rate, corner (typical, slow, fast) and
+  termination (none, to a voltage, or across a pair). Trace builds the
+  route as transmission lines from the copper (impedance and delay of each
+  track from the stack-up, via barrels, stubs as branches; pairs at their
+  odd-mode impedance), drives a PRBS7 pattern through the IBIS buffers and
+  packages, and shows the waveforms at the driver and receiver and an eye
+  diagram with its height and width. Save picture… writes it as SVG
 - export ODB++ (File → Export ODB++): one `.tgz` job with every copper,
   mask, paste, silkscreen, drill (plated, non-plated, blind and buried
   spans) and mechanical layer, the board profile, both component layers,
@@ -197,6 +206,10 @@ trace stubs board.PcbDoc [out.tracepcb]   via stubs longer than their rule allow
 trace panel board.PcbDoc 2x3 out.tracepcb [--gap 2mm] [--rail 5mm] [--tabs N] [--vscore]
                                  panelize: copies in a grid with rails, tabs and mouse bites (or V-score),
                                  fiducials and tooling holes; then export fab outputs or ODB++ from out
+trace sim board.PcbDoc U1.A3 U2.B7 --ibis drv.ibs [--rx-ibis rx.ibs] [--model M] [--rx-model M]
+         [--rate 2G] [--bits 160] [--corner typ|min|max] [--term 50|50@1.65|100diff] [--single] [out.svg]
+                                 IBIS simulation from driver pin to receiver pin: route delay, eye height and
+                                 width; a net with a pair partner is simulated as the pair (unless --single)
 trace convert <file> out.json    export to Trace's open JSON model
 trace convert <file> out.kicad_pcb   write a KiCad board
 trace convert <file> out.PcbDoc      write an Altium Designer board
@@ -354,6 +367,14 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   walks round obstacles as one band and checks each track against the
   other lanes' pads; bring the bus in square to its far pads (a corner
   first) so the jogs can land.
+- Signal simulation is lossless: tracks are ideal transmission lines
+  (no copper or dielectric loss, so long or fast routes look better than
+  they will be), there is no crosstalk from other nets, and a pair is taken
+  as two lines at its odd-mode impedance. Drivers switch along their IBIS
+  [Ramp] (the rising and falling waveforms are read but not yet used), so
+  edges are approximate for buffers with strong pre-emphasis. IBIS-AMI,
+  [External Model], submodels and series models are not supported; a pin
+  not in the file's [Pin] table needs a model named.
 - Impedance uses closed-form models (Hammerstad–Jensen microstrip, Wheeler
   stripline, IPC-2141 coupling). Every copper layer is taken as a reference
   plane and solder mask is ignored, so expect a few percent against a field

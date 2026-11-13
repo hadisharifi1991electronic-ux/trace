@@ -3,6 +3,22 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.36.0 (2026-11-13)
+
+- IBIS signal simulation: View > Signal simulation (IBIS)… simulates a
+  routed net or differential pair from a driver pin to a receiver pin with
+  the buffers and packages of IBIS models (V-I tables, clamps, ramps,
+  C_comp, [Pin] and [Diff Pin], typical/min/max corners). The route is
+  built from the board's copper as lossless transmission lines (stack-up
+  impedance and delay, via barrels, stubs as branches, pairs at odd-mode
+  impedance). A PRBS7 pattern gives the waveforms and an eye diagram with
+  its height and width; Save picture… writes an SVG.
+- `trace sim board from to --ibis file.ibs [--rate 2G] [--term 100diff] [out.svg]`
+  runs the same from the command line. On TI's DAC39RF12 EVM, the 6SRX
+  pair from J10.Z29 to U1.F1 (212 ps of route) with a 3.3 V demo buffer
+  at 2 Gb/s and 100 Ω across the pair gives a 3.27 V eye, 94% of the UI
+  open.
+
 ## 0.35.0 (2026-11-13)
 
 - Bus routing: with the router on, Ctrl+click several pads or track ends

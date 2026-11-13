@@ -45,6 +45,8 @@ USAGE:
     trace convert <file.tracesch> <folder>      Write every sheet of a Trace schematic as Altium sheets
     trace fab <board> <out.zip|folder>          Gerber X2, drill, IPC-356, pick-and-place and BOM files
     trace odb <board> <out.tgz|folder>          ODB++ job: layers, drills, parts and nets in one package
+    trace assembly <board> <out.pdf> [--a4]     Assembly drawing: top and bottom views with part bodies,
+                                                designators and pin 1 marks, then the parts list (A3)
     trace layers <gerber folder|zip>            Show which layer each Gerber or drill file was taken as
     trace symbols <lib.SchLib|IntLib> [out.svg] List the symbols of an Altium schematic library;
                                                 with out, draw them all as SVG
@@ -82,6 +84,8 @@ fn main() -> ExitCode {
         ["layers", file] => layers(file),
         ["fab", file, out] => fab(file, out),
         ["odb", file, out] => odb(file, out),
+        ["assembly", file, out] => assembly(file, out, trace_export::Paper::A3),
+        ["assembly", file, out, "--a4"] => assembly(file, out, trace_export::Paper::A4),
         ["symbols", file] => symbols(file, None),
         ["symbols", file, out] => symbols(file, Some(out)),
         ["footprints", file] => footprints(file, None),
@@ -1057,6 +1061,25 @@ fn fab(file: &str, out: &str) -> Res {
         println!("  {:<40} {:>9} bytes", f.name, f.data.len());
     }
     println!("wrote {} files to {out}", files.len());
+    Ok(())
+}
+
+/// The assembly drawing as a PDF.
+fn assembly(file: &str, out: &str, paper: trace_export::Paper) -> Res {
+    let b = board(file)?;
+    let title = Path::new(file)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "board".into());
+    let pdf = trace_export::assembly_pdf(&b, &title, paper);
+    std::fs::write(out, &pdf)?;
+    let side = |s| b.components.iter().filter(|c| c.side == s).count();
+    println!(
+        "Wrote {out}: {} parts on top, {} on the bottom, {} KB",
+        side(trace_core::Side::Top),
+        side(trace_core::Side::Bottom),
+        pdf.len().div_ceil(1024)
+    );
     Ok(())
 }
 

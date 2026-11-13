@@ -637,6 +637,35 @@ impl App {
         });
     }
 
+    /// Top and bottom assembly views and the parts list, as a PDF.
+    fn export_assembly(&mut self) {
+        let Some(scene) = &self.scene else { return };
+        let stem = scene
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "board".into());
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("PDF", &["pdf"])
+            .set_file_name(format!("{stem}-assembly.pdf"))
+            .save_file()
+        else {
+            return;
+        };
+        let pdf = trace_export::assembly_pdf(&scene.board, &stem, trace_export::Paper::A3);
+        self.message = Some(match std::fs::write(&path, pdf) {
+            Ok(()) => (
+                format!(
+                    "Saved the assembly drawing to {} ({} parts)",
+                    path.display(),
+                    scene.board.components.len()
+                ),
+                false,
+            ),
+            Err(e) => (format!("Could not save: {e}"), true),
+        });
+    }
+
     fn export_pairs(&mut self) {
         let Some(scene) = &self.scene else { return };
         let Some(path) = rfd::FileDialog::new()
@@ -1087,6 +1116,17 @@ impl App {
                 {
                     ui.close_menu();
                     self.export_odb();
+                }
+                if ui
+                    .add_enabled(
+                        self.scene.is_some(),
+                        egui::Button::new("Export assembly drawing (PDF)…"),
+                    )
+                    .on_hover_text("Top and bottom views with part bodies, designators and pin 1 marks, then the parts list (A3)")
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.export_assembly();
                 }
                 if ui
                     .add_enabled(

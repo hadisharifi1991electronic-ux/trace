@@ -1313,7 +1313,7 @@ fn num(v: f64) -> String {
 
 /// A part's value, part number, maker and description, from its
 /// parameters (the part number falls back to its library reference).
-fn part_info(c: &trace_core::Component) -> [String; 4] {
+pub(crate) fn part_info(c: &trace_core::Component) -> [String; 4] {
     let get = |names: &[&str]| c.param(names).unwrap_or("").to_string();
     let number = c
         .param(&[
@@ -1371,7 +1371,7 @@ fn bom(board: &Board) -> String {
 }
 
 /// Orders designators as people read them: R2 before R10.
-fn natural(a: &str, b: &str) -> std::cmp::Ordering {
+pub(crate) fn natural(a: &str, b: &str) -> std::cmp::Ordering {
     fn parts(s: &str) -> Vec<(String, u64)> {
         let mut out = Vec::new();
         let mut text = String::new();

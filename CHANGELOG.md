@@ -3,6 +3,18 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.39.0 (2026-11-13)
+
+- Assembly drawings as PDF: File > Export assembly drawing (PDF)… or
+  `trace assembly board out.pdf [--a4]`. A3 landscape by default: the top
+  side, the bottom side seen from below (mirrored) when it has parts, then
+  the parts list grouped by value and footprint, with the side of each
+  line. Each part is drawn as a body around its pads and silk outline,
+  with its pads, its silk, its designator fitted inside and turned with
+  it, and a red dot on pin 1 (diodes, and parts with 3 or more pins).
+  Every sheet has a title block: board, contents, date and sheet number.
+  On TI's DAC39RF12 EVM (596 parts) it writes five sheets in 1.5 s.
+
 ## 0.38.1 (2026-11-13)
 
 - New logo: the T drawn as a differential pair, with a via pad at each

@@ -232,6 +232,7 @@ trace convert sheet.SchDoc out.SchDoc     write a schematic sheet as an Altium s
 trace convert sheets.tracesch folder  write every sheet of a Trace schematic as Altium sheets
 trace fab board.PcbDoc out.zip   Gerber X2, drill, IPC-356, pick-and-place and BOM (or a folder)
 trace odb board.PcbDoc out.tgz   ODB++ job: layers, drills, parts, nets and stack-up (or a folder)
+trace assembly board.PcbDoc out.pdf [--a4]   Assembly drawing: top and bottom views, parts list
 trace symbols lib.SchLib [out.svg]     list a schematic library's (or IntLib's) symbols; draw them all as SVG
 trace footprints lib.PcbLib [out]   list a library's (or a board's) footprints; save as .tracelib or .PcbLib
 ```
@@ -349,6 +350,13 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   one drill layer spanning the layers drilled. Backdrills are not read
   from ODB++, Gerber or Allegro files, nor written to Altium or KiCad
   boards (Altium recomputes them from its rule).
+- Assembly drawings: File > Export assembly drawing (PDF)… (or `trace
+  assembly`) writes the top view, the bottom view seen from below
+  (mirrored), and the parts list grouped by value and footprint. Part
+  bodies are the box around each part's pads and silk outline, as Trace
+  does not read Altium's assembly or courtyard layers; pin 1 is marked on
+  diodes and parts with 3 or more pins. Text is Helvetica, so a few
+  characters outside Latin-1 print as "?" (Ω prints as "Ohm").
 - Panelization: File > Panelize… (or `trace panel`) lays copies of the
   board out in a grid and opens the panel in place of the board, unsaved.
   Copies come apart by tabs with mouse bites across a milled gap (2 mm by

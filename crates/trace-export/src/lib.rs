@@ -3,13 +3,16 @@
 
 pub mod altium;
 pub mod altium_rt;
+pub mod assembly;
 pub mod fab;
 pub mod kicad;
 pub mod odb;
+pub mod pdf;
 pub mod svg;
 
 pub use altium::{to_altium, to_pcblib};
 pub use altium_rt::{to_altium_over, SaveReport};
+pub use assembly::{assembly_pdf, Paper};
 pub use fab::{fab_files, fab_zip, FabFile, FabOptions};
 #[doc(hidden)]
 pub use kicad::fracture;

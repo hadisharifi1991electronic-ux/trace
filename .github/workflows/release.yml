@@ -1,7 +1,11 @@
 name: Release
-# Each version in Cargo.toml gets one GitHub release with the Windows
-# build: trace-app-<version>.exe and trace.exe, built the same way as the
-# hand-made releases (cross-compiled with MinGW, so the exe has its icon).
+# Each version in Cargo.toml gets the Windows build, trace-app-<version>.exe
+# and trace.exe, built the same way as the hand-made releases (cross-compiled
+# with MinGW, so the exe has its icon). The files go on the `dist` branch, a
+# single commit replaced for each version, so they download from
+# https://github.com/<owner>/trace/raw/dist/<file> without signing in. A
+# GitHub release is also tried; the repository may not allow the workflow to
+# make one, and that does not fail the run.
 on:
   push:
     branches: [master]
@@ -19,14 +23,14 @@ jobs:
         run: |
           v=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           echo "version=$v" >> "$GITHUB_OUTPUT"
-          if gh release view "v$v" >/dev/null 2>&1; then
+          if git fetch -q --depth=1 origin dist 2>/dev/null &&
+             git cat-file -e "FETCH_HEAD:trace-app-$v.exe" 2>/dev/null; then
             echo "exists=true" >> "$GITHUB_OUTPUT"
           fi
-        env:
-          GH_TOKEN: ${{ github.token }}
       - if: steps.v.outputs.exists != 'true'
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: 1.97.0
           targets: x86_64-pc-windows-gnu
       - if: steps.v.outputs.exists != 'true'
         run: sudo apt-get update && sudo apt-get install -y gcc-mingw-w64-x86-64 binutils-mingw-w64-x86-64
@@ -37,10 +41,22 @@ jobs:
         run: |
           v=${{ steps.v.outputs.version }}
           out=target/x86_64-pc-windows-gnu/release
-          cp "$out/trace-app.exe" "trace-app-$v.exe"
-          cp "$out/trace.exe" trace.exe
-          awk -v h="## $v " 'index($0, h) == 1 {f = 1; next} /^## / {if (f) exit} f' CHANGELOG.md > notes.md
+          d=$(mktemp -d)
+          cp "$out/trace-app.exe" "$d/trace-app-$v.exe"
+          cp "$out/trace.exe" "$d/trace.exe"
+          awk -v h="## $v " 'index($0, h) == 1 {f = 1; next} /^## / {if (f) exit} f' CHANGELOG.md > "$d/NOTES.md"
+          (cd "$d" && sha256sum "trace-app-$v.exe" trace.exe > SHA256SUMS)
+          cat "$d/SHA256SUMS"
+          git -C "$d" init -q -b dist
+          git -C "$d" add -A
+          git -C "$d" -c user.name="github-actions[bot]" \
+            -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+            commit -q -m "Trace $v Windows build from $GITHUB_SHA"
+          # checkout's credentials live in this repo's config; reuse them.
+          git -C "$d" -c "http.https://github.com/.extraheader=$(git config --get http.https://github.com/.extraheader)" \
+            push -f "$(git config --get remote.origin.url)" dist
           gh release create "v$v" --target "$GITHUB_SHA" --title "Trace $v" \
-            --notes-file notes.md "trace-app-$v.exe" trace.exe
+            --notes-file "$d/NOTES.md" "$d/trace-app-$v.exe" "$d/trace.exe" ||
+            echo "::warning::GitHub release not created; the build is on the dist branch"
         env:
           GH_TOKEN: ${{ github.token }}

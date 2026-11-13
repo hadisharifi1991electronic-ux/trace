@@ -19,7 +19,10 @@ use std::collections::{HashMap, HashSet};
 
 #[path = "drc_fab.rs"]
 mod fab;
+#[path = "drc_si.rs"]
+mod si;
 pub use fab::{mask_rule, MaskRule};
+pub use si::{GAP_RUN, PARALLEL_LIMIT};
 
 /// The kinds of copper object rules tell apart.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -94,11 +97,15 @@ pub enum Kind {
     SilkToSilk,
     /// Two parts on the same side closer than their rule allows.
     PartClearance,
+    /// A track over a void or a split in the planes next to it.
+    ReturnPath,
+    /// Two nets running side by side too close for too long.
+    Crosstalk,
     Unrouted,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 12] = [
+    pub const ALL: [Kind; 14] = [
         Kind::Short,
         Kind::Clearance,
         Kind::Width,
@@ -110,6 +117,8 @@ impl Kind {
         Kind::SilkToMask,
         Kind::SilkToSilk,
         Kind::PartClearance,
+        Kind::ReturnPath,
+        Kind::Crosstalk,
         Kind::Unrouted,
     ];
     pub fn label(self) -> &'static str {
@@ -125,6 +134,8 @@ impl Kind {
             Kind::SilkToMask => "Silk to mask",
             Kind::SilkToSilk => "Silk to silk",
             Kind::PartClearance => "Part clearance",
+            Kind::ReturnPath => "Return path",
+            Kind::Crosstalk => "Crosstalk",
             Kind::Unrouted => "Unrouted net",
         }
     }
@@ -1505,6 +1516,7 @@ pub fn check(board: &Board, limit: usize) -> Vec<Violation> {
     }
 
     fab::check(board, &info, &items, &mut out);
+    si::check(board, &info, &mut out);
 
     out.sort_by(|a, b| {
         let rank = |k: Kind| Kind::ALL.iter().position(|&x| x == k).unwrap_or(0);
@@ -1558,6 +1570,7 @@ pub fn describe(board: &Board, v: &Violation) -> String {
             v.rule
         ),
         Kind::Unrouted => format!("{}: {}", net(v.nets[0]), v.rule),
+        Kind::ReturnPath | Kind::Crosstalk => si::describe(board, v),
         _ => fab::describe(board, v),
     }
 }

@@ -33,7 +33,7 @@ pub struct Drc {
     no_rules: bool,
 }
 
-const KINDS: [Kind; 12] = Kind::ALL;
+const KINDS: [Kind; Kind::ALL.len()] = Kind::ALL;
 /// Where the length constraints sit in `show`.
 const LENGTHS: usize = KINDS.len();
 
@@ -59,6 +59,8 @@ pub fn color(kind: Kind) -> Color32 {
         Kind::SilkToMask => Color32::from_rgb(240, 240, 160),
         Kind::SilkToSilk => Color32::from_rgb(200, 200, 255),
         Kind::PartClearance => Color32::from_rgb(255, 180, 120),
+        Kind::ReturnPath => Color32::from_rgb(80, 220, 230),
+        Kind::Crosstalk => Color32::from_rgb(255, 110, 160),
         Kind::Unrouted => Color32::from_rgb(120, 180, 255),
     }
 }

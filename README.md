@@ -178,9 +178,10 @@ trace pairs board.PcbDoc [5mil]  length of each differential pair (tracks, arcs,
 trace view board.PcbDoc          open the board viewer in your browser
 trace rules board.PcbDoc         design rules grouped by kind
 trace check board.PcbDoc         check the board's length and matched-length rules; lists failing nets
-trace drc board.PcbDoc [--all]   design rule check: clearance, shorts, width, unrouted nets, and the
+trace drc board.PcbDoc [--all]   design rule check: clearance, shorts, width, unrouted nets, the
                                  manufacturing rules (holes, rings, mask slivers, silk on pads, silk to silk,
-                                 part clearance, board edge)
+                                 part clearance, board edge), and signal integrity (return paths over
+                                 plane voids and splits, crosstalk between parallel tracks)
 trace impedance board.PcbDoc     stack-up widths for 50 Ω and 100 Ω pairs, and each pair's Zdiff
 trace convert <file> out.json    export to Trace's open JSON model
 trace convert <file> out.kicad_pcb   write a KiCad board
@@ -272,6 +273,22 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   another's rectangle (under a shield can) is not reported, and heights
   are not checked. Free silkscreen is not checked against itself. Height
   and net antennae rules are not checked yet.
+- Return path: a copper layer whose pours and fills cover at least 30% of
+  the board is taken as a plane. A signal track is reported where it runs
+  more than 50 mil (or five track widths) over no copper of the planes
+  just above and below it, and where the nearest plane under it changes
+  from one net to another (a split between power islands) with no other
+  plane as near. Clearance around the track's own vias and pads is not
+  counted, and nets that own plane copper are not checked. Altium
+  internal plane layers (negative planes) are not read yet. Crosstalk:
+  tracks of two nets on one layer running side by side within a gap for
+  longer than a limit in total. Altium Parallel Segment rules are used
+  where the board has them; otherwise nets of differential pairs are held
+  to the 3W rule (no more than 250 mil within two track widths of another
+  net). Each report estimates the coupling as 1 / (1 + (D/H)²); tracks on
+  neighbouring layers (broadside coupling) and arcs are not compared. On
+  TI's DAC39RF12 EVM this finds one track over a plane void and no
+  crosstalk.
 - Fab outputs draw text in one stroke font, so silkscreen text is placed
   and sized as in Altium but its letters are shaped differently (TrueType
   text too). Text on mechanical layers and Altium special strings other

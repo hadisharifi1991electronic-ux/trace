@@ -3,6 +3,25 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.32.0 (2026-11-13)
+
+- Return path check in the design rule check: signal tracks that run
+  over a void in the planes next to them (more than 50 mil, or five
+  track widths), or across a split where the plane under them changes
+  from one net to another. Planes are copper layers that pours and fills
+  cover at least 30% of; clearance round a track's own vias and pads is
+  not counted.
+- Crosstalk check: tracks of two nets running side by side too close for
+  too long, from the board's Altium Parallel Segment rules, or by default
+  the 3W rule for nets of differential pairs (at most 250 mil within two
+  track widths of another net). Reports estimate the coupling from the
+  spacing and the height over the plane.
+- Both show in the Design Rule Check window with their own colours and
+  in `trace drc`. On TI's DAC39RF12 EVM they find one track (SYNC_DAC on
+  L10) over a void in both GND planes next to it, and no crosstalk.
+- CI is pinned to the Rust toolchain the checks are written against, and
+  each version's Windows build is published by GitHub Actions.
+
 ## 0.31.0 (2026-11-12)
 
 - Altium rooms are read (room definitions, enabled or not) and drawn on

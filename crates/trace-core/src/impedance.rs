@@ -289,7 +289,7 @@ impl Board {
     }
 
     /// Net index -> its differential partner.
-    fn pair_partners(&self) -> std::collections::HashMap<u32, u32> {
+    pub(crate) fn pair_partners(&self) -> std::collections::HashMap<u32, u32> {
         let idx = |name: &str| {
             self.nets
                 .iter()

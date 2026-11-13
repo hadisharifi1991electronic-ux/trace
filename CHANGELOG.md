@@ -3,6 +3,31 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.33.0 (2026-11-13)
+
+- Via stubs: Trace measures each via's stub from the stack-up and the
+  layers its net joins it on, and the design rule check reports stubs
+  longer than the board's back drilling rule allows (Altium's BackDrilling
+  rule is read: max stub, hole oversize, top and bottom), or 10 mil on
+  pair nets when the board has no rule.
+- Backdrilling: Edit > Backdrill long via stubs backdrills every such via
+  from the side its stub is on, down to just short of the layer it joins;
+  Edit > Remove backdrills takes them off; both undo. Backdrilled vias get
+  a green ring on the board, and pours keep clear of the drill. Altium
+  boards with a back drilling rule are backdrilled when they open.
+- The design rule check also reports backdrills that would cut their
+  via's own connection, and copper of other nets too close to a backdrill
+  on the layers it drills through.
+- Fab outputs: an Excellon backdrill file per side and kept layer, naming
+  the layer that must not be cut; ODB++ gets a backdrill drill layer for
+  each.
+- `trace stubs board [out]` lists stubs that are too long and, with out,
+  saves the board backdrilled.
+- TI's DAC39RF12 EVM backdrills GND vias only, with a 10 mil limit, and no
+  GND via there is over it. Held to 10 mil on its pair nets instead, 16
+  clock and SYSREF vias would need backdrilling (stubs of 29 and 52 mil),
+  and the board passes the check once Trace has drilled them.
+
 ## 0.32.0 (2026-11-13)
 
 - Return path check in the design rule check: signal tracks that run

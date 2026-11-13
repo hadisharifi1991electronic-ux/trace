@@ -547,6 +547,15 @@ fn pour_among(board: &Board, areas: &[Polygon], index: usize) -> Vec<Polygon> {
             continue;
         }
         let c = mil(v.at);
+        // Where the via is backdrilled its barrel is gone: no copper to
+        // join, and the larger drill to keep clear of.
+        let drilled = v
+            .drilled(layer)
+            .map(|d| d.mil() / 2.0 + gaps.via.max(gaps.hole));
+        if let Some(r) = drilled {
+            add(capsule(c, [c[0] + 1e-6, c[1]], r), &mut cuts);
+            continue;
+        }
         if v.net.is_some() && v.net == net {
             anchors.push(c);
             let d = v

@@ -183,6 +183,8 @@ trace drc board.PcbDoc [--all]   design rule check: clearance, shorts, width, un
                                  part clearance, board edge), and signal integrity (return paths over
                                  plane voids and splits, crosstalk between parallel tracks)
 trace impedance board.PcbDoc     stack-up widths for 50 Ω and 100 Ω pairs, and each pair's Zdiff
+trace stubs board.PcbDoc [out.tracepcb]   via stubs longer than their rule allows; with out, backdrill them,
+                                 pour again and save the board
 trace convert <file> out.json    export to Trace's open JSON model
 trace convert <file> out.kicad_pcb   write a KiCad board
 trace convert <file> out.PcbDoc      write an Altium Designer board
@@ -289,6 +291,25 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   neighbouring layers (broadside coupling) and arcs are not compared. On
   TI's DAC39RF12 EVM this finds one track over a plane void and no
   crosstalk.
+- Via stubs and backdrilling: a via's stub is the barrel beyond the
+  outermost layers its net joins it on (track and arc ends, pads, pours
+  through relief or solid), measured from the stack-up (a stack-up without
+  thicknesses is taken as 62 mil). The longest stub allowed comes from the
+  board's back drilling rule (Altium's BackDrilling: `MAXSTUBLENGTH`,
+  `HOLEOVERSIZE`, top and bottom switches) or, without one, 10 mil on nets
+  of differential pairs. Edit > Backdrill long via stubs drills those vias
+  from the side with the stub, down to just short of the layer they join
+  (8 mil is taken as what the drill leaves), with a drill 8 mil over the
+  hole unless the rule says otherwise; Altium boards with a back drilling
+  rule are backdrilled so when they open, as Altium does for its drill
+  files. Pours keep clear of the backdrill on the layers it drills
+  through. The design rule check reports stubs still too long, backdrills
+  that cut a layer their via joins, and copper of other nets too close
+  to a backdrill. Fab outputs get one Excellon file per side and kept
+  layer (`BACKDRILL-BOTTOM-L11-L16.DRL`, Gerber X2 `BackDrill`), and ODB++
+  one drill layer spanning the layers drilled. Backdrills are not read
+  from ODB++, Gerber or Allegro files, nor written to Altium or KiCad
+  boards (Altium recomputes them from its rule).
 - Fab outputs draw text in one stroke font, so silkscreen text is placed
   and sized as in Altium but its letters are shaped differently (TrueType
   text too). Text on mechanical layers and Altium special strings other

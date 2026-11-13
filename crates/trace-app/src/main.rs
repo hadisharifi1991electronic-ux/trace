@@ -1104,6 +1104,45 @@ impl App {
                         self.apply_edits(&format!("Unrouted {name}"), edits);
                     }
                 }
+                ui.separator();
+                if ui
+                    .add_enabled(has, egui::Button::new("Backdrill long via stubs"))
+                    .on_hover_text(
+                        "Backdrill every via whose stub is longer than its rule allows \
+                         (the board's back drilling rule, or 10 mil on pair nets)",
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    if let Some(scene) = &self.scene {
+                        let edits = trace_core::backdrill::plan(&scene.board);
+                        if edits.is_empty() {
+                            self.message =
+                                Some(("No via stub is longer than its rule allows".into(), false));
+                        } else {
+                            let n = edits.len() / 2;
+                            self.apply_edits(&format!("Backdrilled {n} vias"), edits);
+                        }
+                    }
+                }
+                let drilled = self.scene.as_ref().is_some_and(|s| {
+                    s.board
+                        .geometry
+                        .vias
+                        .iter()
+                        .any(|v| v.fab.back_top.is_some() || v.fab.back_bottom.is_some())
+                });
+                if ui
+                    .add_enabled(drilled, egui::Button::new("Remove backdrills"))
+                    .clicked()
+                {
+                    ui.close_menu();
+                    if let Some(scene) = &self.scene {
+                        let edits = trace_core::backdrill::clear(&scene.board);
+                        let n = edits.len() / 2;
+                        self.apply_edits(&format!("Removed {n} backdrills"), edits);
+                    }
+                }
             });
             ui.menu_button("View", |ui| {
                 if ui

@@ -969,8 +969,26 @@ fn draw_holes(
             r * view.scale,
             hole_color,
         ));
+        // A backdrilled via: a ring the size of the backdrill.
+        if let Source::Via(vi) = p.source {
+            let f = &g.vias[vi].fab;
+            if let Some(d) = f
+                .back_top
+                .or(f.back_bottom)
+                .map(|b| b.diameter.mil() as f32)
+            {
+                shapes.push(Shape::circle_stroke(
+                    view.to_screen(x, y),
+                    d / 2.0 * view.scale,
+                    Stroke::new(1.5_f32, BACKDRILL),
+                ));
+            }
+        }
     }
 }
+
+/// Ring drawn round backdrilled vias.
+const BACKDRILL: Color32 = Color32::from_rgb(150, 230, 150);
 
 /// Text centred on `at`, turned by `angle` radians (screen).
 fn label(

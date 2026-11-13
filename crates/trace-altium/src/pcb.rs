@@ -961,6 +961,9 @@ pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
                 .and_then(|p| p.net);
         }
     }
+    // Vias the board's back drilling rule asks to backdrill, before
+    // pouring so pours keep clear of them.
+    trace_core::backdrill::apply_rules(&mut board);
     // Pours saved without their copper are poured here.
     trace_core::pour::pour_missing(&mut board);
     trace_core::pour::mark_unpoured(&mut board);

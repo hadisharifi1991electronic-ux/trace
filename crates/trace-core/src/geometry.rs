@@ -108,6 +108,22 @@ pub struct Fab {
     /// Direction of the slot, degrees counter-clockwise.
     #[serde(default, skip_serializing_if = "is_zero_f")]
     pub slot_deg: f64,
+    /// Vias: the plated barrel drilled out from the top, to cut the stub
+    /// above the first layer it joins.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back_top: Option<Backdrill>,
+    /// Vias: drilled out from the bottom.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub back_bottom: Option<Backdrill>,
+}
+
+/// A backdrill: a drill larger than the hole that removes the barrel from
+/// one side of the board down to just short of copper layer `keep`, which
+/// the via still joins.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Backdrill {
+    pub keep: u8,
+    pub diameter: Length,
 }
 
 fn is_zero(l: &Length) -> bool {
@@ -121,6 +137,26 @@ fn is_zero_f(v: &f64) -> bool {
 impl Fab {
     pub fn is_default(&self) -> bool {
         *self == Fab::default()
+    }
+}
+
+impl Via {
+    /// The backdrill diameter where copper layer `layer` is drilled out.
+    pub fn drilled(&self, layer: u8) -> Option<Length> {
+        let (lo, hi) = (
+            self.from_layer.min(self.to_layer),
+            self.from_layer.max(self.to_layer),
+        );
+        if layer < lo || layer > hi {
+            return None;
+        }
+        if let Some(b) = self.fab.back_top.filter(|b| layer < b.keep) {
+            return Some(b.diameter);
+        }
+        self.fab
+            .back_bottom
+            .filter(|b| layer > b.keep)
+            .map(|b| b.diameter)
     }
 }
 

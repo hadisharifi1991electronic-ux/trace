@@ -61,6 +61,8 @@ pub fn color(kind: Kind) -> Color32 {
         Kind::PartClearance => Color32::from_rgb(255, 180, 120),
         Kind::ReturnPath => Color32::from_rgb(80, 220, 230),
         Kind::Crosstalk => Color32::from_rgb(255, 110, 160),
+        Kind::ViaStub => Color32::from_rgb(180, 140, 255),
+        Kind::Backdrill => Color32::from_rgb(150, 230, 150),
         Kind::Unrouted => Color32::from_rgb(120, 180, 255),
     }
 }

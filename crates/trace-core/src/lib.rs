@@ -3,6 +3,7 @@
 //! Everything here is format-neutral: importers (Altium, KiCad, ...) build these
 //! types, and the editor, router and checkers only ever read these types.
 
+pub mod backdrill;
 pub mod board;
 pub mod connectivity;
 pub mod constraints;

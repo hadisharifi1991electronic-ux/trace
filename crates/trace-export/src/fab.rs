@@ -1035,6 +1035,84 @@ fn drills(board: &Board, n: u8) -> Vec<(String, String)> {
         t.push_str("M30\n");
         out.push((name, t));
     }
+    out.extend(backdrills(board, n));
+    out
+}
+
+/// One drill file per backdrill: side and the layer it must not cut. The
+/// file names the copper layers drilled through; the comment names the
+/// layer that stays.
+fn backdrills(board: &Board, n: u8) -> Vec<(String, String)> {
+    // (from the top, keep) -> (diameter, at)
+    let mut sets: BTreeMap<(bool, u8), Vec<(i64, Point)>> = BTreeMap::new();
+    for v in &board.geometry.vias {
+        if let Some(b) = v.fab.back_top {
+            sets.entry((true, b.keep))
+                .or_default()
+                .push((b.diameter.0, v.at));
+        }
+        if let Some(b) = v.fab.back_bottom {
+            sets.entry((false, b.keep))
+                .or_default()
+                .push((b.diameter.0, v.at));
+        }
+    }
+    let layer_name = |l: u8| {
+        board
+            .stackup
+            .copper_layers()
+            .nth(l as usize)
+            .map(|x| x.name.clone())
+            .unwrap_or_else(|| format!("L{}", l + 1))
+    };
+    let mut out = Vec::new();
+    for ((top, keep), mut holes) in sets {
+        // Copper layers drilled through, 1-based.
+        let (a, b) = if top {
+            (1, keep as u32)
+        } else {
+            (keep as u32 + 2, n as u32)
+        };
+        if a > b {
+            continue;
+        }
+        holes.sort_by_key(|h| (h.0, h.1.x.0, h.1.y.0));
+        let mut tools: Vec<i64> = holes.iter().map(|h| h.0).collect();
+        tools.dedup();
+        let mm4 = |v: i64| format!("{:.4}", v as f64 / 1e6);
+        let mut t = String::new();
+        t.push_str("M48\n");
+        let _ = writeln!(
+            t,
+            "; #@! TF.GenerationSoftware,Trace,Trace,{}",
+            env!("CARGO_PKG_VERSION")
+        );
+        let _ = writeln!(t, "; #@! TF.FileFunction,NonPlated,{a},{b},Blind");
+        t.push_str("; #@! TF.FilePolarity,Positive\n");
+        let _ = writeln!(
+            t,
+            "; Backdrill from the {} through L{a}-L{b}; must not cut L{} ({})",
+            if top { "top" } else { "bottom" },
+            keep + 1,
+            layer_name(keep)
+        );
+        t.push_str("; FORMAT={-:-/ absolute / metric / decimal}\n");
+        t.push_str("FMAT,2\nMETRIC\n");
+        for (i, d) in tools.iter().enumerate() {
+            t.push_str("; #@! TA.AperFunction,NonPlated,Blind,BackDrill\n");
+            let _ = writeln!(t, "T{}C{:.4}", i + 1, *d as f64 / 1e6);
+        }
+        t.push_str("%\nG90\nG05\n");
+        for (i, d) in tools.iter().enumerate() {
+            let _ = writeln!(t, "T{}", i + 1);
+            for h in holes.iter().filter(|h| h.0 == *d) {
+                let _ = writeln!(t, "X{}Y{}", mm4(h.1.x.0), mm4(h.1.y.0));
+            }
+        }
+        t.push_str("M30\n");
+        let side = if top { "TOP" } else { "BOTTOM" };
+        out.push((format!("BACKDRILL-{side}-L{a}-L{b}"), t));
+    }
     out
 }
 
@@ -1512,5 +1590,47 @@ pub(crate) mod tests {
         let gts = mask(&b, Side::Top, 2, &o);
         // The via opens: 0.6 mm + 2 × 4 mil.
         assert!(gts.contains("C,0.8032*%"), "{gts}");
+    }
+
+    #[test]
+    fn backdrill_files_name_the_layers_drilled_and_kept() {
+        let mut b = board();
+        // Four copper layers; the via joins Top and L2, drilled from the
+        // bottom up to L2.
+        for n in ["L2", "L3"] {
+            b.stackup.layers.insert(
+                1,
+                StackLayer {
+                    name: n.into(),
+                    altium_id: None,
+                    kind: LayerKind::Copper,
+                    thickness: Length(0),
+                    dielectric_constant: None,
+                    material: None,
+                },
+            );
+        }
+        b.stackup.layers.swap(1, 2);
+        let v = &mut b.geometry.vias[0];
+        v.to_layer = 3;
+        v.fab.back_bottom = Some(Backdrill {
+            keep: 1,
+            diameter: Length::from_mm(0.5),
+        });
+        let files = drills(&b, 4);
+        let (name, text) = files
+            .iter()
+            .find(|(n, _)| n.starts_with("BACKDRILL"))
+            .expect("a backdrill file");
+        assert_eq!(name, "BACKDRILL-BOTTOM-L3-L4");
+        assert!(
+            text.contains("TF.FileFunction,NonPlated,3,4,Blind"),
+            "{text}"
+        );
+        assert!(text.contains("must not cut L2 (L2)"), "{text}");
+        assert!(text.contains("BackDrill\nT1C0.5000"), "{text}");
+        assert!(text.contains("X30.0000Y5.8000"), "{text}");
+        // The via itself is still in the plated through-hole file.
+        assert!(files.iter().any(|(n, _)| n == "PTH"));
     }
 }

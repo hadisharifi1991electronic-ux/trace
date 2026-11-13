@@ -540,6 +540,37 @@ pub fn odb_files(board: &Board, job: &str, opt: &FabOptions) -> Vec<FabFile> {
             span: Some((cu_names[a as usize].clone(), cu_names[b as usize].clone())),
         });
     }
+    // Backdrills: a non-plated drill layer for each side and layer kept,
+    // spanning the copper layers drilled through.
+    let mut backs: std::collections::BTreeMap<(bool, u8), Feats<'static>> = Default::default();
+    for v in &board.geometry.vias {
+        for (top, b) in [(true, v.fab.back_top), (false, v.fab.back_bottom)] {
+            let Some(b) = b else { continue };
+            let f = backs.entry((top, b.keep)).or_insert_with(Feats::new);
+            f.attr = "1=1";
+            let s = f.round(b.diameter.0);
+            f.pad(s, v.at, 0.0);
+        }
+    }
+    for ((top, keep), f) in backs {
+        let (a, b) = if top {
+            (0, keep.saturating_sub(1))
+        } else {
+            (keep + 1, n - 1)
+        };
+        if (top && keep == 0) || a > b || b >= n {
+            continue;
+        }
+        let side = if top { "top" } else { "bot" };
+        let name = unique(format!("backdrill_{side}_{}-{}", a + 1, b + 1), &mut taken);
+        out.push(layer_file(&name, f.finish()));
+        matrix.push(MatrixLayer {
+            name,
+            context: "BOARD",
+            kind: "DRILL",
+            span: Some((cu_names[a as usize].clone(), cu_names[b as usize].clone())),
+        });
+    }
     for m in fab::mechanical_layers(board) {
         let name = unique(format!("mech{m}"), &mut taken);
         let mut f = Feats::with(&mut user);

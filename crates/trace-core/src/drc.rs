@@ -101,11 +101,16 @@ pub enum Kind {
     ReturnPath,
     /// Two nets running side by side too close for too long.
     Crosstalk,
+    /// A via stub longer than its rule allows.
+    ViaStub,
+    /// A backdrill that cuts its via's own connection, or comes too close
+    /// to other copper on the layers it drills through.
+    Backdrill,
     Unrouted,
 }
 
 impl Kind {
-    pub const ALL: [Kind; 14] = [
+    pub const ALL: [Kind; 16] = [
         Kind::Short,
         Kind::Clearance,
         Kind::Width,
@@ -119,6 +124,8 @@ impl Kind {
         Kind::PartClearance,
         Kind::ReturnPath,
         Kind::Crosstalk,
+        Kind::ViaStub,
+        Kind::Backdrill,
         Kind::Unrouted,
     ];
     pub fn label(self) -> &'static str {
@@ -136,6 +143,8 @@ impl Kind {
             Kind::PartClearance => "Part clearance",
             Kind::ReturnPath => "Return path",
             Kind::Crosstalk => "Crosstalk",
+            Kind::ViaStub => "Via stub",
+            Kind::Backdrill => "Backdrill",
             Kind::Unrouted => "Unrouted net",
         }
     }
@@ -151,6 +160,7 @@ impl Kind {
                 | Kind::SilkToMask
                 | Kind::SilkToSilk
                 | Kind::PartClearance
+                | Kind::Backdrill
         )
     }
 }
@@ -1517,6 +1527,7 @@ pub fn check(board: &Board, limit: usize) -> Vec<Violation> {
 
     fab::check(board, &info, &items, &mut out);
     si::check(board, &info, &mut out);
+    crate::backdrill::check(board, fallback, &mut out);
 
     out.sort_by(|a, b| {
         let rank = |k: Kind| Kind::ALL.iter().position(|&x| x == k).unwrap_or(0);
@@ -1571,6 +1582,7 @@ pub fn describe(board: &Board, v: &Violation) -> String {
         ),
         Kind::Unrouted => format!("{}: {}", net(v.nets[0]), v.rule),
         Kind::ReturnPath | Kind::Crosstalk => si::describe(board, v),
+        Kind::ViaStub | Kind::Backdrill => crate::backdrill::describe(board, v),
         _ => fab::describe(board, v),
     }
 }

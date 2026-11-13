@@ -22,6 +22,8 @@ USAGE:
                                                 part clearance, board edge, return paths over plane voids
                                                 and splits, crosstalk between parallel tracks
     trace impedance <board>                     Stack-up, widths for 50/100 ohm, and the impedance of each pair
+    trace stubs <board> [out.tracepcb]          Via stubs on nets with a stub rule (default: pair nets, 10 mil);
+                                                with out, backdrill those too long and save the board
     trace view <board> [out.html]               Open the board in the viewer (in your browser)
     trace convert <file> <out.json>             Export to Trace's open JSON model
     trace convert <file> <out.kicad_pcb>        Write a KiCad board (KiCad 7 and later)
@@ -59,6 +61,8 @@ fn main() -> ExitCode {
         ["drc", file] => drc(file, 15),
         ["drc", file, "--all"] => drc(file, usize::MAX),
         ["impedance", file] => impedance(file),
+        ["stubs", file] => stubs(file, None),
+        ["stubs", file, out] => stubs(file, Some(out)),
         ["convert", file, out] => convert(file, out),
         ["layers", file] => layers(file),
         ["fab", file, out] => fab(file, out),
@@ -570,6 +574,80 @@ fn drc(file: &str, show: usize) -> Res {
         }
     }
     println!("{} violations in {:.2} s", found.len(), took.as_secs_f64());
+    Ok(())
+}
+
+fn stubs(file: &str, out: Option<&str>) -> Res {
+    use trace_core::backdrill;
+    let mut b = board(file)?;
+    let list = backdrill::stubs(&b);
+    let ruled: Vec<_> = list.iter().filter(|s| s.limit.is_some()).collect();
+    let name = |n: u32| {
+        b.nets
+            .get(n as usize)
+            .map(|n| n.name.as_str())
+            .unwrap_or("?")
+    };
+    let layer = |l: u8| {
+        b.stackup
+            .copper_layers()
+            .nth(l as usize)
+            .map(|x| x.name.clone())
+            .unwrap_or_else(|| format!("L{}", l + 1))
+    };
+    println!(
+        "{} vias joined by their net, {} on nets with a stub rule",
+        list.len(),
+        ruled.len()
+    );
+    let mut long: Vec<_> = ruled
+        .iter()
+        .filter(|s| {
+            let max = s.limit.as_ref().map(|l| l.0).unwrap_or(f64::MAX);
+            s.top_left.max(s.bottom_left) > max
+        })
+        .collect();
+    long.sort_by(|a, b| (b.top_left.max(b.bottom_left)).total_cmp(&a.top_left.max(a.bottom_left)));
+    println!("{} with a stub longer than allowed:", long.len());
+    println!(
+        "  {:<28} {:>9} {:>9}  {:<22} {:>7} {:>7}  rule",
+        "net", "x", "y", "joins", "above", "below"
+    );
+    for s in &long {
+        let v = &b.geometry.vias[s.via];
+        let joins: Vec<String> = s.joins.iter().map(|&l| layer(l)).collect();
+        let (max, rule) = s.limit.clone().unwrap_or_default();
+        println!(
+            "  {:<28} {:>9.1} {:>9.1}  {:<22} {:>7.1} {:>7.1}  {rule} ({max:.1} mil)",
+            name(s.net),
+            v.at.x.mil(),
+            v.at.y.mil(),
+            joins.join(", "),
+            s.top_left,
+            s.bottom_left
+        );
+    }
+    if let Some(out) = out {
+        let edits = backdrill::plan(&b);
+        for e in &edits {
+            e.apply(&mut b);
+        }
+        let n = b
+            .geometry
+            .vias
+            .iter()
+            .filter(|v| v.fab.back_top.is_some() || v.fab.back_bottom.is_some())
+            .count();
+        // Pours keep clear of the backdrills where they drill through.
+        if let Some(e) = trace_core::pour::repour_after(&b, &edits) {
+            e.apply(&mut b);
+        }
+        trace_core::file::save(&b, Path::new(out))?;
+        println!(
+            "Backdrilled {} vias ({n} in all); saved {out}",
+            edits.len() / 2
+        );
+    }
     Ok(())
 }
 

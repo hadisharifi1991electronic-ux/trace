@@ -7,7 +7,20 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use trace_core::ibis::{self, Corner, Ibis};
 use trace_core::sim::{self, End, Pins, Run, Setup, Term};
-use trace_core::Board;
+use trace_core::{Board, Stackup};
+
+/// Whether two stack-ups give the same layers and materials.
+fn same_stackup(a: &Stackup, b: &Stackup) -> bool {
+    a.layers.len() == b.layers.len()
+        && a.layers.iter().zip(&b.layers).all(|(x, y)| {
+            x.name == y.name
+                && x.kind == y.kind
+                && x.thickness == y.thickness
+                && x.dielectric_constant == y.dielectric_constant
+                && x.loss_tangent == y.loss_tangent
+                && x.roughness_um == y.roughness_um
+        })
+}
 
 #[derive(Clone, Copy, PartialEq)]
 enum TermKind {
@@ -33,6 +46,8 @@ pub struct SimWindow {
     term_v: f64,
     pair: bool,
     lossy: bool,
+    /// Each layer's own Df and roughness where the stack-up gives them.
+    from_stackup: bool,
     tan_d: f64,
     rough_um: f64,
     crosstalk: bool,
@@ -56,6 +71,7 @@ impl Default for SimWindow {
             term_v: 0.0,
             pair: true,
             lossy: true,
+            from_stackup: true,
             tan_d: sim::Loss::default().tan_d,
             rough_um: sim::Loss::default().rough_um,
             crosstalk: true,
@@ -82,7 +98,15 @@ fn part_pins(board: &Board, net: u32) -> Vec<String> {
 }
 
 impl SimWindow {
-    pub fn show(&mut self, ctx: &egui::Context, board: &Board, selected: Option<u32>) {
+    /// `stackup` is the stack-up as the Impedance window has it (edits
+    /// included).
+    pub fn show(
+        &mut self,
+        ctx: &egui::Context,
+        board: &Board,
+        stackup: &Stackup,
+        selected: Option<u32>,
+    ) {
         if !self.open {
             return;
         }
@@ -90,11 +114,11 @@ impl SimWindow {
         egui::Window::new("Signal simulation (IBIS)")
             .open(&mut open)
             .default_width(760.0)
-            .show(ctx, |ui| self.body(ui, board, selected));
+            .show(ctx, |ui| self.body(ui, board, stackup, selected));
         self.open = open;
     }
 
-    fn body(&mut self, ui: &mut egui::Ui, board: &Board, selected: Option<u32>) {
+    fn body(&mut self, ui: &mut egui::Ui, board: &Board, stackup: &Stackup, selected: Option<u32>) {
         let Some(net) = selected else {
             ui.label("Select a net on the board (click a track or pad), then come back here.");
             return;
@@ -254,6 +278,11 @@ impl SimWindow {
             ui.checkbox(&mut self.lossy, "Track loss")
                 .on_hover_text("Copper (DC, skin effect, roughness) and dielectric loss");
             ui.add_enabled_ui(self.lossy, |ui| {
+                ui.checkbox(&mut self.from_stackup, "From the stack-up")
+                    .on_hover_text(
+                        "Each layer's own Df and roughness where the stack-up (Impedance window) \
+                     gives them; the values here for the rest. Off: the values here everywhere.",
+                    );
                 ui.label("Df");
                 ui.add(
                     egui::DragValue::new(&mut self.tan_d)
@@ -295,7 +324,13 @@ impl SimWindow {
         });
         ui.horizontal(|ui| {
             if ui.button("Simulate").clicked() {
-                self.result = Some(self.run(board, partner.is_some()));
+                self.result = Some(if same_stackup(&board.stackup, stackup) {
+                    self.run(board, partner.is_some())
+                } else {
+                    let mut b = board.clone();
+                    b.stackup = stackup.clone();
+                    self.run(&b, partner.is_some())
+                });
             }
             if let Some(Ok((run, title))) = &self.result {
                 if ui.button("Save picture…").clicked() {
@@ -383,6 +418,8 @@ impl SimWindow {
             loss: self.lossy.then_some(sim::Loss {
                 tan_d: self.tan_d,
                 rough_um: self.rough_um,
+                stackup_df: self.from_stackup,
+                stackup_rough: self.from_stackup,
             }),
             crosstalk: self.crosstalk,
         };
@@ -446,9 +483,10 @@ fn results(ui: &mut egui::Ui, run: &Run) {
     ));
     if run.loss_db > 0.0 {
         ui.label(format!(
-            "Loss {:.2} dB at {:.2} GHz (half the bit rate)",
+            "Loss {:.2} dB at {:.2} GHz (half the bit rate); {}",
             run.loss_db,
-            0.5 / e.ui / 1e9
+            0.5 / e.ui / 1e9,
+            run.materials
         ));
     }
     if let Some(q) = &run.quiet {

@@ -200,6 +200,8 @@ fn two_layer_stack() -> trace_core::Stackup {
         kind,
         thickness: Length::from_mil(if kind == LayerKind::Copper { 1.4 } else { 12.6 }),
         dielectric_constant: (kind == LayerKind::Dielectric).then_some(4.8),
+        loss_tangent: None,
+        roughness_um: None,
         material: None,
     };
     trace_core::Stackup {
@@ -225,6 +227,8 @@ fn footprint_records(f: &Footprint) -> (u32, Vec<u8>, Vec<String>) {
                 kind: LayerKind::Copper,
                 thickness: Length::from_mil(1.4),
                 dielectric_constant: None,
+                loss_tangent: None,
+                roughness_um: None,
                 material: None,
             },
         );
@@ -921,6 +925,13 @@ impl<'a> Writer<'a> {
                 )
             })
             .collect();
+        let dfs: Vec<Option<f64>> = b
+            .stackup
+            .layers
+            .iter()
+            .filter(|l| l.kind == LayerKind::Dielectric)
+            .map(|l| l.loss_tangent)
+            .collect();
         let name = |i: u8| -> String {
             names
                 .get(i as usize)
@@ -1063,6 +1074,9 @@ impl<'a> Writer<'a> {
                     v.push(p(&key("USEDBYPRIMS"), "FALSE"));
                     v.push(p(&key("DIELTYPE"), if i % 2 == 0 { "1" } else { "2" }));
                     v.push(p(&key("DIELCONST"), format!("{k:.3}")));
+                    if let Some(df) = dfs.get(*i as usize).copied().flatten() {
+                        v.push(p(&key("DIELLOSSTANGENT"), format!("{df:.4}")));
+                    }
                     v.push(p(&key("DIELHEIGHT"), mil(h)));
                     v.push(p(&key("DIELMATERIAL"), m));
                 }

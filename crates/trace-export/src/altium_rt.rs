@@ -2215,6 +2215,12 @@ impl<'a> Merge<'a> {
                         changed = true;
                     }
                 }
+                if a.loss_tangent != b.loss_tangent {
+                    if let Some(d) = b.loss_tangent {
+                        t.set(&key("DIELLOSSTANGENT"), trim(d, 4));
+                        changed = true;
+                    }
+                }
                 if a.material != b.material {
                     if let Some(m) = &b.material {
                         t.set(&key("DIELMATERIAL"), m.clone());

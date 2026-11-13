@@ -81,6 +81,12 @@ pub struct StackLayer {
     pub thickness: Length,
     /// Relative permittivity, for dielectric and mask layers.
     pub dielectric_constant: Option<f64>,
+    /// Loss tangent (Df), for dielectric and mask layers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub loss_tangent: Option<f64>,
+    /// Surface roughness of copper layers, RMS, micrometres.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub roughness_um: Option<f64>,
     pub material: Option<String>,
 }
 

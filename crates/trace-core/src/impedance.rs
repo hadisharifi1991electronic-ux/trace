@@ -105,6 +105,13 @@ pub struct LayerGeometry {
     pub below: Option<f64>,
     /// Permittivity of the dielectric next to the layer.
     pub er: f64,
+    /// Loss tangent of the dielectric next to the layer, where the
+    /// stack-up gives one.
+    #[serde(default)]
+    pub tan_d: Option<f64>,
+    /// The copper's roughness (RMS, µm), where the stack-up gives it.
+    #[serde(default)]
+    pub rough_um: Option<f64>,
 }
 
 impl LayerGeometry {
@@ -201,6 +208,19 @@ pub fn layer_geometry(stackup: &crate::Stackup) -> Vec<LayerGeometry> {
             .filter(|(_, l)| l.kind == LayerKind::Copper)
             .map(|(i, _)| i)
             .collect();
+        // Thickness and thickness-weighted loss tangent of the dielectric
+        // between two stack positions, over the layers that give one.
+        let df = |a: usize, b: usize| -> (f64, f64) {
+            let (mut h, mut dh) = (0.0, 0.0);
+            for l in &layers[a + 1..b] {
+                if let (LayerKind::Dielectric, Some(d)) = (l.kind, l.loss_tangent) {
+                    let t = l.thickness.mil().max(0.0);
+                    h += t;
+                    dh += t * d;
+                }
+            }
+            (h, dh)
+        };
         let gap = |a: usize, b: usize| -> (f64, f64) {
             // Total dielectric between two stack positions, and its mean Er
             // weighted by thickness.
@@ -236,6 +256,21 @@ pub fn layer_geometry(stackup: &crate::Stackup) -> Vec<LayerGeometry> {
                     above: above.map(|a| a.0).filter(|h| *h > 0.0),
                     below: below.map(|b| b.0).filter(|h| *h > 0.0),
                     er,
+                    tan_d: {
+                        let (mut h, mut dh) = (0.0, 0.0);
+                        if ci > 0 {
+                            let (a, b) = df(coppers[ci - 1], i);
+                            h += a;
+                            dh += b;
+                        }
+                        if ci + 1 < coppers.len() {
+                            let (a, b) = df(i, coppers[ci + 1]);
+                            h += a;
+                            dh += b;
+                        }
+                        (h > 0.0).then(|| dh / h)
+                    },
+                    rough_um: layers[i].roughness_um,
                 }
             })
             .collect()
@@ -371,6 +406,37 @@ mod tests {
     }
 
     #[test]
+    fn loss_tangent_is_the_thickness_weighted_mean_next_to_the_layer() {
+        use crate::{StackLayer, Stackup};
+        let l = |name: &str, kind, t: f64, df: Option<f64>| StackLayer {
+            name: name.into(),
+            altium_id: None,
+            kind,
+            thickness: Length::from_mil(t),
+            dielectric_constant: Some(4.0),
+            loss_tangent: df,
+            roughness_um: (kind == LayerKind::Copper).then_some(0.5),
+            material: None,
+        };
+        let st = Stackup {
+            layers: vec![
+                l("Top", LayerKind::Copper, 1.4, None),
+                l("D1", LayerKind::Dielectric, 4.0, Some(0.004)),
+                l("In1", LayerKind::Copper, 0.7, None),
+                l("D2", LayerKind::Dielectric, 12.0, Some(0.02)),
+                l("Bottom", LayerKind::Copper, 1.4, None),
+            ],
+        };
+        let g = layer_geometry(&st);
+        assert_eq!(g[0].tan_d, Some(0.004));
+        assert!((g[1].tan_d.unwrap() - (4.0 * 0.004 + 12.0 * 0.02) / 16.0).abs() < 1e-12);
+        assert_eq!(g[1].rough_um, Some(0.5));
+        let mut st = st;
+        st.layers[3].loss_tangent = None;
+        assert_eq!(layer_geometry(&st)[2].tan_d, None);
+    }
+
+    #[test]
     fn microstrip_matches_references() {
         // 10 mil wide, 1.4 mil copper, 5.5 mil FR-4 (Er 4.2): about 51 ohm.
         let z = microstrip(10.0, 1.4, 5.5, 4.2);
@@ -394,6 +460,8 @@ mod tests {
     fn solves_for_width() {
         let g = LayerGeometry {
             copper: 0,
+            tan_d: None,
+            rough_um: None,
             name: "Top".into(),
             t: 1.4,
             above: None,

@@ -42,7 +42,7 @@ fn reads_board_stackup_nets_and_pair_lengths() {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("demo.PcbDoc");
     let board = "|V9_STACK_LAYER0_NAME=Top|V9_STACK_LAYER0_LAYERID=16777217|V9_STACK_LAYER0_COPTHICK=1.4mil\
-|V9_STACK_LAYER1_NAME=Core|V9_STACK_LAYER1_LAYERID=17039361|V9_STACK_LAYER1_DIELHEIGHT=8mil|V9_STACK_LAYER1_DIELCONST=4.2\
+|V9_STACK_LAYER1_NAME=Core|V9_STACK_LAYER1_LAYERID=17039361|V9_STACK_LAYER1_DIELHEIGHT=8mil|V9_STACK_LAYER1_DIELCONST=4.2|V9_STACK_LAYER1_DIELLOSSTANGENT=0.004\
 |V9_STACK_LAYER2_NAME=Bottom|V9_STACK_LAYER2_LAYERID=16777248|V9_STACK_LAYER2_COPTHICK=1.4mil";
     let mut nets = text_record("|NAME=CLK_P");
     nets.extend(text_record("|NAME=CLK_N"));
@@ -65,6 +65,7 @@ fn reads_board_stackup_nets_and_pair_lengths() {
     let b = trace_altium::read_pcbdoc(&path).unwrap();
     assert_eq!(b.stackup.copper_layers().count(), 2);
     assert_eq!(b.stackup.layers[1].dielectric_constant, Some(4.2));
+    assert_eq!(b.stackup.layers[1].loss_tangent, Some(0.004));
     assert!((b.stackup.layers[1].thickness.mil() - 8.0).abs() < 1e-9);
     assert_eq!(b.stats.tracks, 3);
     assert!((b.net("CLK_P").unwrap().routed_length.mil() - 500.0).abs() < 0.01);

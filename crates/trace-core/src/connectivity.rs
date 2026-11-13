@@ -431,6 +431,8 @@ mod tests {
             kind,
             thickness: Length::from_mil(mil),
             dielectric_constant: None,
+            loss_tangent: None,
+            roughness_um: None,
             material: None,
         };
         let mut b = Board::default();

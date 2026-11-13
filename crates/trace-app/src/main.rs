@@ -2996,7 +2996,8 @@ impl eframe::App for App {
             self.select_net(n, true);
         }
         if let Some(scene) = &self.scene {
-            self.sim.show(ctx, &scene.board, self.selected);
+            self.sim
+                .show(ctx, &scene.board, self.imp.stackup(), self.selected);
         }
     }
 

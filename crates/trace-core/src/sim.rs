@@ -107,6 +107,9 @@ pub fn network(board: &Board, net: u32, odd: bool) -> Network {
     let depth = faces(board);
     let mid = |l: u8| depth.get(l as usize).map_or(0.0, |(a, b)| (a + b) / 2.0);
     let er = geo.first().map_or(DEFAULT_ER, |g| g.er);
+    // Vias pass through the whole stack: its mean loss tangent.
+    let dfs: Vec<f64> = geo.iter().filter_map(|g| g.tan_d).collect();
+    let via_df = (!dfs.is_empty()).then(|| dfs.iter().sum::<f64>() / dfs.len() as f64);
     let partner = if odd {
         board.pair_partners().get(&net).copied()
     } else {
@@ -148,7 +151,7 @@ pub fn network(board: &Board, net: u32, odd: bool) -> Network {
             let ((a, b), (la, lb)) = ((w.0[0], w.0[1]), (w.1[0], w.1[1]));
             let len = (mid(lb) - mid(la)).abs();
             let tau = len / 1000.0 * er.sqrt() / C_IN;
-            edges.push((a, b, zv, tau, loss::dielectric(tau), None));
+            edges.push((a, b, zv, tau, loss::dielectric(tau, via_df), None));
         }
         ids
     };
@@ -610,6 +613,8 @@ pub struct Run {
     pub quiet: Option<Eye>,
     /// Largest crosstalk at the receiver (with minus without), volts.
     pub noise: f64,
+    /// The loss tangent and roughness used, in words.
+    pub materials: String,
 }
 
 /// PRBS7 (x^7 + x^6 + 1).
@@ -1415,6 +1420,7 @@ pub fn simulate(
     };
     let nyquist = setup.rate / 2.0;
     let loss_db = loss.map_or(0.0, |l| victim.att.at(nyquist, l) * 8.686);
+    let materials = loss.map_or_else(|| "lossless lines".to_string(), |l| materials(board, l));
     Ok(Run {
         dt,
         start: start as f64 * dt,
@@ -1428,7 +1434,55 @@ pub fn simulate(
         aggressors,
         quiet,
         noise,
+        materials,
     })
+}
+
+/// The loss tangent and roughness a simulation uses, in words.
+pub fn materials(board: &Board, loss: &Loss) -> String {
+    let geo = board.layer_geometry();
+    let range = |v: &[f64], digits: usize| -> String {
+        let lo = v.iter().cloned().fold(f64::MAX, f64::min);
+        let hi = v.iter().cloned().fold(f64::MIN, f64::max);
+        if (hi - lo).abs() < 1e-12 {
+            format!("{lo:.digits$}")
+        } else {
+            format!("{lo:.digits$} to {hi:.digits$}")
+        }
+    };
+    let part = |own: Vec<f64>, use_own: bool, fallback: f64, what: &str, unit: &str, d: usize| {
+        if use_own && !own.is_empty() {
+            let mut s = format!("{what} {}{unit} from the stack-up", range(&own, d));
+            if own.len() < geo.len() {
+                s += &format!(
+                    " ({fallback:.d$}{unit} on {} layers without)",
+                    geo.len() - own.len()
+                );
+            }
+            s
+        } else {
+            format!("{what} {fallback:.d$}{unit}")
+        }
+    };
+    format!(
+        "{}, {}",
+        part(
+            geo.iter().filter_map(|g| g.tan_d).collect(),
+            loss.stackup_df,
+            loss.tan_d,
+            "Df",
+            "",
+            4
+        ),
+        part(
+            geo.iter().filter_map(|g| g.rough_um).collect(),
+            loss.stackup_rough,
+            loss.rough_um,
+            "roughness",
+            " µm",
+            2
+        )
+    )
 }
 
 /// Finds the nets beside the route, drives each from its pad nearest the
@@ -2218,6 +2272,8 @@ mod tests {
             kind,
             thickness: Length::from_mil(t),
             dielectric_constant: er,
+            loss_tangent: None,
+            roughness_um: None,
             material: None,
         };
         b.stackup.layers = vec![
@@ -2343,6 +2399,8 @@ mod tests {
             kind,
             thickness: Length::from_mil(t),
             dielectric_constant: er,
+            loss_tangent: None,
+            roughness_um: None,
             material: None,
         };
         b.stackup.layers = vec![

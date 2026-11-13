@@ -28,14 +28,22 @@ pub struct Loss {
     pub tan_d: f64,
     /// Copper surface roughness, RMS, micrometres.
     pub rough_um: f64,
+    /// Use each layer's own Df from the stack-up where it gives one
+    /// (`tan_d` for the rest); otherwise `tan_d` everywhere.
+    pub stackup_df: bool,
+    /// The same for roughness.
+    pub stackup_rough: bool,
 }
 
 impl Default for Loss {
-    /// Standard FR-4 and ordinary electro-deposited foil.
+    /// The stack-up's materials; standard FR-4 and ordinary
+    /// electro-deposited foil where it gives none.
     fn default() -> Self {
         Loss {
             tan_d: 0.02,
             rough_um: 1.0,
+            stackup_df: true,
+            stackup_rough: true,
         }
     }
 }
@@ -47,8 +55,16 @@ pub struct Atten {
     pub dc: f64,
     /// Nepers at 1 GHz from the skin effect, smooth copper.
     pub skin: f64,
+    /// The part of `skin` on copper with a roughness of its own, and that
+    /// part times the roughness (µm), for the mean.
+    pub skin_own: f64,
+    pub skin_rough: f64,
     /// Nepers per GHz for a loss tangent of 1.
     pub diel: f64,
+    /// The part of `diel` in dielectric with a loss tangent of its own,
+    /// and that part times its loss tangent (nepers per GHz).
+    pub diel_own: f64,
+    pub diel_lost: f64,
 }
 
 impl std::ops::Add for Atten {
@@ -57,7 +73,11 @@ impl std::ops::Add for Atten {
         Atten {
             dc: self.dc + o.dc,
             skin: self.skin + o.skin,
+            skin_own: self.skin_own + o.skin_own,
+            skin_rough: self.skin_rough + o.skin_rough,
             diel: self.diel + o.diel,
+            diel_own: self.diel_own + o.diel_own,
+            diel_lost: self.diel_lost + o.diel_lost,
         }
     }
 }
@@ -75,8 +95,20 @@ fn rough(f: f64, rough_um: f64) -> f64 {
 impl Atten {
     /// Attenuation at `f` hertz, nepers.
     pub fn at(&self, f: f64, loss: &Loss) -> f64 {
-        let ac = self.skin * (f.max(0.0) / 1e9).sqrt() * rough(f, loss.rough_um);
-        (self.dc * self.dc + ac * ac).sqrt() + self.diel * loss.tan_d * f / 1e9
+        let k = rough(f, loss.rough_um);
+        let skin = if loss.stackup_rough && self.skin_own > 0.0 {
+            let own = rough(f, self.skin_rough / self.skin_own);
+            self.skin_own * own + (self.skin - self.skin_own) * k
+        } else {
+            self.skin * k
+        };
+        let diel = if loss.stackup_df {
+            self.diel_lost + (self.diel - self.diel_own) * loss.tan_d
+        } else {
+            self.diel * loss.tan_d
+        };
+        let ac = skin * (f.max(0.0) / 1e9).sqrt();
+        (self.dc * self.dc + ac * ac).sqrt() + diel * f / 1e9
     }
 
     pub fn is_zero(&self) -> bool {
@@ -113,17 +145,29 @@ pub fn track(g: Option<&LayerGeometry>, w: f64, len: f64, z: f64, tau: f64) -> A
         }
         _ => (1.0 / wm, 1.0),
     };
+    let skin = rs * geom * l / (2.0 * z);
+    let rough = g.and_then(|g| g.rough_um).filter(|r| *r >= 0.0);
+    let diel = PI * 1e9 * tau * q;
+    let df = g.and_then(|g| g.tan_d).filter(|d| *d >= 0.0);
     Atten {
         dc: RHO / (wm * t) * l / (2.0 * z),
-        skin: rs * geom * l / (2.0 * z),
-        diel: PI * 1e9 * tau * q,
+        skin,
+        skin_own: rough.map_or(0.0, |_| skin),
+        skin_rough: rough.map_or(0.0, |r| skin * r),
+        diel,
+        diel_own: df.map_or(0.0, |_| diel),
+        diel_lost: df.map_or(0.0, |d| diel * d),
     }
 }
 
-/// Dielectric loss only (a via barrel), delay `tau`.
-pub fn dielectric(tau: f64) -> Atten {
+/// Dielectric loss only (a via barrel), delay `tau`, in a dielectric of
+/// loss tangent `df` where known.
+pub fn dielectric(tau: f64, df: Option<f64>) -> Atten {
+    let diel = PI * 1e9 * tau;
     Atten {
-        diel: PI * 1e9 * tau,
+        diel,
+        diel_own: df.map_or(0.0, |_| diel),
+        diel_lost: df.map_or(0.0, |d| diel * d),
         ..Default::default()
     }
 }
@@ -288,6 +332,7 @@ mod tests {
             dc: 0.01,
             skin: 0.2,
             diel: 0.3,
+            ..Default::default()
         };
         let f = filter(&a, &loss, 2e-12);
         let sum = f.gain();
@@ -314,6 +359,39 @@ mod tests {
     }
 
     #[test]
+    fn the_stackup_df_counts_where_it_is_given() {
+        let mut g = LayerGeometry {
+            copper: 1,
+            name: "In1".into(),
+            t: 1.4,
+            above: Some(5.0),
+            below: Some(5.0),
+            er: 3.3,
+            tan_d: Some(0.003),
+            rough_um: Some(0.4),
+        };
+        let a = track(Some(&g), 5.0, 1000.0, 50.0, 150e-12);
+        let fr4 = Loss {
+            stackup_df: false,
+            stackup_rough: false,
+            ..Loss::default()
+        };
+        let own = Loss::default();
+        // Low-loss laminate and smooth copper lose less than FR-4 values.
+        assert!(a.at(5e9, &own) < 0.5 * a.at(5e9, &fr4));
+        // A layer without its own values takes the defaults either way.
+        g.tan_d = None;
+        g.rough_um = None;
+        let b = track(Some(&g), 5.0, 1000.0, 50.0, 150e-12);
+        assert!((b.at(5e9, &own) - b.at(5e9, &fr4)).abs() < 1e-12);
+        // Losses still add in series.
+        let s = a + b;
+        assert!(
+            (s.at(5e9, &own) - a.at(5e9, &own) - b.at(5e9, &own)).abs() < 0.05 * s.at(5e9, &own)
+        );
+    }
+
+    #[test]
     fn a_five_mil_stripline_loses_what_tables_say() {
         // 5 mil, 1 oz, 50 ohm stripline in FR-4 (Df 0.02): about
         // 0.1 dB/inch at 1 GHz from copper and 0.1 from the dielectric.
@@ -324,6 +402,8 @@ mod tests {
             above: Some(5.0),
             below: Some(5.0),
             er: 4.2,
+            tan_d: None,
+            rough_um: None,
         };
         let tau = 4.2f64.sqrt() * 0.0254 / 3e8;
         let a = track(Some(&g), 5.0, 1000.0, 50.0, tau);

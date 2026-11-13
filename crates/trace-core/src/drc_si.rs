@@ -821,6 +821,8 @@ mod tests {
                 kind,
                 thickness: Length::from_mil(t),
                 dielectric_constant: Some(4.0),
+                loss_tangent: None,
+                roughness_um: None,
                 material: None,
             });
         }

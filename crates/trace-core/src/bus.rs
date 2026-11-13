@@ -318,6 +318,8 @@ mod tests {
             kind: LayerKind::Copper,
             thickness: Length::from_mil(1.4),
             dielectric_constant: None,
+            loss_tangent: None,
+            roughness_um: None,
             material: None,
         });
         b.nets = (0..3)

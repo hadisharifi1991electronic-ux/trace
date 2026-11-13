@@ -966,6 +966,7 @@ fn stackup(job: &Job, dir: &str, layers: &[&MatrixLayer]) -> Option<trace_core::
                 kv.get(".comment").filter(|c| !c.is_empty()).cloned(),
             )
         };
+        let df = if copper { None } else { num(".loss_tangent") };
         st.layers.push(StackLayer {
             name,
             altium_id: None,
@@ -976,6 +977,8 @@ fn stackup(job: &Job, dir: &str, layers: &[&MatrixLayer]) -> Option<trace_core::
             },
             thickness: Length::from_mm(thickness.unwrap_or(0.0)),
             dielectric_constant: er,
+            loss_tangent: df,
+            roughness_um: None,
             material,
         });
     }

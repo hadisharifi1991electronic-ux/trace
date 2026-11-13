@@ -867,11 +867,13 @@ fn sim(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
             let mut l = sim::Loss::default();
             if let Some(d) = opt.get("--df") {
                 l.tan_d = d.parse().map_err(|_| format!("not a loss tangent: {d}"))?;
+                l.stackup_df = false;
             }
             if let Some(r) = opt.get("--rough") {
                 let um = ibis::num(r.trim_end_matches("um").trim_end_matches('u'))
                     .ok_or(format!("not a roughness: {r}"))?;
                 l.rough_um = um;
+                l.stackup_rough = false;
             }
             Some(l)
         },
@@ -928,12 +930,11 @@ fn sim(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
         e.ui * 1e12
     );
     match &setup.loss {
-        Some(l) => println!(
-            "  loss {:.2} dB at {:.2} GHz (Nyquist), Df {}, roughness {} um",
+        Some(_) => println!(
+            "  loss {:.2} dB at {:.2} GHz (Nyquist); {}",
             run.loss_db,
             rate / 2e9,
-            l.tan_d,
-            l.rough_um
+            run.materials
         ),
         None => println!("  lossless lines"),
     }

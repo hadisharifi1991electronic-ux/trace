@@ -542,6 +542,8 @@ mod tests {
             kind,
             thickness: Length::from_mil(t),
             dielectric_constant: er,
+            loss_tangent: None,
+            roughness_um: None,
             material: None,
         };
         b.stackup.layers = vec![

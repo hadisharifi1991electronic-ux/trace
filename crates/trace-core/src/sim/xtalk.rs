@@ -204,6 +204,8 @@ mod tests {
             above,
             below,
             er: 4.2,
+            tan_d: None,
+            rough_um: None,
         }
     }
 

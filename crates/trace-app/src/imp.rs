@@ -129,6 +129,19 @@ impl Imp {
         match self.saved.get(&key) {
             Some(s) => {
                 self.stackup = s.stackup.clone();
+                // Stack-ups saved before Trace kept loss tangents: take the
+                // file's where the saved layer has none.
+                for l in &mut self.stackup.layers {
+                    if let Some(b) = board
+                        .stackup
+                        .layers
+                        .iter()
+                        .find(|b| b.name == l.name && b.kind == l.kind)
+                    {
+                        l.loss_tangent = l.loss_tangent.or(b.loss_tangent);
+                        l.roughness_um = l.roughness_um.or(b.roughness_um);
+                    }
+                }
                 self.se = s.se;
                 self.diff = s.diff;
                 self.tol = s.tol;
@@ -189,6 +202,11 @@ impl Imp {
 
     /// Width and gap for a pair carrying `net` on each copper layer, from
     /// the stack-up and the pair's target, where they can be worked out.
+    /// The stack-up as edited here, for the board loaded last.
+    pub fn stackup(&self) -> &Stackup {
+        &self.stackup
+    }
+
     pub fn pair_sizes(&mut self, net: &str, copper: usize) -> Vec<Option<(f64, f64)>> {
         if self.geo.is_empty() {
             self.geo = layer_geometry(&self.stackup);
@@ -355,6 +373,8 @@ impl Imp {
                             "Type".into(),
                             format!("Thickness ({unit})"),
                             "Er".into(),
+                            "Df".into(),
+                            "Roughness µm".into(),
                             format!("{:.0} Ω width", self.se),
                             format!("{:.0} Ω pair w / gap", self.diff),
                             "Delay ps/in".into(),
@@ -401,11 +421,76 @@ impl Imp {
                                     l.dielectric_constant = Some(er);
                                     edited = true;
                                 }
+                                match l.loss_tangent {
+                                    Some(mut df) => {
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(&mut df)
+                                                    .speed(0.0005)
+                                                    .range(0.0..=0.2)
+                                                    .max_decimals(4),
+                                            )
+                                            .on_hover_text("Loss tangent, used by the signal simulation")
+                                            .changed()
+                                        {
+                                            l.loss_tangent = Some(df);
+                                            edited = true;
+                                        }
+                                    }
+                                    None => {
+                                        if ui
+                                            .small_button("–")
+                                            .on_hover_text(
+                                                "The file gives no loss tangent; the simulation's \
+                                                 own value is used. Click to set one (FR-4: 0.02)",
+                                            )
+                                            .clicked()
+                                        {
+                                            l.loss_tangent = Some(0.02);
+                                            edited = true;
+                                        }
+                                    }
+                                }
+                                ui.label("");
                                 ui.label("");
                                 ui.label("");
                                 ui.label("");
                             } else {
                                 ui.label("");
+                                ui.label("");
+                                match l.roughness_um {
+                                    Some(mut r) => {
+                                        if ui
+                                            .add(
+                                                egui::DragValue::new(&mut r)
+                                                    .speed(0.02)
+                                                    .range(0.0..=10.0)
+                                                    .max_decimals(2),
+                                            )
+                                            .on_hover_text(
+                                                "Copper roughness (RMS), used by the signal simulation",
+                                            )
+                                            .changed()
+                                        {
+                                            l.roughness_um = Some(r);
+                                            edited = true;
+                                        }
+                                    }
+                                    None => {
+                                        if ui
+                                            .small_button("–")
+                                            .on_hover_text(
+                                                "No roughness given; the simulation's own value is \
+                                                 used. Click to set one (standard foil about 1 µm, \
+                                                 HVLP 0.4 µm)",
+                                            )
+                                            .clicked()
+                                        {
+                                            l.roughness_um = Some(1.0);
+                                            edited = true;
+                                        }
+                                    }
+                                }
                                 let g = self.geo.get(ci).cloned();
                                 ci += 1;
                                 match g {

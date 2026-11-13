@@ -138,9 +138,12 @@ checker and simulator all read.
   odd-mode impedance), drives a PRBS7 pattern through the IBIS buffers and
   packages, and shows the waveforms at the driver and receiver and an eye
   diagram with its height and width. Track loss takes in the copper (DC
-  resistance, skin effect, roughness) and the dielectric's loss tangent
-  (Df, with presets from FR-4 to Megtron 6), and reports the loss at half
-  the bit rate. Crosstalk drives the nets that run beside the route (with
+  resistance, skin effect, roughness) and the dielectric's loss tangent,
+  each layer's own from the stack-up (Altium's Df is read; the Impedance
+  window shows and edits Df per dielectric and roughness per copper
+  layer), with values set in the window (presets from FR-4 to Megtron 6)
+  where the stack-up gives none, and reports the loss at half the bit
+  rate. Crosstalk drives the nets that run beside the route (with
   the same driver and receiver models, pairs against each other, each with
   its own pattern) and adds their near- and far-end crosstalk; the window
   lists them and gives the noise at the receiver and the eye without it.
@@ -216,6 +219,8 @@ trace panel board.PcbDoc 2x3 out.tracepcb [--gap 2mm] [--rail 5mm] [--tabs N] [-
 trace sim board.PcbDoc U1.A3 U2.B7 --ibis drv.ibs [--rx-ibis rx.ibs] [--model M] [--rx-model M]
          [--rate 2G] [--bits 160] [--corner typ|min|max] [--term 50|50@1.65|100diff] [--single]
          [--df 0.02] [--rough 1um] [--lossless] [--no-xtalk] [out.svg]
+                                 (--df and --rough set every layer; by default each layer's own from the
+                                 stack-up, FR-4 and 1 um where it has none)
                                  IBIS simulation from driver pin to receiver pin: route delay, loss, eye height
                                  and width, crosstalk from nets beside the route; a net with a pair partner is
                                  simulated as the pair (unless --single)
@@ -378,9 +383,11 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   first) so the jogs can land.
 - Signal simulation takes a pair as two lines at its odd-mode impedance.
   Loss uses closed-form estimates: copper current on the faces towards the
-  planes, Hammerstad's roughness factor, one loss tangent for the whole
-  board (the stack-up's own Df is not read yet), and a characteristic
-  impedance that does not change with frequency. Crosstalk is counted only
+  planes, Hammerstad's roughness factor, the loss tangent next to each
+  layer (a via takes the stack-up's mean), and a characteristic
+  impedance that does not change with frequency. Altium files carry no
+  copper roughness, so it is the window's value until set in the
+  Impedance window (kept in Trace's settings for the board). Crosstalk is counted only
   between parallel straight tracks on the same layer, within four
   dielectric heights (50 mil at most), from the eight strongest nets, and
   the victim does not disturb its aggressors (weak coupling); coupling

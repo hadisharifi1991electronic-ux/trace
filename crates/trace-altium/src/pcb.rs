@@ -1075,6 +1075,8 @@ pub(crate) fn parse_stackup(p: &Props) -> Stackup {
             kind,
             thickness,
             dielectric_constant: p.float(&key("DIELCONST")),
+            loss_tangent: p.float(&key("DIELLOSSTANGENT")).filter(|d| *d >= 0.0),
+            roughness_um: None,
             material,
         });
     }

@@ -669,6 +669,9 @@ fn attr_file(job: &str, layer: &str, s: &trace_core::StackLayer, copper: bool) -
         if let Some(e) = s.dielectric_constant {
             let _ = writeln!(t, ".dielectric_constant = {e}");
         }
+        if let Some(d) = s.loss_tangent {
+            let _ = writeln!(t, ".loss_tangent = {d}");
+        }
         if let Some(m) = s.material.as_deref().filter(|m| !m.is_empty()) {
             let _ = writeln!(t, ".comment = {m}");
         }
@@ -1091,6 +1094,8 @@ mod tests {
                 kind: LayerKind::Dielectric,
                 thickness: Length::from_mm(1.5),
                 dielectric_constant: Some(4.2),
+                loss_tangent: Some(0.015),
+                roughness_um: None,
                 material: Some("FR-4".into()),
             },
         );
@@ -1144,6 +1149,7 @@ mod tests {
         assert_eq!(st[1].kind, LayerKind::Dielectric);
         assert!((st[1].thickness.mm() - 1.5).abs() < 1e-6);
         assert_eq!(st[1].dielectric_constant, Some(4.2));
+        assert_eq!(st[1].loss_tangent, Some(0.015));
         assert_eq!(st[1].material.as_deref(), Some("FR-4"));
         assert_eq!(g.vias.len(), 1, "{:?}", back.warnings);
         assert_eq!(

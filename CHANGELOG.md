@@ -3,6 +3,21 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.38.0 (2026-11-13)
+
+- Loss from the board's own materials: each dielectric's loss tangent
+  (Df) is read from Altium stack-ups and ODB++ jobs, and kept in Altium,
+  ODB++ and Trace files. The Impedance window shows Df for each
+  dielectric and roughness for each copper layer, and edits both.
+- Signal simulation uses the loss tangent next to each layer and each
+  copper layer's roughness, with the window's values where the stack-up
+  gives none ("From the stack-up", on by default); the results say which
+  values were used. On TI's DAC39RF12 EVM, the 6SRX pair runs in Itera
+  MT40 (Df 0.003) and loses 0.23 dB at 1 GHz against 0.31 dB with FR-4
+  values.
+- `trace sim --df` and `--rough` now set every layer; without them each
+  layer's own values are used.
+
 ## 0.37.0 (2026-11-13)
 
 - Track loss in signal simulation: each line loses signal to its copper

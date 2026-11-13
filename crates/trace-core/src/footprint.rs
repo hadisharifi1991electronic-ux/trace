@@ -692,6 +692,8 @@ mod tests {
                         kind: crate::LayerKind::Copper,
                         thickness: Length(0),
                         dielectric_constant: None,
+                        loss_tangent: None,
+                        roughness_um: None,
                         material: None,
                     })
                     .collect(),

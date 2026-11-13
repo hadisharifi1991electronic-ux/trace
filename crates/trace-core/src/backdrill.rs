@@ -613,6 +613,8 @@ mod tests {
                     kind: LayerKind::Dielectric,
                     thickness: Length::from_mil(10.0),
                     dielectric_constant: Some(4.0),
+                    loss_tangent: None,
+                    roughness_um: None,
                     material: None,
                 });
             }
@@ -622,6 +624,8 @@ mod tests {
                 kind: LayerKind::Copper,
                 thickness: Length::from_mil(1.4),
                 dielectric_constant: None,
+                loss_tangent: None,
+                roughness_um: None,
                 material: None,
             });
         }

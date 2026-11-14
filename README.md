@@ -243,6 +243,11 @@ trace stitch board.PcbDoc GND out.tracepcb [--grid 100mil] [--stagger] [--via 16
                                  stitch a net's pours and planes with vias on a grid
 trace fence board.PcbDoc RF_P,RF_N out.tracepcb [--ground GND] [--ghz 6] [--gap 8mil] [--rows 2]
                                  line the nets' tracks with ground vias on both sides, λ/20 apart at GHz
+trace erc project.PrjPcb [--all]  electrical rule check of the sheets (.SchDoc, .PrjPcb or .tracesch)
+trace annotate project.PrjPcb out.tracesch [--all] [--down] [--start 1] [--per-sheet 100]
+                                 number parts without a number (or all) in sheet order
+trace swap board.PcbDoc U1 A1 A2 out.tracepcb
+                                 two pins of a part trade nets, with the routing leading only to each
 trace fanout board.PcbDoc U1[,U2] out.tracepcb [--via 18/8] [--layers 1-6] [--in-pad] [--inward]
          [--skip-rows N] [--width 5mil] [--clearance 4mil] [--no-net]
                                  fan out BGA parts: a neck track to a via between the balls (or in the pad)

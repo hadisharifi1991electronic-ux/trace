@@ -6,7 +6,7 @@
 use crate::schematic::*;
 
 /// How close two points must be to count as the same, in mil.
-const TOL: f64 = 0.6;
+const TOL: f64 = 1.0;
 
 /// Altium's default wire colour (dark blue) and width.
 pub const WIRE_COLOR: Rgb = [0, 0, 128];
@@ -541,12 +541,16 @@ impl Drawing {
             return;
         };
         let old = std::mem::replace(&mut q.designator, designator.to_string());
-        for t in self
-            .texts
-            .iter_mut()
-            .filter(|t| t.part == Some(i as u32) && t.text == old)
-        {
-            t.text = designator.to_string();
+        for t in self.texts.iter_mut().filter(|t| t.part == Some(i as u32)) {
+            if t.text == old {
+                t.text = designator.to_string();
+            } else if let Some(letter) = t
+                .text
+                .strip_prefix(old.as_str())
+                .filter(|l| l.len() == 1 && l.chars().all(|c| c.is_ascii_uppercase()))
+            {
+                t.text = format!("{designator}{letter}");
+            }
         }
     }
 }
@@ -575,6 +579,7 @@ impl Sheet {
         self.symbols.push(s);
         let n = self.drawing.paste_part(&lib.drawing, 0, at, designator)?;
         self.drawing.parts[n].symbol = self.symbols.len() - 1;
+        self.drawing.parts[n].gate = if lib.parts > 1 { lib.part } else { 0 };
         Some(n)
     }
 
@@ -612,6 +617,7 @@ mod tests {
                 symbol: 0,
                 min: [-100.0, -50.0],
                 max: [100.0, 50.0],
+                ..Default::default()
             }],
             pins: vec![
                 SchPin {
@@ -620,6 +626,7 @@ mod tests {
                     part: 0,
                     name: String::new(),
                     number: "1".into(),
+                    ..Default::default()
                 },
                 SchPin {
                     at: [200.0, 0.0],
@@ -627,6 +634,7 @@ mod tests {
                     part: 0,
                     name: String::new(),
                     number: "2".into(),
+                    ..Default::default()
                 },
             ],
             texts: vec![SchText {

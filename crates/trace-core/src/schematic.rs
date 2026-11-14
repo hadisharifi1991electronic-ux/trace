@@ -95,6 +95,13 @@ pub struct Drawing {
     /// Sheet symbols: the box and the file of the sheet they stand for.
     #[serde(default)]
     pub links: Vec<SheetLink>,
+    /// Buses and bus entries, as polylines (wires ending on them are
+    /// joined to the bus).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub buses: Vec<Vec<Pt>>,
+    /// No-ERC markers: pins and wires they sit on are not checked.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub no_erc: Vec<Pt>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -214,7 +221,79 @@ pub struct SchText {
     pub part: Option<u32>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+/// A pin's electrical type, as Altium and Allegro name them, for the
+/// electrical rule check.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum PinKind {
+    Input,
+    Bidir,
+    Output,
+    OpenCollector,
+    #[default]
+    Passive,
+    HiZ,
+    OpenEmitter,
+    Power,
+}
+
+impl PinKind {
+    pub const ALL: [PinKind; 8] = [
+        PinKind::Input,
+        PinKind::Bidir,
+        PinKind::Output,
+        PinKind::OpenCollector,
+        PinKind::Passive,
+        PinKind::HiZ,
+        PinKind::OpenEmitter,
+        PinKind::Power,
+    ];
+
+    /// From Altium's `ELECTRICAL` number.
+    pub fn altium(n: i64) -> PinKind {
+        match n {
+            0 => PinKind::Input,
+            1 => PinKind::Bidir,
+            2 => PinKind::Output,
+            3 => PinKind::OpenCollector,
+            5 => PinKind::HiZ,
+            6 => PinKind::OpenEmitter,
+            7 => PinKind::Power,
+            _ => PinKind::Passive,
+        }
+    }
+
+    pub fn altium_number(self) -> i64 {
+        match self {
+            PinKind::Input => 0,
+            PinKind::Bidir => 1,
+            PinKind::Output => 2,
+            PinKind::OpenCollector => 3,
+            PinKind::Passive => 4,
+            PinKind::HiZ => 5,
+            PinKind::OpenEmitter => 6,
+            PinKind::Power => 7,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            PinKind::Input => "input",
+            PinKind::Bidir => "I/O",
+            PinKind::Output => "output",
+            PinKind::OpenCollector => "open collector",
+            PinKind::Passive => "passive",
+            PinKind::HiZ => "high-Z",
+            PinKind::OpenEmitter => "open emitter",
+            PinKind::Power => "power",
+        }
+    }
+
+    fn is_passive(&self) -> bool {
+        *self == PinKind::Passive
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SchPin {
     /// The connection end.
     pub at: Pt,
@@ -224,6 +303,8 @@ pub struct SchPin {
     pub name: String,
     /// Pin number, matching the footprint's pad name.
     pub number: String,
+    #[serde(default, skip_serializing_if = "PinKind::is_passive")]
+    pub kind: PinKind,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -246,12 +327,35 @@ pub struct NetTag {
     pub graphic: Option<u32>,
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct SchPart {
     pub designator: String,
     pub symbol: usize,
     pub min: Pt,
     pub max: Pt,
+    /// Which part of a multi-part component this is (1 for A); 0 for a
+    /// component in one part.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub gate: u32,
+}
+
+fn is_zero(v: &u32) -> bool {
+    *v == 0
+}
+
+impl SchPart {
+    /// The designator with its part letter (U1A), as drawn.
+    pub fn full_designator(&self) -> String {
+        if self.gate > 0 {
+            format!(
+                "{}{}",
+                self.designator,
+                (b'A' + (self.gate.clamp(1, 26) - 1) as u8) as char
+            )
+        } else {
+            self.designator.clone()
+        }
+    }
 }
 
 /// A net within one sheet.
@@ -302,7 +406,9 @@ impl Drawing {
     /// lies on another wire, pins and tags join the wire they touch, and
     /// tags with the same text join each other.
     pub fn connect(&mut self) {
-        const TOL: f64 = 0.6;
+        // Sheets drawn in metric and read as mil land a fraction of a mil
+        // apart where they meet; grids are 10 mil or more.
+        const TOL: f64 = 1.0;
         let (nw, np, nt) = (self.wires.len(), self.pins.len(), self.tags.len());
         let mut d = Dsu((0..nw + np + nt).collect());
         let pin = |i: usize| nw + i;
@@ -451,6 +557,7 @@ mod tests {
                 part: 0,
                 name: String::new(),
                 number: "1".into(),
+                ..Default::default()
             }],
             tags: vec![
                 NetTag {

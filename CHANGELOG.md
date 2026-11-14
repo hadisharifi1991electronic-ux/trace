@@ -3,6 +3,37 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.50.0 (2026-11-14)
+
+- Annotation (schematic panel > Annotate…, `trace annotate`): numbers
+  parts without a number (R?, U?A), or every part again, across then
+  down or down then across, from a start number, optionally a block per
+  sheet (R101… on the second sheet). Gates of one part share its number
+  even across sheets, and new gates fill a part of the same kind on the
+  same sheet before another is started. Preview first; one undo step.
+  Renamed parts reach the board through Update PCB.
+- Electrical rule check (schematic panel > Check (ERC), `trace erc`):
+  parts without a number or with one used twice, input pins left open
+  (errors), other open pins, nets with only one pin or none, outputs
+  driving each other or a supply pin, inputs with nothing driving them,
+  nets with two names, net labels on nothing and loose wire ends. No-ERC
+  markers and pins named NC are left out. The results list jumps to each
+  issue and rings it on the sheet.
+- Pin and gate swap (Edit > Pin and gate swap…, `trace swap`): two pins
+  of a part trade nets, taking along the tracks and vias that lead only
+  to each pad; routing that reaches other pads stays and is reported for
+  routing again. Two gates of a part (U1A and U1B, from the open
+  schematic) trade every pin, matched by where the pins sit on the
+  symbol. The open schematic changes to match (pin numbers, and the
+  gates' letters), so Update PCB does not swap them back.
+- Pins keep their electrical type (input, output, power, ...), parts
+  their gate letter, and sheets their No-ERC markers and buses, read from
+  Altium and written back to Altium sheets.
+- Schematic wires and pins less than 1 mil apart now count as joined
+  (sheets drawn in millimetres land a fraction of a mil off): two pins on
+  the LimeSDR-USB sheets were unconnected before.
+- The schematic's undo takes back a change to several sheets in one step.
+
 ## 0.49.0 (2026-11-14)
 
 - BGA fanout (Edit > Fanout…, `trace fanout`): for the selected parts, or

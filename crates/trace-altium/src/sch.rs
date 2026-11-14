@@ -872,10 +872,13 @@ fn read_records(records: &[SchRecord], name: String, file_name: &str) -> Sheet {
                 });
                 if wire {
                     b.d.wires.push(pts);
+                } else {
+                    b.d.buses.push(pts);
                 }
             }
             Some(BUS_ENTRY) => {
                 let c = color(p, "COLOR", 0x800000);
+                b.d.buses.push(vec![at(p), corner(p)]);
                 b.line(k, vec![at(p), corner(p)], line_width(p).max(10.0), c);
             }
             Some(JUNCTION) => {
@@ -898,6 +901,7 @@ fn read_records(records: &[SchRecord], name: String, file_name: &str) -> Sheet {
             }
             Some(NO_ERC) => {
                 let c = at(p);
+                b.d.no_erc.push(c);
                 let red = [255, 0, 0];
                 for (dx, dy) in [(1.0, 1.0), (1.0, -1.0)] {
                     b.line(
@@ -998,6 +1002,11 @@ fn read_records(records: &[SchRecord], name: String, file_name: &str) -> Sheet {
             symbol: s,
             min,
             max,
+            gate: if recs[k].int("PARTCOUNT").unwrap_or(0) > 2 {
+                recs[k].int("CURRENTPARTID").unwrap_or(1).clamp(1, 26) as u32
+            } else {
+                0
+            },
         });
     }
     sheet.net_labels.sort();
@@ -1138,6 +1147,7 @@ fn pin(b: &mut Builder, k: usize, p: &Props) {
         part,
         name: p.str("NAME"),
         number: p.str("DESIGNATOR"),
+        kind: trace_core::schematic::PinKind::altium(p.int("ELECTRICAL").unwrap_or(4)),
     });
     // Edge symbols: a bubble outside (negated), a wedge inside (clock).
     if p.int("SYMBOL_OUTEREDGE") == Some(1) {

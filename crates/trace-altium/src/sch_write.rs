@@ -1112,7 +1112,7 @@ pub fn write_schdoc(sheet: &Sheet, original: Option<&Path>) -> Result<Vec<u8>> {
                     .len("PINLENGTH", length)
                     .set("NAME", p.name.clone())
                     .set("DESIGNATOR", p.number.clone())
-                    .set("ELECTRICAL", "4");
+                    .set("ELECTRICAL", p.kind.altium_number().to_string());
                 let mut flags = orient;
                 if combo & 1 != 0 {
                     flags |= 0x08;
@@ -1155,7 +1155,7 @@ pub fn write_schdoc(sheet: &Sheet, original: Option<&Path>) -> Result<Vec<u8>> {
                         .len("PINLENGTH", length)
                         .set("NAME", p.name.clone())
                         .set("DESIGNATOR", p.number.clone())
-                        .set("ELECTRICAL", "4")
+                        .set("ELECTRICAL", p.kind.altium_number().to_string())
                         .set("PINCONGLOMERATE", (orient | 0x18).to_string());
                     r
                 }

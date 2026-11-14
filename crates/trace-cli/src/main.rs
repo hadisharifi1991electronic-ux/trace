@@ -79,6 +79,9 @@ USAGE:
     trace gloss <board> <out.tracepcb> [--nets a,b] [--no-merge] [--keep-dangling] [--corners] [--clearance C]
                                                 Tidy routing: zero-length and duplicate tracks, straight joins
                                                 merged, dangling ends cut back, square corners chamfered (--corners)
+    trace swap <board> <part> <pin> <pin> <out.tracepcb>
+    trace erc <sheet.SchDoc|project.PrjPcb|sch.tracesch> [--all]
+    trace annotate <sheet.SchDoc|project.PrjPcb|sch.tracesch> <out.tracesch> [--all] [--down] [--start N] [--per-sheet 100]
     trace fanout <board> <U1[,U2]> <out.tracepcb> [--via 18/8] [--layers 1-4] [--in-pad] [--inward]
               [--skip-rows N] [--width W] [--clearance C] [--no-net]
                                                 Fan out BGA and other surface parts: a short track from each
@@ -166,6 +169,9 @@ fn main() -> ExitCode {
         ["teardrops", file, out, rest @ ..] => teardrops_cmd(file, out, rest),
         ["gloss", file, out, rest @ ..] => gloss_cmd(file, out, rest),
         ["fanout", file, parts, out, rest @ ..] => fanout_cmd(file, parts, out, rest),
+        ["erc", file, rest @ ..] => erc_cmd(file, rest),
+        ["swap", file, part, a, b, out] => swap_cmd(file, part, a, b, out),
+        ["annotate", file, out, rest @ ..] => annotate_cmd(file, out, rest),
         ["fence", file, nets, out, rest @ ..] => fence_cmd(file, nets, out, rest),
         ["stackup", file] => stackup(file, None),
         ["stackup", file, out] => stackup(file, Some(out)),
@@ -2547,6 +2553,207 @@ fn teardrops_cmd(file: &str, out: &str, rest: &[&str]) -> Res {
         save_edits(b, edits, out)?;
     }
     println!("saved {out}");
+    Ok(())
+}
+
+/// Sheets with their file names, and the Trace schematic they came from.
+type Sheets = (
+    Vec<(String, trace_core::Sheet)>,
+    Option<trace_core::SchFile>,
+);
+
+/// The sheets of a `.SchDoc`, a `.PrjPcb` or a Trace schematic, with
+/// their file names and, for a Trace schematic, the file itself.
+fn sheets_of(file: &str) -> Result<Sheets, Box<dyn std::error::Error>> {
+    let p = Path::new(file);
+    let name = |q: &Path| {
+        q.file_name()
+            .map(|f| f.to_string_lossy().into_owned())
+            .unwrap_or_default()
+    };
+    match p
+        .extension()
+        .map(|e| e.to_string_lossy().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("tracesch") => {
+            let f = trace_core::SchFile::load(p)?;
+            let v = f
+                .sheets
+                .iter()
+                .map(|s| (s.file.clone(), s.sheet.clone()))
+                .collect();
+            Ok((v, Some(f)))
+        }
+        Some("prjpcb") => {
+            let dir = p.parent().unwrap_or(Path::new("."));
+            let text = String::from_utf8_lossy(&std::fs::read(p)?).into_owned();
+            let mut v = Vec::new();
+            for l in text.lines() {
+                let Some(doc) = l.trim().strip_prefix("DocumentPath=") else {
+                    continue;
+                };
+                let q = dir.join(doc.replace('\\', std::path::MAIN_SEPARATOR_STR));
+                if q.extension()
+                    .is_some_and(|e| e.eq_ignore_ascii_case("schdoc"))
+                    && q.is_file()
+                {
+                    v.push((name(&q), trace_altium::read_schdoc(&q)?));
+                }
+            }
+            if v.is_empty() {
+                return Err(format!("{file} lists no schematic sheets that exist").into());
+            }
+            Ok((v, None))
+        }
+        Some("schdoc") => Ok((vec![(name(p), trace_altium::read_schdoc(p)?)], None)),
+        _ => Err(format!("{file}: expected a .SchDoc, .PrjPcb or .tracesch").into()),
+    }
+}
+
+fn swap_cmd(file: &str, part: &str, a: &str, b: &str, out: &str) -> Res {
+    let b0 = board(file)?;
+    let i = b0
+        .components
+        .iter()
+        .position(|c| c.designator.eq_ignore_ascii_case(part))
+        .ok_or(format!("no part {part}"))?;
+    let s = trace_core::swap::swap_pads(&b0, &[((i, a.to_string()), (i, b.to_string()))])?;
+    println!("{}", s.summary(&b0));
+    save_edits(b0, s.edits, out)?;
+    println!("saved {out}");
+    Ok(())
+}
+
+fn erc_cmd(file: &str, rest: &[&str]) -> Res {
+    use trace_core::erc::{check, summary, Level};
+    let all = rest.contains(&"--all");
+    if let Some(o) = rest.iter().find(|a| **a != "--all") {
+        return Err(format!("unknown option {o}").into());
+    }
+    let t = std::time::Instant::now();
+    let (sheets, _) = sheets_of(file)?;
+    let refs: Vec<&trace_core::Sheet> = sheets.iter().map(|s| &s.1).collect();
+    let v = check(&refs);
+    let shown = if all { v.len() } else { v.len().min(60) };
+    for i in &v[..shown] {
+        println!(
+            "{:7}  {:24}  {:>8.0} {:>8.0}  {}",
+            if i.level == Level::Error {
+                "error"
+            } else {
+                "warning"
+            },
+            sheets[i.sheet].0,
+            i.at[0],
+            i.at[1],
+            i.text
+        );
+    }
+    if shown < v.len() {
+        println!("  ... {} more (--all lists them)", v.len() - shown);
+    }
+    println!(
+        "{} sheets: {} in {:.2} s",
+        sheets.len(),
+        summary(&v),
+        t.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+fn annotate_cmd(file: &str, out: &str, rest: &[&str]) -> Res {
+    use trace_core::annotate::{annotate, apply, AnnotateGoal, Order};
+    let mut goal = AnnotateGoal::default();
+    let mut i = 0;
+    while i < rest.len() {
+        let a = rest[i];
+        let val = || rest.get(i + 1).copied().ok_or(format!("{a} needs a value"));
+        match a {
+            "--all" => goal.all = true,
+            "--down" => goal.order = Order::DownThenAcross,
+            "--start" => {
+                goal.start = val()?.parse().map_err(|_| "--start takes a whole number")?;
+                i += 1;
+            }
+            "--per-sheet" => {
+                goal.sheet_step = Some(
+                    val()?
+                        .parse()
+                        .map_err(|_| "--per-sheet takes a whole number")?,
+                );
+                i += 1;
+            }
+            o => return Err(format!("unknown option {o}").into()),
+        }
+        i += 1;
+    }
+    if !out.to_ascii_lowercase().ends_with(".tracesch") {
+        return Err("the annotated sheets are saved as a Trace schematic (.tracesch)".into());
+    }
+    let (mut sheets, saved) = sheets_of(file)?;
+    let refs: Vec<&trace_core::Sheet> = sheets.iter().map(|s| &s.1).collect();
+    let r = annotate(&refs, &goal);
+    for x in r.iter().take(40) {
+        println!("{:24}  {} -> {}", sheets[x.sheet].0, x.from, x.to);
+    }
+    if r.len() > 40 {
+        println!("  ... {} more", r.len() - 40);
+    }
+    let before: Vec<trace_core::schematic::Drawing> = sheets
+        .iter()
+        .map(|s| trace_core::schematic::Drawing {
+            images: Vec::new(),
+            ..s.1.drawing.clone()
+        })
+        .collect();
+    {
+        let mut m: Vec<&mut trace_core::Sheet> = sheets.iter_mut().map(|s| &mut s.1).collect();
+        apply(&mut m, &r);
+    }
+    let mut f = saved.unwrap_or_else(|| trace_core::SchFile {
+        project: Path::new(file)
+            .extension()
+            .is_some_and(|e| e.eq_ignore_ascii_case("prjpcb"))
+            .then(|| {
+                Path::new(file)
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+            })
+            .flatten(),
+        sheets: sheets
+            .iter()
+            .zip(&before)
+            .map(|((name, sh), d)| trace_core::schematic::SavedSheet {
+                file: name.clone(),
+                sheet: sh.clone(),
+                synced: Some(d.clone()),
+                original: Some(d.clone()),
+            })
+            .collect(),
+        ..Default::default()
+    });
+    f.version = env!("CARGO_PKG_VERSION").to_string();
+    for (s, (_, sh)) in f.sheets.iter_mut().zip(&sheets) {
+        s.sheet = sh.clone();
+    }
+    // Numbered parts renamed: now -> as on the board.
+    let renamed = trace_core::annotate::component_renames(&r);
+    for map in [&mut f.renames, &mut f.original_renames] {
+        let was: Vec<(String, String)> = renamed
+            .iter()
+            .map(|(from, to)| {
+                let up = from.to_ascii_uppercase();
+                (to.to_ascii_uppercase(), map.get(&up).cloned().unwrap_or(up))
+            })
+            .collect();
+        for from in renamed.keys() {
+            map.remove(&from.to_ascii_uppercase());
+        }
+        map.extend(was);
+    }
+    f.save(Path::new(out))?;
+    println!("{} parts renamed; saved {out}", r.len());
     Ok(())
 }
 

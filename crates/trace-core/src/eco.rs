@@ -536,6 +536,7 @@ mod tests {
                 symbol: 0,
                 min: [x - 100.0, -50.0],
                 max: [x + 100.0, 50.0],
+                ..Default::default()
             });
             for (n, dx) in [(1, -200.0), (2, 200.0)] {
                 d.pins.push(SchPin {
@@ -544,6 +545,7 @@ mod tests {
                     part: k as u32,
                     name: String::new(),
                     number: n.to_string(),
+                    ..Default::default()
                 });
             }
         }

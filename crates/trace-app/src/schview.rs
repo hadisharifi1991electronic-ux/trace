@@ -14,6 +14,8 @@ use trace_core::footprint::{designator_prefix, next_designator, Footprint};
 use trace_core::sch_edit::{snap, WIRE_COLOR};
 use trace_core::{Drawing, SavedSheet, SchFile, SchGeom, Sheet};
 
+mod erc;
+
 /// Grid the editing tools snap to, in mil.
 const GRID: f64 = 50.0;
 
@@ -99,8 +101,11 @@ pub struct Schematics {
     pub tool: SchTool,
     /// Each sheet as the board last matched it.
     baseline: Vec<Option<Drawing>>,
-    undo: Vec<(usize, Sheet)>,
-    redo: Vec<(usize, Sheet)>,
+    /// Each step: the sheets it changed, as they were.
+    undo: Vec<Vec<(usize, Sheet)>>,
+    redo: Vec<Vec<(usize, Sheet)>>,
+    /// Electrical rule check results, and annotation settings.
+    erc: erc::ErcState,
     /// Designators renamed on the sheets: now -> as on the board.
     renames: HashMap<String, String>,
     /// The sheets as first read, which the board file as it was matches,
@@ -890,7 +895,7 @@ impl Schematics {
         let Some(sheet) = self.slots.get_mut(cur).and_then(|s| s.sheet.as_mut()) else {
             return;
         };
-        self.undo.push((cur, sheet.clone()));
+        self.undo.push(vec![(cur, sheet.clone())]);
         if self.undo.len() > 200 {
             self.undo.remove(0);
         }
@@ -914,6 +919,7 @@ impl Schematics {
         self.hl_for = None;
         self.sel_net = None;
         self.dirty = true;
+        self.erc.stale = true;
     }
 
     fn step(&mut self, back: bool) {
@@ -922,18 +928,33 @@ impl Schematics {
         } else {
             (&mut self.redo, &mut self.undo)
         };
-        let Some((i, sheet)) = from.pop() else { return };
-        let Some(slot) = self.slots.get_mut(i) else {
-            return;
-        };
-        if let Some(now) = slot.sheet.replace(sheet) {
-            to.push((i, now));
+        let Some(group) = from.pop() else { return };
+        let mut back = Vec::new();
+        let mut touched = Vec::new();
+        for (i, sheet) in group {
+            let Some(slot) = self.slots.get_mut(i) else {
+                continue;
+            };
+            if let Some(now) = slot.sheet.replace(sheet) {
+                back.push((i, now));
+            }
+            touched.push(i);
         }
-        self.select_sheet(i);
+        if !back.is_empty() {
+            to.push(back);
+        }
+        if !touched.contains(&self.current) {
+            if let Some(&i) = touched.first() {
+                self.select_sheet(i);
+            }
+        }
         self.sel_part = None;
         self.sel_wire = None;
         self.sel_tag = None;
-        self.after_edit(i);
+        for i in touched {
+            self.after_edit(i);
+        }
+        self.erc.stale = true;
     }
 
     pub fn select_sheet(&mut self, i: usize) {
@@ -1240,6 +1261,22 @@ impl Schematics {
                 self.step(false);
             }
         });
+        ui.horizontal(|ui| {
+            if ui
+                .button("Annotate…")
+                .on_hover_text("Number parts without a designator number (R?, U?A), or every part again, in sheet order")
+                .clicked()
+            {
+                self.erc.annotate_open = true;
+            }
+            if ui
+                .button("Check (ERC)")
+                .on_hover_text("Electrical rule check: unconnected pins, one-pin nets, outputs driving each other, undriven inputs, duplicate designators, nets with two names, loose wire ends")
+                .clicked()
+            {
+                self.run_erc();
+            }
+        });
         if let Some(n) = &self.note {
             ui.label(RichText::new(n).weak().small());
         }
@@ -1509,7 +1546,7 @@ impl Schematics {
                 let b = self.view.to_board(o);
                 let p = [b[0] as f64, b[1] as f64];
                 if let Some(i) = part_at(&sheet.drawing, p) {
-                    self.undo.push((cur, sheet.clone()));
+                    self.undo.push(vec![(cur, sheet.clone())]);
                     self.redo.clear();
                     self.drag = Some((i, snap(p, GRID)));
                     self.sel_part = Some(i);
@@ -2042,6 +2079,7 @@ impl Schematics {
             }
         }
 
+        self.draw_erc(&painter, view);
         // The name for a new net label.
         if let Some(at) = self.label_at {
             let mut open = true;
@@ -2208,6 +2246,8 @@ impl Schematics {
             }
             None => {}
         }
+        self.erc_window(ui.ctx());
+        self.annotate_window(ui.ctx());
         pick
     }
 }

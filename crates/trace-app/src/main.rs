@@ -20,6 +20,7 @@ mod schview;
 mod shapetool;
 mod simwin;
 mod stitchwin;
+mod swapwin;
 mod symlib;
 mod tidywin;
 mod toolbar;
@@ -129,6 +130,7 @@ pub struct App {
     stitch: stitchwin::StitchWindow,
     tidy: tidywin::TidyWindow,
     fan: fanwin::FanoutWindow,
+    swap: swapwin::SwapWindow,
     /// The part being dragged.
     moving: Option<placing::Moving>,
     /// The next board edit joins the last step (a part placed then dropped).
@@ -214,6 +216,7 @@ impl App {
             stitch: stitchwin::StitchWindow::default(),
             tidy: tidywin::TidyWindow::default(),
             fan: fanwin::FanoutWindow::default(),
+            swap: swapwin::SwapWindow::default(),
             moving: None,
             join_next: false,
             new_span: (1, 2),
@@ -995,6 +998,59 @@ impl App {
     }
 
     /// Puts a drawn shape on the board and picks it.
+    /// Pin or gate swap from the swap window: the board, then the sheets.
+    fn do_swap(&mut self, act: swapwin::SwapAct) {
+        use trace_core::swap::swap_pads;
+        let Some(scene) = &self.scene else { return };
+        let board = &scene.board;
+        let sheets_open = !self.schem.slots.is_empty();
+        let result = match &act {
+            swapwin::SwapAct::Pins(part, a, b) => {
+                let des = board.components[*part].designator.clone();
+                swap_pads(board, &[((*part, a.clone()), (*part, b.clone()))]).map(|s| {
+                    let label = format!("Swap pins {a} and {b} of {des}");
+                    (s, label, des, vec![(a.clone(), b.clone())])
+                })
+            }
+            swapwin::SwapAct::Gates(ga, gb) => {
+                self.schem.gate_pads(board, *ga, *gb).and_then(|pairs| {
+                    let des = board.components[pairs[0].0 .0].designator.clone();
+                    let nums = pairs
+                        .iter()
+                        .map(|(x, y)| (x.1.clone(), y.1.clone()))
+                        .collect();
+                    swap_pads(board, &pairs)
+                        .map(|s| (s, format!("Swap two gates of {des}"), des, nums))
+                })
+            }
+        };
+        match result {
+            Ok((s, label, des, nums)) => {
+                let mut msg = s.summary(board);
+                self.apply_edits(&label, s.edits);
+                match act {
+                    swapwin::SwapAct::Pins(..) if sheets_open => {
+                        if self.schem.swap_numbers(&des, &nums) > 0 {
+                            msg.push_str("; the sheets were changed to match");
+                        }
+                    }
+                    swapwin::SwapAct::Gates(ga, gb) => {
+                        if let Err(e) = self.schem.swap_gates(ga, gb) {
+                            msg.push_str(&format!("; the sheets could not be changed: {e}"));
+                        } else {
+                            msg.push_str("; the sheets were changed to match");
+                        }
+                    }
+                    _ => msg.push_str(
+                        "; no schematic is open, so remember the swap before updating the board from it",
+                    ),
+                }
+                self.message = Some((msg, false));
+            }
+            Err(e) => self.message = Some((e, true)),
+        }
+    }
+
     pub fn add_shape(&mut self, ring: Vec<[f64; 2]>) {
         let Some(scene) = &self.scene else { return };
         let board = &scene.board;
@@ -1528,6 +1584,18 @@ impl App {
                 {
                     ui.close_menu();
                     self.fan.open = true;
+                }
+                if ui
+                    .add_enabled(has, egui::Button::new("Pin and gate swap…"))
+                    .on_hover_text(
+                        "Two pins of a part trade nets, with the routing leaving each pad; or \
+                         two gates of a part (from the schematic) trade every pin. The open \
+                         schematic changes to match",
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.swap.open = true;
                 }
                 if ui
                     .add_enabled(has, egui::Button::new("Via stitching and fences…"))
@@ -3594,6 +3662,18 @@ impl eframe::App for App {
             .and_then(|scene| self.fan.show(ctx, &scene.board, &sel_parts));
         if let Some((label, edits)) = fanned {
             self.apply_edits(&label, edits);
+        }
+        let single = (self.edit.sel.parts.len() == 1)
+            .then(|| self.edit.sel.parts.iter().next().copied())
+            .flatten();
+        let sheets_open = !self.schem.slots.is_empty();
+        let schem = &self.schem;
+        let swap_act = self.scene.as_ref().and_then(|scene| {
+            self.swap
+                .show(ctx, &scene.board, single, &|d| schem.gates(d), sheets_open)
+        });
+        if let Some(a) = swap_act {
+            self.do_swap(a);
         }
         let shaped = match (&self.scene, self.tool) {
             (Some(scene), Tool::Shape) => self.shape.window(ctx, &scene.board),

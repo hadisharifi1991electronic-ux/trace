@@ -1,7 +1,7 @@
 //! Turns the raw `.brd` database into a Trace board: layers, nets, tracks,
 //! arcs, vias, copper fills, parts with their pads, silkscreen and outline.
 
-use crate::blocks::{class, Block, Data, Db, LayerInfo, LayerName, PadComp, Padstack};
+use crate::blocks::{class, Block, Data, Db, LayerInfo, LayerName, PadComp, Padstack, StackRecord};
 use crate::Result;
 use std::collections::HashMap;
 use trace_core::*;
@@ -110,17 +110,81 @@ impl<'a> Builder<'a> {
             return;
         };
         self.copper = list.len();
-        for (i, (name, _)) in list.iter().enumerate() {
-            let name = match name {
-                LayerName::Text(s) => s.clone(),
-                LayerName::Id(id) => self.db.string(*id).to_string(),
-            };
-            self.board.stackup.layers.push(StackLayer {
-                name: if name.is_empty() {
+        let names: Vec<String> = list
+            .iter()
+            .enumerate()
+            .map(|(i, (name, _))| {
+                let name = match name {
+                    LayerName::Text(s) => s.clone(),
+                    LayerName::Id(id) => self.db.string(*id).to_string(),
+                };
+                if name.is_empty() {
                     format!("ETCH {}", i + 1)
                 } else {
                     name
-                },
+                }
+            })
+            .collect();
+        // The cross-section, where the file has one: every layer from the
+        // top surface down, with thickness, Er and loss tangent.
+        let mut recs: Vec<&StackRecord> = self
+            .db
+            .blocks
+            .iter()
+            .filter_map(|b| match &b.data {
+                Data::Stack(r) => Some(r),
+                _ => None,
+            })
+            .collect();
+        recs.sort_by_key(|r| r.position);
+        recs.dedup_by_key(|r| r.position);
+        let coppers: Vec<u8> = recs.iter().filter_map(|r| r.copper).collect();
+        let whole = coppers.len() == names.len()
+            && coppers.iter().enumerate().all(|(i, &c)| c as usize == i);
+        if whole {
+            for r in &recs {
+                if r.kind == "SURFACE" {
+                    continue;
+                }
+                let t = allegro_length(&r.thickness).unwrap_or(Length(0));
+                let num = |v: &str| {
+                    v.split_whitespace()
+                        .next()
+                        .and_then(|x| x.parse::<f64>().ok())
+                };
+                let material = (!r.material.is_empty()).then(|| r.material.clone());
+                match r.copper {
+                    Some(c) => self.board.stackup.layers.push(StackLayer {
+                        name: names[c as usize].clone(),
+                        altium_id: None,
+                        kind: LayerKind::Copper,
+                        thickness: t,
+                        dielectric_constant: None,
+                        loss_tangent: None,
+                        roughness_um: None,
+                        material,
+                    }),
+                    None => self.board.stackup.layers.push(StackLayer {
+                        name: format!(
+                            "{} {}",
+                            material.as_deref().unwrap_or("Dielectric"),
+                            r.position
+                        ),
+                        altium_id: None,
+                        kind: LayerKind::Dielectric,
+                        thickness: t,
+                        dielectric_constant: num(&r.er).filter(|e| *e >= 1.0),
+                        loss_tangent: num(&r.loss_tangent).filter(|d| *d > 0.0 && *d < 1.0),
+                        roughness_um: None,
+                        material,
+                    }),
+                }
+            }
+            return;
+        }
+        for name in names {
+            self.board.stackup.layers.push(StackLayer {
+                name,
                 altium_id: None,
                 kind: LayerKind::Copper,
                 thickness: Length(0),
@@ -627,5 +691,49 @@ impl<'a> Builder<'a> {
         for (side, first, key) in items {
             self.track(first, key, side, None);
         }
+    }
+}
+
+/// A length as Allegro writes it in the cross-section: a number and a
+/// unit (MIL, MM, UM, IN, OZ of copper), or a bare number in metres.
+fn allegro_length(v: &str) -> Option<Length> {
+    let v = v.trim();
+    let split = v
+        .find(|c: char| c.is_ascii_alphabetic() && c != 'e' && c != 'E')
+        .unwrap_or(v.len());
+    let x: f64 = v[..split].trim().parse().ok()?;
+    let unit = v[split..].trim().to_ascii_uppercase();
+    let mil = match unit.as_str() {
+        "" => {
+            if x < 0.01 {
+                x / 25.4e-6
+            } else {
+                x
+            }
+        }
+        "MIL" | "MILS" => x,
+        "MM" => x / 0.0254,
+        "UM" | "MICRON" | "MICRONS" => x / 25.4,
+        "IN" | "INCH" | "INCHES" => x * 1000.0,
+        "OZ" => x * 1.37,
+        _ => return None,
+    };
+    (mil.is_finite() && mil >= 0.0).then(|| Length::from_mil(mil))
+}
+
+#[cfg(test)]
+mod length_tests {
+    use super::allegro_length;
+
+    #[test]
+    fn cross_section_lengths() {
+        let mil = |s: &str| allegro_length(s).map(|l| (l.mil() * 1000.0).round() / 1000.0);
+        assert_eq!(mil("1.2 MIL"), Some(1.2));
+        assert_eq!(mil("3.048e-005"), Some(1.2));
+        assert_eq!(mil("0.0002032"), Some(8.0));
+        assert_eq!(mil("0.1 MM"), Some(3.937));
+        assert_eq!(mil("1 OZ"), Some(1.37));
+        assert_eq!(mil("0 MIL"), Some(0.0));
+        assert_eq!(mil("abc"), None);
     }
 }

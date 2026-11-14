@@ -3,6 +3,19 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.44.0 (2026-11-14)
+
+- Allegro boards bring their stack-up: the cross-section Allegro 17.x and
+  newer keep (each layer's material, thickness, Er and loss tangent), so
+  impedance, the field solver, the 3D via solver and the optimisers work
+  on .brd files. Allegro 16.x files whose cross-section was never filled
+  in still come with copper names only.
+- Stack-up files: `trace stackup <board> [out.txt]` writes a board's
+  stack-up as text (name, copper or dielectric, thickness, Er, Df), and
+  any command takes `--stackup file` to use one instead of the board's;
+  in the app, Impedance > "Load stack-up…" and "Save stack-up…".
+- `trace layers` on a board prints its stack-up.
+
 ## 0.43.0 (2026-11-14)
 
 - Via optimiser: View > "Via S-parameters (3D)…" > Optimise (or `trace

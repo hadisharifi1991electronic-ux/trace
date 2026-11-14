@@ -11,6 +11,8 @@ trace: read Altium, Allegro and Gerber designs with the Trace engine
 
 Boards can be Altium .PcbDoc, Cadence Allegro .brd (16.0 or newer), Trace
 .tracepcb, or Gerber and drill files: a folder, a .zip, or one file.
+Any command takes --stackup <file> to put a stack-up file (see trace stackup)
+on the board, for boards whose file has none.
 
 USAGE:
     trace inspect <board|file.SchDoc>           Summary of a board or sheet
@@ -61,6 +63,8 @@ USAGE:
     trace cascade <load.s1p> [stage.s2p | --line Z@len@Eeff[@dB/in]]... [--ref R] [--step GHz]
                                                 Return loss into a chain of two-ports (vias from trace via, lines)
                                                 ending in a load such as a chip's port model, input side first
+    trace stackup <board> [out.txt]             Print the board's stack-up as a stack-up file (name, kind,
+                                                thickness, Er, Df); edit it and give it back with --stackup
     trace validate [--quick] [out.txt]          Accuracy checks: the field, IR drop and 3D via solvers against
                                                 exact answers, the 2D solver and finer grids (--quick: no 3D)
     trace stubs <board> [out.tracepcb]          Via stubs on nets with a stub rule (default: pair nets, 10 mil);
@@ -76,7 +80,8 @@ USAGE:
     trace odb <board> <out.tgz|folder>          ODB++ job: layers, drills, parts and nets in one package
     trace assembly <board> <out.pdf> [--a4]     Assembly drawing: top and bottom views with part bodies,
                                                 designators and pin 1 marks, then the parts list (A3)
-    trace layers <gerber folder|zip>            Show which layer each Gerber or drill file was taken as
+    trace layers <gerber folder|zip|board>      Show which layer each Gerber or drill file was taken as
+                                                (for a board, its stack-up)
     trace symbols <lib.SchLib|IntLib> [out.svg] List the symbols of an Altium schematic library;
                                                 with out, draw them all as SVG
     trace footprints <lib|board> [out]          List the footprints of a .PcbLib, .IntLib, .tracelib or board;
@@ -84,8 +89,30 @@ USAGE:
                                                 or an Altium one (.PcbLib)
 ";
 
+/// A stack-up file given with --stackup, put on every board loaded.
+static STACKUP: std::sync::OnceLock<trace_core::Stackup> = std::sync::OnceLock::new();
+
 fn main() -> ExitCode {
-    let args: Vec<String> = std::env::args().skip(1).collect();
+    let mut args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(i) = args.iter().position(|a| a == "--stackup") {
+        let Some(path) = args.get(i + 1).cloned() else {
+            eprintln!("error: --stackup needs a file");
+            return ExitCode::FAILURE;
+        };
+        match std::fs::read_to_string(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|t| trace_core::stackfile::parse(&t))
+        {
+            Ok(st) => {
+                let _ = STACKUP.set(st);
+            }
+            Err(e) => {
+                eprintln!("error: {path}: {e}");
+                return ExitCode::FAILURE;
+            }
+        }
+        args.drain(i..i + 2);
+    }
     let result = match args
         .iter()
         .map(String::as_str)
@@ -114,6 +141,8 @@ fn main() -> ExitCode {
         ["via", file, from, to, rest @ ..] => via(file, from, to, rest),
         ["pairsize", file, layer, rest @ ..] => pairsize(file, layer, rest),
         ["validate", rest @ ..] => validate(rest),
+        ["stackup", file] => stackup(file, None),
+        ["stackup", file, out] => stackup(file, Some(out)),
         ["cascade", load, rest @ ..] => cascade(load, rest),
         ["stubs", file] => stubs(file, None),
         ["stubs", file, out] => stubs(file, Some(out)),
@@ -270,6 +299,14 @@ enum Design {
 }
 
 fn load(file: &str) -> Result<Design, Box<dyn std::error::Error>> {
+    let mut d = load_file(file)?;
+    if let (Design::Board(b), Some(st)) = (&mut d, STACKUP.get()) {
+        trace_core::stackfile::apply(b, st)?;
+    }
+    Ok(d)
+}
+
+fn load_file(file: &str) -> Result<Design, Box<dyn std::error::Error>> {
     let ext = Path::new(file)
         .extension()
         .map(|e| e.to_string_lossy().to_ascii_lowercase());
@@ -291,6 +328,10 @@ fn is_fab(file: &str) -> bool {
 }
 
 fn layers(file: &str) -> Res {
+    if !is_fab(file) {
+        // A board: its stack-up.
+        return stackup(file, None);
+    }
     let t = std::time::Instant::now();
     let imp = trace_gerber::read_path(file)?;
     println!("{:<52} {:<26} Because of", "File", "Taken as");
@@ -1659,6 +1700,19 @@ fn cascade(load: &str, rest: &[&str]) -> Res {
             touchstone::z_to_gamma(z, zr).db()
         );
         f += dstep;
+    }
+    Ok(())
+}
+
+fn stackup(file: &str, out: Option<&str>) -> Res {
+    let b = board(file)?;
+    let text = trace_core::stackfile::write(&b.stackup);
+    match out {
+        Some(o) => {
+            std::fs::write(o, &text)?;
+            println!("Wrote {o}");
+        }
+        None => print!("{text}"),
     }
     Ok(())
 }

@@ -327,6 +327,9 @@ pub enum Data {
     Keepout {
         first_seg: u32,
     },
+    /// A cross-section record (0x21 blob, subtype 0x0518): one layer of
+    /// the stack-up, surfaces and dielectrics included.
+    Stack(StackRecord),
     Other,
 }
 
@@ -788,14 +791,20 @@ fn parse_block(s: &mut Stream, kind: u8, v: Ver, x27_end: usize) -> Result<Optio
         }
         0x21 => {
             s.u8()?;
-            s.u16()?;
+            let sub = s.u16()?;
             let size = s.u32()? as usize;
             if size < 12 {
                 return Err(Error::Format("blob block too small".into()));
             }
             key = s.u32()?;
-            s.skip(size - 12)?;
-            Data::Other
+            let body = s.bytes(size - 12)?;
+            if std::env::var("ALLEGRO_DEBUG").is_ok() {
+                eprintln!("0x21 sub {sub:#06x} size {size}");
+            }
+            match stack_record(sub, body) {
+                Some(r) => Data::Stack(r),
+                None => Data::Other,
+            }
         }
         0x22 => {
             s.u8()?;
@@ -1314,4 +1323,52 @@ impl Db {
         }
         out
     }
+}
+
+/// One layer of the cross-section, as Allegro stores it: fixed 20-byte
+/// text fields (a value with a unit, or a bare number in SI units).
+#[derive(Clone, Debug, Default)]
+pub struct StackRecord {
+    /// Copper layer index (0 = top), None for a dielectric or surface.
+    pub copper: Option<u8>,
+    pub plane: bool,
+    /// Position in the stack, from the top surface (0).
+    pub position: u32,
+    pub material: String,
+    pub thickness: String,
+    pub conductivity: String,
+    pub er: String,
+    /// CONDUCTOR, PLANE, DIELECTRIC or SURFACE.
+    pub kind: String,
+    pub loss_tangent: String,
+}
+
+fn stack_record(sub: u16, b: &[u8]) -> Option<StackRecord> {
+    // After the key: 4 flag bytes, the position, then text fields.
+    if sub != 0x0518 || b.len() < 8 + 20 * 7 {
+        return None;
+    }
+    let text = |i: usize| -> String {
+        let f = &b[8 + 20 * i..8 + 20 * (i + 1)];
+        let end = f.iter().position(|&c| c == 0).unwrap_or(f.len());
+        String::from_utf8_lossy(&f[..end]).trim().to_string()
+    };
+    let kind = text(5).to_ascii_uppercase();
+    if !matches!(
+        kind.as_str(),
+        "CONDUCTOR" | "PLANE" | "DIELECTRIC" | "SURFACE"
+    ) {
+        return None;
+    }
+    Some(StackRecord {
+        copper: (b[0] != 0xfd && matches!(kind.as_str(), "CONDUCTOR" | "PLANE")).then_some(b[0]),
+        plane: kind == "PLANE",
+        position: u32::from_le_bytes([b[4], b[5], b[6], b[7]]),
+        material: text(0),
+        thickness: text(1),
+        conductivity: text(3),
+        er: text(4),
+        kind,
+        loss_tangent: text(6),
+    })
 }

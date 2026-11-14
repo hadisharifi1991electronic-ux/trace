@@ -28,6 +28,7 @@ pub mod route;
 pub mod sch_edit;
 pub mod schematic;
 pub mod sim;
+pub mod stackfile;
 pub mod touchstone;
 pub mod units;
 pub mod validate;

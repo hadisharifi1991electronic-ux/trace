@@ -162,6 +162,7 @@ pub struct Imp {
     key: String,
     board_stackup: Stackup,
     stackup: Stackup,
+    stack_msg: Option<String>,
     se: f64,
     diff: f64,
     /// Tolerance, percent.
@@ -196,6 +197,7 @@ impl Imp {
             key: String::new(),
             board_stackup: Stackup::default(),
             stackup: Stackup::default(),
+            stack_msg: None,
             se: 50.0,
             diff: 100.0,
             tol: 10.0,
@@ -461,8 +463,43 @@ impl Imp {
             {
                 self.stackup = self.board_stackup.clone();
                 edited = true;
+                self.stack_msg = None;
+            }
+            if ui
+                .button("Load stack-up…")
+                .on_hover_text("A stack-up file: one layer per line, top first: name, copper or dielectric, thickness, Er, Df")
+                .clicked()
+            {
+                if let Some(p) = rfd::FileDialog::new()
+                    .add_filter("Stack-up", &["txt", "csv"])
+                    .pick_file()
+                {
+                    let r = std::fs::read_to_string(&p)
+                        .map_err(|e| e.to_string())
+                        .and_then(|t| trace_core::stackfile::parse(&t))
+                        .and_then(|st| trace_core::stackfile::apply_to(&mut self.stackup, &st));
+                    self.stack_msg = Some(match r {
+                        Ok(()) => {
+                            edited = true;
+                            format!("Loaded {}", p.display())
+                        }
+                        Err(e) => format!("Not loaded: {e}"),
+                    });
+                }
+            }
+            if ui.button("Save stack-up…").clicked() {
+                if let Some(p) = rfd::FileDialog::new()
+                    .add_filter("Stack-up", &["txt"])
+                    .set_file_name("stackup.txt")
+                    .save_file()
+                {
+                    let _ = std::fs::write(p, trace_core::stackfile::write(&self.stackup));
+                }
             }
         });
+        if let Some(m) = &self.stack_msg {
+            ui.weak(m);
+        }
         egui::CollapsingHeader::new(format!("Per-net targets ({})", self.rules.len()))
             .id_salt("imprules")
             .show(ui, |ui| {

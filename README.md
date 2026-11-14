@@ -393,7 +393,7 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   Cohn's exact stripline and coupled-stripline values and of Hammerstad
   and Jensen's microstrip; IR drop within 1.5% of ρL/wt; the 3D solver's
   straight line reflects below −45 dB, its line impedance is within 1% of
-  the 2D solver's, and a stub's notch moves under 2% from 2 mil to 1 mil
+  the 2D solver's, and a stub's notch moves about 2% from 2 mil to 1 mil
   cells. It has not yet been compared with another 3D solver or with
   measurements.
 - Assembly drawings: File > Export assembly drawing (PDF)… (or `trace

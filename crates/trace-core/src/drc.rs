@@ -1000,6 +1000,45 @@ struct Copper {
 
 const CELL: f64 = 100.0;
 
+/// Pairs of parts placed on top of one another as alternatives, as boards
+/// do for a choice of footprints (a balun of one maker or another): two or
+/// more pads of one overlap pads of the other on the same net.
+fn alternate_parts(
+    items: &[Copper],
+    grid: &HashMap<(u8, i32, i32), Vec<usize>>,
+) -> HashSet<(u32, u32)> {
+    // The pad pairs found for each pair of parts, once whatever the layer.
+    let mut count: HashMap<(u32, u32), HashSet<(Item, Item)>> = HashMap::new();
+    for list in grid.values() {
+        for (n, &i) in list.iter().enumerate() {
+            let a = &items[i];
+            let (Item::Pad(_), Some(ca), Some(_)) = (a.item, a.component, a.net) else {
+                continue;
+            };
+            for &j in &list[n + 1..] {
+                let c = &items[j];
+                let (Item::Pad(_), Some(cc)) = (c.item, c.component) else {
+                    continue;
+                };
+                if ca == cc || c.net != a.net || a.layer != c.layer {
+                    continue;
+                }
+                if shape_gap(&a.shape, &c.shape) <= 0.0 {
+                    count
+                        .entry((ca.min(cc), ca.max(cc)))
+                        .or_default()
+                        .insert((a.item.min(c.item), a.item.max(c.item)));
+                }
+            }
+        }
+    }
+    count
+        .into_iter()
+        .filter(|(_, pairs)| pairs.len() >= 2)
+        .map(|(k, _)| k)
+        .collect()
+}
+
 fn shape_gap(x: &Shape, y: &Shape) -> f64 {
     match (x, y) {
         (Shape::Capsule { a, b, r }, other) | (other, Shape::Capsule { a, b, r }) => {
@@ -1306,6 +1345,7 @@ pub fn check(board: &Board, limit: usize) -> Vec<Violation> {
         }
     }
 
+    let alternates = alternate_parts(&items, &grid);
     let mut out: Vec<Violation> = Vec::new();
     // One report per pair of board items (a track against a pour, not
     // against every edge of it), the worst gap kept.
@@ -1329,6 +1369,16 @@ pub fn check(board: &Board, limit: usize) -> Vec<Violation> {
                     let c = &items[j];
                     if a.item == c.item || a.net == c.net {
                         continue;
+                    }
+                    // Pads of two footprints placed one on the other as
+                    // alternatives (fit one or the other): their unused
+                    // pins carry dummy nets of their own.
+                    if let (Item::Pad(_), Item::Pad(_), Some(p), Some(q)) =
+                        (a.item, c.item, a.component, c.component)
+                    {
+                        if alternates.contains(&(p.min(q), p.max(q))) {
+                            continue;
+                        }
                     }
                     // Copper without a net (a free fill, a logo) is not
                     // checked against nets, as Altium has it join whatever
@@ -1676,6 +1726,70 @@ mod tests {
             &[("MINLIMIT", "5mil"), ("MAXLIMIT", "50mil")],
         ));
         b
+    }
+
+    #[test]
+    fn alternate_footprints_on_one_spot() {
+        let mut b = board();
+        b.stackup.layers.push(StackLayer {
+            name: "Top".into(),
+            altium_id: None,
+            kind: LayerKind::Copper,
+            thickness: Length(0),
+            dielectric_constant: None,
+            loss_tangent: None,
+            roughness_um: None,
+            material: None,
+        });
+        for n in ["D1", "D2"] {
+            b.nets.push(Net {
+                name: n.into(),
+                pieces: 1,
+                ..Default::default()
+            });
+        }
+        // Two footprints on one centre: pins 1 and 2 on nets A and B, pin 3
+        // left unused with a dummy net each (3 and 4).
+        let pad = |part: u32, name: &str, x: f64, net: u32, w: f64| Pad {
+            layer: LayerRef::Copper(0),
+            net: Some(net),
+            component: Some(part),
+            name: name.into(),
+            at: p(x, 0.0),
+            size_x: Length::from_mil(w),
+            size_y: Length::from_mil(20.0),
+            hole: Length(0),
+            shape: PadShape::Rect,
+            rotation_deg: 0.0,
+            outline: Vec::new(),
+            stack: Vec::new(),
+            fab: Default::default(),
+        };
+        for (part, w, dummy) in [(0u32, 14.0, 3u32), (1, 10.0, 4)] {
+            b.components.push(Component {
+                designator: format!("T{}", part + 1),
+                footprint: "BALUN".into(),
+                library_ref: None,
+                x: Length(0),
+                y: Length(0),
+                rotation_deg: 0.0,
+                side: Side::Top,
+                sheet: None,
+                params: Default::default(),
+            });
+            b.geometry.pads.push(pad(part, "1", 0.0, 0, w));
+            b.geometry.pads.push(pad(part, "2", 40.0, 1, w));
+            b.geometry
+                .pads
+                .push(pad(part, "3", 80.0 + part as f64 * 3.0, dummy, w));
+        }
+        let v = check(&b, 100);
+        assert!(!v.iter().any(|v| v.kind == Kind::Short), "{v:?}");
+        // One footprint alone over another net's pad is still a short.
+        b.geometry.pads[4].net = Some(2);
+        b.geometry.pads[1].net = Some(1);
+        let v = check(&b, 100);
+        assert!(v.iter().any(|v| v.kind == Kind::Short));
     }
 
     #[test]

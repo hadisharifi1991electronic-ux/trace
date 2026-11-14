@@ -125,6 +125,18 @@ checker and simulator all read.
   cursor. Pasted parts get the next free designators (R12 gives R13…) and
   no nets; tracks and vias pasted alone keep their nets, so a via pattern
   can be copied along a line
+- draw and edit shapes (the polygon icon, or Edit > "Draw and edit
+  shapes"): pours, copper regions, keepouts, pour cutouts and the board
+  outline, corner by corner (kept to 45° if you like) or as a rectangle,
+  on the current layer and the net typed or selected. In Edit mode click a
+  shape, drag its corners, drag the middle of an edge to add a corner,
+  Ctrl+click a corner to take it away, drag inside to move it, Delete to
+  remove it. Pours are poured again after each change and stop at the
+  board edge. The Shape window sets a pour's net, dead copper, pour order
+  and how it joins its net's pads and vias: by the board's rules, or set
+  on the pour for through-hole pads, surface pads and vias each as direct,
+  thermal relief (air gap, spoke width, 2 or 4 spokes, straight or 45°) or
+  not joined
 - place text (the A icon) on the silkscreen, a copper layer or a
   mechanical layer, mirrored on the bottom; and linear dimensions (the
   dimension icon): click two points, then where the line sits, and the

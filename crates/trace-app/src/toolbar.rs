@@ -30,6 +30,7 @@ pub enum Icon {
     Unroute,
     Text,
     Dimension,
+    Shape,
 }
 
 const RED: Color32 = Color32::from_rgb(236, 84, 84);
@@ -359,6 +360,32 @@ fn draw(p: &egui::Painter, icon: Icon, r: Rect, fg: Color32, enabled: bool) {
             line(&[(0.0, 0.6), (0.2, 0.75)], st);
             line(&[(1.0, 0.6), (0.8, 0.45)], st);
             line(&[(1.0, 0.6), (0.8, 0.75)], st);
+        }
+        Icon::Shape => {
+            poly(
+                &[
+                    (0.05, 0.35),
+                    (0.45, 0.05),
+                    (0.95, 0.3),
+                    (0.85, 0.95),
+                    (0.2, 0.9),
+                ],
+                tint(BLUE).gamma_multiply(0.5),
+                s(1.2, tint(BLUE)),
+            );
+            for (x, y) in [
+                (0.05, 0.35),
+                (0.45, 0.05),
+                (0.95, 0.3),
+                (0.85, 0.95),
+                (0.2, 0.9),
+            ] {
+                p.rect_filled(
+                    Rect::from_center_size(at(x, y), Vec2::splat(w * 0.16)),
+                    0.0,
+                    fg,
+                );
+            }
         }
         Icon::Route => {
             let st = Stroke::new(w * 0.16, tint(RED));

@@ -3,6 +3,24 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.48.0 (2026-11-14)
+
+- Shapes: a Shape tool (polygon icon; Edit > "Draw and edit shapes")
+  draws pours, copper regions, keepouts, pour cutouts and a new board
+  outline on the current layer, corner by corner (45° optional) or as a
+  rectangle; a pour or region takes the net typed in the bar, or the
+  selected net. Edit mode picks a shape by its edge or from inside; drag a
+  corner to move it, the middle of an edge to add one, Ctrl+click a corner
+  to take it away, drag inside to move the whole shape, Delete removes
+  it. Every change is one undo step and pours are poured again.
+- Thermal relief styles per pour: the Shape window sets a pour's net,
+  dead-copper removal, pour order and its connection to its own net's
+  through-hole pads, surface pads and vias, each Direct, Relief (air gap,
+  spoke width, 2 or 4 spokes, straight or at 45°) or None, instead of the
+  board's polygon connect rules. "Pour again" refills it. Kept in Trace
+  boards (`.tracepcb`); Altium and KiCad exports carry the poured copper.
+- Pours stop at the board outline even when drawn past it.
+
 ## 0.47.0 (2026-11-14)
 
 - Select many things at once: Shift+drag a box (left to right takes what

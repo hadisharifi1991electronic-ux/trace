@@ -242,6 +242,60 @@ pub struct Pour {
     /// Islands smaller than this (square mil) are left out.
     #[serde(default, skip_serializing_if = "no_area")]
     pub min_island: f64,
+    /// How the pour joins pads and vias of its net, set on the pour itself;
+    /// `None` follows the board's polygon connect rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub connect: Option<PourConnect>,
+}
+
+/// How a pour joins copper of its own net, by kind of object.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub struct PourConnect {
+    pub th_pads: Join,
+    pub smd_pads: Join,
+    pub vias: Join,
+}
+
+/// One way of joining a pour to a pad or via.
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub enum Join {
+    /// Copper all round.
+    Direct,
+    /// An air gap round the land, crossed by spokes (thermal relief).
+    Relief {
+        /// Air gap (mil).
+        gap: f64,
+        /// Spoke width (mil).
+        width: f64,
+        /// Number of spokes: 2 or 4 (or 1 to 8).
+        spokes: u32,
+        /// Spokes at 45° instead of along the land's axes.
+        diagonal: bool,
+    },
+    /// Not joined: the pour keeps the air gap all round.
+    None {
+        /// Air gap (mil).
+        gap: f64,
+    },
+}
+
+impl Join {
+    pub const RELIEF: Join = Join::Relief {
+        gap: 10.0,
+        width: 10.0,
+        spokes: 4,
+        diagonal: false,
+    };
+}
+
+impl PourConnect {
+    /// Thermal reliefs on through-hole pads, direct to surface pads and
+    /// vias: the usual choice for a ground pour.
+    pub const USUAL: PourConnect = PourConnect {
+        th_pads: Join::RELIEF,
+        smd_pads: Join::Direct,
+        vias: Join::Direct,
+    };
 }
 
 fn no_area(v: &f64) -> bool {

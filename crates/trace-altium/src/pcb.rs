@@ -722,6 +722,7 @@ pub(crate) fn parse_pour(p: &Props, layers: &LayerMap) -> Pour {
         } else {
             0.0
         },
+        connect: None,
     }
 }
 

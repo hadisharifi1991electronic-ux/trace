@@ -29,6 +29,7 @@ pub mod route;
 pub mod sch_edit;
 pub mod schematic;
 pub mod select;
+pub mod shape;
 pub mod sim;
 pub mod stackfile;
 pub mod stitch;

@@ -16,6 +16,7 @@ mod power;
 mod router;
 mod scene;
 mod schview;
+mod shapetool;
 mod simwin;
 mod stitchwin;
 mod symlib;
@@ -60,6 +61,7 @@ pub enum Tool {
     Tune,
     Text,
     Dimension,
+    Shape,
 }
 
 /// A distance measurement: first point, and second once placed.
@@ -135,6 +137,8 @@ pub struct App {
     pub edit: editing::Editing,
     /// Show the mechanical layers once the next edit is in (a dimension).
     pub show_mechanical: bool,
+    /// The Shape tool: drawing and editing pours, regions and outlines.
+    pub shape: shapetool::ShapeTool,
 }
 
 #[derive(Clone, Copy)]
@@ -212,6 +216,7 @@ impl App {
             new_span: (1, 2),
             edit: editing::Editing::default(),
             show_mechanical: false,
+            shape: shapetool::ShapeTool::default(),
         };
         if let Some(f) = start_file {
             app.open(f);
@@ -810,6 +815,8 @@ impl App {
         self.picked = None;
         self.edit.sel.clear();
         self.edit.dim.clear();
+        self.shape.picked = None;
+        self.shape.reset();
     }
 
     /// Applies edits as one undoable step and refreshes everything derived
@@ -883,6 +890,7 @@ impl App {
             trace_core::connectivity::analyse(&mut scene.board);
             scene.rebuild();
             self.edit.sel.keep_valid(&scene.board);
+            self.shape.keep_valid(&scene.board);
         }
         self.router.board_changed();
         self.cm.board_changed();
@@ -974,6 +982,53 @@ impl App {
                 ))
             }
         }
+    }
+
+    /// Adds the shape drawn so far, closed (Enter, double-click).
+    fn finish_shape(&mut self) {
+        if let Some(ring) = self.shape.finish() {
+            self.add_shape(ring);
+        }
+    }
+
+    /// Puts a drawn shape on the board and picks it.
+    pub fn add_shape(&mut self, ring: Vec<[f64; 2]>) {
+        let Some(scene) = &self.scene else { return };
+        let board = &scene.board;
+        let kind = self.shape.kind;
+        let net = if matches!(
+            kind,
+            trace_core::shape::Kind::Pour | trace_core::shape::Kind::Region
+        ) {
+            match shapetool::net_for(board, &self.shape.net, self.selected) {
+                Ok(n) => n,
+                Err(e) => {
+                    self.message = Some((e, true));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+        let layer = shapetool::layer_of(self.active).unwrap_or(0);
+        let Some((edits, r)) = trace_core::shape::add(board, kind, &ring, layer, net) else {
+            self.message = Some((
+                "A shape needs three corners that enclose some area.".into(),
+                true,
+            ));
+            return;
+        };
+        let what = r.describe(board);
+        let label = match (kind, r) {
+            (trace_core::shape::Kind::Outline, _) => "Drew a new board outline".to_string(),
+            _ => format!("Drew a {}", what.to_lowercase()),
+        };
+        let mut label = label;
+        if kind == trace_core::shape::Kind::Pour && net.is_none() {
+            label.push_str(" (no net: pick a net first, or type one in the bar)");
+        }
+        self.apply_edits(&label, edits);
+        self.shape.picked = Some(r);
     }
 
     /// Applies an edit made from the selection, keeping it selected.
@@ -1451,6 +1506,14 @@ impl App {
                     ui.close_menu();
                     self.set_tool(Tool::Dimension);
                 }
+                if ui
+                    .add_enabled(has, egui::Button::new("Draw and edit shapes"))
+                    .on_hover_text("Pours, copper regions, keepouts, pour cutouts and the board outline; a pour's thermal relief style")
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.set_tool(Tool::Shape);
+                }
                 ui.separator();
                 if ui
                     .add_enabled(has, egui::Button::new("Via stitching and fences…"))
@@ -1625,6 +1688,10 @@ impl App {
         self.tool = tool;
         self.measure = None;
         self.edit.dim.clear();
+        self.shape.reset();
+        if tool != Tool::Shape {
+            self.shape.picked = None;
+        }
         self.router.cancel();
         self.router.tune.preview = None;
     }
@@ -1847,6 +1914,10 @@ impl App {
                 self.edit.dim_bar(ui);
                 return;
             }
+            if self.tool == Tool::Shape {
+                self.shape.bar(ui);
+                return;
+            }
             let hint = match (self.tool, self.measure) {
                 (Tool::Measure, None) => "Click the first point.",
                 (Tool::Measure, Some(Measure { b: None, .. })) => "Click the second point.",
@@ -1923,6 +1994,17 @@ impl App {
                             .clicked()
                             {
                                 self.set_tool(Tool::Dimension);
+                            }
+                            if button(
+                                ui,
+                                Icon::Shape,
+                                t == Tool::Shape,
+                                true,
+                                "Draw and edit shapes: pours, copper regions, keepouts, cutouts, the board outline",
+                            )
+                            .clicked()
+                            {
+                                self.set_tool(Tool::Shape);
                             }
                             divider(ui);
                             let pairs = self.router.pairs;
@@ -3161,6 +3243,21 @@ impl eframe::App for App {
             } else if del && self.tool == Tool::Select {
                 self.delete_picked();
             }
+            if self.tool == Tool::Shape {
+                if enter {
+                    self.finish_shape();
+                }
+                if back {
+                    self.shape.pts.pop();
+                }
+                if del && self.shape.pts.is_empty() {
+                    if let (Some(r), Some(scene)) = (self.shape.picked, &self.scene) {
+                        let e = trace_core::shape::delete(&scene.board, r);
+                        let what = r.kind(&scene.board).label().to_lowercase();
+                        self.apply_edits(&format!("Deleted a {what}"), e);
+                    }
+                }
+            }
             if self.tool == Tool::Route {
                 if corner {
                     self.router.flip = !self.router.flip;
@@ -3234,7 +3331,11 @@ impl eframe::App for App {
                 self.set_tool(Tool::Select);
             } else if self.tool == Tool::Dimension && !self.edit.dim.is_empty() {
                 self.edit.dim.clear();
-            } else if matches!(self.tool, Tool::Text | Tool::Dimension) {
+            } else if self.tool == Tool::Shape && !self.shape.pts.is_empty() {
+                self.shape.pts.clear();
+            } else if self.tool == Tool::Shape && self.shape.picked.is_some() {
+                self.shape.picked = None;
+            } else if matches!(self.tool, Tool::Text | Tool::Dimension | Tool::Shape) {
                 self.set_tool(Tool::Select);
             } else {
                 self.selected = None;
@@ -3471,6 +3572,17 @@ impl eframe::App for App {
             .and_then(|scene| self.tidy.show(ctx, &scene.board, self.selected));
         if let Some((label, edits)) = tidied {
             self.apply_edits(&label, edits);
+        }
+        let shaped = match (&self.scene, self.tool) {
+            (Some(scene), Tool::Shape) => self.shape.window(ctx, &scene.board),
+            _ => None,
+        };
+        if let Some((label, edits)) = shaped {
+            if edits.is_empty() {
+                self.message = Some((label, true));
+            } else {
+                self.apply_edits(&label, edits);
+            }
         }
     }
 

@@ -150,6 +150,22 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     // Pressing on a part and dragging moves it, as in Altium; anywhere
     // else (or with the right button) dragging pans.
+    // The Shape tool: pressing on a corner, an edge's middle or inside the
+    // picked shape drags it.
+    if resp.drag_started_by(egui::PointerButton::Primary)
+        && app.tool == Tool::Shape
+        && app.shape.mode == crate::shapetool::Mode::Edit
+    {
+        if let Some(o) = ui.input(|i| i.pointer.press_origin()) {
+            let [x, y] = app.view.to_board(o);
+            let p = [x as f64, y as f64];
+            let layer = crate::shapetool::layer_of(app.active);
+            let tol = 6.0 / app.view.scale as f64;
+            if let Some(g) = app.shape.grab_at(&scene.board, p, tol, layer) {
+                app.shape.grab = Some((g, p));
+            }
+        }
+    }
     // Shift+drag draws a box to select with; pressing on a selection of
     // more than one part drags all of it.
     if resp.drag_started_by(egui::PointerButton::Primary)
@@ -224,6 +240,17 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     placed = Some((format!("{verb} {name}"), edits));
                 }
                 app.moving = None;
+            }
+        }
+    } else if app.shape.grab.is_some() {
+        if resp.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
+            let end = resp
+                .interact_pointer_pos()
+                .or(resp.hover_pos())
+                .map(|p| app.view.to_board(p));
+            match end {
+                Some([x, y]) => placed = app.shape.drop_at(&scene.board, [x as f64, y as f64]),
+                None => app.shape.grab = None,
             }
         }
     } else if app.edit.boxing.is_some() || app.edit.dragging.is_some() {
@@ -321,6 +348,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             });
     }
     let mut pending: Option<Vec<trace_core::edit::Edit>> = None;
+    // A shape drawn to its end, to put on the board.
+    let mut shape_ring: Option<Vec<[f64; 2]>> = None;
     let mut pending_label = "Routed a track".to_string();
     if let Some((label, edits)) = placed {
         pending_label = label;
@@ -416,6 +445,31 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         Some(Measure { a, b: None }) => Some(Measure { a, b: Some(at) }),
                         _ => Some(Measure { a: at, b: None }),
                     };
+                }
+                Tool::Shape => {
+                    let layer = crate::shapetool::layer_of(app.active);
+                    let tol = 6.0 / view.scale as f64;
+                    let p = [x as f64, y as f64];
+                    if app.shape.mode == crate::shapetool::Mode::Draw {
+                        if app.shape.kind != trace_core::shape::Kind::Keepout
+                            && app.shape.kind != trace_core::shape::Kind::Outline
+                            && layer.is_none()
+                        {
+                            app.message = Some(("Choose a copper layer to draw on.".into(), true));
+                        } else if let Some(ring) =
+                            app.shape.draw_click([at[0] as f64, at[1] as f64], tol)
+                        {
+                            shape_ring = Some(ring);
+                        }
+                    } else if ui.input(|i| i.modifiers.command) {
+                        if let Some((l, e)) = app.shape.remove_corner(&scene.board, p, tol) {
+                            pending_label = l;
+                            pending = Some(e);
+                        }
+                    } else {
+                        app.shape.picked = trace_core::shape::pick(&scene.board, p, tol, layer);
+                        app.message = app.shape.picked.map(|r| (r.describe(&scene.board), false));
+                    }
                 }
                 Tool::Text => {
                     let t =
@@ -769,6 +823,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     if app.tool == Tool::Measure || app.tool == Tool::Dimension || app.measure.is_some() {
         draw_measure(ui, &mut shapes, &view, app.measure, snapped);
     }
+    if resp.double_clicked() && app.tool == Tool::Shape && shape_ring.is_none() {
+        shape_ring = app.shape.finish();
+    }
+    if app.tool == Tool::Shape {
+        let layer = crate::shapetool::layer_of(app.active);
+        let cursor = snapped.map(|p| [p[0] as f64, p[1] as f64]);
+        app.shape
+            .draw(&mut shapes, &scene.board, &view, layer, cursor);
+    }
     if resp.double_clicked() && app.tool == Tool::Route && pending.is_none() {
         pending = app.router.finish(&scene.board);
     }
@@ -874,6 +937,9 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ));
     }
     painter.extend(shapes);
+    if let Some(ring) = shape_ring {
+        app.add_shape(ring);
+    }
     if let Some(edits) = pending {
         if app.tool == Tool::Route {
             app.selected = None;

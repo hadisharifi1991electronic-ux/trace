@@ -242,6 +242,8 @@ type Asked = (Obj, Option<u32>, u64, Option<[i64; 2]>);
 /// pour and the object. Rules that ask what Trace cannot tell (a room) are
 /// passed over.
 struct Connect<'a> {
+    /// The pour's own setting, before any rule.
+    own: Option<crate::PourConnect>,
     rules: Vec<&'a Rule>,
     scopes: Scopes,
     pour: Thing,
@@ -252,7 +254,13 @@ struct Connect<'a> {
 }
 
 impl<'a> Connect<'a> {
-    fn of(board: &'a Board, net: Option<u32>, layer: u8, extent: [f64; 4]) -> Connect<'a> {
+    fn of(
+        board: &'a Board,
+        own: Option<crate::PourConnect>,
+        net: Option<u32>,
+        layer: u8,
+        extent: [f64; 4],
+    ) -> Connect<'a> {
         let mut rules: Vec<&Rule> = board
             .rules
             .iter()
@@ -260,6 +268,7 @@ impl<'a> Connect<'a> {
             .collect();
         rules.sort_by_key(|r| r.priority);
         Connect {
+            own,
             rules,
             scopes: Scopes::new(board),
             pour: Thing {
@@ -279,6 +288,34 @@ impl<'a> Connect<'a> {
     }
 
     fn style(&self, t: &Thing) -> Style {
+        if let Some(own) = self.own {
+            let j = match t.obj {
+                Obj::Via => own.vias,
+                Obj::SmdPad => own.smd_pads,
+                _ => own.th_pads,
+            };
+            return match j {
+                crate::Join::Direct => Style::Direct,
+                crate::Join::Relief {
+                    gap,
+                    width,
+                    spokes,
+                    diagonal,
+                } => Style::Relief {
+                    gap,
+                    width,
+                    entries: spokes.clamp(1, 8),
+                    diagonal,
+                },
+                // An air gap with no spokes across it.
+                crate::Join::None { gap } => Style::Relief {
+                    gap,
+                    width: 0.0,
+                    entries: 0,
+                    diagonal: false,
+                },
+            };
+        }
         let at = t
             .bbox
             .filter(|_| self.rooms)
@@ -480,7 +517,7 @@ fn pour_among(board: &Board, areas: &[Polygon], index: usize) -> Vec<Polygon> {
             cuts.push(ring);
         }
     };
-    let connect = Connect::of(board, def.net, layer, b);
+    let connect = Connect::of(board, def.connect, def.net, layer, b);
     let mut reliefs: Vec<Vec<P>> = Vec::new();
     let mut spokes: Vec<Vec<P>> = Vec::new();
     let mut relieve = |c: P, sx: f64, sy: f64, deg: f64, shape: PadShape, style: &Style| {
@@ -726,7 +763,17 @@ fn pour_among(board: &Board, areas: &[Polygon], index: usize) -> Vec<Polygon> {
         }
     }
 
-    let subject = vec![outline.clone()];
+    // Only on the board: a pour drawn past its edge stops there.
+    let board_ring: Vec<P> = g.outline.iter().map(|&q| mil(q)).collect();
+    let subject: Vec<Vec<P>> = if board_ring.len() >= 3 {
+        vec![outline.clone()]
+            .overlay(&vec![board_ring], OverlayRule::Intersect, FillRule::NonZero)
+            .into_iter()
+            .flatten()
+            .collect()
+    } else {
+        vec![outline.clone()]
+    };
     let mut clip = cuts.clone();
     clip.extend(reliefs);
     let mut shapes = subject.overlay(&clip, OverlayRule::Difference, FillRule::NonZero);
@@ -842,7 +889,7 @@ fn touched(board: &Board, e: &Edit) -> Option<([f64; 4], Vec<u8>)> {
             }
             (b[0] <= b[2]).then(|| (b, (0..n).collect()))
         }
-        Edit::Parts { area, .. } => area.map(|b| (b, (0..n).collect())),
+        Edit::Parts { area, .. } | Edit::Shapes { area, .. } => area.map(|b| (b, (0..n).collect())),
         Edit::SetPolygons { before, after } => {
             // Teardrops added or taken away: pours about them clear them
             // or fill where they were. Other area changes (pouring) don't
@@ -968,6 +1015,7 @@ mod tests {
             remove_dead: true,
             order: 0,
             min_island: 0.0,
+            connect: None,
         });
         // A GND pad so the pour is live.
         b.geometry.pads.push(Pad {
@@ -1066,6 +1114,7 @@ mod tests {
             remove_dead: true,
             order: 1,
             min_island: 0.0,
+            connect: None,
         });
         assert_eq!(pour_missing(&mut b), 1);
         assert!(b.geometry.polygons.iter().all(|p| p.pour == Some(0)));

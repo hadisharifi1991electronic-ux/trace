@@ -621,6 +621,28 @@ impl<'a> Builder<'a> {
         let (s, c) = rotation_deg.to_radians().sin_cos();
         let ox = if bottom { -off.0 } else { off.0 };
         let center = (at.0 + ox * c - off.1 * s, at.1 + ox * s + off.1 * c);
+        // A pad-local point on the board.
+        let place = |(lx, ly): (f64, f64)| {
+            let lx = if bottom { -lx } else { lx };
+            (at.0 + lx * c - ly * s, at.1 + lx * s + ly * c)
+        };
+        // Shape symbol pads: their own outline, its size the outline's.
+        let custom = |k: &PadComp| -> Option<(Vec<Point>, f64, f64)> {
+            let local = self.custom_outline(k)?;
+            let (mut lo, mut hi) = ((f64::MAX, f64::MAX), (f64::MIN, f64::MIN));
+            for &(x, y) in &local {
+                lo = (lo.0.min(x), lo.1.min(y));
+                hi = (hi.0.max(x), hi.1.max(y));
+            }
+            let pts: Vec<(f64, f64)> = local.into_iter().map(place).collect();
+            Some((self.points(&pts), hi.0 - lo.0, hi.1 - lo.1))
+        };
+        let mut outline = Vec::new();
+        if let Some((o, cw, ch)) = comp.and_then(custom) {
+            outline = o;
+            w = cw;
+            h = ch;
+        }
         // A through-hole pad's copper layer by layer, where it differs
         // from the first: inner layers often have a smaller pad or none,
         // and a plane of another net clears it by the layer's own pad.
@@ -632,6 +654,18 @@ impl<'a> Builder<'a> {
                 // A part on the bottom has its padstack's first layer there.
                 let l = if bottom { top - i } else { i };
                 match ps.pad(i) {
+                    Some(k) if custom(k).is_some() => {
+                        let (o, kw, kh) = custom(k).unwrap_or_default();
+                        differs |= o != outline;
+                        stack.push(Land {
+                            layer: l as u8,
+                            shape: PadShape::Rect,
+                            size_x: self.len(kw),
+                            size_y: self.len(kh),
+                            rotation_deg,
+                            outline: o,
+                        });
+                    }
                     Some(k) if k.w != 0 => {
                         let (kw, kh) = (
                             k.w.abs() as f64,
@@ -683,10 +717,30 @@ impl<'a> Builder<'a> {
             },
             shape,
             rotation_deg,
-            outline: Vec::new(),
+            outline,
             stack,
             fab: Default::default(),
         })
+    }
+
+    /// The outline of a shape symbol pad, in file units about the pad's
+    /// origin (its offset already in it).
+    fn custom_outline(&self, k: &PadComp) -> Option<Vec<(f64, f64)>> {
+        if k.kind != 0x16 || k.shape == 0 {
+            return None;
+        }
+        let Some(Data::Shape { first_seg, .. }) = self.db.get(k.shape).map(|b| &b.data) else {
+            return None;
+        };
+        let mut pts = self.chain(*first_seg);
+        if pts.len() < 3 {
+            return None;
+        }
+        for p in &mut pts {
+            p.0 += k.off_x as f64;
+            p.1 += k.off_y as f64;
+        }
+        Some(pts)
     }
 
     /// The board outline: the largest closed shape on an outline layer.

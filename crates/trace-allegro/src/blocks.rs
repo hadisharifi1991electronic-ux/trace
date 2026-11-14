@@ -214,6 +214,8 @@ pub struct PadComp {
     pub z1: i32,
     pub off_x: i32,
     pub off_y: i32,
+    /// For a shape symbol pad (kind 0x16), the 0x28 shape that outlines it.
+    pub shape: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -706,14 +708,16 @@ fn parse_block(s: &mut Stream, kind: u8, v: Ver, x27_end: usize) -> Result<Optio
                 let z1 = if ge(Ver::V172) { s.i32()? } else { 0 };
                 let off_x = s.i32()?;
                 let off_y = s.i32()?;
-                if ge(Ver::V172) {
-                    s.skip_u32(2)?;
-                } else {
+                let shape = if ge(Ver::V172) {
                     s.skip_u32(1)?;
+                    s.u32()?
+                } else {
+                    let shape = s.u32()?;
                     if i + 1 < count {
                         s.skip_u32(1)?;
                     }
-                }
+                    shape
+                };
                 comps.push(PadComp {
                     kind,
                     w,
@@ -721,6 +725,7 @@ fn parse_block(s: &mut Stream, kind: u8, v: Ver, x27_end: usize) -> Result<Optio
                     z1,
                     off_x,
                     off_y,
+                    shape,
                 });
             }
             s.skip_u32(n * if lt(Ver::V172) { 8 } else { 10 })?;

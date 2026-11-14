@@ -3,6 +3,14 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.56.1 (2026-11-14)
+
+- Allegro: shape symbol pads (custom pad shapes) are read with their own
+  outline, on every layer of a through-hole padstack, instead of a box
+  from the pad's extent. On the Arduino UNO Q board this takes away 4
+  false shorts at the crystal's pads; the ADRV9026 board's NF1846-1 pad 1
+  is one of these.
+
 ## 0.56.0 (2026-11-14)
 
 - Hierarchical schematics: sheet symbols are followed, and the sheets'

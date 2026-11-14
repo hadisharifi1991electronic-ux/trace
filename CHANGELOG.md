@@ -3,6 +3,21 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.45.0 (2026-11-14)
+
+- Via stitching: Edit > "Via stitching and fences…" (or `trace stitch
+  <board> <net> <out>`) fills a net's pours and planes with vias on a grid
+  (staggered if asked), each clear of other copper on every layer it
+  passes, off the board edge, keepouts and cutouts, and landing on the
+  net's copper on at least two layers. Stitching again adds nothing.
+- Via fences: the same window fences the selected net (and its pair
+  partner), or `trace fence <board> <nets> <out>`: ground vias on both
+  sides of its tracks and arcs, a twentieth of a wavelength apart at the
+  frequency given (or a pitch of your own), at a gap from the track, in
+  one or more rows.
+- Other nets' planes that a new via passes get a clearance hole; pours
+  are poured again. Ctrl+Z undoes the lot.
+
 ## 0.44.1 (2026-11-14)
 
 - 3D via solver: with more than two return vias around a pair, the extra

@@ -64,6 +64,14 @@ USAGE:
     trace cascade <load.s1p> [stage.s2p | --line Z@len@Eeff[@dB/in]]... [--ref R] [--step GHz]
                                                 Return loss into a chain of two-ports (vias from trace via, lines)
                                                 ending in a load such as a chip's port model, input side first
+    trace stitch <board> <net> <out.tracepcb> [--grid 100mil] [--stagger] [--via 16/8] [--layers 1-4]
+              [--clearance C] [--edge 20mil] [--area x0,y0,x1,y1]
+                                                Stitch a net's pours and planes with vias on a grid, each clear
+                                                of other copper and landing on the net on two or more layers
+    trace fence <board> <net[,net]> <out.tracepcb> [--ground GND] [--ghz 6 | --pitch P] [--gap G]
+              [--rows 1] [--via 16/8] [--layers 1-4] [--on 1,3] [--clearance C]
+                                                Line a net's tracks (RF lines, a pair) with ground vias on both
+                                                sides, a twentieth of a wavelength apart at GHz (default 6)
     trace stackup <board> [out.txt]             Print the board's stack-up as a stack-up file (name, kind,
                                                 thickness, Er, Df); edit it and give it back with --stackup
     trace validate [--quick] [out.txt]          Accuracy checks: the field, IR drop and 3D via solvers against
@@ -142,6 +150,8 @@ fn main() -> ExitCode {
         ["via", file, from, to, rest @ ..] => via(file, from, to, rest),
         ["pairsize", file, layer, rest @ ..] => pairsize(file, layer, rest),
         ["validate", rest @ ..] => validate(rest),
+        ["stitch", file, net, out, rest @ ..] => stitch_cmd(file, net, out, rest),
+        ["fence", file, nets, out, rest @ ..] => fence_cmd(file, nets, out, rest),
         ["stackup", file] => stackup(file, None),
         ["stackup", file, out] => stackup(file, Some(out)),
         ["cascade", load, rest @ ..] => cascade(load, rest),
@@ -2215,4 +2225,243 @@ fn clip(s: &str, n: usize) -> String {
 fn natural(s: &str) -> (String, u64) {
     let split = s.find(|c: char| c.is_ascii_digit()).unwrap_or(s.len());
     (s[..split].to_string(), s[split..].parse().unwrap_or(0))
+}
+
+/// Options shared by `trace stitch` and `trace fence`.
+struct ViaOpts {
+    via: trace_core::stitch::ViaSpec,
+    rules: trace_core::stitch::Rules,
+}
+
+fn layer_of(b: &Board, l: &str) -> Result<u8, String> {
+    let geo = b.layer_geometry();
+    l.parse::<usize>()
+        .ok()
+        .and_then(|n| n.checked_sub(1))
+        .filter(|&n| n < geo.len())
+        .or_else(|| geo.iter().position(|g| g.name.eq_ignore_ascii_case(l)))
+        .map(|n| n as u8)
+        .ok_or_else(|| {
+            format!(
+                "no copper layer {l}; layers: {}",
+                geo.iter()
+                    .map(|g| g.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })
+}
+
+fn mil_of(v: &str) -> Result<f64, String> {
+    Length::parse(v)
+        .map(|l| l.mil())
+        .ok_or(format!("not a length: {v}"))
+}
+
+/// Reads the via and rule options it knows; returns the rest.
+fn via_opts<'a>(b: &Board, rest: &[&'a str]) -> Result<(ViaOpts, Vec<&'a str>), String> {
+    use trace_core::stitch::{Rules, ViaSpec};
+    let mut o = ViaOpts {
+        via: ViaSpec::of(b),
+        rules: Rules::of(b),
+    };
+    let mut left = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        let a = rest[i];
+        let val = || rest.get(i + 1).copied().ok_or(format!("{a} needs a value"));
+        match a {
+            "--via" => {
+                let v = val()?;
+                let (p, d) = v
+                    .split_once('/')
+                    .ok_or("--via is pad/drill, such as 16/8 or 0.4mm/0.2mm")?;
+                o.via.pad = mil_of(p)?;
+                o.via.drill = mil_of(d)?;
+                i += 1;
+            }
+            "--layers" => {
+                let v = val()?;
+                let (f, t) = v
+                    .split_once('-')
+                    .ok_or("--layers is from-to, such as 1-4 or TOP-BOTTOM")?;
+                let (f, t) = (layer_of(b, f)?, layer_of(b, t)?);
+                o.via.from = f.min(t);
+                o.via.to = f.max(t);
+                i += 1;
+            }
+            "--clearance" => {
+                o.rules.clearance = mil_of(val()?)?;
+                i += 1;
+            }
+            "--edge" => {
+                o.rules.edge = mil_of(val()?)?;
+                i += 1;
+            }
+            _ => left.push(a),
+        }
+        i += 1;
+    }
+    Ok((o, left))
+}
+
+fn net_of(b: &Board, name: &str) -> Result<u32, String> {
+    trace_core::stitch::net_named(b, name).ok_or(format!("no net {name}"))
+}
+
+/// Applies the vias, pours touched pours again and saves.
+fn save_with(
+    mut b: Board,
+    placed: &trace_core::stitch::Placed,
+    out: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let edits = placed.edits(&b);
+    for e in &edits {
+        e.apply(&mut b);
+    }
+    if let Some(e) = trace_core::pour::repour_after(&b, &edits) {
+        e.apply(&mut b);
+    }
+    trace_core::connectivity::analyse(&mut b);
+    if out.to_ascii_lowercase().ends_with(".kicad_pcb") {
+        std::fs::write(out, trace_export::to_kicad(&b))?;
+    } else {
+        trace_core::file::save(&b, Path::new(out))?;
+    }
+    Ok(())
+}
+
+fn stitch_cmd(file: &str, net: &str, out: &str, rest: &[&str]) -> Res {
+    use trace_core::stitch::{stitch, StitchGoal};
+    let b = board(file)?;
+    let (o, rest) = via_opts(&b, rest)?;
+    let mut goal = StitchGoal {
+        net: net_of(&b, net)?,
+        via: o.via,
+        rules: o.rules,
+        grid: 100.0,
+        stagger: false,
+        area: None,
+    };
+    let mut i = 0;
+    while i < rest.len() {
+        let a = rest[i];
+        let val = || rest.get(i + 1).copied().ok_or(format!("{a} needs a value"));
+        match a {
+            "--grid" => {
+                goal.grid = mil_of(val()?)?;
+                i += 1;
+            }
+            "--stagger" => goal.stagger = true,
+            "--area" => {
+                let v: Vec<f64> = val()?.split(',').map(mil_of).collect::<Result<_, _>>()?;
+                if v.len() != 4 {
+                    return Err("--area is x0,y0,x1,y1".into());
+                }
+                goal.area = Some([v[0], v[1], v[2], v[3]]);
+                i += 1;
+            }
+            o => return Err(format!("unknown option {o}").into()),
+        }
+        i += 1;
+    }
+    let p = stitch(&b, &goal)?;
+    println!(
+        "{}: {:.1}/{:.1} mil vias, layers {}-{}, every {:.0} mil{}",
+        b.nets[goal.net as usize].name,
+        goal.via.pad,
+        goal.via.drill,
+        goal.via.from + 1,
+        goal.via.to + 1,
+        goal.grid,
+        if goal.stagger { ", staggered" } else { "" }
+    );
+    println!("{}", p.summary());
+    save_with(b, &p, out)?;
+    println!("saved {out}");
+    Ok(())
+}
+
+fn fence_cmd(file: &str, nets: &str, out: &str, rest: &[&str]) -> Res {
+    use trace_core::stitch::{fence, fence_pitch, ground_net, FenceGoal};
+    let b = board(file)?;
+    let (o, rest) = via_opts(&b, rest)?;
+    let nets: Vec<u32> = nets
+        .split(',')
+        .map(|n| net_of(&b, n.trim()))
+        .collect::<Result<_, _>>()?;
+    let mut ground = None;
+    let (mut ghz, mut pitch, mut gap, mut rows) = (6.0, None, None, 1);
+    let mut on: Vec<u8> = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        let a = rest[i];
+        let val = || rest.get(i + 1).copied().ok_or(format!("{a} needs a value"));
+        match a {
+            "--ground" => ground = Some(net_of(&b, val()?)?),
+            "--ghz" => {
+                ghz = val()?
+                    .trim_end_matches(|c: char| c.is_ascii_alphabetic())
+                    .parse()
+                    .map_err(|_| "--ghz takes a number")?
+            }
+            "--pitch" => pitch = Some(mil_of(val()?)?),
+            "--gap" => gap = Some(mil_of(val()?)?),
+            "--rows" => rows = val()?.parse().map_err(|_| "--rows takes a number")?,
+            "--on" => {
+                on = val()?
+                    .split(',')
+                    .map(|l| layer_of(&b, l.trim()))
+                    .collect::<Result<_, _>>()?
+            }
+            o => return Err(format!("unknown option {o}").into()),
+        }
+        i += 2;
+    }
+    let ground = ground
+        .or_else(|| ground_net(&b))
+        .ok_or("no ground net found; give --ground")?;
+    // The highest Er the fenced tracks see sets the wavelength.
+    let geo = b.layer_geometry();
+    let er = geo
+        .iter()
+        .filter(|g| on.is_empty() || on.contains(&g.copper))
+        .map(|g| g.er)
+        .fold(1.0, f64::max);
+    let er = if er > 1.0 { er } else { 4.0 };
+    let mut rules = o.rules;
+    // A fence via need only reach the ground plane.
+    rules.min_layers = 1;
+    let goal = FenceGoal {
+        nets: nets.clone(),
+        ground,
+        pitch: pitch.unwrap_or_else(|| fence_pitch(ghz, er)),
+        gap: gap.unwrap_or(rules.clearance),
+        rows,
+        layers: on,
+        via: o.via,
+        rules,
+    };
+    let p = fence(&b, &goal)?;
+    println!(
+        "fence of {} vias ({:.1}/{:.1} mil) beside {}: every {:.1} mil{}, {:.1} mil from the track edge",
+        b.nets[ground as usize].name,
+        goal.via.pad,
+        goal.via.drill,
+        nets.iter()
+            .map(|&n| b.nets[n as usize].name.as_str())
+            .collect::<Vec<_>>()
+            .join(", "),
+        goal.pitch,
+        if pitch.is_none() {
+            format!(" (a twentieth of a wavelength at {ghz} GHz, Er {er:.2})")
+        } else {
+            String::new()
+        },
+        goal.gap.max(goal.rules.clearance)
+    );
+    println!("{}", p.summary());
+    save_with(b, &p, out)?;
+    println!("saved {out}");
+    Ok(())
 }

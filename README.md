@@ -213,6 +213,10 @@ trace match board.PcbDoc D0,D1,D2 [out.tracepcb] [--target 1500mil] [--amp 40mil
                                  they fit; with out, save the board tuned
 trace stubs board.PcbDoc [out.tracepcb]   via stubs longer than their rule allows; with out, backdrill them,
                                  pour again and save the board
+trace stitch board.PcbDoc GND out.tracepcb [--grid 100mil] [--stagger] [--via 16/8] [--layers 1-6]
+                                 stitch a net's pours and planes with vias on a grid
+trace fence board.PcbDoc RF_P,RF_N out.tracepcb [--ground GND] [--ghz 6] [--gap 8mil] [--rows 2]
+                                 line the nets' tracks with ground vias on both sides, λ/20 apart at GHz
 trace panel board.PcbDoc 2x3 out.tracepcb [--gap 2mm] [--rail 5mm] [--tabs N] [--vscore]
                                  panelize: copies in a grid with rails, tabs and mouse bites (or V-score),
                                  fiducials and tooling holes; then export fab outputs or ODB++ from out
@@ -340,6 +344,20 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   neighbouring layers (broadside coupling) and arcs are not compared. On
   TI's DAC39RF12 EVM this finds one track over a plane void and no
   crosstalk.
+- Via stitching and fences (Edit > Via stitching and fences…, `trace
+  stitch`, `trace fence`): stitching tries a grid of spots (fixed to the
+  origin, so stitching again lines up and adds nothing) over a net's
+  copper areas on the via's layers; a fence tries spots along each track
+  and arc of the selected net (and its pair partner) at the track's half
+  width plus the gap, on both sides, a twentieth of a wavelength apart in
+  the highest Er beside those layers. A spot is kept only if the via stays
+  inside the board, clear of its edge and slots, keepouts and pour
+  cutouts; keeps the clearance to every track, pad, hole and via on every
+  layer it passes; lands fully on the net's own copper on two layers
+  (stitching) or one (a fence); and, on its end layers, stays clear of
+  other nets' copper. Other nets' planes on the layers between get a
+  round clearance hole cut; pours are poured again. Vias of the net
+  already there count, so spots too near them are left out.
 - Via stubs and backdrilling: a via's stub is the barrel beyond the
   outermost layers its net joins it on (track and arc ends, pads, pours
   through relief or solid), measured from the stack-up (a stack-up without

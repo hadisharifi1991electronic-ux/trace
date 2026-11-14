@@ -29,6 +29,7 @@ pub mod sch_edit;
 pub mod schematic;
 pub mod sim;
 pub mod stackfile;
+pub mod stitch;
 pub mod touchstone;
 pub mod units;
 pub mod validate;

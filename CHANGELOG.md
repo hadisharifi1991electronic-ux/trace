@@ -3,6 +3,20 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.57.0 (2026-11-14)
+
+- PDN impedance and decoupling (View > "PDN impedance and decaps…",
+  `trace pdn`): the supply's impedance from 100 kHz to 1 GHz at each
+  load, from the plane pair, every decoupling capacitor between the
+  supply and ground (ESR and ESL by case size, mounting inductance from
+  the via length) and the regulator. It is drawn against the target
+  impedance (V × ripple / current step), with the frequencies over it.
+  Capacitors can be ticked off or given another value to see what each
+  does, and the optimiser picks values (or takes capacitors off) to bring
+  the worst excess down. The board is not changed.
+- Allegro: part values and device types are read (component value text
+  and the device of each part), so BOMs and the PDN window have them.
+
 ## 0.56.1 (2026-11-14)
 
 - Allegro: shape symbol pads (custom pad shapes) are read with their own

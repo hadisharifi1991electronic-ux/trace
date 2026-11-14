@@ -296,6 +296,7 @@ trace step board.PcbDoc out.step [--vias] [--no-parts] [--min-hole 0.3]   STEP (
 trace field board.PcbDoc         2D field solver on each layer (50/100 ohm widths, delay, loss)
 trace field board.PcbDoc 1 11 --ground 6 out.svg   One cross-section, with its field drawn
 trace ir board.PcbDoc DVDD --source U19 --volts 1.0 --load U1=2A out.svg   IR drop over a supply net, drop maps per layer
+trace pdn board.brd VDD_SOC --amps 3 --optimise [--csv z.csv]   PDN impedance vs target, decap optimiser
 trace via board.PcbDoc 1 7 --returns 2@30mil via.s2p via.svg   3D full-wave via solve: S-parameters, stub resonance
 trace via board.PcbDoc 1 7 --pair 40 --optimise 10 best.s2p   tune a pair's antipad (round or oval) and return vias (--free-pitch: the pitch too)
 trace pairsize board.PcbDoc 3 --zdiff 100 --ghz 8   every width and gap for 100 ohm on a layer, ranked by loss
@@ -458,6 +459,18 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   integrity (IR drop)…", `trace ir`). The return path (ground) is taken
   as ideal, current spreads evenly over each load's pads, and copper is
   at 20 °C (no self-heating).
+- PDN impedance: the supply's impedance from 100 kHz to 1 GHz as each
+  load sees it, from the plane pair (a grid of cells with the dielectric's
+  capacitance and loss and the planes' skin-effect resistance and
+  inductance), the decoupling capacitors (capacitance, ESR, ESL by case
+  size, plus a mounting inductance from the via length) and the regulator
+  (R + L). The target is V × ripple / current step. The optimiser changes
+  values or takes capacitors off while the worst excess over the target,
+  up to the band edge, gets smaller (View > "PDN impedance and decaps…",
+  `trace pdn`). Only the main plane pair is modelled (no package, die or
+  spreading through other planes), capacitors without a value read from
+  the board get a typical one for their case, and the regulator is a
+  fixed R + L.
 - Via solver (3D FDTD): metal is perfect and thin (copper thickness is
   folded into the dielectric), the dielectric lossless by default, round
   holes and barrels are built from the grid's cells, every copper layer

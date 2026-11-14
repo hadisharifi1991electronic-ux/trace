@@ -201,6 +201,8 @@ pub mod class {
     pub const DRAWING_FORMAT: u8 = 0x04;
     pub const ETCH: u8 = 0x06;
     pub const PACKAGE_GEOMETRY: u8 = 0x09;
+    pub const COMPONENT_VALUE: u8 = 0x02;
+    pub const DEVICE_TYPE: u8 = 0x03;
     pub const REF_DES: u8 = 0x0D;
     pub const ANTI_ETCH: u8 = 0x14;
     pub const BOUNDARY: u8 = 0x15;
@@ -313,7 +315,21 @@ pub enum Data {
         inst_ref: u32,
         graphics: u32,
         first_pad: u32,
+        /// First of the part's texts (0x30), value and device type among them.
+        texts: u32,
     },
+    /// A component (0x06): its device type (a string) and first instance (0x07).
+    Comp {
+        device: u32,
+        first_inst: u32,
+    },
+    /// A placed text (0x30): its layer and the string block (0x31).
+    Text {
+        layer: LayerInfo,
+        string: u32,
+    },
+    /// A string (0x31).
+    Str(String),
     PlacedPad {
         net: u32,
         next_in_fp: u32,
@@ -457,9 +473,12 @@ fn parse_block(s: &mut Stream, kind: u8, v: Ver, x27_end: usize) -> Result<Optio
             s.skip(3)?;
             key = s.u32()?;
             next = s.u32()?;
-            s.skip_u32(6)?;
+            let device = s.u32()?;
+            s.skip_u32(1)?;
+            let first_inst = s.u32()?;
+            s.skip_u32(3)?;
             opt(s, ge(Ver::V172), 1)?;
-            Data::Other
+            Data::Comp { device, first_inst }
         }
         0x07 => {
             s.skip(3)?;
@@ -963,7 +982,8 @@ fn parse_block(s: &mut Stream, kind: u8, v: Ver, x27_end: usize) -> Result<Optio
             }
             let graphics = s.u32()?;
             let first_pad = s.u32()?;
-            s.skip_u32(5)?;
+            let texts = s.u32()?;
+            s.skip_u32(4)?;
             Data::FpInst {
                 bottom,
                 rotation,
@@ -972,6 +992,7 @@ fn parse_block(s: &mut Stream, kind: u8, v: Ver, x27_end: usize) -> Result<Optio
                 inst_ref,
                 graphics,
                 first_pad,
+                texts,
             }
         }
         0x2E => {
@@ -992,18 +1013,18 @@ fn parse_block(s: &mut Stream, kind: u8, v: Ver, x27_end: usize) -> Result<Optio
         }
         0x30 => {
             s.u8()?;
-            layer(s)?;
+            let li = layer(s)?;
             key = s.u32()?;
             next = s.u32()?;
             opt(s, ge(Ver::V172), 4)?; // two words, font properties, pointer
             opt(s, ge(Ver::V174), 1)?;
-            s.skip_u32(1)?;
+            let string = s.u32()?;
             opt(s, ge(Ver::V172), 1)?;
             opt(s, lt(Ver::V172), 2)?; // word and font properties
             opt(s, ge(Ver::V172), 1)?;
             s.skip_u32(4)?;
             opt(s, lt(Ver::V172), 1)?;
-            Data::Other
+            Data::Text { layer: li, string }
         }
         0x31 => {
             s.u8()?;
@@ -1013,8 +1034,7 @@ fn parse_block(s: &mut Stream, kind: u8, v: Ver, x27_end: usize) -> Result<Optio
             s.u16()?;
             let len = s.u16()? as usize;
             opt(s, ge(Ver::V174), 1)?;
-            s.fixed_str(len, true)?;
-            Data::Other
+            Data::Str(s.fixed_str(len, true)?)
         }
         0x32 => {
             s.u8()?;

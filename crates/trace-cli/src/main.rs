@@ -46,6 +46,12 @@ USAGE:
                                                 Simulate the route from a driver pin to a receiver pin with IBIS
                                                 models (a pair when the net has a partner): waveforms and eye,
                                                 with track loss and crosstalk from nets beside the route
+    trace pdn <board> <net> [--ground GND] [--volts 1.0] [--ripple 3] [--amps 2] [--target 10m] [--band 100M]
+              [--fmin 100k] [--fmax 1G] [--points 60] [--vrm U5] [--loads U1,U2] [--cell 50]
+              [--optimise] [--no-assume] [--csv out.csv]
+                                                PDN impedance of a supply's plane pair against frequency at
+                                                each load, with its capacitors and regulator; target check;
+                                                --optimise picks capacitor values and drops spare ones
     trace ir <board> <net> [--source U5] [--volts 1.0] [--load U1=5A ...] [--total 10A] [--plating 0.8mil] [out.svg]
                                                 DC voltage drop (IR drop) over a supply net's pours, tracks and
                                                 vias from the source part to the loads (no --load: the total,
@@ -215,6 +221,7 @@ fn main() -> ExitCode {
         ["match", file, nets, rest @ ..] => match_nets(file, nets, rest),
         ["sim", file, from, to, rest @ ..] => sim(file, from, to, rest),
         ["ir", file, net, rest @ ..] => ir(file, net, rest),
+        ["pdn", file, net, rest @ ..] => pdn_cmd(file, net, rest),
         ["via", file, from, to, rest @ ..] => via(file, from, to, rest),
         ["pairsize", file, layer, rest @ ..] => pairsize(file, layer, rest),
         ["validate", rest @ ..] => validate(rest),
@@ -1407,6 +1414,213 @@ fn amps(s: &str) -> Option<f64> {
         return v.trim().parse::<f64>().ok().map(|v| v / 1000.0);
     }
     t.strip_suffix('a').unwrap_or(&t).trim().parse().ok()
+}
+
+/// 100k, 1G, 10m, 20n, 4.7u: a number with an SI prefix.
+fn si(v: &str) -> Option<f64> {
+    let t = v
+        .trim()
+        .trim_end_matches(['H', 'F', 'z', 'Ω', 'A', 'V'])
+        .trim_end_matches('H');
+    let (num, k) = match t.chars().last()? {
+        'G' => (&t[..t.len() - 1], 1e9),
+        'M' => (&t[..t.len() - 1], 1e6),
+        'k' | 'K' => (&t[..t.len() - 1], 1e3),
+        'm' => (&t[..t.len() - 1], 1e-3),
+        'u' => (&t[..t.len() - 1], 1e-6),
+        'n' => (&t[..t.len() - 1], 1e-9),
+        'p' => (&t[..t.len() - 1], 1e-12),
+        _ => (t, 1.0),
+    };
+    num.trim().parse::<f64>().ok().map(|x| x * k)
+}
+
+fn pdn_cmd(file: &str, net: &str, rest: &[&str]) -> Res {
+    use trace_core::pdn::{self, farads_text, hz_text, ohm_text};
+    let b = board(file)?;
+    let find_net = |n: &str| -> Result<u32, Box<dyn std::error::Error>> {
+        Ok(b.nets
+            .iter()
+            .position(|x| x.name == n || x.name.eq_ignore_ascii_case(n))
+            .ok_or(format!("no net {n}"))? as u32)
+    };
+    let part = |d: &str| -> Result<usize, Box<dyn std::error::Error>> {
+        Ok(b.components
+            .iter()
+            .position(|c| c.designator.eq_ignore_ascii_case(d))
+            .ok_or(format!("no part {d}"))?)
+    };
+    let mut s = pdn::Setup::new(find_net(net)?);
+    let (mut opt, mut csv) = (false, None);
+    let mut it = rest.iter();
+    while let Some(&a) = it.next() {
+        let mut val = || it.next().copied().ok_or(format!("{a} needs a value"));
+        let mut num = |what: &str| -> Result<f64, Box<dyn std::error::Error>> {
+            let v = val()?;
+            Ok(si(v).ok_or(format!("{a}: not {what}: {v}"))?)
+        };
+        match a {
+            "--ground" => s.ground = Some(find_net(val()?)?),
+            "--volts" => s.volts = Some(num("a voltage")?),
+            "--ripple" => s.ripple_pct = num("a percentage")?,
+            "--amps" => s.amps = num("a current")?,
+            "--target" => s.target = Some(num("an impedance")?),
+            "--band" => s.target_fmax = num("a frequency")?,
+            "--fmin" => s.fmin = num("a frequency")?,
+            "--fmax" => s.fmax = num("a frequency")?,
+            "--points" => s.points = num("a count")? as usize,
+            "--cell" => s.cell_mil = num("a length in mil")?,
+            "--vrm-r" => s.vrm_r = num("a resistance")?,
+            "--vrm-l" => s.vrm_l = num("an inductance")?,
+            "--via" => s.via_drill_mil = num("a drill in mil")?,
+            "--vrm" => s.vrm = Some(part(val()?)?),
+            "--loads" => {
+                s.loads = val()?
+                    .split(',')
+                    .map(|d| part(d.trim()))
+                    .collect::<Result<_, _>>()?
+            }
+            "--optimise" | "--optimize" => opt = true,
+            "--no-assume" => s.assume = false,
+            "--csv" => csv = Some(val()?.to_string()),
+            _ => return Err(format!("unknown option {a}").into()),
+        }
+    }
+    if !(s.fmin > 0.0 && s.fmax > s.fmin) {
+        return Err("the sweep needs 0 < fmin < fmax".into());
+    }
+    let t = std::time::Instant::now();
+    let m = pdn::model(&b, &s)?;
+    let des = |i: usize| b.components[i].designator.as_str();
+    let c = &m.cavity;
+    println!(
+        "{}: plane pair {} over {} ({}), {:.2} mil, εr {:.2}, tanδ {:.3}; {:.2} in², {:.2} nF; {} cells of {:.0} mil; solved in {:.1} s",
+        b.nets[s.net as usize].name,
+        c.power_layer,
+        c.ground_layer,
+        c.ground_net,
+        c.d_mil,
+        c.er,
+        c.tan_d,
+        c.area_in2,
+        c.farads * 1e9,
+        c.nodes,
+        c.cell_mil,
+        t.elapsed().as_secs_f64()
+    );
+    let mut kinds: std::collections::BTreeMap<(i64, &str), usize> = Default::default();
+    for d in &m.decaps {
+        *kinds
+            .entry(((d.model.farads * 1e15).round() as i64, d.package.label()))
+            .or_default() += 1;
+    }
+    let list: Vec<String> = kinds
+        .iter()
+        .rev()
+        .map(|((f, p), n)| format!("{n} × {} {p}", farads_text(*f as f64 / 1e15)))
+        .collect();
+    println!(
+        "Capacitors: {} ({}); regulator {}",
+        m.decaps.len(),
+        if list.is_empty() {
+            "none".into()
+        } else {
+            list.join(", ")
+        },
+        m.vrm.map_or("none", des)
+    );
+    for n in &m.notes {
+        println!("  note: {n}");
+    }
+    match m.target {
+        Some(t) => println!("Target: {} up to {}", ohm_text(t), hz_text(m.band)),
+        None => println!("Target: none (give --volts and --amps, or --target)"),
+    }
+    let curves = m.evaluate(&m.as_built());
+    // Decade points and the worst.
+    let mut marks: Vec<usize> = Vec::new();
+    let mut f = 10f64.powf(s.fmin.log10().ceil());
+    while f <= s.fmax * 1.0001 {
+        if let Some(i) = m.freqs.iter().position(|&x| x >= f * 0.999) {
+            marks.push(i);
+        }
+        f *= 10.0;
+    }
+    print!("{:12}", "|Z| at");
+    for &i in &marks {
+        print!("{:>12}", hz_text(m.freqs[i]));
+    }
+    println!();
+    for (l, c) in curves.iter().enumerate() {
+        print!("{:12}", des(m.loads[l]));
+        for &i in &marks {
+            print!("{:>12}", ohm_text(c[i]));
+        }
+        let (fi, z) = c
+            .iter()
+            .enumerate()
+            .fold((0, 0.0), |b, (i, &v)| if v > b.1 { (i, v) } else { b });
+        println!("   peak {} at {}", ohm_text(z), hz_text(m.freqs[fi]));
+    }
+    if let Some((r, f, l)) = m.worst(&curves) {
+        let bands: Vec<String> = m
+            .over(&curves)
+            .iter()
+            .map(|(a, b)| trace_core::pdn::band_text(*a, *b))
+            .collect();
+        if r <= 1.0 {
+            println!(
+                "Under the target everywhere (worst {r:.2}× at {} at {}).",
+                hz_text(f),
+                des(m.loads[l])
+            );
+        } else {
+            println!(
+                "Over the target: worst {r:.2}× at {} at {}; over at {}",
+                hz_text(f),
+                des(m.loads[l]),
+                bands.join(", ")
+            );
+        }
+    }
+    if let Some(path) = &csv {
+        let mut out = String::from("freq_hz");
+        for &l in &m.loads {
+            out.push_str(&format!(",{}", des(l)));
+        }
+        out.push_str(",target\n");
+        for (fi, f) in m.freqs.iter().enumerate() {
+            out.push_str(&format!("{f}"));
+            for c in &curves {
+                out.push_str(&format!(",{}", c[fi]));
+            }
+            out.push_str(&format!(",{}\n", m.target.unwrap_or(f64::NAN)));
+        }
+        std::fs::write(path, out)?;
+        println!("wrote {path}");
+    }
+    if opt {
+        let t = std::time::Instant::now();
+        let plan = pdn::optimise(&m, &m.as_built());
+        println!(
+            "Optimised in {:.1} s: {}",
+            t.elapsed().as_secs_f64(),
+            plan.summary()
+        );
+        for ch in &plan.changes {
+            let d = &m.decaps[ch.decap];
+            let text =
+                |c: Option<pdn::CapModel>| c.map_or("off".to_string(), |c| farads_text(c.farads));
+            println!(
+                "  {:8} {:5}  {} -> {}",
+                d.designator,
+                d.package.label(),
+                text(ch.from),
+                text(ch.to)
+            );
+        }
+    }
+    Ok(())
 }
 
 fn ir(file: &str, net: &str, rest: &[&str]) -> Res {

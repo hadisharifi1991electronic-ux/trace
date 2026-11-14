@@ -19,6 +19,8 @@ struct Builder<'a> {
     nets: HashMap<u32, u32>,
     /// Nets with a real copper pour, which the routing check skips.
     poured: std::collections::HashSet<u32>,
+    /// Device type of each component instance (0x07), by its key.
+    devices: HashMap<u32, String>,
     board: Board,
 }
 
@@ -54,6 +56,7 @@ impl<'a> Builder<'a> {
             copper: 0,
             nets: HashMap::new(),
             poured: Default::default(),
+            devices: HashMap::new(),
             board: Board::default(),
         }
     }
@@ -463,6 +466,25 @@ impl<'a> Builder<'a> {
     }
 
     fn parts(&mut self) {
+        for b in &self.db.blocks {
+            let Data::Comp { device, first_inst } = b.data else {
+                continue;
+            };
+            let name = self.db.string(device).trim().to_string();
+            if name.is_empty() {
+                continue;
+            }
+            let mut key = first_inst;
+            for _ in 0..100_000 {
+                match self.db.get(key) {
+                    Some(i) if matches!(i.data, Data::CompInst { .. }) => {
+                        self.devices.insert(i.key, name.clone());
+                        key = i.next;
+                    }
+                    _ => break,
+                }
+            }
+        }
         let ll = self.db.header.ll_fp_defs;
         for def in self.db.walk(ll.head, ll.tail) {
             let Data::FpDef { name, first_inst } = def.data else {
@@ -486,10 +508,32 @@ impl<'a> Builder<'a> {
             inst_ref,
             graphics,
             first_pad,
+            texts,
         } = inst.data
         else {
             return;
         };
+        // The part's value and device type, from its texts, else the
+        // device type of its component.
+        let mut params = std::collections::BTreeMap::new();
+        if let Some(d) = self.devices.get(&inst_ref) {
+            params.insert("Device Type".to_string(), d.clone());
+        }
+        for t in self.db.walk(texts, inst.key) {
+            let Data::Text { layer, string } = t.data else {
+                continue;
+            };
+            let name = match layer.class {
+                class::COMPONENT_VALUE => "Value",
+                class::DEVICE_TYPE => "Device Type",
+                _ => continue,
+            };
+            if let Some(Data::Str(v)) = self.db.get(string).map(|b| &b.data) {
+                if !v.trim().is_empty() {
+                    params.insert(name.to_string(), v.trim().to_string());
+                }
+            }
+        }
         let designator = match self.db.get(inst_ref).map(|b| &b.data) {
             Some(Data::CompInst { refdes }) => self.db.string(*refdes).to_string(),
             _ => String::new(),
@@ -511,7 +555,7 @@ impl<'a> Builder<'a> {
             },
             side: if bottom { Side::Bottom } else { Side::Top },
             sheet: None,
-            params: Default::default(),
+            params,
         });
 
         let (s, c) = rot.to_radians().sin_cos();

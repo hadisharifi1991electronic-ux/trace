@@ -14,6 +14,7 @@ mod fpview;
 mod imp;
 mod pairwin;
 mod panelize;
+mod pdnwin;
 mod placing;
 mod power;
 mod reusewin;
@@ -130,6 +131,7 @@ pub struct App {
     panel: panelize::PanelWindow,
     sim: simwin::SimWindow,
     power: power::PowerWindow,
+    pdn: pdnwin::PdnWindow,
     via: viawin::ViaWindow,
     pairs: pairwin::PairWindow,
     stitch: stitchwin::StitchWindow,
@@ -221,6 +223,7 @@ impl App {
             panel: panelize::PanelWindow::default(),
             sim: simwin::SimWindow::default(),
             power: power::PowerWindow::default(),
+            pdn: pdnwin::PdnWindow::default(),
             via: viawin::ViaWindow::default(),
             pairs: pairwin::PairWindow::default(),
             stitch: stitchwin::StitchWindow::default(),
@@ -1935,6 +1938,17 @@ impl App {
                 {
                     ui.close_menu();
                     self.power.open = true;
+                }
+                if ui
+                    .add_enabled(
+                        self.scene.is_some(),
+                        egui::Button::new("PDN impedance and decaps…"),
+                    )
+                    .on_hover_text("Supply impedance from 100 kHz to 1 GHz from the planes, decaps and VRM, against a target, with a decap optimiser")
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.pdn.open = true;
                 }
                 if ui
                     .add_enabled(
@@ -3839,6 +3853,7 @@ impl eframe::App for App {
             self.sim
                 .show(ctx, &scene.board, self.imp.stackup(), self.selected);
             self.power.show(ctx, &scene.board, self.selected);
+            self.pdn.show(ctx, &scene.board, self.selected);
             self.via.show(ctx, &scene.board, self.imp.stackup());
             self.pairs.show(ctx, &scene.board, self.imp.stackup());
         }

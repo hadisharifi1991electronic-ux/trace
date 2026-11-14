@@ -27,6 +27,9 @@ pub struct Board {
     /// are made for; `None` is the board as designed.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub variant: Option<usize>,
+    /// Parts marked as net ties (designators), besides those named as one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub net_ties: Vec<String>,
 }
 
 /// How a panel's nets and parts follow from its board: `nets` nets and

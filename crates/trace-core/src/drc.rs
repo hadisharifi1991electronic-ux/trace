@@ -1346,6 +1346,17 @@ pub fn check(board: &Board, limit: usize) -> Vec<Violation> {
     }
 
     let alternates = alternate_parts(&items, &grid);
+    // Net ties join their nets with their own copper on purpose.
+    let ties = crate::nettie::ties(board);
+    let g = &board.geometry;
+    let owner = |i: Item| -> Option<u32> {
+        match i {
+            Item::Pad(k) => g.pads.get(k)?.component,
+            Item::Track(k) => g.tracks.get(k)?.component,
+            Item::Arc(k) => g.arcs.get(k)?.component,
+            _ => None,
+        }
+    };
     let mut out: Vec<Violation> = Vec::new();
     // One report per pair of board items (a track against a pour, not
     // against every edge of it), the worst gap kept.
@@ -1378,6 +1389,13 @@ pub fn check(board: &Board, limit: usize) -> Vec<Violation> {
                     {
                         if alternates.contains(&(p.min(q), p.max(q))) {
                             continue;
+                        }
+                    }
+                    if !ties.is_empty() {
+                        if let (Some(p), Some(q)) = (owner(a.item), owner(c.item)) {
+                            if p == q && ties.contains(&(p as usize)) {
+                                continue;
+                            }
                         }
                     }
                     // Copper without a net (a free fill, a logo) is not
@@ -1790,6 +1808,71 @@ mod tests {
         b.geometry.pads[1].net = Some(1);
         let v = check(&b, 100);
         assert!(v.iter().any(|v| v.kind == Kind::Short));
+    }
+
+    #[test]
+    fn net_ties_may_join_their_nets() {
+        let mut b = board();
+        b.stackup.layers.push(StackLayer {
+            name: "Top".into(),
+            altium_id: None,
+            kind: LayerKind::Copper,
+            thickness: Length(0),
+            dielectric_constant: None,
+            loss_tangent: None,
+            roughness_um: None,
+            material: None,
+        });
+        b.components.push(Component {
+            designator: "X1".into(),
+            footprint: "TIE".into(),
+            library_ref: None,
+            x: Length(0),
+            y: Length(0),
+            rotation_deg: 0.0,
+            side: Side::Top,
+            sheet: None,
+            params: Default::default(),
+        });
+        for (name, x, net) in [("1", 0.0, 0u32), ("2", 30.0, 1)] {
+            b.geometry.pads.push(Pad {
+                layer: LayerRef::Copper(0),
+                net: Some(net),
+                component: Some(0),
+                name: name.into(),
+                at: p(x, 0.0),
+                size_x: Length::from_mil(20.0),
+                size_y: Length::from_mil(20.0),
+                hole: Length(0),
+                shape: PadShape::Rect,
+                rotation_deg: 0.0,
+                outline: Vec::new(),
+                stack: Vec::new(),
+                fab: Default::default(),
+            });
+        }
+        // The tie's own copper bridge, on net 0, over pad 2 of net 1.
+        b.geometry.tracks.push(Track {
+            layer: LayerRef::Copper(0),
+            net: Some(0),
+            start: p(0.0, 0.0),
+            end: p(30.0, 0.0),
+            width: Length::from_mil(10.0),
+            component: Some(0),
+            text: false,
+        });
+        let shorts = |b: &Board| {
+            check(b, 100)
+                .iter()
+                .filter(|v| v.kind == Kind::Short)
+                .count()
+        };
+        assert!(shorts(&b) > 0);
+        crate::nettie::set(&mut b, &["X1".to_string()], true);
+        assert_eq!(shorts(&b), 0);
+        // Other copper over the tie is still a short.
+        b.geometry.tracks[0].component = None;
+        assert!(shorts(&b) > 0);
     }
 
     #[test]

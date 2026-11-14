@@ -92,6 +92,15 @@ USAGE:
                                                 Test points for bed-of-nails or flying-probe test: one probe point
                                                 per net (bottom side by default) on a via or pad big enough, clear
                                                 of parts, the edge and other probes; coverage and the nets missed
+    trace reuse <board> <U1,R1,C1,...> <U2> <out.tracepcb> [--margin 1mm] [--keep-routing]
+                                                Copy a laid-out block onto another instance of it: the parts
+                                                listed (anchor first) are matched with the copy's through their
+                                                nets, starting from the copy's anchor U2, placed alike, and the
+                                                block's tracks, arcs and vias copied with the copy's nets (the
+                                                copy's own routing there is taken up first, unless --keep-routing)
+    trace nettie <board> <part[,part]> <out.tracepcb> [--remove]
+                                                Mark parts as net ties: their own copper may join their nets
+                                                (parts named NT…, or with a NetTie footprint, already are)
     trace variants <board>                      Assembly variants (read from the Altium project beside a PcbDoc):
                                                 parts not fitted and changed in each. Any command takes
                                                 --variant <name> to make its BOM, pick and place, assembly
@@ -195,6 +204,9 @@ fn main() -> ExitCode {
         ["teardrops", file, out, rest @ ..] => teardrops_cmd(file, out, rest),
         ["gloss", file, out, rest @ ..] => gloss_cmd(file, out, rest),
         ["fanout", file, parts, out, rest @ ..] => fanout_cmd(file, parts, out, rest),
+        ["reuse", file, block, anchor, out, rest @ ..] => reuse_cmd(file, block, anchor, out, rest),
+        ["nettie", file, parts, out] => nettie_cmd(file, parts, out, true),
+        ["nettie", file, parts, out, "--remove"] => nettie_cmd(file, parts, out, false),
         ["variants", file] => board(file).map(|b| print!("{}", trace_core::variant::summary(&b))),
         ["testpoints", file, rest @ ..] => testpoints_cmd(file, rest),
         ["erc", file, rest @ ..] => erc_cmd(file, rest),
@@ -2675,6 +2687,81 @@ fn teardrops_cmd(file: &str, out: &str, rest: &[&str]) -> Res {
         let edits = t.edits(&b);
         save_edits(b, edits, out)?;
     }
+    println!("saved {out}");
+    Ok(())
+}
+
+/// Part indices from a comma-separated list of designators.
+fn part_list(b: &Board, parts: &str) -> Result<Vec<usize>, String> {
+    parts
+        .split(',')
+        .map(str::trim)
+        .filter(|d| !d.is_empty())
+        .map(|d| {
+            b.components
+                .iter()
+                .position(|c| c.designator.eq_ignore_ascii_case(d))
+                .ok_or(format!("no part {d}"))
+        })
+        .collect()
+}
+
+fn reuse_cmd(file: &str, block: &str, anchor: &str, out: &str, rest: &[&str]) -> Res {
+    use trace_core::reuse::{match_block, replicate};
+    let b = board(file)?;
+    let parts = part_list(&b, block)?;
+    let anchor = *part_list(&b, anchor)?.first().ok_or("no anchor part")?;
+    let mut margin = Length::from_mm(1.0);
+    let mut clear = true;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "--keep-routing" => clear = false,
+            "--margin" => {
+                let v = rest.get(i + 1).ok_or("--margin needs a length")?;
+                margin = Length::parse(v).ok_or(format!("not a length: {v}"))?;
+                i += 1;
+            }
+            o => return Err(format!("unknown option {o}").into()),
+        }
+        i += 1;
+    }
+    let m = match_block(&b, &parts, anchor)?;
+    for &(s, t) in &m.pairs {
+        println!(
+            "  {} -> {}",
+            b.components[s].designator, b.components[t].designator
+        );
+    }
+    let (edits, r) = replicate(&b, &m, margin, clear);
+    println!("{}", r.summary());
+    save_edits(b, edits, out)?;
+    println!("saved {out}");
+    Ok(())
+}
+
+fn nettie_cmd(file: &str, parts: &str, out: &str, tie: bool) -> Res {
+    let mut b = board(file)?;
+    let names: Vec<String> = part_list(&b, parts)?
+        .into_iter()
+        .map(|i| b.components[i].designator.clone())
+        .collect();
+    trace_core::nettie::set(&mut b, &names, tie);
+    let ties = trace_core::nettie::ties(&b);
+    let mut list: Vec<&str> = ties
+        .iter()
+        .map(|&i| b.components[i].designator.as_str())
+        .collect();
+    list.sort_unstable();
+    println!(
+        "net ties: {}",
+        if list.is_empty() {
+            "none".to_string()
+        } else {
+            list.join(" ")
+        }
+    );
+    save_edits(b, Vec::new(), out)?;
     println!("saved {out}");
     Ok(())
 }

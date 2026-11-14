@@ -278,6 +278,8 @@ trace fab board.PcbDoc out.zip   Gerber X2, drill, IPC-356, pick-and-place and B
 trace odb board.PcbDoc out.tgz   ODB++ job: layers, drills, parts, nets and stack-up (or a folder)
 trace assembly board.PcbDoc out.pdf [--a4]   Assembly drawing: top and bottom views, parts list
 trace fabdrawing board.PcbDoc out.pdf [--a4] Fabrication drawing: drill symbols, dimensions, drill table, stack-up, notes
+trace reuse board.PcbDoc U1,R1,C1 U2 out.tracepcb   copy U1's block layout onto U2's copy
+trace nettie board.PcbDoc NT1 out.tracepcb      mark a part as a net tie
 trace testpoints board.PcbDoc out.tracepcb [--both] [--smd] [--report tp.csv]   probe point per net, coverage
 trace variants board.PcbDoc       assembly variants; add --variant NAME to fab, assembly, step...
 trace step board.PcbDoc out.step [--vias] [--no-parts] [--min-hole 0.3]   STEP (AP214) board solid and part boxes
@@ -488,6 +490,12 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   changes; Altium project variants come in with the PcbDoc. Pick one for
   the outputs (or pass `--variant name` on the command line): BOM, pick
   and place, assembly drawing, IPC-2581, STEP and the 3D view follow it.
+- Design reuse: Edit > Copy block layout… (or `trace reuse`) places and
+  routes another instance of a laid-out block the same way: its parts are
+  matched through their nets from one anchor pair, and the block's
+  routing is copied with the copy's nets.
+- Net ties: Edit > Net tie: mark selected parts (or `trace nettie`) lets
+  a part's own copper join its nets without a short in the rule check.
 - Fabrication drawing: File > Export fabrication drawing (PDF)… (or
   `trace fabdrawing`) draws the outline with every hole marked by its
   size's symbol, the overall dimensions and the drill table (size,

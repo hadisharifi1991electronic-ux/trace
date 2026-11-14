@@ -14,6 +14,7 @@ mod pairwin;
 mod panelize;
 mod placing;
 mod power;
+mod reusewin;
 mod router;
 mod scene;
 mod schview;
@@ -132,6 +133,7 @@ pub struct App {
     stitch: stitchwin::StitchWindow,
     tidy: tidywin::TidyWindow,
     tests: testwin::TestWindow,
+    reuse: reusewin::ReuseWindow,
     variants: varwin::VariantWindow,
     fan: fanwin::FanoutWindow,
     swap: swapwin::SwapWindow,
@@ -220,6 +222,7 @@ impl App {
             stitch: stitchwin::StitchWindow::default(),
             tidy: tidywin::TidyWindow::default(),
             tests: testwin::TestWindow::default(),
+            reuse: reusewin::ReuseWindow::default(),
             variants: varwin::VariantWindow::default(),
             fan: fanwin::FanoutWindow::default(),
             swap: swapwin::SwapWindow::default(),
@@ -1302,6 +1305,39 @@ impl App {
         self.sel_edit(how.label().to_string(), edits);
     }
 
+    /// Marks the selected parts as net ties, or unmarks them when all
+    /// already are.
+    fn toggle_net_ties(&mut self) {
+        let Some(scene) = self.scene.as_mut() else {
+            return;
+        };
+        let names: Vec<String> = self
+            .edit
+            .sel
+            .parts
+            .iter()
+            .filter_map(|&i| scene.board.components.get(i))
+            .map(|c| c.designator.clone())
+            .collect();
+        let all = names.iter().all(|d| scene.board.net_ties.contains(d));
+        trace_core::nettie::set(&mut scene.board, &names, !all);
+        self.dirty = true;
+        self.after_edit();
+        self.message = Some((
+            format!(
+                "{} {}",
+                names.join(" "),
+                match (names.len() == 1, all) {
+                    (true, false) => "is now a net tie",
+                    (true, true) => "is no longer a net tie",
+                    (false, false) => "are now net ties",
+                    (false, true) => "are no longer net ties",
+                },
+            ),
+            false,
+        ));
+    }
+
     fn select_net(&mut self, net: u32, zoom: bool) {
         self.selected = Some(net);
         self.marker = None;
@@ -1731,6 +1767,29 @@ impl App {
                 {
                     ui.close_menu();
                     self.variants.open = true;
+                }
+                if ui
+                    .add_enabled(has, egui::Button::new("Copy block layout…"))
+                    .on_hover_text(
+                        "Design reuse: place and route another instance of a block (a channel, \
+                         a supply) as one already laid out",
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.reuse.open = true;
+                }
+                let sel_n = self.edit.sel.parts.len();
+                if ui
+                    .add_enabled(has && sel_n > 0, egui::Button::new("Net tie: mark selected parts"))
+                    .on_hover_text(
+                        "Their own copper may join their nets (a star point, a Kelvin joint): \
+                         the rule check does not call it a short. Click again to unmark.",
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.toggle_net_ties();
                 }
                 if ui
                     .add_enabled(has, egui::Button::new("Backdrill long via stubs"))
@@ -3790,6 +3849,13 @@ impl eframe::App for App {
             None => {}
         }
         let sel_parts: Vec<usize> = self.edit.sel.parts.iter().copied().collect();
+        let reused = self
+            .scene
+            .as_ref()
+            .and_then(|scene| self.reuse.show(ctx, &scene.board, &sel_parts));
+        if let Some((label, edits)) = reused {
+            self.apply_edits(&label, edits);
+        }
         let var_act = self
             .scene
             .as_ref()

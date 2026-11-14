@@ -328,6 +328,117 @@ impl Area {
     }
 }
 
+/// The board's copper polygons as areas, with their polygon index and
+/// whether a pour makes them.
+fn copper_areas(board: &Board) -> Vec<Area> {
+    let mut copper = Vec::new();
+    for (i, p) in board.geometry.polygons.iter().enumerate() {
+        let l = match &p.layer {
+            LayerRef::Copper(i) => Some(*i),
+            LayerRef::AllCopper => None,
+            _ => continue,
+        };
+        let mut rings: Vec<&[Point]> = vec![&p.outline];
+        rings.extend(p.holes.iter().map(|h| h.as_slice()));
+        if let Some(mut a) = Area::new(l, p.net, &rings) {
+            a.poly = Some(i);
+            a.poured = p.pour.is_some();
+            copper.push(a);
+        }
+    }
+    copper
+}
+
+/// Other nets' copper areas, for vias and tracks other tools place
+/// (the router's obstacles leave copper areas out).
+pub(crate) struct Planes {
+    copper: Vec<Area>,
+}
+
+impl Planes {
+    pub(crate) fn new(board: &Board) -> Planes {
+        Planes {
+            copper: copper_areas(board),
+        }
+    }
+
+    /// Whether a via of radius `rp` at `c` keeps clear of other nets'
+    /// copper; if so, the planes it passes through on the layers between
+    /// its ends, which need a clearance hole cut. Pours clear it
+    /// themselves when poured again.
+    pub(crate) fn via(
+        &self,
+        c: P,
+        net: Option<u32>,
+        from: u8,
+        to: u8,
+        rp: f64,
+        clearance: f64,
+    ) -> Option<Vec<usize>> {
+        let hole = (rp + clearance) * 1.03;
+        let mut cuts = Vec::new();
+        for a in &self.copper {
+            if !(from..=to).any(|l| a.on(l)) || (net.is_some() && a.net == net) {
+                continue;
+            }
+            if !(a.contains(c) || a.edge_within(c, rp + clearance)) {
+                continue;
+            }
+            let between = a.layer.is_some_and(|l| l > from && l < to);
+            if !between {
+                if a.poured {
+                    continue;
+                }
+                return None;
+            }
+            if a.poured {
+                continue;
+            }
+            if !a.contains(c) || a.edge_within(c, hole) {
+                return None;
+            }
+            cuts.extend(a.poly);
+        }
+        Some(cuts)
+    }
+
+    /// Whether a track from `a` to `b` of half width `hw` on `layer` runs
+    /// into another net's fixed copper (pours are poured again round it).
+    pub(crate) fn track_hits(
+        &self,
+        a: P,
+        b: P,
+        hw: f64,
+        layer: u8,
+        net: Option<u32>,
+        clearance: f64,
+    ) -> bool {
+        let len = (b[0] - a[0]).hypot(b[1] - a[1]);
+        let n = (len / 2.0).ceil().max(1.0) as usize;
+        self.copper
+            .iter()
+            .filter(|x| x.on(layer) && !x.poured && !(net.is_some() && x.net == net))
+            .any(|x| {
+                (0..=n).any(|k| {
+                    let t = k as f64 / n as f64;
+                    let p = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+                    x.contains(p) || x.edge_within(p, hw + clearance)
+                })
+            })
+    }
+}
+
+/// A 16-sided clearance hole round `c` that clears a circle of `r`.
+pub(crate) fn hole_ring(c: P, r: f64) -> Vec<Point> {
+    let rad = r / (std::f64::consts::PI / 16.0).cos();
+    (0..16)
+        .map(|k| {
+            let t = std::f64::consts::PI * (2 * k + 1) as f64 / 16.0;
+            Point::mil(c[0] + rad * t.cos(), c[1] + rad * t.sin())
+        })
+        .collect()
+}
+
 /// Everything a new via is checked against.
 struct Site {
     obstacles: Obstacles,
@@ -360,18 +471,7 @@ impl Site {
             LayerRef::AllCopper => Some(None),
             _ => None,
         };
-        let mut copper = Vec::new();
-        for (i, p) in g.polygons.iter().enumerate() {
-            if let Some(l) = layer(&p.layer) {
-                let mut rings: Vec<&[Point]> = vec![&p.outline];
-                rings.extend(p.holes.iter().map(|h| h.as_slice()));
-                if let Some(mut a) = Area::new(l, p.net, &rings) {
-                    a.poly = Some(i);
-                    a.poured = p.pour.is_some();
-                    copper.push(a);
-                }
-            }
-        }
+        let copper = copper_areas(board);
         let mut blocked = Vec::new();
         for p in &g.cutouts {
             if let Some(l) = layer(&p.layer) {
@@ -571,12 +671,7 @@ fn place(
                 }
                 site.keep(c);
                 out.vias.push(via_at(c, net, v));
-                let ring: Vec<Point> = (0..16)
-                    .map(|k| {
-                        let t = std::f64::consts::PI * (2 * k + 1) as f64 / 16.0;
-                        Point::mil(c[0] + rad * t.cos(), c[1] + rad * t.sin())
-                    })
-                    .collect();
+                let ring = hole_ring(c, v.pad.max(v.drill) / 2.0 + r.clearance);
                 out.holes
                     .extend(cuts.into_iter().map(|i| (i, ring.clone())));
             }

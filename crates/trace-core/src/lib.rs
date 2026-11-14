@@ -11,6 +11,7 @@ pub mod constraints;
 pub mod drc;
 pub mod eco;
 pub mod edit;
+pub mod fanout;
 pub mod fdtd;
 pub mod field;
 pub mod file;

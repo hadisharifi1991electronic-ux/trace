@@ -3,6 +3,23 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.49.0 (2026-11-14)
+
+- BGA fanout (Edit > Fanout…, `trace fanout`): for the selected parts, or
+  a part picked from those with 16 or more surface pads, each ball pad
+  gets a short neck track to a via in the middle of its grid cell, away
+  from the part's centre (or towards it), or a via in the pad. The grid
+  pitch is found from the pads, so turned parts and any pitch work. Outer
+  rows can be left for routing on the surface, pads already routed are
+  skipped, and a via is placed only where it and its neck keep the
+  clearance to tracks, pads, vias and other nets' copper. Planes of other
+  nets between the via's layers get a clearance hole cut (holes that meet
+  are joined), pours are poured again. One undo step.
+- Design rule check: two footprints placed on one spot as alternatives
+  (an assembly option, such as two balun packages) are no longer reported
+  as shorts between their pads. Parts count as alternatives when two or
+  more of their same-net pads overlap.
+
 ## 0.48.0 (2026-11-14)
 
 - Shapes: a Shape tool (polygon icon; Edit > "Draw and edit shapes")

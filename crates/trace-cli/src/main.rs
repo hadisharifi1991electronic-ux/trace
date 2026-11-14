@@ -79,6 +79,11 @@ USAGE:
     trace gloss <board> <out.tracepcb> [--nets a,b] [--no-merge] [--keep-dangling] [--corners] [--clearance C]
                                                 Tidy routing: zero-length and duplicate tracks, straight joins
                                                 merged, dangling ends cut back, square corners chamfered (--corners)
+    trace fanout <board> <U1[,U2]> <out.tracepcb> [--via 18/8] [--layers 1-4] [--in-pad] [--inward]
+              [--skip-rows N] [--width W] [--clearance C] [--no-net]
+                                                Fan out BGA and other surface parts: a short track from each
+                                                pad to a via between the pads (away from the centre), or a via
+                                                in the pad; outer rows can be left for surface routing
     trace stackup <board> [out.txt]             Print the board's stack-up as a stack-up file (name, kind,
                                                 thickness, Er, Df); edit it and give it back with --stackup
     trace validate [--quick] [out.txt]          Accuracy checks: the field, IR drop and 3D via solvers against
@@ -160,6 +165,7 @@ fn main() -> ExitCode {
         ["stitch", file, net, out, rest @ ..] => stitch_cmd(file, net, out, rest),
         ["teardrops", file, out, rest @ ..] => teardrops_cmd(file, out, rest),
         ["gloss", file, out, rest @ ..] => gloss_cmd(file, out, rest),
+        ["fanout", file, parts, out, rest @ ..] => fanout_cmd(file, parts, out, rest),
         ["fence", file, nets, out, rest @ ..] => fence_cmd(file, nets, out, rest),
         ["stackup", file] => stackup(file, None),
         ["stackup", file, out] => stackup(file, Some(out)),
@@ -2540,6 +2546,52 @@ fn teardrops_cmd(file: &str, out: &str, rest: &[&str]) -> Res {
         let edits = t.edits(&b);
         save_edits(b, edits, out)?;
     }
+    println!("saved {out}");
+    Ok(())
+}
+
+fn fanout_cmd(file: &str, parts: &str, out: &str, rest: &[&str]) -> Res {
+    use trace_core::fanout::{fanout, Direction, FanoutGoal, Style};
+    let b = board(file)?;
+    let mut idx = Vec::new();
+    for d in parts.split(',').map(str::trim).filter(|d| !d.is_empty()) {
+        let i = b
+            .components
+            .iter()
+            .position(|c| c.designator.eq_ignore_ascii_case(d))
+            .ok_or(format!("no part {d}"))?;
+        idx.push(i);
+    }
+    let mut goal = FanoutGoal::of(&b, idx);
+    let (o, left) = via_opts(&b, rest)?;
+    goal.via = o.via;
+    goal.clearance = o.rules.clearance;
+    let mut i = 0;
+    while i < left.len() {
+        let a = left[i];
+        let val = || left.get(i + 1).copied().ok_or(format!("{a} needs a value"));
+        match a {
+            "--in-pad" => goal.style = Style::InPad,
+            "--inward" => goal.direction = Direction::In,
+            "--no-net" => goal.no_net = true,
+            "--skip-rows" => {
+                goal.skip_rows = val()?
+                    .parse()
+                    .map_err(|_| "--skip-rows takes a whole number")?;
+                i += 1;
+            }
+            "--width" => {
+                goal.width = Some(mil_of(val()?)?);
+                i += 1;
+            }
+            o => return Err(format!("unknown option {o}").into()),
+        }
+        i += 1;
+    }
+    let f = fanout(&b, &goal);
+    println!("{}", f.summary());
+    let edits = f.edits(&b);
+    save_edits(b, edits, out)?;
     println!("saved {out}");
     Ok(())
 }

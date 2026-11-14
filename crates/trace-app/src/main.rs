@@ -7,6 +7,7 @@ mod canvas;
 mod cm;
 mod drc;
 mod editing;
+mod fanwin;
 mod fpview;
 mod imp;
 mod pairwin;
@@ -127,6 +128,7 @@ pub struct App {
     pairs: pairwin::PairWindow,
     stitch: stitchwin::StitchWindow,
     tidy: tidywin::TidyWindow,
+    fan: fanwin::FanoutWindow,
     /// The part being dragged.
     moving: Option<placing::Moving>,
     /// The next board edit joins the last step (a part placed then dropped).
@@ -211,6 +213,7 @@ impl App {
             pairs: pairwin::PairWindow::default(),
             stitch: stitchwin::StitchWindow::default(),
             tidy: tidywin::TidyWindow::default(),
+            fan: fanwin::FanoutWindow::default(),
             moving: None,
             join_next: false,
             new_span: (1, 2),
@@ -1515,6 +1518,17 @@ impl App {
                     self.set_tool(Tool::Shape);
                 }
                 ui.separator();
+                if ui
+                    .add_enabled(has, egui::Button::new("Fanout…"))
+                    .on_hover_text(
+                        "Fan out BGA parts: a dogbone track to a via between the balls, or a \
+                         via in each pad, for the selected parts or a part you pick",
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.fan.open = true;
+                }
                 if ui
                     .add_enabled(has, egui::Button::new("Via stitching and fences…"))
                     .on_hover_text(
@@ -3571,6 +3585,14 @@ impl eframe::App for App {
             .as_ref()
             .and_then(|scene| self.tidy.show(ctx, &scene.board, self.selected));
         if let Some((label, edits)) = tidied {
+            self.apply_edits(&label, edits);
+        }
+        let sel_parts: Vec<usize> = self.edit.sel.parts.iter().copied().collect();
+        let fanned = self
+            .scene
+            .as_ref()
+            .and_then(|scene| self.fan.show(ctx, &scene.board, &sel_parts));
+        if let Some((label, edits)) = fanned {
             self.apply_edits(&label, edits);
         }
         let shaped = match (&self.scene, self.tool) {

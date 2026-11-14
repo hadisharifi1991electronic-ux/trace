@@ -243,6 +243,9 @@ trace stitch board.PcbDoc GND out.tracepcb [--grid 100mil] [--stagger] [--via 16
                                  stitch a net's pours and planes with vias on a grid
 trace fence board.PcbDoc RF_P,RF_N out.tracepcb [--ground GND] [--ghz 6] [--gap 8mil] [--rows 2]
                                  line the nets' tracks with ground vias on both sides, λ/20 apart at GHz
+trace fanout board.PcbDoc U1[,U2] out.tracepcb [--via 18/8] [--layers 1-6] [--in-pad] [--inward]
+         [--skip-rows N] [--width 5mil] [--clearance 4mil] [--no-net]
+                                 fan out BGA parts: a neck track to a via between the balls (or in the pad)
 trace teardrops board.PcbDoc out.tracepcb [--nets a,b] [--smd] [--length 1.0] [--width 0.9] [--remove]
                                  teardrops at vias and through-hole pads (and surface pads with --smd)
 trace gloss board.PcbDoc out.tracepcb [--corners] [--keep-dangling] [--no-merge]
@@ -388,6 +391,18 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   other nets' copper. Other nets' planes on the layers between get a
   round clearance hole cut; pours are poured again. Vias of the net
   already there count, so spots too near them are left out.
+- BGA fanout (Edit > Fanout…, `trace fanout`): the grid pitch is the
+  median distance from each surface pad on the part's outer layer to its
+  nearest neighbour; each pad's via goes half a pitch out diagonally, to
+  the corner of its grid cell on the side away from the part's centre (or
+  towards it), and a neck track joins them on the outer layer at the width
+  rule (no wider than the pad). Via in pad puts the via at the pad's
+  centre. A via is kept only if it and its neck keep the clearance to
+  every track, pad, hole and via, to vias placed before it, and, where the
+  via has pads, to other nets' fixed copper; planes of other nets on the
+  layers between get a round clearance hole cut, joined where holes meet.
+  Pads with a track of their net ending on them, or a via in them, count
+  as routed and are left alone.
 - Via stubs and backdrilling: a via's stub is the barrel beyond the
   outermost layers its net joins it on (track and arc ends, pads, pours
   through relief or solid), measured from the stack-up (a stack-up without

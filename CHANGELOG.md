@@ -3,6 +3,37 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.42.0 (2026-11-14)
+
+- 3D full-wave solver for vias: the finite-difference time-domain
+  (FDTD) method on a graded Yee grid. A via (or a differential pair of
+  vias) carries a trace from one copper layer to another through the
+  board's own stack-up: planes with round antipads, pads, the barrel
+  (with its stub, or backdrilled), and return vias joining the planes,
+  closed all round by convolutional PML so the planes act as an endless
+  board. Each trace ends in a resistor; the first is driven by a pulse,
+  voltage and current are sampled on both traces, each trace's own
+  impedance and propagation are measured from two probes, and the
+  reference planes are moved to the via's centre.
+- It gives return and insertion loss (S11 and S21, or Sdd11 and Sdd21 for
+  a pair) up to the frequency asked (40 GHz by default), the stub's
+  resonance when the barrel runs on past the outgoing layer, and a
+  Touchstone file (.s2p) for other tools.
+- Checked: a plain trace through the same ports and probes comes out
+  with |S11| below −45 dB and |S21| within 0.1 dB (stripline: −60 dB and
+  0.01 dB to 40 GHz); a via is passive (|S11|² + |S21|² between 0.9 and
+  1.05) and nearly transparent at 1 GHz; a 60 mil stub notches |S21|
+  below its bare quarter-wave frequency, as the planes it passes load it,
+  and backdrilling removes the notch. On the DAC39RF12 EVM, a top-to-L7
+  via leaves a 51.6 mil stub that notches S21 to −20.8 dB at 18 GHz.
+- View > "Via S-parameters (3D)…": layers, drill, pad and antipad (taken
+  from the board's commonest via and its plane clearances), return vias,
+  pair pitch, backdrill, top frequency; solves in the background with a
+  plot, "Save Touchstone…" and "Save plot (SVG)…".
+- `trace via board layer layer [--drill D] [--pad P] [--antipad A]
+  [--width W] [--width2 W] [--pair PITCH] [--returns N@D] [--backdrill]
+  [--fmax 40] [--cell C] [out.s2p] [out.svg]`.
+
 ## 0.41.0 (2026-11-13)
 
 - Power integrity: DC voltage drop (IR drop) over a supply net. The

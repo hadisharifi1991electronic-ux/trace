@@ -236,6 +236,7 @@ trace assembly board.PcbDoc out.pdf [--a4]   Assembly drawing: top and bottom vi
 trace field board.PcbDoc         2D field solver on each layer (50/100 ohm widths, delay, loss)
 trace field board.PcbDoc 1 11 --ground 6 out.svg   One cross-section, with its field drawn
 trace ir board.PcbDoc DVDD --source U19 --volts 1.0 --load U1=2A out.svg   IR drop over a supply net, drop maps per layer
+trace via board.PcbDoc 1 7 --returns 2@30mil via.s2p via.svg   3D full-wave via solve: S-parameters, stub resonance
 trace symbols lib.SchLib [out.svg]     list a schematic library's (or IntLib's) symbols; draw them all as SVG
 trace footprints lib.PcbLib [out]   list a library's (or a board's) footprints; save as .tracelib or .PcbLib
 ```
@@ -366,6 +367,15 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   integrity (IR drop)…", `trace ir`). The return path (ground) is taken
   as ideal, current spreads evenly over each load's pads, and copper is
   at 20 °C (no self-heating).
+- Via solver (3D FDTD): metal is perfect and thin (copper thickness is
+  folded into the dielectric), the dielectric lossless by default, round
+  holes and barrels are built from the grid's cells, every copper layer
+  named like a plane (GND, PWR, VCC, VDD, VSS, PLANE) is a full plane
+  with an antipad (or every other layer, when none is named so), and the
+  traces of a pair enter their vias at the vias' pitch. S-parameters are
+  normalised to the traces as the grid sees them; for the small wave
+  back from the far port, S22 is taken equal to S11. A solve takes from
+  seconds to minutes (more for thin traces and tall boards).
 - Assembly drawings: File > Export assembly drawing (PDF)… (or `trace
   assembly`) writes the top view, the bottom view seen from below
   (mirrored), and the parts list grouped by value and footprint. Part

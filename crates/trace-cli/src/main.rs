@@ -46,6 +46,12 @@ USAGE:
                                                 DC voltage drop (IR drop) over a supply net's pours, tracks and
                                                 vias from the source part to the loads (no --load: the total,
                                                 default 1 A, shared by pad count); with out, a drop map per layer
+    trace via <board> <layer> <layer> [--drill D] [--pad P] [--antipad A] [--width W] [--width2 W]
+              [--pair PITCH] [--returns N@D] [--backdrill] [--fmax 40] [--cell C] [out.s2p] [out.svg]
+                                                3D full-wave (FDTD) solve of a via from one layer to another
+                                                with the board's stack-up (default drill, pad and antipad from
+                                                its commonest via): S11/S21, or Sdd for a pair, as Touchstone
+                                                and a plot; the stub resonance when the barrel runs on
     trace stubs <board> [out.tracepcb]          Via stubs on nets with a stub rule (default: pair nets, 10 mil);
                                                 with out, backdrill those too long and save the board
     trace view <board> [out.html]               Open the board in the viewer (in your browser)
@@ -94,6 +100,7 @@ fn main() -> ExitCode {
         ["match", file, nets, rest @ ..] => match_nets(file, nets, rest),
         ["sim", file, from, to, rest @ ..] => sim(file, from, to, rest),
         ["ir", file, net, rest @ ..] => ir(file, net, rest),
+        ["via", file, from, to, rest @ ..] => via(file, from, to, rest),
         ["stubs", file] => stubs(file, None),
         ["stubs", file, out] => stubs(file, Some(out)),
         ["convert", file, out] => convert(file, out),
@@ -1421,6 +1428,164 @@ fn ir(file: &str, net: &str, rest: &[&str]) -> Res {
             std::fs::write(&f, r.svg(m, 1200.0, &title, &marks))?;
             println!("Saved {}", f.display());
         }
+    }
+    Ok(())
+}
+
+fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
+    use trace_core::fdtd::{self, ViaSetup};
+    let b = board(file)?;
+    let geo = b.layer_geometry();
+    let layer = |l: &str| -> Result<u8, String> {
+        l.parse::<usize>()
+            .ok()
+            .and_then(|n| n.checked_sub(1))
+            .filter(|&n| n < geo.len())
+            .or_else(|| geo.iter().position(|g| g.name.eq_ignore_ascii_case(l)))
+            .map(|n| n as u8)
+            .ok_or_else(|| {
+                format!(
+                    "no copper layer {l}; layers: {}",
+                    geo.iter()
+                        .map(|g| g.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                )
+            })
+    };
+    let mut v = ViaSetup::new(layer(from)?, layer(to)?);
+    if let Some((d, p, a)) = fdtd::board_via(&b) {
+        v.drill = d;
+        v.pad = p;
+        v.antipad = a;
+    }
+    let mut outs: Vec<&str> = Vec::new();
+    let mut it = rest.iter();
+    let len = |x: Option<&&str>, what: &str| -> Result<f64, Box<dyn std::error::Error>> {
+        let x = x.ok_or(format!("{what} needs a length"))?;
+        Ok(Length::parse(x).ok_or(format!("not a length: {x}"))?.mil())
+    };
+    while let Some(&a) = it.next() {
+        match a {
+            "--drill" => v.drill = len(it.next(), a)?,
+            "--pad" => v.pad = len(it.next(), a)?,
+            "--antipad" => v.antipad = len(it.next(), a)?,
+            "--width" => v.w_from = Some(len(it.next(), a)?),
+            "--width2" => v.w_to = Some(len(it.next(), a)?),
+            "--pair" => v.pair = Some(len(it.next(), a)?),
+            "--cell" => v.cell = len(it.next(), a)?,
+            "--backdrill" => v.backdrill = true,
+            "--returns" => {
+                let x = it.next().ok_or("--returns needs N or N@distance")?;
+                let (n, d) = x.split_once('@').unwrap_or((x, ""));
+                v.returns = n.parse().map_err(|_| format!("not a count: {n}"))?;
+                if !d.is_empty() {
+                    v.return_dist = Length::parse(d).ok_or(format!("not a length: {d}"))?.mil();
+                }
+            }
+            "--fmax" => {
+                let x = it.next().ok_or("--fmax needs GHz")?;
+                v.fmax_ghz = x
+                    .trim_end_matches(['G', 'g', 'H', 'h', 'z'])
+                    .parse()
+                    .map_err(|_| format!("not a frequency: {x}"))?;
+            }
+            _ if !a.starts_with("--") => outs.push(a),
+            _ => return Err(format!("unknown option {a}").into()),
+        }
+    }
+    let names = |l: u8| geo[l as usize].name.clone();
+    println!(
+        "Via {} to {}{}: drill {:.1} mil, pad {:.1}, antipad {:.1}, {} return via(s) at {:.1} mil{}",
+        names(v.from),
+        names(v.to),
+        v.pair.map_or(String::new(), |p| format!(", pair at {p:.1} mil pitch")),
+        v.drill,
+        v.pad,
+        v.antipad,
+        v.returns,
+        v.return_dist,
+        if v.backdrill { ", backdrilled" } else { "" }
+    );
+    let t = std::time::Instant::now();
+    let last = std::cell::Cell::new(-1i32);
+    let r = fdtd::solve_with(&b.stackup, &v, &|p| {
+        let pc = (p * 100.0) as i32 / 10 * 10;
+        if pc > last.get() {
+            last.set(pc);
+            eprint!("\r  solving… {pc}%");
+        }
+    })?;
+    eprintln!(
+        "\r  solved: {} cells, {} steps, {:.1} s",
+        r.cells,
+        r.steps,
+        t.elapsed().as_secs_f64()
+    );
+    println!(
+        "Traces: {:.2} mil ({:.1} ohm) in, {:.2} mil ({:.1} ohm) out; stub {:.1} mil{}",
+        r.w[0],
+        r.z0[0],
+        r.w[1],
+        r.z0[1],
+        r.stub,
+        if r.stub > 0.5 {
+            format!(
+                " (bare quarter-wave {:.1} GHz)",
+                fdtd::stub_resonance_ghz(r.stub, 3.8)
+            )
+        } else {
+            String::new()
+        }
+    );
+    let kind = if r.z_ref > 60.0 { "Sdd" } else { "S" };
+    println!(
+        "  {:>7}  {:>9}  {:>9}  {:>9}",
+        "GHz",
+        format!("{kind}11 dB"),
+        format!("{kind}21 dB"),
+        "deg"
+    );
+    let n = r.f.len();
+    for k in (0..n).filter(|k| (k + 1) % (n / 16).max(1) == 0) {
+        println!(
+            "  {:>7.2}  {:>9.2}  {:>9.3}  {:>9.1}",
+            r.f[k],
+            r.s11[k].db(),
+            r.s21[k].db(),
+            r.s21[k].deg()
+        );
+    }
+    if let Some((f, db)) = r.notch() {
+        println!("Stub resonance: {kind}21 dips to {db:.1} dB at {f:.2} GHz");
+    }
+    let worst = (0..n)
+        .max_by(|&a, &b| r.s11[a].abs().total_cmp(&r.s11[b].abs()))
+        .unwrap_or(0);
+    println!(
+        "Worst return loss {:.1} dB at {:.2} GHz",
+        r.s11[worst].db(),
+        r.f[worst]
+    );
+    for note in &r.notes {
+        println!("Note: {note}");
+    }
+    let title = format!(
+        "{} via, {} to {}",
+        Path::new(file)
+            .file_stem()
+            .map_or(String::new(), |s| s.to_string_lossy().into_owned()),
+        names(v.from),
+        names(v.to)
+    );
+    for o in outs {
+        let low = o.to_ascii_lowercase();
+        if low.ends_with(".svg") {
+            std::fs::write(o, r.svg(&title))?;
+        } else {
+            std::fs::write(o, r.touchstone(&title))?;
+        }
+        println!("Saved {o}");
     }
     Ok(())
 }

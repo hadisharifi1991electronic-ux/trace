@@ -4,7 +4,7 @@ members = ["crates/trace-core", "crates/trace-altium", "crates/trace-allegro",
     "crates/trace-gerber", "crates/trace-export", "crates/trace-step", "crates/trace-cli", "crates/trace-app"]
 
 [workspace.package]
-version = "0.41.0"
+version = "0.42.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 repository = ""
@@ -19,3 +19,7 @@ trace-step = { path = "crates/trace-step" }
 
 [profile.release]
 strip = true
+
+# The field solvers are too slow unoptimised, even in tests.
+[profile.dev.package.trace-core]
+opt-level = 3

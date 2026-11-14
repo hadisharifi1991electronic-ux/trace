@@ -17,6 +17,7 @@ mod schview;
 mod simwin;
 mod symlib;
 mod toolbar;
+mod viawin;
 mod view3d;
 
 use eframe::egui::{self, Color32, RichText, Stroke};
@@ -114,6 +115,7 @@ pub struct App {
     panel: panelize::PanelWindow,
     sim: simwin::SimWindow,
     power: power::PowerWindow,
+    via: viawin::ViaWindow,
     /// The part being dragged.
     moving: Option<placing::Moving>,
     /// The next board edit joins the last step (a part placed then dropped).
@@ -188,6 +190,7 @@ impl App {
             panel: panelize::PanelWindow::default(),
             sim: simwin::SimWindow::default(),
             power: power::PowerWindow::default(),
+            via: viawin::ViaWindow::default(),
             moving: None,
             join_next: false,
             new_span: (1, 2),
@@ -1328,6 +1331,17 @@ impl App {
                 {
                     ui.close_menu();
                     self.power.open = true;
+                }
+                if ui
+                    .add_enabled(
+                        self.scene.is_some(),
+                        egui::Button::new("Via S-parameters (3D)…"),
+                    )
+                    .on_hover_text("3D full-wave solve of a via or via pair between two layers: return and insertion loss, stub resonance, Touchstone")
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.via.open = true;
                 }
             });
             ui.menu_button("Help", |ui| {
@@ -3053,6 +3067,7 @@ impl eframe::App for App {
             self.sim
                 .show(ctx, &scene.board, self.imp.stackup(), self.selected);
             self.power.show(ctx, &scene.board, self.selected);
+            self.via.show(ctx, &scene.board, self.imp.stackup());
         }
     }
 

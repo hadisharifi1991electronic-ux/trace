@@ -3,6 +3,18 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.45.1 (2026-11-14)
+
+- Allegro boards: through-hole pads and vias keep their copper layer by
+  layer, as the padstack gives it. A square pin-1 pad with round inner
+  pads was drawn square on every layer, so its corners poked out of the
+  round clearance holes in the planes around it, and DRC reported shorts
+  that are not on the board (112 of 136 on ADI's ADRV9026 EVB).
+- Via fences: spots already served by the ground net's own vias are
+  reported as such ("already covered") instead of as spacing, and the
+  pitch uses each fenced track's effective Er (a microstrip's field is
+  partly in air), so it is no denser than it needs to be.
+
 ## 0.45.0 (2026-11-14)
 
 - Via stitching: Edit > "Via stitching and fences…" (or `trace stitch

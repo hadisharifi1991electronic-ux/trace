@@ -433,6 +433,22 @@ impl<'a> Builder<'a> {
             .find_map(|i| ps.pad(i))
             .map(|c| c.w.abs() as f64)
             .unwrap_or(ps.drill as f64 * 2.0);
+        // The pad on each layer of the span, where it differs: inner
+        // layers often have a smaller pad or none (only the barrel).
+        let mut rings = Vec::new();
+        if count > 1 {
+            for l in from..=to {
+                let d = ps
+                    .pad(l - from)
+                    .map(|c| c.w.abs().max(c.h.abs()) as f64)
+                    .filter(|&d| d > 0.0)
+                    .unwrap_or(ps.drill as f64);
+                rings.push((l as u8, self.len(d)));
+            }
+            if rings.iter().all(|r| r.1 == self.len(diameter)) {
+                rings.clear();
+            }
+        }
         self.board.geometry.vias.push(Via {
             net,
             from_layer: from as u8,
@@ -440,7 +456,7 @@ impl<'a> Builder<'a> {
             at: self.pt(x as f64, y as f64),
             diameter: self.len(diameter),
             hole: self.len(ps.drill as f64),
-            rings: Vec::new(),
+            rings,
             fab: Default::default(),
         });
     }
@@ -604,6 +620,53 @@ impl<'a> Builder<'a> {
         let (s, c) = rotation_deg.to_radians().sin_cos();
         let ox = if bottom { -off.0 } else { off.0 };
         let center = (at.0 + ox * c - off.1 * s, at.1 + ox * s + off.1 * c);
+        // A through-hole pad's copper layer by layer, where it differs
+        // from the first: inner layers often have a smaller pad or none,
+        // and a plane of another net clears it by the layer's own pad.
+        let mut stack = Vec::new();
+        if through {
+            let top = self.copper.saturating_sub(1);
+            let mut differs = false;
+            for i in 0..count.min(self.copper) {
+                // A part on the bottom has its padstack's first layer there.
+                let l = if bottom { top - i } else { i };
+                match ps.pad(i) {
+                    Some(k) if k.w != 0 => {
+                        let (kw, kh) = (
+                            k.w.abs() as f64,
+                            if k.kind == 0x05 { k.w } else { k.h }.abs() as f64,
+                        );
+                        let kshape = match k.kind {
+                            0x02 | 0x0B | 0x0C => PadShape::Round,
+                            0x03 => PadShape::Octagon,
+                            _ => PadShape::Rect,
+                        };
+                        differs |= kw != w || kh != h || kshape != shape;
+                        stack.push(Land {
+                            layer: l as u8,
+                            shape: kshape,
+                            size_x: self.len(kw),
+                            size_y: self.len(if kh > 0.0 { kh } else { kw }),
+                            rotation_deg,
+                            outline: Vec::new(),
+                        });
+                    }
+                    // A custom shape: as the first layer's extent.
+                    Some(_) => stack.push(Land {
+                        layer: l as u8,
+                        shape,
+                        size_x: self.len(w),
+                        size_y: self.len(h),
+                        rotation_deg,
+                        outline: Vec::new(),
+                    }),
+                    None => differs = true,
+                }
+            }
+            if !differs {
+                stack.clear();
+            }
+        }
         Some(Pad {
             layer,
             net: None,
@@ -620,7 +683,7 @@ impl<'a> Builder<'a> {
             shape,
             rotation_deg,
             outline: Vec::new(),
-            stack: Vec::new(),
+            stack,
             fab: Default::default(),
         })
     }

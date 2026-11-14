@@ -269,12 +269,16 @@ trace sim board.PcbDoc U1.A3 U2.B7 --ibis drv.ibs [--rx-ibis rx.ibs] [--model M]
 trace convert <file> out.json    export to Trace's open JSON model
 trace convert <file> out.kicad_pcb   write a KiCad board
 trace convert <file> out.PcbDoc      write an Altium Designer board
+trace convert <file> out.xml         write IPC-2581 revision C: stack-up, layers with nets, drills, parts, BOM
+trace convert <file> out.dxf         write every layer as a DXF (millimetres, a DXF layer per board layer)
 trace convert sheet.SchDoc out.svg   draw a schematic sheet as SVG
 trace convert sheet.SchDoc out.SchDoc     write a schematic sheet as an Altium sheet
 trace convert sheets.tracesch folder  write every sheet of a Trace schematic as Altium sheets
 trace fab board.PcbDoc out.zip   Gerber X2, drill, IPC-356, pick-and-place and BOM (or a folder)
 trace odb board.PcbDoc out.tgz   ODB++ job: layers, drills, parts, nets and stack-up (or a folder)
 trace assembly board.PcbDoc out.pdf [--a4]   Assembly drawing: top and bottom views, parts list
+trace fabdrawing board.PcbDoc out.pdf [--a4] Fabrication drawing: drill symbols, dimensions, drill table, stack-up, notes
+trace step board.PcbDoc out.step [--vias] [--no-parts] [--min-hole 0.3]   STEP (AP214) board solid and part boxes
 trace field board.PcbDoc         2D field solver on each layer (50/100 ohm widths, delay, loss)
 trace field board.PcbDoc 1 11 --ground 6 out.svg   One cross-section, with its field drawn
 trace ir board.PcbDoc DVDD --source U19 --volts 1.0 --load U1=2A out.svg   IR drop over a supply net, drop maps per layer
@@ -472,6 +476,26 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   does not read Altium's assembly or courtyard layers; pin 1 is marked on
   diodes and parts with 3 or more pins. Text is Helvetica, so a few
   characters outside Latin-1 print as "?" (Ω prints as "Ohm").
+- Fabrication drawing: File > Export fabrication drawing (PDF)… (or
+  `trace fabdrawing`) draws the outline with every hole marked by its
+  size's symbol, the overall dimensions and the drill table (size,
+  plated, layers, count) on one sheet, and the stack-up with notes
+  (material, thickness, class, smallest track and gap, hole tolerances,
+  impedance and backdrill notes when they apply) on the next. The notes
+  are typical defaults (ENIG, green mask, IPC class 2): check them before
+  sending.
+- STEP: File > Export STEP (3D)… (or `trace step`) writes an AP214 model
+  in millimetres for mechanical CAD: the board as a solid with its
+  outline, cut-outs and round or slotted holes (vias too with `--vias`),
+  and each part as a coloured box sized from its pads, named by its
+  designator in one assembly. Holes that cross the board edge, a cut-out
+  or another hole are left out and counted. The parts' own STEP models are
+  not merged in yet. Checked with OpenCascade: every solid valid.
+- IPC-2581 and DXF: File > Export IPC-2581… and Export DXF… (or `trace
+  convert` to .xml or .dxf). IPC-2581 revision C holds the stack-up, the
+  layers with their nets, the drills, the parts and the BOM; it has been
+  checked to be well-formed, not yet against IPC's schema. The DXF (R12)
+  has a layer per board layer, mask, paste and drills.
 - Panelization: File > Panelize… (or `trace panel`) lays copies of the
   board out in a grid and opens the panel in place of the board, unsaved.
   Copies come apart by tabs with mouse bites across a milled gap (2 mm by

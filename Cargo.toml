@@ -4,7 +4,7 @@ members = ["crates/trace-core", "crates/trace-altium", "crates/trace-allegro",
     "crates/trace-gerber", "crates/trace-export", "crates/trace-step", "crates/trace-cli", "crates/trace-app"]
 
 [workspace.package]
-version = "0.50.0"
+version = "0.51.0"
 edition = "2021"
 license = "GPL-3.0-or-later"
 repository = ""

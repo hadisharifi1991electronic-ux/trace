@@ -3,6 +3,27 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.51.0 (2026-11-14)
+
+- STEP export (File > Export STEP (3D)…, `trace step`, or `trace convert`
+  to .step): an AP214 model in millimetres with the board as a solid
+  (outline, cut-outs, round and slotted holes; vias with `--vias`) and
+  each part as a coloured box sized from its pads, named by designator in
+  one assembly. Holes crossing the edge, a cut-out or another hole are
+  left out and counted. All solids check valid in OpenCascade on the
+  sample boards.
+- Fabrication drawing (File > Export fabrication drawing (PDF)…,
+  `trace fabdrawing`): the outline with each hole marked by its size's
+  symbol, overall dimensions and a drill table, then the stack-up and
+  fabrication notes (A3 or A4).
+- IPC-2581 revision C export (File > Export IPC-2581…, `trace convert`
+  to .xml): stack-up with dielectrics, every layer's features with nets,
+  drills, parts, logical nets and the BOM.
+- DXF export (File > Export DXF…, `trace convert` to .dxf): a DXF layer
+  per board layer (copper, silk, mask, paste, mechanical, plated and
+  unplated drills), in millimetres; tracks keep their width and arcs
+  their curve.
+
 ## 0.50.0 (2026-11-14)
 
 - Annotation (schematic panel > Annotate…, `trace annotate`): numbers

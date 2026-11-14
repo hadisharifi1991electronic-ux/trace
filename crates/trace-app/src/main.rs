@@ -701,6 +701,79 @@ impl App {
         });
     }
 
+    /// One of the single-file board exports: fabrication drawing, IPC-2581,
+    /// STEP or DXF.
+    fn export_file(&mut self, kind: ExportKind) {
+        let Some(scene) = &self.scene else { return };
+        let stem = scene
+            .path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "board".into());
+        let (filter, ext, suffix) = match kind {
+            ExportKind::FabDrawing => ("PDF", "pdf", "-fab"),
+            ExportKind::Ipc2581 => ("IPC-2581", "xml", ""),
+            ExportKind::Step => ("STEP", "step", ""),
+            ExportKind::Dxf => ("DXF", "dxf", ""),
+        };
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter(filter, &[ext])
+            .set_file_name(format!("{stem}{suffix}.{ext}"))
+            .save_file()
+        else {
+            return;
+        };
+        let b = &scene.board;
+        let made: Result<(Vec<u8>, String), String> = match kind {
+            ExportKind::FabDrawing => {
+                let holes = trace_export::fabdraw::drill_table(b);
+                Ok((
+                    trace_export::fab_drawing_pdf(b, &stem, trace_export::Paper::A3),
+                    format!(
+                        "the fabrication drawing ({} holes in {} sizes)",
+                        holes.iter().map(|d| d.count).sum::<usize>(),
+                        holes.len()
+                    ),
+                ))
+            }
+            ExportKind::Ipc2581 => {
+                let (t, n) = trace_export::to_ipc2581(b, &stem);
+                Ok((t.into_bytes(), format!("IPC-2581 ({n} features)")))
+            }
+            ExportKind::Step => {
+                trace_export::to_step(b, &stem, &Default::default()).map(|(t, r)| {
+                    (
+                        t.into_bytes(),
+                        format!(
+                            "the STEP model ({} holes, {} parts{})",
+                            r.holes,
+                            r.parts,
+                            if r.skipped > 0 {
+                                format!(
+                                    "; {} holes crossing an edge or another hole left out",
+                                    r.skipped
+                                )
+                            } else {
+                                String::new()
+                            }
+                        ),
+                    )
+                })
+            }
+            ExportKind::Dxf => {
+                let (t, n) = trace_export::to_dxf(b);
+                Ok((t.into_bytes(), format!("the DXF ({n} objects)")))
+            }
+        };
+        self.message = Some(match made {
+            Ok((bytes, what)) => match std::fs::write(&path, bytes) {
+                Ok(()) => (format!("Saved {what} to {}", path.display()), false),
+                Err(e) => (format!("Could not save: {e}"), true),
+            },
+            Err(e) => (format!("Could not export: {e}"), true),
+        });
+    }
+
     fn export_pairs(&mut self) {
         let Some(scene) = &self.scene else { return };
         let Some(path) = rfd::FileDialog::new()
@@ -1401,6 +1474,21 @@ impl App {
                 {
                     ui.close_menu();
                     self.export_assembly();
+                }
+                for (kind, label, hint) in [
+                    (ExportKind::FabDrawing, "Export fabrication drawing (PDF)…", "Outline with drill symbols and dimensions, drill table, notes and the stack-up (A3)"),
+                    (ExportKind::Ipc2581, "Export IPC-2581…", "One IPC-2581 revision C file: layers, drills, stack-up, parts, nets and BOM"),
+                    (ExportKind::Step, "Export STEP (3D)…", "The board solid with its holes and the parts as boxes, for mechanical CAD"),
+                    (ExportKind::Dxf, "Export DXF…", "Every layer as a DXF layer, in millimetres"),
+                ] {
+                    if ui
+                        .add_enabled(self.scene.is_some(), egui::Button::new(label))
+                        .on_hover_text(hint)
+                        .clicked()
+                    {
+                        ui.close_menu();
+                        self.export_file(kind);
+                    }
                 }
                 if ui
                     .add_enabled(
@@ -3715,4 +3803,13 @@ fn plain_key(i: &egui::InputState, key: egui::Key) -> bool {
         matches!(e, egui::Event::Key { key: k, pressed: true, modifiers, .. }
             if *k == key && !modifiers.command && !modifiers.ctrl && !modifiers.shift && !modifiers.alt)
     })
+}
+
+/// The single-file board exports in the File menu.
+#[derive(Clone, Copy)]
+enum ExportKind {
+    FabDrawing,
+    Ipc2581,
+    Step,
+    Dxf,
 }

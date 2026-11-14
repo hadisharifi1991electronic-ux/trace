@@ -24,10 +24,10 @@ impl Paper {
     }
 }
 
-const MARGIN: f64 = 24.0;
-const BLOCK: f64 = 50.0;
-const INK: Rgb = [20, 20, 20];
-const GRAY: Rgb = [110, 110, 110];
+pub(crate) const MARGIN: f64 = 24.0;
+pub(crate) const BLOCK: f64 = 50.0;
+pub(crate) const INK: Rgb = [20, 20, 20];
+pub(crate) const GRAY: Rgb = [110, 110, 110];
 const BODY: Rgb = [232, 239, 249];
 const BODY_EDGE: Rgb = [120, 140, 165];
 const PAD: Rgb = [196, 196, 196];
@@ -35,7 +35,7 @@ const SILK: Rgb = [60, 60, 60];
 const PIN1: Rgb = [176, 24, 24];
 const LABEL: Rgb = [15, 35, 80];
 
-fn mm(p: Point) -> [f64; 2] {
+pub(crate) fn mm(p: Point) -> [f64; 2] {
     [p.x.mm(), p.y.mm()]
 }
 
@@ -257,7 +257,7 @@ fn readable(a: f64) -> f64 {
     }
 }
 
-fn today() -> String {
+pub(crate) fn today() -> String {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
@@ -280,18 +280,18 @@ pub(crate) fn civil(days: i64) -> (i64, i64, i64) {
     (yoe + era * 400 + (m <= 2) as i64, m, d)
 }
 
-struct Sheet<'a> {
-    title: &'a str,
-    what: String,
-    contents: String,
-    note: String,
-    date: &'a str,
-    index: usize,
-    count: usize,
+pub(crate) struct Sheet<'a> {
+    pub title: &'a str,
+    pub what: String,
+    pub contents: String,
+    pub note: String,
+    pub date: &'a str,
+    pub index: usize,
+    pub count: usize,
 }
 
 /// The title block along the bottom of a page.
-fn title_block(p: &mut Page, s: &Sheet) {
+pub(crate) fn title_block(p: &mut Page, s: &Sheet) {
     let (x0, x1) = (MARGIN, p.width - MARGIN);
     let (y0, y1) = (MARGIN, MARGIN + BLOCK);
     let w = x1 - x0;
@@ -333,7 +333,7 @@ fn title_block(p: &mut Page, s: &Sheet) {
 }
 
 /// `s` cut with "..." to at most `room` wide at size 1.
-fn fit(s: &str, room: f64) -> String {
+pub(crate) fn fit(s: &str, room: f64) -> String {
     if text_width(s, false) <= room {
         return s.into();
     }

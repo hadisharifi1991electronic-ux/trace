@@ -97,6 +97,8 @@ USAGE:
     trace convert <file> <out.json>             Export to Trace's open JSON model
     trace convert <file> <out.kicad_pcb>        Write a KiCad board (KiCad 7 and later)
     trace convert <file> <out.PcbDoc>           Write an Altium Designer board
+    trace convert <file> <out.xml>              Write an IPC-2581 (revision C) file
+    trace convert <file> <out.dxf>              Write every layer of a board as a DXF (mm)
     trace convert <file.SchDoc> <out.svg>       Draw a schematic sheet as SVG
     trace convert <file.SchDoc> <out.SchDoc>    Write a schematic sheet as an Altium sheet
     trace convert <file.tracesch> <folder>      Write every sheet of a Trace schematic as Altium sheets
@@ -104,6 +106,11 @@ USAGE:
     trace odb <board> <out.tgz|folder>          ODB++ job: layers, drills, parts and nets in one package
     trace assembly <board> <out.pdf> [--a4]     Assembly drawing: top and bottom views with part bodies,
                                                 designators and pin 1 marks, then the parts list (A3)
+    trace step <board> <out.step> [--vias] [--no-parts] [--min-hole 0.3]
+                                                STEP (AP214) model for mechanical CAD: the board solid with its
+                                                cut-outs and holes (vias with --vias, mm), parts as boxes
+    trace fabdrawing <board> <out.pdf> [--a4]   Fabrication drawing: outline with drill symbols and
+                                                dimensions, drill table, notes, then the stack-up (A3)
     trace layers <gerber folder|zip|board>      Show which layer each Gerber or drill file was taken as
                                                 (for a board, its stack-up)
     trace symbols <lib.SchLib|IntLib> [out.svg] List the symbols of an Altium schematic library;
@@ -184,6 +191,9 @@ fn main() -> ExitCode {
         ["odb", file, out] => odb(file, out),
         ["assembly", file, out] => assembly(file, out, trace_export::Paper::A3),
         ["assembly", file, out, "--a4"] => assembly(file, out, trace_export::Paper::A4),
+        ["step", file, out, rest @ ..] => step_cmd(file, out, rest),
+        ["fabdrawing", file, out] => fab_drawing(file, out, trace_export::Paper::A3),
+        ["fabdrawing", file, out, "--a4"] => fab_drawing(file, out, trace_export::Paper::A4),
         ["symbols", file] => symbols(file, None),
         ["symbols", file, out] => symbols(file, Some(out)),
         ["footprints", file] => footprints(file, None),
@@ -2114,6 +2124,69 @@ fn assembly(file: &str, out: &str, paper: trace_export::Paper) -> Res {
     Ok(())
 }
 
+/// The board and its parts as a STEP model.
+fn step_cmd(file: &str, out: &str, rest: &[&str]) -> Res {
+    let mut opt = trace_export::StepOptions::default();
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "--vias" => opt.vias = true,
+            "--no-parts" => opt.parts = false,
+            "--min-hole" => {
+                i += 1;
+                let v = rest.get(i).ok_or("--min-hole needs a size in mm")?;
+                opt.min_hole = v
+                    .trim_end_matches("mm")
+                    .parse()
+                    .map_err(|_| format!("bad --min-hole {v}"))?;
+            }
+            o => return Err(format!("unknown option {o}").into()),
+        }
+        i += 1;
+    }
+    let b = board(file)?;
+    let name = Path::new(file)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "board".into());
+    let (text, r) = trace_export::to_step(&b, &name, &opt)?;
+    std::fs::write(out, &text)?;
+    println!(
+        "Wrote {out}: board {:.2} mm thick, {} holes, {} cut-outs, {} parts, {} KB",
+        r.thickness,
+        r.holes,
+        r.cutouts,
+        r.parts,
+        text.len().div_ceil(1024)
+    );
+    if r.skipped > 0 {
+        println!(
+            "  {} holes left out: they cross the board edge, a cut-out or another hole",
+            r.skipped
+        );
+    }
+    Ok(())
+}
+
+/// The fabrication drawing as a PDF.
+fn fab_drawing(file: &str, out: &str, paper: trace_export::Paper) -> Res {
+    let b = board(file)?;
+    let title = Path::new(file)
+        .file_stem()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "board".into());
+    let pdf = trace_export::fab_drawing_pdf(&b, &title, paper);
+    std::fs::write(out, &pdf)?;
+    let holes = trace_export::fabdraw::drill_table(&b);
+    println!(
+        "Wrote {out}: {} hole sizes, {} holes, {} KB",
+        holes.len(),
+        holes.iter().map(|d| d.count).sum::<usize>(),
+        pdf.len().div_ceil(1024)
+    );
+    Ok(())
+}
+
 fn odb(file: &str, out: &str) -> Res {
     let b = board(file)?;
     let opt = trace_export::FabOptions::from_board(&b);
@@ -2156,6 +2229,32 @@ fn odb(file: &str, out: &str) -> Res {
 }
 
 fn convert(file: &str, out: &str) -> Res {
+    let lower = out.to_ascii_lowercase();
+    if lower.ends_with(".step") || lower.ends_with(".stp") {
+        return step_cmd(file, out, &[]);
+    }
+    if out.to_ascii_lowercase().ends_with(".xml") || out.to_ascii_lowercase().ends_with(".cvg") {
+        let Design::Board(b) = load(file)? else {
+            return Err("only boards can be written as IPC-2581".into());
+        };
+        let name = Path::new(file)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "board".into());
+        let (text, n) = trace_export::to_ipc2581(&b, &name);
+        std::fs::write(out, text)?;
+        println!("wrote {out}: IPC-2581 revision C, {n} features");
+        return Ok(());
+    }
+    if out.to_ascii_lowercase().ends_with(".dxf") {
+        let Design::Board(b) = load(file)? else {
+            return Err("only boards can be written as .dxf".into());
+        };
+        let (text, n) = trace_export::to_dxf(&b);
+        std::fs::write(out, text)?;
+        println!("wrote {out}: {n} objects");
+        return Ok(());
+    }
     if out.to_ascii_lowercase().ends_with(".kicad_pcb") {
         let Design::Board(b) = load(file)? else {
             return Err("only boards can be written as .kicad_pcb".into());

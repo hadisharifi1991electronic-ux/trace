@@ -6,6 +6,7 @@
 pub mod annotate;
 pub mod backdrill;
 pub mod board;
+pub mod body;
 pub mod bus;
 pub mod connectivity;
 pub mod constraints;

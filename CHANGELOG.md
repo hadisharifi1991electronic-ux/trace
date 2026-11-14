@@ -3,6 +3,24 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.46.0 (2026-11-14)
+
+- Teardrops: Edit > "Teardrops and gloss…" (or `trace teardrops <board>
+  <out>`) widens each track where it meets a via or through-hole pad
+  (surface pads if asked), on every net or the selected one. Each is a
+  curved taper from 0.9 of the pad's width down to the track over one pad
+  width; one that would come nearer other copper than the clearance is
+  made shorter and narrower, or left out. Pours are poured again around
+  them; fixed copper areas and other teardrops are kept clear of. Adding
+  again replaces them; "Remove teardrops" (`--remove`) takes them off.
+- Gloss, in the same window (or `trace gloss <board> <out>`): removes
+  zero-length and duplicate tracks, merges tracks that carry on in a
+  straight line with nothing else at the joint, cuts back dangling tracks
+  (ends touching nothing of their net), and with "Chamfer square corners"
+  (`--corners`) puts a 45° cut on 90° corners where it keeps the
+  clearance. Joints with a pad, via or third track are left alone.
+- The return-path check no longer takes teardrops for plane copper.
+
 ## 0.45.1 (2026-11-14)
 
 - Allegro boards: through-hole pads and vias keep their copper layer by

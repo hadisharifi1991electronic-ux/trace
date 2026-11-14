@@ -122,7 +122,8 @@ impl Planes {
             layers: Vec::new(),
         };
         let mut by_layer: Vec<Vec<usize>> = vec![Vec::new(); n];
-        for (i, p) in g.polygons.iter().enumerate() {
+        // Teardrops are part of a track, not a plane.
+        for (i, p) in g.polygons.iter().enumerate().filter(|(_, p)| !p.teardrop) {
             if let LayerRef::Copper(l) = p.layer {
                 by_layer[l as usize].push(i);
             }
@@ -369,7 +370,7 @@ fn return_path(board: &Board, planes: &Planes, out: &mut Vec<Violation>) {
     }
     // Nets that own plane copper are the planes themselves.
     let mut plane_nets: HashSet<u32> = HashSet::new();
-    for p in &board.geometry.polygons {
+    for p in board.geometry.polygons.iter().filter(|p| !p.teardrop) {
         if let (LayerRef::Copper(l), Some(net)) = (&p.layer, p.net) {
             if planes.is_plane(*l as usize) {
                 plane_nets.insert(net);
@@ -796,6 +797,7 @@ mod tests {
 
     fn plane(net: u32, layer: u8, outline: Vec<Point>, holes: Vec<Vec<Point>>) -> Polygon {
         Polygon {
+            teardrop: false,
             layer: LayerRef::Copper(layer),
             net: Some(net),
             outline,

@@ -240,6 +240,7 @@ pub(crate) fn openings(
         for (outline, holes) in trace_core::geometry::offset_area(&copper.outline, &copper.holes, e)
         {
             out.push(Polygon {
+                teardrop: false,
                 layer: LayerRef::Other(id),
                 net: None,
                 outline,
@@ -386,6 +387,7 @@ pub(crate) fn parse_fill(b: &[u8], layers: &LayerMap) -> Option<Polygon> {
     }
     let rot = f64_at(b, 29).filter(|r| r.is_finite()).unwrap_or(0.0);
     Some(Polygon {
+        teardrop: false,
         layer,
         net: net(b),
         outline: fill_outline(a, e, rot),
@@ -433,6 +435,7 @@ pub(crate) fn parse_any_region(b: &[u8], layers: &LayerMap) -> Option<(Polygon, 
     let outline = ring()?;
     let holes = (0..holes).map(|_| ring()).collect::<Option<Vec<_>>>()?;
     let poly = Polygon {
+        teardrop: false,
         layer,
         net: if cutout { None } else { net(b) },
         outline,

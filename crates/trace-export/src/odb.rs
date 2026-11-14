@@ -1077,6 +1077,7 @@ mod tests {
         let mut b = board();
         // A copper area with a hole, and a slot.
         b.geometry.polygons.push(Polygon {
+            teardrop: false,
             layer: LayerRef::Copper(1),
             net: Some(0),
             outline: vec![pt(1.0, 1.0), pt(39.0, 1.0), pt(39.0, 11.0), pt(1.0, 11.0)],

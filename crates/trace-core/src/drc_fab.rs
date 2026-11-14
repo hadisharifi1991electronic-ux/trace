@@ -1479,6 +1479,7 @@ mod tests {
             text: false,
         });
         b.geometry.polygons.push(Polygon {
+            teardrop: false,
             layer: LayerRef::Copper(1),
             net: Some(0),
             outline: vec![

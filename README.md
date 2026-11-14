@@ -217,6 +217,10 @@ trace stitch board.PcbDoc GND out.tracepcb [--grid 100mil] [--stagger] [--via 16
                                  stitch a net's pours and planes with vias on a grid
 trace fence board.PcbDoc RF_P,RF_N out.tracepcb [--ground GND] [--ghz 6] [--gap 8mil] [--rows 2]
                                  line the nets' tracks with ground vias on both sides, λ/20 apart at GHz
+trace teardrops board.PcbDoc out.tracepcb [--nets a,b] [--smd] [--length 1.0] [--width 0.9] [--remove]
+                                 teardrops at vias and through-hole pads (and surface pads with --smd)
+trace gloss board.PcbDoc out.tracepcb [--corners] [--keep-dangling] [--no-merge]
+                                 tidy routing: duplicates, straight joins, dangling tracks, square corners
 trace panel board.PcbDoc 2x3 out.tracepcb [--gap 2mm] [--rail 5mm] [--tabs N] [--vscore]
                                  panelize: copies in a grid with rails, tabs and mouse bites (or V-score),
                                  fiducials and tooling holes; then export fab outputs or ODB++ from out

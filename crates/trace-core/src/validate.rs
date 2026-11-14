@@ -259,6 +259,7 @@ pub fn ir_checks() -> Vec<Check> {
     // A pour 2000 by 200 mil, fed and loaded across its ends.
     let mut pour = b.clone();
     pour.geometry.polygons.push(Polygon {
+        teardrop: false,
         layer: LayerRef::Copper(0),
         net: Some(0),
         outline: vec![

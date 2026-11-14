@@ -981,6 +981,7 @@ mod tests {
 
     fn rect(l: u8, x0: f64, y0: f64, x1: f64, y1: f64) -> Polygon {
         Polygon {
+            teardrop: false,
             layer: LayerRef::Copper(l),
             net: Some(0),
             outline: vec![

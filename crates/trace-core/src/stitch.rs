@@ -204,7 +204,7 @@ impl Placed {
 const CELL: f64 = 100.0;
 
 /// A copper area's edges, indexed.
-struct Area {
+pub(crate) struct Area {
     layer: Option<u8>,
     net: Option<u32>,
     /// The board polygon it is, and whether a pour makes it (poured again
@@ -221,7 +221,7 @@ fn cell(v: f64) -> i32 {
 }
 
 impl Area {
-    fn new(layer: Option<u8>, net: Option<u32>, rings: &[&[Point]]) -> Option<Area> {
+    pub(crate) fn new(layer: Option<u8>, net: Option<u32>, rings: &[&[Point]]) -> Option<Area> {
         let mut edges = Vec::new();
         for r in rings {
             if r.len() < 3 {
@@ -278,7 +278,7 @@ impl Area {
     }
 
     /// Inside (even-odd, so holes count out).
-    fn contains(&self, p: P) -> bool {
+    pub(crate) fn contains(&self, p: P) -> bool {
         if !self.near_box(p, 0.0) {
             return false;
         }
@@ -304,7 +304,7 @@ impl Area {
     }
 
     /// Whether an edge is closer than `r`.
-    fn edge_within(&self, p: P, r: f64) -> bool {
+    pub(crate) fn edge_within(&self, p: P, r: f64) -> bool {
         if !self.near_box(p, r) {
             return false;
         }
@@ -844,6 +844,7 @@ mod tests {
         // GND on all three layers, with a hole around the RF line on top.
         for l in 0..3u8 {
             b.geometry.polygons.push(Polygon {
+                teardrop: false,
                 layer: LayerRef::Copper(l),
                 net: Some(0),
                 outline: sq(50.0, 50.0, 1950.0, 950.0),

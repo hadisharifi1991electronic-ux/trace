@@ -521,6 +521,7 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
         if cutout {
             if matches!(layer, LayerRef::Copper(_) | LayerRef::AllCopper) {
                 g.cutouts.push(Polygon {
+                    teardrop: false,
                     layer,
                     net: None,
                     outline,
@@ -546,6 +547,7 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
                     .flatten()
             });
         let poly = Polygon {
+            teardrop: false,
             layer: layer.clone(),
             net,
             outline,
@@ -572,6 +574,7 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
             continue;
         }
         let poly = Polygon {
+            teardrop: false,
             layer: layer.clone(),
             net: index(p, "NET"),
             outline: crate::pcb::fill_outline(a, b, angle(p, "ROTATION")),

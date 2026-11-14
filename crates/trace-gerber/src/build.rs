@@ -801,6 +801,7 @@ impl Builder {
                 let outline = s.remove(0);
                 let i = self.board.geometry.polygons.len();
                 self.board.geometry.polygons.push(Polygon {
+                    teardrop: false,
                     layer: layer.clone(),
                     net: None,
                     outline: outline.into_iter().map(pt).collect(),

@@ -2411,6 +2411,7 @@ pub fn compare(saved: &Board, back: &Board) -> Vec<String> {
             same_area(
                 a,
                 &Polygon {
+                    teardrop: false,
                     pour: a.pour,
                     ..b.clone()
                 },

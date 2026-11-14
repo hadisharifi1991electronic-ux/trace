@@ -72,6 +72,13 @@ USAGE:
               [--rows 1] [--via 16/8] [--layers 1-4] [--on 1,3] [--clearance C]
                                                 Line a net's tracks (RF lines, a pair) with ground vias on both
                                                 sides, a twentieth of a wavelength apart at GHz (default 6)
+    trace teardrops <board> <out.tracepcb> [--nets a,b] [--smd] [--no-vias] [--no-th] [--length 1.0]
+              [--width 0.9] [--clearance C] [--remove]
+                                                Teardrops where tracks meet vias and through-hole pads (--smd:
+                                                surface pads too), kept clear of other nets; --remove takes them off
+    trace gloss <board> <out.tracepcb> [--nets a,b] [--no-merge] [--keep-dangling] [--corners] [--clearance C]
+                                                Tidy routing: zero-length and duplicate tracks, straight joins
+                                                merged, dangling ends cut back, square corners chamfered (--corners)
     trace stackup <board> [out.txt]             Print the board's stack-up as a stack-up file (name, kind,
                                                 thickness, Er, Df); edit it and give it back with --stackup
     trace validate [--quick] [out.txt]          Accuracy checks: the field, IR drop and 3D via solvers against
@@ -151,6 +158,8 @@ fn main() -> ExitCode {
         ["pairsize", file, layer, rest @ ..] => pairsize(file, layer, rest),
         ["validate", rest @ ..] => validate(rest),
         ["stitch", file, net, out, rest @ ..] => stitch_cmd(file, net, out, rest),
+        ["teardrops", file, out, rest @ ..] => teardrops_cmd(file, out, rest),
+        ["gloss", file, out, rest @ ..] => gloss_cmd(file, out, rest),
         ["fence", file, nets, out, rest @ ..] => fence_cmd(file, nets, out, rest),
         ["stackup", file] => stackup(file, None),
         ["stackup", file, out] => stackup(file, Some(out)),
@@ -2456,6 +2465,113 @@ fn fence_cmd(file: &str, nets: &str, out: &str, rest: &[&str]) -> Res {
     );
     println!("{}", p.summary());
     save_with(b, &p, out)?;
+    println!("saved {out}");
+    Ok(())
+}
+
+fn nets_list(b: &Board, v: &str) -> Result<Vec<u32>, String> {
+    v.split(',').map(|n| net_of(b, n.trim())).collect()
+}
+
+/// Applies edits, pours touched pours again and saves.
+fn save_edits(
+    mut b: Board,
+    edits: Vec<trace_core::edit::Edit>,
+    out: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for e in &edits {
+        e.apply(&mut b);
+    }
+    if let Some(e) = trace_core::pour::repour_after(&b, &edits) {
+        e.apply(&mut b);
+    }
+    trace_core::connectivity::analyse(&mut b);
+    if out.to_ascii_lowercase().ends_with(".kicad_pcb") {
+        std::fs::write(out, trace_export::to_kicad(&b))?;
+    } else {
+        trace_core::file::save(&b, Path::new(out))?;
+    }
+    Ok(())
+}
+
+fn teardrops_cmd(file: &str, out: &str, rest: &[&str]) -> Res {
+    use trace_core::teardrop::{add, remove, TeardropGoal};
+    let b = board(file)?;
+    let mut goal = TeardropGoal::of(&b);
+    let mut take_off = false;
+    let mut i = 0;
+    while i < rest.len() {
+        let a = rest[i];
+        let val = || rest.get(i + 1).copied().ok_or(format!("{a} needs a value"));
+        let num = |v: &str| v.parse::<f64>().map_err(|_| format!("not a number: {v}"));
+        match a {
+            "--nets" => {
+                goal.nets = nets_list(&b, val()?)?;
+                i += 1;
+            }
+            "--smd" => goal.smd_pads = true,
+            "--no-vias" => goal.vias = false,
+            "--no-th" => goal.th_pads = false,
+            "--length" => {
+                goal.length = num(val()?)?;
+                i += 1;
+            }
+            "--width" => {
+                goal.width = num(val()?)?.clamp(0.1, 1.0);
+                i += 1;
+            }
+            "--clearance" => {
+                goal.clearance = mil_of(val()?)?;
+                i += 1;
+            }
+            "--remove" => take_off = true,
+            o => return Err(format!("unknown option {o}").into()),
+        }
+        i += 1;
+    }
+    if take_off {
+        let n = b.geometry.polygons.iter().filter(|p| p.teardrop).count();
+        let edits: Vec<_> = remove(&b).into_iter().collect();
+        println!("{n} teardrops removed");
+        save_edits(b, edits, out)?;
+    } else {
+        let t = add(&b, &goal);
+        println!("{}", t.summary());
+        let edits = t.edits(&b);
+        save_edits(b, edits, out)?;
+    }
+    println!("saved {out}");
+    Ok(())
+}
+
+fn gloss_cmd(file: &str, out: &str, rest: &[&str]) -> Res {
+    use trace_core::gloss::{gloss, GlossGoal};
+    let b = board(file)?;
+    let mut goal = GlossGoal::of(&b);
+    let mut i = 0;
+    while i < rest.len() {
+        let a = rest[i];
+        let val = || rest.get(i + 1).copied().ok_or(format!("{a} needs a value"));
+        match a {
+            "--nets" => {
+                goal.nets = nets_list(&b, val()?)?;
+                i += 1;
+            }
+            "--no-merge" => goal.merge = false,
+            "--keep-dangling" => goal.dangling = false,
+            "--corners" => goal.corners = true,
+            "--clearance" => {
+                goal.clearance = mil_of(val()?)?;
+                i += 1;
+            }
+            o => return Err(format!("unknown option {o}").into()),
+        }
+        i += 1;
+    }
+    let g = gloss(&b, &goal);
+    println!("{}", g.summary());
+    let edits = g.edits(&b);
+    save_edits(b, edits, out)?;
     println!("saved {out}");
     Ok(())
 }

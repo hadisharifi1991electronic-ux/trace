@@ -2,7 +2,7 @@ use crate::Length;
 use serde::{Deserialize, Serialize};
 
 /// A point in board coordinates (y grows upward, as in fabrication data).
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub struct Point {
     pub x: Length,
     pub y: Length,
@@ -221,6 +221,9 @@ pub struct Polygon {
     /// The part it belongs to, which it moves with.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub component: Option<u32>,
+    /// A teardrop Trace added where a track meets a pad or via.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub teardrop: bool,
 }
 
 /// A copper pour as drawn: the area it may fill, its net and layer. Its

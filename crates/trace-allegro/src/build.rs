@@ -407,6 +407,7 @@ impl<'a> Builder<'a> {
             key = b.next;
         }
         self.board.geometry.polygons.push(Polygon {
+            teardrop: false,
             layer,
             net,
             outline: self.points(&outline),

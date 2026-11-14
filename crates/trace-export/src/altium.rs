@@ -1814,6 +1814,7 @@ mod tests {
                 component: None,
             }],
             regions: vec![trace_core::Polygon {
+                teardrop: false,
                 layer: LayerRef::Other(35),
                 net: None,
                 outline: vec![ptm(4.0, -1.0), ptm(6.0, -1.0), ptm(6.0, 1.0)],

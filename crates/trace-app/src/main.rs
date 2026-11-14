@@ -18,6 +18,7 @@ mod schview;
 mod simwin;
 mod stitchwin;
 mod symlib;
+mod tidywin;
 mod toolbar;
 mod viawin;
 mod view3d;
@@ -120,6 +121,7 @@ pub struct App {
     via: viawin::ViaWindow,
     pairs: pairwin::PairWindow,
     stitch: stitchwin::StitchWindow,
+    tidy: tidywin::TidyWindow,
     /// The part being dragged.
     moving: Option<placing::Moving>,
     /// The next board edit joins the last step (a part placed then dropped).
@@ -197,6 +199,7 @@ impl App {
             via: viawin::ViaWindow::default(),
             pairs: pairwin::PairWindow::default(),
             stitch: stitchwin::StitchWindow::default(),
+            tidy: tidywin::TidyWindow::default(),
             moving: None,
             join_next: false,
             new_span: (1, 2),
@@ -1232,6 +1235,17 @@ impl App {
                 {
                     ui.close_menu();
                     self.stitch.open = true;
+                }
+                if ui
+                    .add_enabled(has, egui::Button::new("Teardrops and gloss…"))
+                    .on_hover_text(
+                        "Teardrops where tracks meet vias and pads; tidy routing: merge \
+                         straight joins, cut dangling tracks, chamfer square corners",
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.tidy.open = true;
                 }
                 if ui
                     .add_enabled(has, egui::Button::new("Backdrill long via stubs"))
@@ -3103,6 +3117,13 @@ impl eframe::App for App {
             .as_ref()
             .and_then(|scene| self.stitch.show(ctx, &scene.board, self.selected));
         if let Some((label, edits)) = placed {
+            self.apply_edits(&label, edits);
+        }
+        let tidied = self
+            .scene
+            .as_ref()
+            .and_then(|scene| self.tidy.show(ctx, &scene.board, self.selected));
+        if let Some((label, edits)) = tidied {
             self.apply_edits(&label, edits);
         }
     }

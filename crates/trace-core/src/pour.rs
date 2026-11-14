@@ -777,6 +777,7 @@ fn pour_among(board: &Board, areas: &[Polygon], index: usize) -> Vec<Polygon> {
             let mut rings = s.into_iter();
             let outer = rings.next().unwrap_or_default();
             Polygon {
+                teardrop: false,
                 layer: def.layer.clone(),
                 net,
                 outline: outer.into_iter().map(point).collect(),
@@ -842,7 +843,43 @@ fn touched(board: &Board, e: &Edit) -> Option<([f64; 4], Vec<u8>)> {
             (b[0] <= b[2]).then(|| (b, (0..n).collect()))
         }
         Edit::Parts { area, .. } => area.map(|b| (b, (0..n).collect())),
-        Edit::MoveComponent { .. } | Edit::SetPolygons { .. } => None,
+        Edit::SetPolygons { before, after } => {
+            // Teardrops added or taken away: pours about them clear them
+            // or fill where they were. Other area changes (pouring) don't
+            // pour again.
+            let key = |p: &Polygon| (format!("{:?}", p.layer), p.outline.first().copied());
+            let old: std::collections::HashSet<_> =
+                before.iter().filter(|p| p.teardrop).map(key).collect();
+            let new: std::collections::HashSet<_> =
+                after.iter().filter(|p| p.teardrop).map(key).collect();
+            let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];
+            let mut layers = Vec::new();
+            for p in before
+                .iter()
+                .filter(|p| p.teardrop && !new.contains(&key(p)))
+                .chain(
+                    after
+                        .iter()
+                        .filter(|p| p.teardrop && !old.contains(&key(p))),
+                )
+            {
+                let r: Vec<P> = p.outline.iter().map(|&q| mil(q)).collect();
+                let pb = bbox(&r);
+                b = [
+                    b[0].min(pb[0]),
+                    b[1].min(pb[1]),
+                    b[2].max(pb[2]),
+                    b[3].max(pb[3]),
+                ];
+                for l in one(&p.layer) {
+                    if !layers.contains(&l) {
+                        layers.push(l);
+                    }
+                }
+            }
+            (b[0] <= b[2]).then_some((b, layers))
+        }
+        Edit::MoveComponent { .. } => None,
     }
 }
 
@@ -1043,6 +1080,7 @@ mod tests {
         let mut b = board();
         // A cutout takes its area and no more.
         b.geometry.cutouts.push(Polygon {
+            teardrop: false,
             layer: LayerRef::Copper(0),
             net: None,
             outline: vec![

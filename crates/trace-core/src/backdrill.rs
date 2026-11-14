@@ -783,6 +783,7 @@ mod tests {
             })
             .collect();
         b.geometry.polygons.push(Polygon {
+            teardrop: false,
             layer: LayerRef::Copper(3),
             net: Some(1),
             outline: vec![

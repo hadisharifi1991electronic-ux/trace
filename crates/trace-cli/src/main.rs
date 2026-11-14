@@ -50,13 +50,14 @@ USAGE:
                                                 default 1 A, shared by pad count); with out, a drop map per layer
     trace via <board> <layer> <layer> [--drill D] [--pad P] [--antipad A] [--width W] [--width2 W]
               [--pair PITCH] [--oval] [--returns N@D] [--backdrill] [--fmax 40] [--cell C]
-              [--optimise GHz] [out.s2p] [out.svg]
+              [--optimise GHz [--free-pitch]] [out.s2p] [out.svg]
                                                 3D full-wave (FDTD) solve of a via from one layer to another
                                                 with the board's stack-up (default drill, pad and antipad from
                                                 its commonest via): S11/S21, or Sdd for a pair, as Touchstone
                                                 and a plot; the stub resonance when the barrel runs on.
-                                                --optimise GHz sweeps the antipad (--oval for a pair), the
-                                                pitch and the return vias for the best return loss to GHz
+                                                --optimise GHz sweeps the antipad (--oval for a pair) and the
+                                                return vias for the best return loss to GHz, keeping the pair's
+                                                pitch unless --free-pitch
     trace pairsize <board> <layer> [--zdiff 100] [--wmin W] [--wmax W] [--gap S] [--ghz 8] [--next D] [--xtalk 2]
                                                 Every track width and gap on a layer that gives the target Zdiff
                                                 (2D field solver), ranked by loss, with crosstalk and etch
@@ -1776,6 +1777,7 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     }
     let mut outs: Vec<&str> = Vec::new();
     let mut optimise: Option<f64> = None;
+    let mut free_pitch = false;
     let mut it = rest.iter();
     let len = |x: Option<&&str>, what: &str| -> Result<f64, Box<dyn std::error::Error>> {
         let x = x.ok_or(format!("{what} needs a length"))?;
@@ -1792,6 +1794,7 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
             "--cell" => v.cell = len(it.next(), a)?,
             "--backdrill" => v.backdrill = true,
             "--oval" => v.antipad_oval = true,
+            "--free-pitch" => free_pitch = true,
             "--optimise" | "--optimize" => {
                 let x = it.next().ok_or("--optimise needs GHz")?;
                 optimise = Some(
@@ -1834,7 +1837,13 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     );
     if let Some(fg) = optimise {
         use trace_core::viaopt;
-        let goal = viaopt::ViaGoal::around(&v, fg);
+        let mut goal = viaopt::ViaGoal::around(&v, fg);
+        if free_pitch {
+            if let Some(p) = v.pair {
+                let pad = v.pad.max(v.drill);
+                goal.pitch = ((pad + goal.clearance).min(p), (2.5 * pad).max(p));
+            }
+        }
         let t = std::time::Instant::now();
         let o = viaopt::optimise(&b.stackup, &v, &goal, &|p, what| {
             eprint!("\r  optimising… {:3.0}% {what:<40}", p * 100.0);
@@ -1846,12 +1855,19 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
         );
         println!("Setups tried (worst return loss to {fg} GHz, through loss at {fg} GHz):");
         for tr in &o.trials {
-            println!(
-                "  {:>7.1} dB {:>7.2} dB  {}",
-                tr.worst_rl,
-                tr.il,
-                viaopt::describe(&tr.setup)
-            );
+            match &tr.error {
+                None => println!(
+                    "  {:>7.1} dB {:>7.2} dB  {}",
+                    tr.worst_rl,
+                    tr.il,
+                    viaopt::describe(&tr.setup)
+                ),
+                Some(e) => println!(
+                    "  {:>21}  {}: {e}",
+                    "not buildable",
+                    viaopt::describe(&tr.setup)
+                ),
+            }
         }
         let (s0, _) = viaopt::judge(&o.start, fg);
         let (s1, il) = viaopt::judge(&o.best, fg);

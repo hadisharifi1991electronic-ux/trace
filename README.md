@@ -237,7 +237,7 @@ trace field board.PcbDoc         2D field solver on each layer (50/100 ohm width
 trace field board.PcbDoc 1 11 --ground 6 out.svg   One cross-section, with its field drawn
 trace ir board.PcbDoc DVDD --source U19 --volts 1.0 --load U1=2A out.svg   IR drop over a supply net, drop maps per layer
 trace via board.PcbDoc 1 7 --returns 2@30mil via.s2p via.svg   3D full-wave via solve: S-parameters, stub resonance
-trace via board.PcbDoc 1 7 --pair 40 --optimise 10 best.s2p   tune a pair's antipad (round or oval), pitch and return vias
+trace via board.PcbDoc 1 7 --pair 40 --optimise 10 best.s2p   tune a pair's antipad (round or oval) and return vias (--free-pitch: the pitch too)
 trace pairsize board.PcbDoc 3 --zdiff 100 --ghz 8   every width and gap for 100 ohm on a layer, ranked by loss
 trace cascade chip.s1p via.s2p --line 50@500@3.4   return loss into vias and lines ending in a chip's port model
 trace stackup board.brd stack.txt   the board's stack-up as text; edit it, then any command takes --stackup stack.txt
@@ -385,8 +385,8 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   rule), which brings the grid's trace impedance to within 1% of the 2D
   solver.
 - Optimisers: the via optimiser is a coordinate search over the antipad,
-  oval or round, the pair's pitch, and the return vias' count and
-  distance, on quick coarse solves, with the winner solved again in full;
+  oval or round, the return vias' count and distance, and (if asked) the
+  pair's pitch, keeping 4 mil of copper clearance (or the start's own, if tighter), on quick coarse solves, with the winner solved again in full;
   it finds a good setup near the start, not a proven global best. The
   pair cross-section search keeps the copper rectangular and takes the
   next pair three heights away unless told.

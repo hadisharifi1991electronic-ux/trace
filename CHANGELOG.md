@@ -3,6 +3,23 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.44.1 (2026-11-14)
+
+- 3D via solver: with more than two return vias around a pair, the extra
+  ones landed on the traces leaving the vias and shorted them. Return vias
+  now go straight out from each via first, then to each side at the
+  shallowest angle that clears the widest trace; a count that does not fit
+  at the distance given is refused, as is any return via overlapping the
+  antipad or another return via.
+- Via optimiser: a pair keeps its pitch unless asked (`--free-pitch`, or
+  "pitch too" in the window), since the part's pins usually set it. Every
+  setup keeps 4 mil of copper clearance (pad to plane, pad to pad, return
+  pad to antipad), or the starting setup's own where that is tighter, and
+  setups that cannot be built are listed as such and
+  never chosen.
+- The pair note gives each line's own impedance (S-parameters were and
+  stay referenced to 100 Ω differential).
+
 ## 0.44.0 (2026-11-14)
 
 - Allegro boards bring their stack-up: the cross-section Allegro 17.x and

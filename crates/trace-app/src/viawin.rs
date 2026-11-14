@@ -24,6 +24,8 @@ pub struct ViaWindow {
     result: Option<(ViaSetup, Result<ViaResult, String>)>,
     /// The optimiser: goal frequency, run, outcome.
     opt_f: f64,
+    /// Let the optimiser move a pair's pitch too.
+    free_pitch: bool,
     opt_running: Option<OptRun>,
     opt: Option<Optimised>,
 }
@@ -40,6 +42,7 @@ impl Default for ViaWindow {
             running: None,
             result: None,
             opt_f: 10.0,
+            free_pitch: false,
             opt_running: None,
             opt: None,
         }
@@ -294,14 +297,19 @@ impl ViaWindow {
             if ui
                 .add_enabled(ok, egui::Button::new("Optimise"))
                 .on_hover_text(
-                    "Sweeps the antipad (round or oval), the pair's pitch and the return vias \
-                     with quick 3D solves, for the best return loss up to the frequency given",
+                    "Sweeps the antipad (round or oval), the return vias and, if allowed, the \
+                     pair's pitch with quick 3D solves, for the best return loss up to the \
+                     frequency given. Every setup keeps the copper clearance buildable.",
                 )
                 .clicked()
             {
                 let st = stackup.clone();
                 let base = self.setup.clone();
-                let goal = viaopt::ViaGoal::around(&base, self.opt_f);
+                let mut goal = viaopt::ViaGoal::around(&base, self.opt_f);
+                if let (Some(p), true) = (base.pair, self.free_pitch) {
+                    let pad = base.pad.max(base.drill);
+                    goal.pitch = ((pad + goal.clearance).min(p), (2.5 * pad).max(p));
+                }
                 let (tx, rx) = mpsc::channel();
                 let prog = Arc::new(Mutex::new((0.0, String::new())));
                 let p2 = prog.clone();
@@ -325,6 +333,10 @@ impl ViaWindow {
                     .range(1.0..=self.setup.fmax_ghz.max(1.0))
                     .suffix(" GHz"),
             );
+            if self.is_pair {
+                ui.checkbox(&mut self.free_pitch, "pitch too")
+                    .on_hover_text("Off: the pair keeps its pitch (a part's pins usually set it)");
+            }
             if let Some((_, p)) = &self.opt_running {
                 ui.spinner();
                 if let Ok(p) = p.lock() {
@@ -370,8 +382,13 @@ impl ViaWindow {
                                 ui.end_row();
                                 for t in &o.trials {
                                     ui.label(viaopt::describe(&t.setup));
-                                    ui.label(format!("{:.1} dB", t.worst_rl));
-                                    ui.label(format!("{:.2} dB", t.il));
+                                    if let Some(e) = &t.error {
+                                        ui.weak("not buildable").on_hover_text(e);
+                                        ui.label("");
+                                    } else {
+                                        ui.label(format!("{:.1} dB", t.worst_rl));
+                                        ui.label(format!("{:.2} dB", t.il));
+                                    }
                                     ui.end_row();
                                 }
                             });

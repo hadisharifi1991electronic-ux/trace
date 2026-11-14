@@ -16,7 +16,8 @@ pub struct ViaGoal {
     pub f_ghz: f64,
     /// Antipad diameters to try (from, to).
     pub antipad: (f64, f64),
-    /// Pair pitch (from, to); ignored for a single via.
+    /// Pair pitch (from, to); ignored for a single via. Equal ends keep
+    /// the pitch (a part's pin pitch usually sets it).
     pub pitch: (f64, f64),
     /// Return via distance (from, to).
     pub return_dist: (f64, f64),
@@ -24,8 +25,9 @@ pub struct ViaGoal {
     pub returns: Vec<usize>,
     /// Try one oval antipad around a pair.
     pub try_oval: bool,
-    /// Copper to copper clearance the layout must keep (between a pair's
-    /// pads, and from a return via's pad to the antipad).
+    /// Copper to copper clearance the layout must keep (from a pad to the
+    /// plane around it, between a pair's pads, and from a return via's pad
+    /// to the antipad).
     pub clearance: f64,
     /// Values per setting.
     pub steps: usize,
@@ -36,10 +38,16 @@ impl ViaGoal {
     pub fn around(v: &ViaSetup, f_ghz: f64) -> ViaGoal {
         let pad = v.pad.max(v.drill);
         let pitch = v.pair.unwrap_or(2.0 * pad);
+        // 4 mil of copper clearance, or the setup's own if it is tighter
+        // (the starting setup is then always one the search may keep).
+        let have = ((v.antipad - pad) / 2.0)
+            .min(v.pair.map_or(f64::INFINITY, |p| p - pad))
+            .min(v.return_dist - v.antipad / 2.0 - pad / 2.0);
+        let clearance = have.clamp(0.5, 4.0);
         ViaGoal {
             f_ghz,
-            antipad: (pad + 4.0, pad + 3.0 * pad.max(8.0)),
-            pitch: ((pad + 5.0).min(pitch), (2.5 * pad).max(pitch)),
+            antipad: (pad + 2.0 * clearance, pad + 3.0 * pad.max(8.0)),
+            pitch: (pitch, pitch),
             return_dist: (0.0, v.return_dist.max(3.0 * pad)),
             returns: if v.pair.is_some() {
                 vec![2, 4, 6]
@@ -47,7 +55,7 @@ impl ViaGoal {
                 vec![2, 4]
             },
             try_oval: v.pair.is_some(),
-            clearance: 5.0,
+            clearance,
             steps: 4,
         }
     }
@@ -62,6 +70,8 @@ pub struct ViaTrial {
     pub worst_rl: f64,
     /// Insertion loss at the goal frequency, dB.
     pub il: f64,
+    /// Why the setup could not be built or solved, if so (not scored).
+    pub error: Option<String>,
 }
 
 /// The search's outcome.
@@ -102,7 +112,7 @@ fn span(a: f64, b: f64, n: usize) -> Vec<f64> {
 /// apart.
 fn legal(mut v: ViaSetup, g: &ViaGoal) -> ViaSetup {
     let pad = v.pad.max(v.drill);
-    v.antipad = v.antipad.max(pad + 2.0);
+    v.antipad = v.antipad.max(pad + 2.0 * g.clearance);
     if let Some(p) = v.pair {
         v.pair = Some(p.max(pad + g.clearance));
     }
@@ -148,7 +158,7 @@ pub fn optimise(
     if pair && goal.try_oval {
         axes.push(("oval", vec![0.0, 1.0], |v, x| v.antipad_oval = x > 0.5));
     }
-    if pair {
+    if pair && goal.pitch.1 - goal.pitch.0 > 0.5 {
         axes.push((
             "pitch",
             span(goal.pitch.0, goal.pitch.1, goal.steps),
@@ -183,14 +193,27 @@ pub fn optimise(
         progress(n0 / tg, what);
         let r = fdtd::solve_with(stackup, &quick(&v), &|p| {
             progress((n0 + p * 0.95) / tg, what)
-        })?;
-        done.set(done.get() + 1);
-        let (worst_rl, il) = judge(&r, f);
-        trials.push(ViaTrial {
-            setup: v,
-            worst_rl,
-            il,
         });
+        done.set(done.get() + 1);
+        match r {
+            Ok(r) => {
+                let (worst_rl, il) = judge(&r, f);
+                trials.push(ViaTrial {
+                    setup: v,
+                    worst_rl,
+                    il,
+                    error: None,
+                });
+            }
+            // A setup that cannot be built (return vias on the traces,
+            // say) is listed but never wins.
+            Err(e) => trials.push(ViaTrial {
+                setup: v,
+                worst_rl: f64::INFINITY,
+                il: f64::NAN,
+                error: Some(e),
+            }),
+        }
         seen.insert(k, trials.len() - 1);
         Ok(trials.len() - 1)
     };
@@ -217,6 +240,9 @@ pub fn optimise(
                 best = i;
             }
         }
+    }
+    if let Some(e) = &trials[best].error {
+        return Err(format!("no setup could be solved: {e}"));
     }
     let best_setup = trials[best].setup.clone();
     progress(0.96, "the best setup in full");
@@ -245,7 +271,16 @@ pub fn describe(v: &ViaSetup) -> String {
     if let Some(p) = v.pair {
         s += &format!(", pitch {p:.1} mil");
     }
-    s += &format!(", {} return via(s) at {:.1} mil", v.returns, v.return_dist);
+    s += &format!(
+        ", {} return via(s) {:.1} mil from {}",
+        v.returns,
+        v.return_dist,
+        if v.pair.is_some() {
+            "each via"
+        } else {
+            "the via"
+        }
+    );
     s
 }
 

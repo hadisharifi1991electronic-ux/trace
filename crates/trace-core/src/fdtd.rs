@@ -638,34 +638,67 @@ pub fn solve_with(
         Some(p) => vec![[0.0, p / 2.0], [0.0, -p / 2.0]],
         None => vec![[0.0, 0.0]],
     };
-    let mut ret: Vec<[f64; 2]> = Vec::new();
     let rdist = setup.return_dist.max(ra + rd + 1.0);
+    // Return vias stay off the traces, which leave each via along ±x on
+    // their layers but which a through return via would short: first
+    // straight out from the via (±y), then on each side at the shallowest
+    // angle that clears the widest trace.
+    let wtr = w[0].max(w[1]) / 2.0 + rp + 1.0;
+    let side = (wtr / rdist).clamp(-1.0, 1.0).asin();
+    let tilted = side < std::f64::consts::FRAC_PI_2 * 0.9;
+    let at = |c: [f64; 2], a: f64| [c[0] + rdist * a.cos(), c[1] + rdist * a.sin()];
+    let half = std::f64::consts::FRAC_PI_2;
+    let mut spots: Vec<[f64; 2]> = Vec::new();
     match setup.pair {
         Some(p) => {
-            // Beside the pair on its axis, then above and below each via.
-            let spots = [
-                [0.0, p / 2.0 + rdist],
-                [0.0, -p / 2.0 - rdist],
-                [rdist, p / 2.0],
-                [-rdist, -p / 2.0],
-                [-rdist, p / 2.0],
-                [rdist, -p / 2.0],
-            ];
-            ret.extend(spots.iter().take(setup.returns));
+            let (up, dn) = ([0.0, p / 2.0], [0.0, -p / 2.0]);
+            spots.push(at(up, half));
+            spots.push(at(dn, -half));
+            if tilted {
+                // Point-symmetric pairs, so the pair stays balanced.
+                spots.push(at(up, side));
+                spots.push(at(dn, std::f64::consts::PI + side));
+                spots.push(at(up, std::f64::consts::PI - side));
+                spots.push(at(dn, -side));
+            }
         }
         None => {
-            let n = setup.returns;
-            for k in 0..n {
-                // Away from the traces, which run along ±x.
-                let a = if n == 1 {
-                    std::f64::consts::FRAC_PI_2
-                } else if n == 2 {
-                    std::f64::consts::FRAC_PI_2 + k as f64 * std::f64::consts::PI
-                } else {
-                    std::f64::consts::FRAC_PI_4 + k as f64 * 2.0 * std::f64::consts::PI / n as f64
-                };
-                ret.push([rdist * a.cos(), rdist * a.sin()]);
+            let c = [0.0, 0.0];
+            spots.push(at(c, half));
+            spots.push(at(c, -half));
+            if tilted {
+                spots.push(at(c, side));
+                spots.push(at(c, std::f64::consts::PI + side));
+                spots.push(at(c, std::f64::consts::PI - side));
+                spots.push(at(c, -side));
             }
+        }
+    }
+    if setup.returns > spots.len() {
+        return Err(format!(
+            "{} return vias do not fit at {rdist:.1} mil without touching the traces; \
+             at most {} (move them further out for more)",
+            setup.returns,
+            spots.len()
+        ));
+    }
+    let ret: Vec<[f64; 2]> = spots.into_iter().take(setup.returns).collect();
+    // Each return via must clear every signal via's antipad (or the oval
+    // one) and the other returns.
+    for (k, r) in ret.iter().enumerate() {
+        let near_sig = sig
+            .iter()
+            .any(|c| (r[0] - c[0]).hypot(r[1] - c[1]) < ra + rd + 1.0 - 1e-9)
+            || (setup.antipad_oval
+                && sig.len() == 2
+                && seg_dist(*r, sig[0], sig[1]) < ra + rd + 1.0 - 1e-9);
+        let near_ret = ret[..k]
+            .iter()
+            .any(|q| (r[0] - q[0]).hypot(r[1] - q[1]) < 2.0 * rp);
+        if near_sig || near_ret {
+            return Err(format!(
+                "the return vias at {rdist:.1} mil overlap the antipad or each other"
+            ));
         }
     }
     // Cell sizes: fine enough for the drill, the traces and the thinnest
@@ -1441,9 +1474,10 @@ pub fn solve_with(
         eprintln!("grid line impedance {zline:?}");
     }
     if ns == 2 {
-        notes.push(
-            "the pair's traces enter the vias at the vias' pitch (uncoupled), 50 Ω each".into(),
-        );
+        notes.push(format!(
+            "the pair's traces enter the vias at the vias' pitch (uncoupled), {:.1} Ω each",
+            (z0[0] * z0[1]).sqrt()
+        ));
     }
     Ok(ViaResult {
         f: freqs.iter().map(|f| f / 1e9).collect(),

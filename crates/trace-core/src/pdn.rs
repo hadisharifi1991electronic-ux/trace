@@ -294,6 +294,146 @@ pub struct Decap {
     pub assumed: bool,
 }
 
+/// A two-pad part joining the supply to another (non-ground) net: a
+/// ferrite bead, inductor or series resistor feeding a sub-rail, or the
+/// one feeding this rail.
+#[derive(Clone, Debug)]
+pub struct Feed {
+    pub part: usize,
+    pub designator: String,
+    /// The net on its other pad.
+    pub net: u32,
+    pub net_name: String,
+    /// A ferrite bead or inductor (else a resistor or other part).
+    pub bead: bool,
+    /// Its value as the board gives it.
+    pub value: String,
+}
+
+impl Feed {
+    /// A sub-rail worth looking at on its own: through a bead, an
+    /// inductor or a resistor of at most 1 Ω (a 0 Ω link).
+    pub fn is_rail(&self) -> bool {
+        self.bead || parse_ohms(&self.value).is_some_and(|r| r <= 1.0)
+    }
+}
+
+/// Ohms from a value such as "0", "0R", "4R7", "10 ohm", "1k", "22Ω".
+pub fn parse_ohms(s: &str) -> Option<f64> {
+    let t = s
+        .trim()
+        .to_ascii_lowercase()
+        .replace("ohms", "")
+        .replace("ohm", "")
+        .replace('Ω', "");
+    let t = t.trim();
+    if t.is_empty() {
+        return None;
+    }
+    // "4R7", "0R", "1K5": the letter is the decimal point.
+    for (ch, mul) in [('r', 1.0), ('k', 1e3), ('m', 1e6)] {
+        if let Some(i) = t.find(ch) {
+            let (a, b) = (&t[..i], &t[i + 1..]);
+            let num = |x: &str| x.chars().all(|c| c.is_ascii_digit() || c == '.');
+            if num(a) && num(b) && !(a.is_empty() && b.is_empty()) {
+                let a: f64 = if a.is_empty() { 0.0 } else { a.parse().ok()? };
+                let frac: f64 = if b.is_empty() {
+                    0.0
+                } else {
+                    format!("0.{b}").parse().ok()?
+                };
+                return Some((a + frac) * mul);
+            }
+        }
+    }
+    let end = t
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(t.len());
+    let v: f64 = t[..end].parse().ok()?;
+    let rest = t[end..].trim();
+    let mul = match rest.chars().next() {
+        None => 1.0,
+        Some('k') => 1e3,
+        Some('m') if rest.starts_with("meg") => 1e6,
+        Some('m') => 1e-3,
+        _ => return None,
+    };
+    Some(v * mul)
+}
+
+/// The two-pad parts joining `net` to another net that is not `ground`,
+/// by designator.
+pub fn feeds(board: &Board, net: u32, ground: u32) -> Vec<Feed> {
+    let mut pads_of: std::collections::BTreeMap<usize, Vec<Option<u32>>> = Default::default();
+    for p in &board.geometry.pads {
+        if let Some(c) = p.component {
+            pads_of.entry(c as usize).or_default().push(p.net);
+        }
+    }
+    let mut out = Vec::new();
+    for (part, nets) in pads_of {
+        if nets.len() != 2 {
+            continue;
+        }
+        let other = match (nets[0], nets[1]) {
+            (Some(a), Some(b)) if a == net && b != net => b,
+            (Some(a), Some(b)) if b == net && a != net => a,
+            _ => continue,
+        };
+        if other == ground {
+            continue;
+        }
+        let comp = &board.components[part];
+        let des = comp.designator.to_ascii_uppercase();
+        let prefix: String = des
+            .chars()
+            .take_while(|c| c.is_ascii_alphabetic())
+            .collect();
+        let value = comp
+            .param(&["Value", "Comment", "Device Type"])
+            .unwrap_or("")
+            .to_string();
+        let v = format!("{} {}", value, comp.footprint).to_ascii_uppercase();
+        let net_name = board
+            .nets
+            .get(other as usize)
+            .map(|n| n.name.clone())
+            .unwrap_or_default();
+        // An inductor between two rails is a filter; one to a switch node
+        // is a regulator's own output inductor (not a bead).
+        let up = net_name.to_ascii_uppercase();
+        let rail = volts_in_name(&net_name).is_some()
+            || [
+                "VDD", "VCC", "VIN", "VBAT", "VSYS", "PWR", "VREG", "AVDD", "DVDD",
+            ]
+            .iter()
+            .any(|k| up.contains(k));
+        let bead = matches!(prefix.as_str(), "FB" | "E" | "B" | "BD" | "FER")
+            || matches!(prefix.as_str(), "L" | "FL") && rail
+            || v.contains("BEAD")
+            || v.contains("BLM")
+            || v.contains("FERRITE");
+        if prefix == "C" || parse_farads(&value).is_some() && !bead {
+            continue;
+        }
+        out.push(Feed {
+            part,
+            designator: comp.designator.clone(),
+            net: other,
+            net_name,
+            bead,
+            value,
+        });
+    }
+    out
+}
+
+/// A ferrite bead or filter inductor feeding a rail, seen from that rail:
+/// its DC resistance and low-frequency inductance (above a few MHz a bead
+/// is mostly loss, so the rail before it hardly shows).
+pub const BEAD_R: f64 = 0.05;
+pub const BEAD_L: f64 = 1e-6;
+
 /// The plane pair analysed.
 #[derive(Clone, Debug, Default)]
 pub struct Cavity {
@@ -320,6 +460,10 @@ pub struct Model {
     pub vrm: Option<usize>,
     pub vrm_r: f64,
     pub vrm_l: f64,
+    /// The regulator is a ferrite bead or inductor from another rail.
+    pub vrm_bead: bool,
+    /// Sub-rails this supply feeds through beads, inductors or 0 Ω links.
+    pub sub_rails: Vec<Feed>,
     pub decaps: Vec<Decap>,
     pub cavity: Cavity,
     /// Target impedance, Ω, if known.
@@ -481,10 +625,24 @@ pub fn guess_ground(board: &Board, net: u32) -> Option<u32> {
         }
     }
     let mut votes: HashMap<u32, usize> = HashMap::new();
-    for nets in by_part.values() {
-        if nets.len() == 2 && nets.contains(&Some(net)) {
+    for (&part, nets) in &by_part {
+        // Only capacitors vote: beads and resistors go to other rails.
+        let is_cap = board.components.get(part as usize).is_some_and(|c| {
+            let d = c.designator.to_ascii_uppercase();
+            d.starts_with('C') && !d.starts_with("CON")
+                || c.param(&["Value", "Comment", "Capacitance"])
+                    .and_then(parse_farads)
+                    .is_some()
+        });
+        if is_cap && nets.len() == 2 && nets.contains(&Some(net)) {
             if let Some(o) = nets.iter().flatten().find(|&&n| n != net) {
-                *votes.entry(*o).or_default() += 1;
+                let name = board
+                    .nets
+                    .get(*o as usize)
+                    .map(|n| n.name.to_ascii_uppercase())
+                    .unwrap_or_default();
+                let named = name.contains("GND") || name.contains("VSS");
+                *votes.entry(*o).or_default() += if named { 3 } else { 1 };
             }
         }
     }
@@ -914,19 +1072,108 @@ pub fn model(board: &Board, setup: &Setup) -> Result<Model, String> {
             no_value.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
         ));
     }
-    let vrm = setup
-        .vrm
-        .or_else(|| crate::pi::guess_source(board, net).filter(|v| !setup.loads.contains(v)));
+    let all_feeds = feeds(board, net, ground);
+    let on_plane = |i: usize| !port_of(i).is_empty();
+    let guessed = crate::pi::guess_source(board, net)
+        .filter(|v| !setup.loads.contains(v))
+        .filter(|&v| {
+            // A connector off the planes says little; a bead may say more.
+            let des = board.components[v].designator.to_ascii_uppercase();
+            on_plane(v) || !matches!(des.chars().next(), Some('J' | 'P' | 'X'))
+        });
+    // A rail with chips of its own and a bead to another rail is a
+    // sub-rail fed by it (the one from the rail with the most parts); a
+    // rail with only beads to others is a distribution rail.
+    let has_chips = crate::pi::default_loads(board, net, usize::MAX)
+        .iter()
+        .any(|&(p, _)| {
+            on_plane(p)
+                && !decaps.iter().any(|d| d.part == p)
+                && !all_feeds.iter().any(|f| f.part == p)
+                && !setup.loads.is_empty() == setup.loads.contains(&p)
+        });
+    let bead_in = || {
+        if !has_chips {
+            return None;
+        }
+        all_feeds
+            .iter()
+            .filter(|f| f.bead && on_plane(f.part) && !setup.loads.contains(&f.part))
+            .max_by_key(|f| crate::pi::parts_on(board, f.net).len())
+            .map(|f| f.part)
+    };
+    let vrm = setup.vrm.or(guessed).or_else(bead_in);
+    let vrm_bead =
+        setup.vrm.is_none() && vrm.is_some_and(|v| all_feeds.iter().any(|f| f.part == v && f.bead));
+    let (vrm_r, vrm_l) = if vrm_bead {
+        (BEAD_R, BEAD_L)
+    } else {
+        (setup.vrm_r, setup.vrm_l)
+    };
+    if let Some(v) = vrm.filter(|_| vrm_bead) {
+        notes.push(format!(
+            "fed through {} (a bead or filter inductor) from {}: taken as {} + {:.1} µH toward that rail",
+            designator(v),
+            all_feeds
+                .iter()
+                .find(|f| f.part == v)
+                .map(|f| f.net_name.clone())
+                .unwrap_or_default(),
+            ohm_text(BEAD_R),
+            BEAD_L * 1e6,
+        ));
+    }
+    let sub_rails: Vec<Feed> = all_feeds
+        .iter()
+        .filter(|f| Some(f.part) != vrm && f.is_rail())
+        .cloned()
+        .collect();
     let loads: Vec<usize> = if setup.loads.is_empty() {
-        let skip: Vec<usize> = decaps.iter().map(|d| d.part).collect();
-        crate::pi::default_loads(board, net, vrm.unwrap_or(usize::MAX))
+        let skip: Vec<usize> = decaps
+            .iter()
+            .map(|d| d.part)
+            .chain(all_feeds.iter().map(|f| f.part))
+            .collect();
+        let chips: Vec<usize> = crate::pi::default_loads(board, net, vrm.unwrap_or(usize::MAX))
             .into_iter()
             .map(|p| p.0)
             .filter(|p| !skip.contains(p))
-            .collect()
+            .collect();
+        if chips.iter().any(|&c| on_plane(c)) {
+            chips
+        } else {
+            // Nothing draws from the rail itself: look from what it feeds.
+            let fed: Vec<usize> = sub_rails
+                .iter()
+                .map(|f| f.part)
+                .filter(|&p| on_plane(p))
+                .collect();
+            if !fed.is_empty() {
+                notes.push(format!(
+                    "no chip draws from {net_name} directly; looking from the parts feeding its sub-rails ({}); analyse a sub-rail for a chip's own decoupling",
+                    fed.iter().take(8).map(|&p| designator(p)).collect::<Vec<_>>().join(", ")
+                ));
+                fed
+            } else {
+                chips
+            }
+        }
     } else {
         setup.loads.clone()
     };
+    if !sub_rails.is_empty() {
+        notes.push(format!(
+            "feeds {} sub-rail{}: {}",
+            sub_rails.len(),
+            if sub_rails.len() == 1 { "" } else { "s" },
+            sub_rails
+                .iter()
+                .take(10)
+                .map(|f| format!("{} ({})", f.net_name, f.designator))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     let mut ports: Vec<Vec<usize>> = Vec::new();
     let mut kept_loads = Vec::new();
     for &l in &loads {
@@ -1046,8 +1293,10 @@ pub fn model(board: &Board, setup: &Setup) -> Result<Model, String> {
         freqs,
         loads: kept_loads,
         vrm,
-        vrm_r: setup.vrm_r,
-        vrm_l: setup.vrm_l,
+        vrm_r,
+        vrm_l,
+        vrm_bead,
+        sub_rails,
         decaps,
         cavity: Cavity {
             power_layer: names[pl].clone(),
@@ -1537,6 +1786,73 @@ mod tests {
             });
         }
         i
+    }
+
+    #[test]
+    fn follows_beads_to_sub_rails() {
+        assert_eq!(parse_ohms("0R"), Some(0.0));
+        assert_eq!(parse_ohms("4R7"), Some(4.7));
+        assert_eq!(parse_ohms("10 ohm"), Some(10.0));
+        assert_eq!(parse_ohms("1k5"), Some(1500.0));
+        assert_eq!(parse_ohms("22Ω"), Some(22.0));
+        assert_eq!(parse_ohms("BLM18"), None);
+        let mut b = board(1000.0, 4.0);
+        // The rail on the left half; a sub-rail on the right, through FB1.
+        b.geometry.polygons[0].outline = vec![
+            Point::mil(0.0, 0.0),
+            Point::mil(500.0, 0.0),
+            Point::mil(500.0, 1000.0),
+            Point::mil(0.0, 1000.0),
+        ];
+        b.nets.push(Net {
+            name: "VSUB_1V0".into(),
+            ..Default::default()
+        });
+        let mut sub = b.geometry.polygons[0].clone();
+        sub.net = Some(2);
+        sub.outline = vec![
+            Point::mil(520.0, 0.0),
+            Point::mil(1000.0, 0.0),
+            Point::mil(1000.0, 1000.0),
+            Point::mil(520.0, 1000.0),
+        ];
+        b.geometry.polygons.push(sub);
+        let fb = part(
+            &mut b,
+            "FB1",
+            "BLM18PG221",
+            &[(480.0, 500.0, 0), (540.0, 500.0, 2)],
+        );
+        part(
+            &mut b,
+            "C2",
+            "10uF",
+            &[(200.0, 400.0, 0), (200.0, 440.0, 1)],
+        );
+        let u1 = part(&mut b, "U1", "", &[(800.0, 500.0, 2), (820.0, 500.0, 1)]);
+        part(&mut b, "C1", "1uF", &[(700.0, 400.0, 2), (700.0, 440.0, 1)]);
+        part(&mut b, "R1", "10k", &[(300.0, 700.0, 0), (340.0, 700.0, 2)]);
+        let f = feeds(&b, 0, 1);
+        assert_eq!(f.len(), 2);
+        assert!(f.iter().any(|f| f.part == fb && f.bead && f.is_rail()));
+        assert!(f.iter().any(|f| f.designator == "R1" && !f.is_rail()));
+        // The rail feeds only the sub-rail: seen from the bead.
+        let mut s = Setup::new(0);
+        s.points = 8;
+        let m = model(&b, &s).unwrap();
+        assert_eq!(m.loads, vec![fb]);
+        assert_eq!(m.sub_rails.len(), 1);
+        assert_eq!(m.sub_rails[0].net, 2);
+        assert!(m.notes.iter().any(|n| n.contains("no chip draws")));
+        // The sub-rail: fed by the bead, seen from the chip.
+        let mut s = Setup::new(2);
+        s.points = 8;
+        let m = model(&b, &s).unwrap();
+        assert_eq!(m.vrm, Some(fb));
+        assert!(m.vrm_bead);
+        assert_eq!(m.loads, vec![u1]);
+        assert_eq!(m.decaps.len(), 1);
+        assert!((m.vrm_l - BEAD_L).abs() < 1e-12);
     }
 
     #[test]

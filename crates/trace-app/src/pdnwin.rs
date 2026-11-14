@@ -29,6 +29,9 @@ pub struct PdnWindow {
     load: usize,
     supplies: Option<Vec<u32>>,
     board_key: (usize, usize, usize),
+    /// A sub-rail picked from the results: switch to it and analyse.
+    jump: Option<u32>,
+    auto_run: bool,
 }
 
 impl Default for PdnWindow {
@@ -52,6 +55,8 @@ impl Default for PdnWindow {
             load: 0,
             supplies: None,
             board_key: (0, 0, 0),
+            jump: None,
+            auto_run: false,
         }
     }
 }
@@ -155,6 +160,10 @@ impl PdnWindow {
                 ..Default::default()
             };
         }
+        if let Some(n) = self.jump.take() {
+            self.pick_net(board, n);
+            self.auto_run = true;
+        }
         let supplies = self.supplies(board).to_vec();
         if self.net.is_none() {
             if let Some(n) = selected
@@ -256,12 +265,14 @@ impl PdnWindow {
                     .suffix(" MHz"),
             );
             let busy = self.running.is_some();
+            let go = std::mem::take(&mut self.auto_run) && !busy;
             if ui
                 .add_enabled(!busy, egui::Button::new("Analyse"))
                 .on_hover_text(
                     "Solve the plane pair under the supply with its capacitors and regulator",
                 )
                 .clicked()
+                || go
             {
                 let (tx, rx) = mpsc::channel();
                 let b = board.clone();
@@ -304,10 +315,33 @@ impl PdnWindow {
             c.area_in2,
             c.farads * 1e9,
             m.decaps.len(),
-            m.vrm.map(des).unwrap_or_else(|| "none".into())
+            m.vrm
+                .map(|v| if m.vrm_bead {
+                    format!("fed by {} (bead)", des(v))
+                } else {
+                    des(v)
+                })
+                .unwrap_or_else(|| "none".into())
         ));
         for n in &m.notes {
             ui.label(RichText::new(n).weak().small());
+        }
+        if !m.sub_rails.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Sub-rails");
+                for f in &m.sub_rails {
+                    if ui
+                        .button(&f.net_name)
+                        .on_hover_text(format!(
+                            "Fed through {} {}; analyse it",
+                            f.designator, f.value
+                        ))
+                        .clicked()
+                    {
+                        self.jump = Some(f.net);
+                    }
+                }
+            });
         }
         if m.loads.len() > 1 {
             ui.horizontal(|ui| {

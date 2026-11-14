@@ -3,6 +3,18 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.57.1 (2026-11-14)
+
+- PDN: ferrite beads, filter inductors and 0 Ω links to other rails are
+  no longer taken as loads. A rail that only feeds sub-rails is looked at
+  from those feeds, with a note; its sub-rails are listed (in the window,
+  as buttons that switch to the sub-rail and analyse it). A sub-rail with
+  chips on it is fed by its bead, taken as 50 mΩ + 1 µH toward the rail
+  before it. A regulator's own output inductor (to a switch node) is
+  still the regulator.
+- PDN: the ground is guessed from the capacitors only (beads and
+  resistors to other rails no longer vote).
+
 ## 0.57.0 (2026-11-14)
 
 - PDN impedance and decoupling (View > "PDN impedance and decaps…",

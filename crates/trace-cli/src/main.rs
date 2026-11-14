@@ -1527,7 +1527,11 @@ fn pdn_cmd(file: &str, net: &str, rest: &[&str]) -> Res {
         } else {
             list.join(", ")
         },
-        m.vrm.map_or("none", des)
+        m.vrm.map_or("none".to_string(), |v| if m.vrm_bead {
+            format!("fed by {} (bead)", des(v))
+        } else {
+            des(v).to_string()
+        })
     );
     for n in &m.notes {
         println!("  note: {n}");

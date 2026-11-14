@@ -35,9 +35,11 @@ USAGE:
     trace panel <board> <cols>x<rows> <out.tracepcb> [--gap 2mm] [--rail 5mm] [--tabs N] [--vscore]
                                                 Panel of copies with rails, fiducials, tooling holes, and
                                                 tabs with mouse bites (or V-score lines); then fab or odb it
-    trace match <board> <net,net,...> [out.tracepcb] [--target L] [--amp L]
+    trace match <board> <net|pair,...> [out.tracepcb] [--target L] [--amp L]
                                                 Match the nets' lengths (to the longest, or the target) with
-                                                meanders where they fit; with out, save the board tuned
+                                                meanders where they fit; with out, save the board tuned. A
+                                                differential pair (named, or both nets given) is tuned as a pair:
+                                                both legs meander together and its mean length is matched
     trace sim <board> <U1.pin> <U2.pin> --ibis drv.ibs [--rx-ibis rx.ibs] [--model M] [--rx-model M]
               [--rate 1G] [--bits N] [--corner typ|min|max] [--term 50|50@0.9|100diff] [--single]
               [--df 0.02] [--rough 1um] [--lossless] [--no-xtalk] [--formulas] [out.svg]
@@ -98,6 +100,12 @@ USAGE:
                                                 nets, starting from the copy's anchor U2, placed alike, and the
                                                 block's tracks, arcs and vias copied with the copy's nets (the
                                                 copy's own routing there is taken up first, unless --keep-routing)
+    trace clear3d <board> [--clearance 0.25mm] [--max-top 10mm] [--max-bottom 3mm] [--no-models]
+                  [--no-estimate] [--no-edge]
+                                                3D clearance: part bodies (their 3D models, or boxes estimated
+                                                from the pads) that run into each other or come closer than
+                                                --clearance, parts taller or lower than the board's Height rules
+                                                or the limits given, and bodies over the board edge
     trace nettie <board> <part[,part]> <out.tracepcb> [--remove]
                                                 Mark parts as net ties: their own copper may join their nets
                                                 (parts named NT…, or with a NetTie footprint, already are)
@@ -205,6 +213,7 @@ fn main() -> ExitCode {
         ["gloss", file, out, rest @ ..] => gloss_cmd(file, out, rest),
         ["fanout", file, parts, out, rest @ ..] => fanout_cmd(file, parts, out, rest),
         ["reuse", file, block, anchor, out, rest @ ..] => reuse_cmd(file, block, anchor, out, rest),
+        ["clear3d", file, rest @ ..] => clear3d_cmd(file, rest),
         ["nettie", file, parts, out] => nettie_cmd(file, parts, out, true),
         ["nettie", file, parts, out, "--remove"] => nettie_cmd(file, parts, out, false),
         ["variants", file] => board(file).map(|b| print!("{}", trace_core::variant::summary(&b))),
@@ -1139,19 +1148,32 @@ fn match_nets(file: &str, nets: &str, rest: &[&str]) -> Res {
         }
     }
     let mut ids = Vec::new();
+    let id = |name: &str| b.nets.iter().position(|n| n.name == name).map(|i| i as u32);
     for name in nets.split(',').map(str::trim).filter(|n| !n.is_empty()) {
-        let i = b
-            .nets
-            .iter()
-            .position(|n| n.name == name)
-            .ok_or(format!("no net {name}"))?;
-        ids.push(i as u32);
+        // A differential pair's name stands for both its nets.
+        if let Some(d) = b.diff_pairs.iter().find(|d| d.name == name) {
+            for leg in [&d.positive, &d.negative] {
+                ids.push(id(leg).ok_or(format!("no net {leg}"))?);
+            }
+            continue;
+        }
+        ids.push(id(name).ok_or(format!("no net {name}"))?);
     }
     let clearance = trace_core::route::board_clearance(&b);
     let m = trace_core::bus::match_lengths(&b, &ids, target, amp, None, clearance);
+    for &(p, n) in &m.pairs {
+        println!(
+            "  pair {} / {}: tuned together, mean {:.1} mil, skew {:.1} mil",
+            b.nets[p as usize].name,
+            b.nets[n as usize].name,
+            m.length_of(p),
+            m.nets.iter().find(|t| t.net == p).map_or(0.0, |t| t.after)
+                - m.nets.iter().find(|t| t.net == n).map_or(0.0, |t| t.after)
+        );
+    }
     println!("Target {:.1} mil", m.target);
     for t in &m.nets {
-        let short = m.target - t.after;
+        let short = m.target - m.length_of(t.net);
         println!(
             "  {:<28} {:>9.1} -> {:>9.1}{}",
             b.nets[t.net as usize].name,
@@ -2737,6 +2759,115 @@ fn reuse_cmd(file: &str, block: &str, anchor: &str, out: &str, rest: &[&str]) ->
     println!("{}", r.summary());
     save_edits(b, edits, out)?;
     println!("saved {out}");
+    Ok(())
+}
+
+/// Each of the board's part models meshed, where the reader manages it in
+/// half a minute.
+fn meshes(b: &trace_core::Board) -> Vec<Option<trace_step::Mesh>> {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Mutex};
+    let steps: Vec<_> = b.geometry.models.iter().map(|m| m.step.clone()).collect();
+    let n = steps.len();
+    let out = Arc::new(Mutex::new((0..n).map(|_| None).collect::<Vec<_>>()));
+    let next = Arc::new(AtomicUsize::new(0));
+    let steps = Arc::new(steps);
+    let workers = std::thread::available_parallelism()
+        .map_or(2, |n| n.get())
+        .clamp(1, 8);
+    let handles: Vec<_> = (0..workers)
+        .map(|_| {
+            let (steps, out, next) = (steps.clone(), out.clone(), next.clone());
+            std::thread::spawn(move || loop {
+                let i = next.fetch_add(1, Ordering::Relaxed);
+                let Some(step) = steps.get(i).cloned() else {
+                    break;
+                };
+                // A model the reader chokes on must not hold up the others.
+                let (tx, rx) = std::sync::mpsc::channel();
+                std::thread::spawn(move || {
+                    let r = std::panic::catch_unwind(|| trace_step::mesh(&step).ok())
+                        .ok()
+                        .flatten();
+                    let _ = tx.send(r);
+                });
+                let mesh = rx
+                    .recv_timeout(std::time::Duration::from_secs(30))
+                    .ok()
+                    .flatten();
+                if let Ok(mut o) = out.lock() {
+                    o[i] = mesh;
+                }
+            })
+        })
+        .collect();
+    for h in handles {
+        let _ = h.join();
+    }
+    let v = out.lock().map(|mut o| std::mem::take(&mut *o));
+    v.unwrap_or_default()
+}
+
+fn clear3d_cmd(file: &str, rest: &[&str]) -> Res {
+    use trace_core::clear3d::{check, Goal, ModelMesh};
+    let b = board(file)?;
+    let mut goal = Goal::default();
+    let mut models = true;
+    let mut i = 0;
+    let len = |i: usize, name: &str| -> Result<f64, String> {
+        let v = rest.get(i + 1).ok_or(format!("{name} needs a length"))?;
+        Ok(Length::parse(v).ok_or(format!("not a length: {v}"))?.mm())
+    };
+    while i < rest.len() {
+        match rest[i] {
+            "--no-models" => models = false,
+            "--no-estimate" => goal.estimate = false,
+            "--no-edge" => goal.edge = false,
+            "--clearance" => {
+                goal.clearance = len(i, "--clearance")?;
+                i += 1;
+            }
+            "--max-top" => {
+                goal.max_top = Some(len(i, "--max-top")?);
+                i += 1;
+            }
+            "--max-bottom" => {
+                goal.max_bottom = Some(len(i, "--max-bottom")?);
+                i += 1;
+            }
+            o => return Err(format!("unknown option {o}").into()),
+        }
+        i += 1;
+    }
+    let meshed = if models { meshes(&b) } else { Vec::new() };
+    if models && !meshed.is_empty() {
+        println!(
+            "{} of {} part models read",
+            meshed.iter().filter(|m| m.is_some()).count(),
+            meshed.len()
+        );
+    }
+    let refs: Vec<Option<ModelMesh>> = meshed
+        .iter()
+        .map(|m| {
+            m.as_ref().map(|m| ModelMesh {
+                positions: &m.positions,
+                indices: &m.indices,
+            })
+        })
+        .collect();
+    let r = check(&b, &refs, &goal);
+    for issue in &r.issues {
+        let at = issue.at(&b);
+        println!(
+            "  {:<9} {}  at {:.2}, {:.2} mm",
+            issue.kind(),
+            issue.describe(&b),
+            at[0],
+            at[1]
+        );
+    }
+    println!("{}", r.summary());
     Ok(())
 }
 

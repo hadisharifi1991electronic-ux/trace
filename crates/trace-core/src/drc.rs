@@ -21,7 +21,7 @@ use std::collections::{HashMap, HashSet};
 mod fab;
 #[path = "drc_si.rs"]
 mod si;
-pub use fab::{mask_rule, MaskRule};
+pub use fab::{height_rules, mask_rule, HeightRule, MaskRule};
 pub use si::{GAP_RUN, PARALLEL_LIMIT};
 
 /// The kinds of copper object rules tell apart.
@@ -261,6 +261,8 @@ enum Part<'a> {
         classes: &'a [String],
         /// Whether any of its pads has a hole.
         thru: bool,
+        /// Whether it sits on the bottom side.
+        bottom: bool,
     },
 }
 
@@ -583,6 +585,13 @@ impl Parser<'_> {
                 });
             }
             "issmtcomponent" => return thru.map(|t| !t),
+            // A whole part's side; other objects' layers are not known here.
+            "ontoplayer" | "onbottomlayer" => {
+                return match (s.obj, s.part) {
+                    (Obj::Part, Part::In { bottom, .. }) => Some(bottom == (w == "onbottomlayer")),
+                    _ => None,
+                }
+            }
             _ => {}
         }
         Some(match w.as_str() {
@@ -673,6 +682,8 @@ struct NetInfo {
     parts: Vec<(String, String, Vec<String>)>,
     /// Whether each component has a pad with a hole.
     thru: Vec<bool>,
+    /// Whether each component sits on the bottom side.
+    bottom: Vec<bool>,
     rooms: Vec<Room>,
     /// Copper layer names, top first.
     layers: Vec<String>,
@@ -762,6 +773,11 @@ impl NetInfo {
             pair_classes,
             parts,
             thru,
+            bottom: board
+                .components
+                .iter()
+                .map(|c| c.side == crate::Side::Bottom)
+                .collect(),
             rooms: Room::all(board),
             layers: board
                 .stackup
@@ -781,6 +797,7 @@ impl NetInfo {
                 footprint: f,
                 classes: c,
                 thru: component.is_some_and(|i| self.thru[i as usize]),
+                bottom: component.is_some_and(|i| self.bottom[i as usize]),
             },
             None => Part::Free,
         };

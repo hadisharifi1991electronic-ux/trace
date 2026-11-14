@@ -9,6 +9,9 @@
 
 use crate::edit::Edit;
 use crate::route::{self, seg_seg, Obstacles, Piece, P};
+
+/// A pair meander tried: its skew, the two legs and their lengths.
+type PairTry = (f64, Vec<Piece>, Vec<Piece>, f64, f64);
 use crate::{Board, LayerRef, Length, Point, Track};
 
 /// Orders bus starts (pad centre, net) across the bus: along the line the
@@ -130,6 +133,9 @@ pub struct Matched {
     pub edits: Vec<Edit>,
     pub nets: Vec<Tuned>,
     pub target: f64,
+    /// Differential pairs tuned as pairs (positive, negative): both legs
+    /// meander together and the pair's mean length is matched.
+    pub pairs: Vec<(u32, u32)>,
 }
 
 impl Matched {
@@ -137,7 +143,21 @@ impl Matched {
     pub fn short(&self, tol: f64) -> impl Iterator<Item = &Tuned> {
         self.nets
             .iter()
-            .filter(move |t| t.after < self.target - tol)
+            .filter(move |t| self.length_of(t.net) < self.target - tol)
+    }
+
+    /// A net's length after matching, a pair leg's being its pair's mean.
+    pub fn length_of(&self, net: u32) -> f64 {
+        let after = |n: u32| {
+            self.nets
+                .iter()
+                .find(|t| t.net == n)
+                .map_or(0.0, |t| t.after)
+        };
+        match self.pairs.iter().find(|(p, n)| *p == net || *n == net) {
+            Some(&(p, n)) => (after(p) + after(n)) / 2.0,
+            None => after(net),
+        }
     }
 }
 
@@ -156,8 +176,16 @@ pub fn match_lengths(
     space: Option<f64>,
     clearance: f64,
 ) -> Matched {
-    let lengths: Vec<f64> = nets.iter().map(|&n| board.net_length(n).mil()).collect();
-    let target = target.unwrap_or_else(|| lengths.iter().copied().fold(0.0, f64::max));
+    let pairs = pairs_in(board, nets);
+    let paired: std::collections::HashSet<u32> = pairs.iter().flat_map(|&(p, n)| [p, n]).collect();
+    let len_of = |n: u32| board.net_length(n).mil();
+    let target = target.unwrap_or_else(|| {
+        nets.iter()
+            .filter(|n| !paired.contains(n))
+            .map(|&n| len_of(n))
+            .chain(pairs.iter().map(|&(p, n)| (len_of(p) + len_of(n)) / 2.0))
+            .fold(0.0, f64::max)
+    });
     let obstacles = Obstacles::new(board);
     let g = &board.geometry;
     // New copper so far: layer, ends, half width, net.
@@ -165,7 +193,33 @@ pub fn match_lengths(
     // Tracks replaced and their meanders.
     let mut swaps: Vec<(usize, Vec<Piece>)> = Vec::new();
     let mut report = Vec::new();
+    for &(p, n) in &pairs {
+        let (lp, ln) = (len_of(p), len_of(n));
+        let added = tune_pair(
+            board,
+            &obstacles,
+            (p, n),
+            target - (lp + ln) / 2.0,
+            (lp - ln, amp, space, clearance),
+            &mut placed,
+            &mut swaps,
+        );
+        report.push(Tuned {
+            net: p,
+            before: lp,
+            after: lp + added.0,
+        });
+        report.push(Tuned {
+            net: n,
+            before: ln,
+            after: ln + added.1,
+        });
+    }
+    let lengths: Vec<f64> = nets.iter().map(|&n| len_of(n)).collect();
     for (&net, &before) in nets.iter().zip(&lengths) {
+        if paired.contains(&net) {
+            continue;
+        }
         let mut need = target - before;
         let mut tracks: Vec<(usize, u8, P, P, f64)> = g
             .tracks
@@ -273,7 +327,256 @@ pub fn match_lengths(
         edits,
         nets: report,
         target,
+        pairs,
     }
+}
+
+/// The differential pairs both of whose nets are in `nets`.
+pub fn pairs_in(board: &Board, nets: &[u32]) -> Vec<(u32, u32)> {
+    let id = |name: &str| {
+        board
+            .nets
+            .iter()
+            .position(|x| x.name == name)
+            .map(|i| i as u32)
+            .filter(|i| nets.contains(i))
+    };
+    board
+        .diff_pairs
+        .iter()
+        .filter_map(|d| Some((id(&d.positive)?, id(&d.negative)?)))
+        .collect()
+}
+
+/// Two tracks of a pair running side by side: the positive's index, the
+/// negative's, the layer, the run along the positive track (from its
+/// start, mil), the positive's direction, its start, and the signed
+/// distance across to the negative (left positive).
+struct Coupled {
+    ip: usize,
+    jn: usize,
+    layer: u8,
+    span: (f64, f64),
+    u: P,
+    a: P,
+    d: f64,
+}
+
+fn coupled(board: &Board, p: u32, n: u32, used: &std::collections::HashSet<usize>) -> Vec<Coupled> {
+    let g = &board.geometry;
+    let line = |i: usize| {
+        let t = &g.tracks[i];
+        let l = match t.layer {
+            LayerRef::Copper(l) => l,
+            _ => return None,
+        };
+        (t.component.is_none() && !t.text).then_some((
+            l,
+            [t.start.x.mil(), t.start.y.mil()],
+            [t.end.x.mil(), t.end.y.mil()],
+            t.width.mil(),
+        ))
+    };
+    let of = |net: u32| -> Vec<usize> {
+        (0..g.tracks.len())
+            .filter(|&i| g.tracks[i].net == Some(net) && !used.contains(&i))
+            .collect()
+    };
+    let (ps, ns) = (of(p), of(n));
+    let mut out = Vec::new();
+    for &i in &ps {
+        let Some((lp, a, b, wp)) = line(i) else {
+            continue;
+        };
+        let len = (b[0] - a[0]).hypot(b[1] - a[1]);
+        if len < 1.0 {
+            continue;
+        }
+        let u = [(b[0] - a[0]) / len, (b[1] - a[1]) / len];
+        let nrm = [-u[1], u[0]];
+        let mut best: Option<Coupled> = None;
+        for &j in &ns {
+            let Some((ln, c, e, wn)) = line(j) else {
+                continue;
+            };
+            if ln != lp {
+                continue;
+            }
+            let along = |q: P| (q[0] - a[0]) * u[0] + (q[1] - a[1]) * u[1];
+            let across = |q: P| (q[0] - a[0]) * nrm[0] + (q[1] - a[1]) * nrm[1];
+            let (dc, de) = (across(c), across(e));
+            // Parallel, and as close as a pair runs.
+            if (dc - de).abs() > 0.05
+                || dc.abs() < (wp + wn) / 2.0
+                || dc.abs() > 3.0 * (wp + wn) + 20.0
+            {
+                continue;
+            }
+            let (t0, t1) = (along(c).min(along(e)), along(c).max(along(e)));
+            let span = (t0.max(0.0), t1.min(len));
+            if span.1 - span.0 < 1.0 {
+                continue;
+            }
+            if best
+                .as_ref()
+                .is_none_or(|b| span.1 - span.0 > b.span.1 - b.span.0)
+            {
+                best = Some(Coupled {
+                    ip: i,
+                    jn: j,
+                    layer: lp,
+                    span,
+                    u,
+                    a,
+                    d: dc,
+                });
+            }
+        }
+        out.extend(best);
+    }
+    out.sort_by(|x, y| (y.span.1 - y.span.0).total_cmp(&(x.span.1 - x.span.0)));
+    out
+}
+
+/// Meanders a pair's coupled runs together to add `need` mil to its mean
+/// length, keeping the legs at their gap and choosing the side that best
+/// keeps (or improves) the pair's skew. Returns the length added to each
+/// leg. `opts` is (skew now, positive minus negative; tallest meander;
+/// step along the track; clearance).
+fn tune_pair(
+    board: &Board,
+    obstacles: &Obstacles,
+    (p, n): (u32, u32),
+    mut need: f64,
+    (mut skew, amp, space, clearance): (f64, f64, Option<f64>, f64),
+    placed: &mut Vec<(u8, P, P, f64, u32)>,
+    swaps: &mut Vec<(usize, Vec<Piece>)>,
+) -> (f64, f64) {
+    let g = &board.geometry;
+    let mut used = std::collections::HashSet::new();
+    let mut added = (0.0, 0.0);
+    let skip = [Some(p), Some(n)];
+    let pt = |c: &Coupled, s: f64, across: f64| {
+        let nrm = [-c.u[1], c.u[0]];
+        [
+            c.a[0] + c.u[0] * s + nrm[0] * across,
+            c.a[1] + c.u[1] * s + nrm[1] * across,
+        ]
+    };
+    while need > 0.5 {
+        let runs = coupled(board, p, n, &used);
+        let mut done = false;
+        for c in &runs {
+            let (wp, wn) = (g.tracks[c.ip].width.mil(), g.tracks[c.jn].width.mil());
+            let w = wp.max(wn);
+            // Bumps wide enough that the inner leg's stays open.
+            let step = space
+                .unwrap_or(4.0 * w)
+                .max(c.d.abs() + 2.0 * w + clearance);
+            let (c0, c1) = (pt(c, c.span.0, c.d / 2.0), pt(c, c.span.1, c.d / 2.0));
+            let mut best: Option<PairTry> = None;
+            for k in [1.0, 0.7, 0.5, 0.35, 0.25] {
+                let h = amp * k;
+                if h < 2.0 * w + c.d.abs() {
+                    break;
+                }
+                for flip in [false, true] {
+                    let (centre, add) = route::meander(c0, c1, need, h, step, flip);
+                    if add <= 0.0 {
+                        continue;
+                    }
+                    // The positive runs at 0 across, the negative at d.
+                    let lp = route::offset(&centre, -c.d / 2.0);
+                    let ln = route::offset(&centre, c.d / 2.0);
+                    let run = c.span.1 - c.span.0;
+                    let sum = |v: &[Piece]| v.iter().map(Piece::length).sum::<f64>();
+                    let (ap, an) = (sum(&lp) - run, sum(&ln) - run);
+                    let clear = |leg: &[Piece], wl: f64, net: u32| {
+                        leg.iter().all(|q| {
+                            let (s, e) = (q.start(), q.end());
+                            obstacles
+                                .check_pair_track(c.layer, s, e, wl, &skip, clearance)
+                                .is_none()
+                                && placed.iter().all(|&(l, a, b, r, other)| {
+                                    l != c.layer
+                                        || other == net
+                                        || other == p
+                                        || other == n
+                                        || seg_seg(s, e, a, b) - r - wl / 2.0 >= clearance - 1e-3
+                                })
+                        })
+                    };
+                    if !(clear(&lp, wp, p) && clear(&ln, wn, n)) {
+                        continue;
+                    }
+                    let new_skew = skew + ap - an;
+                    if best
+                        .as_ref()
+                        .is_none_or(|b| new_skew.abs() < (skew + b.3 - b.4).abs())
+                    {
+                        best = Some((add, lp, ln, ap, an));
+                    }
+                }
+                if best.is_some() {
+                    break;
+                }
+            }
+            let Some((_, lp, ln, ap, an)) = best else {
+                continue;
+            };
+            // Whole new tracks: the untouched ends, then the legs.
+            let tp = &g.tracks[c.ip];
+            let tn = &g.tracks[c.jn];
+            let ps = [tp.start.x.mil(), tp.start.y.mil()];
+            let pe = [tp.end.x.mil(), tp.end.y.mil()];
+            let mut newp = Vec::new();
+            if c.span.0 > 1e-6 {
+                newp.push(Piece::Line(ps, pt(c, c.span.0, 0.0)));
+            }
+            newp.extend(lp.iter().copied());
+            if pt(c, c.span.1, 0.0) != pe {
+                newp.push(Piece::Line(pt(c, c.span.1, 0.0), pe));
+            }
+            let along = |q: P| (q[0] - c.a[0]) * c.u[0] + (q[1] - c.a[1]) * c.u[1];
+            let (ns, ne) = {
+                let s = [tn.start.x.mil(), tn.start.y.mil()];
+                let e = [tn.end.x.mil(), tn.end.y.mil()];
+                if along(s) <= along(e) {
+                    (s, e)
+                } else {
+                    (e, s)
+                }
+            };
+            let mut newn = Vec::new();
+            if along(ns) < c.span.0 - 1e-6 {
+                newn.push(Piece::Line(ns, pt(c, c.span.0, c.d)));
+            }
+            newn.extend(ln.iter().copied());
+            if along(ne) > c.span.1 + 1e-6 {
+                newn.push(Piece::Line(pt(c, c.span.1, c.d), ne));
+            }
+            for q in &lp {
+                placed.push((c.layer, q.start(), q.end(), wp / 2.0, p));
+            }
+            for q in &ln {
+                placed.push((c.layer, q.start(), q.end(), wn / 2.0, n));
+            }
+            used.insert(c.ip);
+            used.insert(c.jn);
+            swaps.push((c.ip, newp));
+            swaps.push((c.jn, newn));
+            added.0 += ap;
+            added.1 += an;
+            skew += ap - an;
+            need -= (ap + an) / 2.0;
+            done = true;
+            break;
+        }
+        if !done {
+            break;
+        }
+    }
+    added
 }
 
 #[cfg(test)]
@@ -385,5 +688,55 @@ mod tests {
         }
         assert!(checked > 0);
         assert_eq!(m.short(1.0).count(), 0);
+    }
+
+    #[test]
+    fn pairs_meander_together() {
+        let mut b = board();
+        // Nets 0 and 1 become a pair 8 mil apart (centre to centre, 5 mil
+        // tracks), 1000 mil long; net 2 is 1200 long and far away.
+        b.diff_pairs.push(crate::DiffPair {
+            name: "D".into(),
+            positive: "D0".into(),
+            negative: "D1".into(),
+        });
+        for (i, y) in [(0usize, 0.0), (1, 8.0)] {
+            let t = &mut b.geometry.tracks[i];
+            t.start = Point::mil(0.0, y);
+            t.end = Point::mil(1000.0, y);
+        }
+        b.geometry.tracks[2].start = Point::mil(0.0, 400.0);
+        b.geometry.tracks[2].end = Point::mil(1200.0, 400.0);
+        crate::connectivity::analyse(&mut b);
+        let m = match_lengths(&b, &[0, 1, 2], None, 60.0, None, 5.0);
+        assert_eq!(m.pairs, vec![(0, 1)]);
+        assert!((m.target - 1200.0).abs() < 1e-6);
+        assert_eq!(m.short(2.0).count(), 0, "{:?}", m.nets);
+        let mut h = crate::edit::History::default();
+        h.apply(&mut b, "tune", m.edits);
+        crate::connectivity::analyse(&mut b);
+        let (p, n) = (b.net_length(0).mil(), b.net_length(1).mil());
+        assert!(((p + n) / 2.0 - 1200.0).abs() < 2.0, "{p} {n}");
+        assert!((p - n).abs() < 10.0, "skew {}", p - n);
+        // The legs keep their gap: no piece of one comes nearer the other
+        // than the pair did (8 mil centre to centre).
+        let legs = |net: u32| -> Vec<(P, P)> {
+            b.geometry
+                .tracks
+                .iter()
+                .filter(|t| t.net == Some(net))
+                .map(|t| {
+                    (
+                        [t.start.x.mil(), t.start.y.mil()],
+                        [t.end.x.mil(), t.end.y.mil()],
+                    )
+                })
+                .collect()
+        };
+        for (a0, a1) in legs(0) {
+            for &(b0, b1) in &legs(1) {
+                assert!(seg_seg(a0, a1, b0, b1) > 8.0 - 0.01);
+            }
+        }
     }
 }

@@ -8,3 +8,4 @@ license.workspace = true
 [dependencies]
 truck-stepio = "0.3"
 truck-meshalgo = "0.4"
+truck-topology = "0.6"

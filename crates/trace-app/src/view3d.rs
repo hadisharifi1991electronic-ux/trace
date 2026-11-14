@@ -256,6 +256,8 @@ impl Default for Options {
 /// Builds the board's 3D mesh, in mm with the board centred on the origin.
 /// Tessellated part models, by index into `Geometry::models`.
 pub type Models = [Option<Arc<trace_step::Mesh>>];
+/// Every part model of a board, meshed where the reader managed it.
+pub type Meshes = Arc<Vec<Option<Arc<trace_step::Mesh>>>>;
 
 pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
     let b = scene.bounds;
@@ -505,11 +507,9 @@ fn place_models(
         }
         let [rx, ry, rz] = body.model_rotation_deg;
         let (rx, ry) = (rx.to_radians(), ry.to_radians());
-        // Altium's z rotation already includes the part's own rotation.
-        let mut rz = (rz - body.rotation_deg).to_radians();
-        if body.bottom {
-            rz = -rz;
-        }
+        // Altium's z rotation already includes the part's own rotation. On
+        // the bottom it turns the same way before the model is turned over.
+        let rz = (rz - body.rotation_deg).to_radians();
         let rot = |a: f64, axis: usize| -> [[f64; 3]; 3] {
             let (s, c) = a.sin_cos();
             match axis {
@@ -1054,6 +1054,26 @@ impl View3d {
     /// Build the mesh again from the same board (parts fitted changed).
     pub fn rebuild(&mut self) {
         self.built = None;
+    }
+
+    /// The board's part models meshed, read first if need be: how far the
+    /// reading has got (done, of) while it runs.
+    pub fn meshes(&mut self, models: &[trace_core::Model3d]) -> Result<Meshes, (usize, usize)> {
+        if let Some(m) = &self.models {
+            return Ok(m.clone());
+        }
+        let l = self
+            .loader
+            .get_or_insert_with(|| start_loader(models))
+            .clone();
+        if let Some(r) = l.result.lock().ok().and_then(|mut r| r.take()) {
+            self.model_count = r.iter().filter(|m| m.is_some()).count();
+            let a = Arc::new(r);
+            self.models = Some(a.clone());
+            self.loader = None;
+            return Ok(a);
+        }
+        Err((l.done.load(Ordering::Relaxed), l.total))
     }
 
     pub fn destroy(&self, gl: &glow::Context) {

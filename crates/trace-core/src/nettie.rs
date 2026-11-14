@@ -50,10 +50,17 @@ pub fn ties(board: &Board) -> HashSet<usize> {
                     && (a.layer == b.layer
                         || matches!(a.layer, crate::LayerRef::AllCopper)
                         || matches!(b.layer, crate::LayerRef::AllCopper))
-                    && (a.at.x.0 - b.at.x.0).abs() * 2
-                        < a.size_x.0.max(a.size_y.0) + b.size_x.0.max(b.size_y.0)
-                    && (a.at.y.0 - b.at.y.0).abs() * 2
-                        < a.size_x.0.max(a.size_y.0) + b.size_x.0.max(b.size_y.0)
+                    && {
+                        // One laid on the other: centres closer than half
+                        // the narrower pad, not merely neighbours touching.
+                        let small = a
+                            .size_x
+                            .mm()
+                            .min(a.size_y.mm())
+                            .min(b.size_x.mm().min(b.size_y.mm()));
+                        let d = (a.at.x.mm() - b.at.x.mm()).hypot(a.at.y.mm() - b.at.y.mm());
+                        d < small / 2.0
+                    }
             })
         });
         if stacked {

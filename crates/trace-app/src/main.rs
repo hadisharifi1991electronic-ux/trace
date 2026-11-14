@@ -4,6 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod canvas;
+mod clearwin;
 mod cm;
 mod drc;
 mod editing;
@@ -134,6 +135,7 @@ pub struct App {
     tidy: tidywin::TidyWindow,
     tests: testwin::TestWindow,
     reuse: reusewin::ReuseWindow,
+    clear3d: clearwin::ClearWindow,
     variants: varwin::VariantWindow,
     fan: fanwin::FanoutWindow,
     swap: swapwin::SwapWindow,
@@ -223,6 +225,7 @@ impl App {
             tidy: tidywin::TidyWindow::default(),
             tests: testwin::TestWindow::default(),
             reuse: reusewin::ReuseWindow::default(),
+            clear3d: clearwin::ClearWindow::default(),
             variants: varwin::VariantWindow::default(),
             fan: fanwin::FanoutWindow::default(),
             swap: swapwin::SwapWindow::default(),
@@ -1778,6 +1781,18 @@ impl App {
                 {
                     ui.close_menu();
                     self.reuse.open = true;
+                }
+                if ui
+                    .add_enabled(has, egui::Button::new("3D clearance…"))
+                    .on_hover_text(
+                        "Part bodies (3D models, or boxes from the pads) that run into each \
+                         other or come too close, parts taller than the Height rules, bodies \
+                         over the board edge",
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.clear3d.open = true;
                 }
                 let sel_n = self.edit.sel.parts.len();
                 if ui
@@ -3855,6 +3870,20 @@ impl eframe::App for App {
             .and_then(|scene| self.reuse.show(ctx, &scene.board, &sel_parts));
         if let Some((label, edits)) = reused {
             self.apply_edits(&label, edits);
+        }
+        let shown = match &self.scene {
+            Some(scene) => self.clear3d.show(ctx, &scene.board, &mut self.view3d),
+            None => None,
+        };
+        if let Some(clearwin::ShowParts(parts, at, text)) = shown {
+            let p = [(at[0] / 0.0254) as f32, (at[1] / 0.0254) as f32];
+            self.edit.sel = Default::default();
+            self.edit.sel.parts.extend(parts);
+            self.focus = Some(Focus::Point(p, 3.0));
+            self.needs_fit = false;
+            self.marker = Some(p);
+            self.selected = None;
+            self.message = Some((text, false));
         }
         let var_act = self
             .scene

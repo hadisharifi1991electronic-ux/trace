@@ -56,7 +56,8 @@ pub fn mesh(data: &[u8]) -> Result<Mesh, String> {
         let shell_color = colors.get(&id).copied();
         let faces: Vec<u64> = ents.get(&id).map(|e| e.refs.clone()).unwrap_or_default();
         let res = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let cs = table.to_compressed_shell(holder).ok()?;
+            let mut cs = table.to_compressed_shell(holder).ok()?;
+            mend(&mut cs);
             let mut lo = [f64::MAX; 3];
             let mut hi = [f64::MIN; 3];
             for v in &cs.vertices {
@@ -103,6 +104,124 @@ pub fn mesh(data: &[u8]) -> Result<Mesh, String> {
         return Err("no solid in the file could be read".into());
     }
     Ok(out)
+}
+
+type Shell = truck_topology::compress::CompressedShell<
+    truck_meshalgo::prelude::Point3,
+    truck_stepio::r#in::alias::Curve3D,
+    truck_stepio::r#in::alias::Surface,
+>;
+
+/// Mends faces whose surface came out of the reader with NaN in it (a
+/// plane from a zero-length direction), which send the tessellator into
+/// allocating without end: a plane is rebuilt through its boundary, and
+/// any other such face is left out.
+fn mend(cs: &mut Shell) {
+    use truck_meshalgo::prelude::*;
+    use truck_stepio::r#in::alias::{Curve2D, Curve3D};
+    use truck_stepio::r#in::alias::{ElementarySurface, Surface};
+    let finite = |p: Point3| p.x.is_finite() && p.y.is_finite() && p.z.is_finite();
+    let mut drop = Vec::new();
+    // A spline edge whose knots are not clamped is read over its whole knot
+    // range, outside the curve's own span, where dividing it never ends: it
+    // becomes the chord between its ends, and a closed one takes its faces
+    // out.
+    let mut lost = HashSet::new();
+    for (ei, e) in cs.edges.iter_mut().enumerate() {
+        let loose = match &e.curve {
+            Curve3D::BSplineCurve(c) => !c.is_clamped(),
+            Curve3D::NurbsCurve(c) => !c.is_clamped(),
+            Curve3D::PCurve(pc) => match pc.curve().as_ref() {
+                Curve2D::BSplineCurve(c) => !c.is_clamped(),
+                Curve2D::NurbsCurve(c) => !c.is_clamped(),
+                _ => false,
+            },
+            _ => false,
+        };
+        if !loose {
+            continue;
+        }
+        let (a, b) = (cs.vertices[e.vertices.0], cs.vertices[e.vertices.1]);
+        if (a - b).magnitude2() > 1e-18 {
+            e.curve = Curve3D::Line(truck_stepio::r#in::alias::Line(a, b));
+        } else {
+            lost.insert(ei);
+        }
+    }
+    for (fi, f) in cs.faces.iter_mut().enumerate() {
+        let bad = match &f.surface {
+            Surface::ElementarySurface(e) => match e.as_ref() {
+                ElementarySurface::Plane(p) => {
+                    !(finite(p.origin())
+                        && p.u_axis().magnitude2().is_finite()
+                        && p.v_axis().magnitude2().is_finite())
+                }
+                other => format!("{other:?}").contains("NaN"),
+            },
+            Surface::SweptCurve(c) => format!("{c:?}").contains("NaN"),
+            Surface::BSplineSurface(b) => !b.control_points().iter().flatten().all(|&p| finite(p)),
+            Surface::NurbsSurface(_) => false,
+        };
+        if f.boundaries
+            .iter()
+            .flatten()
+            .any(|e| lost.contains(&e.index))
+        {
+            drop.push(fi);
+            continue;
+        }
+        if !bad {
+            continue;
+        }
+        let is_plane = matches!(&f.surface, Surface::ElementarySurface(e) if matches!(e.as_ref(), ElementarySurface::Plane(_)));
+        // The outer boundary's corners.
+        let pts: Vec<Point3> = f
+            .boundaries
+            .first()
+            .into_iter()
+            .flatten()
+            .filter_map(|e| {
+                let edge = cs.edges.get(e.index)?;
+                let v = if e.orientation {
+                    edge.vertices.0
+                } else {
+                    edge.vertices.1
+                };
+                (v < cs.vertices.len()).then(|| cs.vertices[v])
+            })
+            .filter(|&p| finite(p))
+            .collect();
+        // Newell's normal, which follows the loop's turn.
+        let mut n = Vector3::new(0.0, 0.0, 0.0);
+        for i in 0..pts.len() {
+            let (a, b) = (pts[i], pts[(i + 1) % pts.len()]);
+            n += Vector3::new(
+                (a.y - b.y) * (a.z + b.z),
+                (a.z - b.z) * (a.x + b.x),
+                (a.x - b.x) * (a.y + b.y),
+            );
+        }
+        let far = pts
+            .iter()
+            .skip(1)
+            .map(|&p| p - pts[0])
+            .max_by(|a, b| a.magnitude2().total_cmp(&b.magnitude2()));
+        match far {
+            Some(u) if is_plane && n.magnitude2() > 1e-24 && u.magnitude2() > 1e-24 => {
+                let n = n.normalize();
+                let u = (u - n * u.dot(n)).normalize();
+                let v = n.cross(u);
+                let o = pts[0];
+                f.surface = Surface::ElementarySurface(Box::new(ElementarySurface::Plane(
+                    truck_stepio::r#in::alias::Plane::new(o, o + u, o + v),
+                )));
+            }
+            _ => drop.push(fi),
+        }
+    }
+    for fi in drop.into_iter().rev() {
+        cs.faces.remove(fi);
+    }
 }
 
 /// Adds a face's triangles, leaving out any that stray outside the shell's
@@ -331,16 +450,54 @@ fn numbers_in(args: &str) -> Vec<f64> {
 
 /// Millimetres per file length unit.
 fn length_unit(text: &str) -> f64 {
-    let t = text.to_ascii_uppercase();
-    if t.contains("CONVERSION_BASED_UNIT('INCH'") || t.contains("CONVERSION_BASED_UNIT ( 'INCH'") {
-        25.4
-    } else if t.contains("SI_UNIT(.MILLI.,.METRE.)") || t.contains(".MILLI., .METRE.") {
-        1.0
-    } else if t.contains("SI_UNIT($,.METRE.)") || t.contains("SI_UNIT( $, .METRE. )") {
-        1000.0
-    } else {
-        1.0
+    let t: String = text
+        .chars()
+        .filter(|c| !c.is_whitespace())
+        .collect::<String>()
+        .to_ascii_uppercase();
+    if t.contains("CONVERSION_BASED_UNIT('INCH'") {
+        return 25.4;
     }
+    if t.contains("CONVERSION_BASED_UNIT('FOOT'") {
+        return 304.8;
+    }
+    // The prefix of the SI length unit: SI_UNIT(.CENTI.,.METRE.).
+    let mut rest = t.as_str();
+    while let Some(i) = rest.find("SI_UNIT(") {
+        rest = &rest[i + 8..];
+        let Some(end) = rest.find(')') else { break };
+        let args = &rest[..end];
+        if let Some(prefix) = args.strip_suffix(",.METRE.") {
+            return match prefix {
+                ".MILLI." => 1.0,
+                ".CENTI." => 10.0,
+                ".DECI." => 100.0,
+                ".MICRO." => 0.001,
+                ".KILO." => 1e6,
+                _ => 1000.0,
+            };
+        }
+    }
+    1.0
+}
+
+#[cfg(test)]
+#[test]
+fn reads_the_length_unit() {
+    assert_eq!(
+        length_unit("#1=(LENGTH_UNIT()NAMED_UNIT(*)SI_UNIT(.CENTI.,.METRE.));"),
+        10.0
+    );
+    assert_eq!(
+        length_unit("( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT( .MILLI., .METRE. ) )"),
+        1.0
+    );
+    assert_eq!(
+        length_unit("SI_UNIT($,.RADIAN.) SI_UNIT($,.METRE.)"),
+        1000.0
+    );
+    assert_eq!(length_unit("CONVERSION_BASED_UNIT ( 'INCH', #5 )"), 25.4);
+    assert_eq!(length_unit("nothing"), 1.0);
 }
 
 /// Colour of each styled item, keyed by the shell or face it applies to.
@@ -530,24 +687,65 @@ fn placements(ents: &HashMap<u64, Entity>) -> HashMap<u64, Vec<Xform>> {
         g.insert(x, r);
         r
     }
-    // (child, parent, transform child -> parent)
-    let mut links: Vec<(u64, u64, Xform)> = Vec::new();
+    // Which representation is the parent in each relationship with a
+    // transform: writers differ, so ask the assembly usage behind it
+    // (CONTEXT_DEPENDENT_SHAPE_REPRESENTATION -> NEXT_ASSEMBLY_USAGE_OCCURRENCE
+    // relating, related) and the representation of each product definition.
+    let mut rep_of_pd: HashMap<u64, Vec<u64>> = HashMap::new();
     for e in ents.values() {
+        if e.kind != "SHAPE_DEFINITION_REPRESENTATION" {
+            continue;
+        }
+        let (Some(pds), Some(&rep)) = (e.refs.first().and_then(|r| ents.get(r)), e.refs.get(1))
+        else {
+            continue;
+        };
+        if let Some(&pd) = pds.refs.first() {
+            rep_of_pd.entry(pd).or_default().push(rep);
+        }
+    }
+    let mut parent_of_rel: HashMap<u64, u64> = HashMap::new();
+    for e in ents.values() {
+        if e.kind != "CONTEXT_DEPENDENT_SHAPE_REPRESENTATION" {
+            continue;
+        }
+        let (Some(&rel), Some(pds)) = (e.refs.first(), e.refs.get(1).and_then(|r| ents.get(r)))
+        else {
+            continue;
+        };
+        let Some(nauo) = pds.refs.first().and_then(|r| ents.get(r)) else {
+            continue;
+        };
+        if let Some(reps) = nauo.refs.first().and_then(|pd| rep_of_pd.get(pd)) {
+            for &r in reps {
+                parent_of_rel.insert(rel, r);
+            }
+        }
+    }
+    // (child, parent, child item, parent item)
+    let mut raw: Vec<(u64, u64, u64, u64)> = Vec::new();
+    for (&id, e) in ents.iter() {
         if !e.kind.contains("REPRESENTATION_RELATIONSHIP") {
             continue;
         }
         let (Some(&r1), Some(&r2)) = (e.refs.first(), e.refs.get(1)) else {
             continue;
         };
-        let transform = e.refs.get(2).and_then(|t| ents.get(t)).and_then(|t| {
-            (t.kind == "ITEM_DEFINED_TRANSFORMATION").then(|| {
-                let from = axis_placement(ents, *t.refs.first().unwrap_or(&0));
-                let to = axis_placement(ents, *t.refs.get(1).unwrap_or(&0));
-                to.then_after(&from.inverse())
-            })
-        });
-        match transform {
-            Some(x) => links.push((r1, r2, x)),
+        let items = e
+            .refs
+            .get(2)
+            .and_then(|t| ents.get(t))
+            .filter(|t| t.kind == "ITEM_DEFINED_TRANSFORMATION")
+            .map(|t| (*t.refs.first().unwrap_or(&0), *t.refs.get(1).unwrap_or(&0)));
+        match items {
+            Some((i1, i2)) => {
+                // Unless the assembly says otherwise, rep_1 is the child.
+                if parent_of_rel.get(&id) == Some(&r1) {
+                    raw.push((r2, r1, i2, i1));
+                } else {
+                    raw.push((r1, r2, i1, i2));
+                }
+            }
             None => {
                 let (a, b) = (find(&mut group, r1), find(&mut group, r2));
                 if a != b {
@@ -556,6 +754,15 @@ fn placements(ents: &HashMap<u64, Entity>) -> HashMap<u64, Vec<Xform>> {
             }
         }
     }
+    // (child, parent, transform child -> parent)
+    let links: Vec<(u64, u64, Xform)> = raw
+        .into_iter()
+        .map(|(c, p, ci, pi)| {
+            let from = axis_placement(ents, ci);
+            let to = axis_placement(ents, pi);
+            (c, p, to.then_after(&from.inverse()))
+        })
+        .collect();
     if links.is_empty() {
         return HashMap::new();
     }

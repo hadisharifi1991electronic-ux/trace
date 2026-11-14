@@ -11,4 +11,5 @@ trace-altium.workspace = true
 trace-allegro.workspace = true
 trace-gerber.workspace = true
 trace-export.workspace = true
+trace-step.workspace = true
 serde_json = "1"

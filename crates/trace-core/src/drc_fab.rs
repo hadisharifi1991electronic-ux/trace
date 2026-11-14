@@ -946,6 +946,50 @@ fn parts(board: &Board, info: &NetInfo, out: &mut Vec<Violation>) {
     }
 }
 
+/// The heights (mm) a part's Height rule allows, and the rule's name.
+#[derive(Clone, Debug, PartialEq)]
+pub struct HeightRule {
+    pub name: String,
+    pub min: Option<f64>,
+    pub max: Option<f64>,
+    pub preferred: Option<f64>,
+}
+
+/// Each part's Height rule (`MAXHEIGHT`, `MINHEIGHT`, `PREFHEIGHT`), judged
+/// as placement rules are: where rules Trace cannot tell apart may take
+/// the part, the most lenient limit wins.
+pub fn height_rules(board: &Board) -> Vec<Option<HeightRule>> {
+    let info = NetInfo::new(board);
+    let mut rules = Rules::new(board, &info, "Height");
+    let mm = |rules: &Rules, r: usize, k: &str| rules.mil(r, k).map(|v| v * 0.0254);
+    (0..board.components.len())
+        .map(|c| {
+            if rules.list.is_empty() {
+                return None;
+            }
+            let w = (None, Obj::Part, Some(c as u32));
+            let list = rules.deciding(|s, r| s.one(r, 0, w));
+            let &last = list.last()?;
+            let lenient = |k: &str, most: fn(f64, f64) -> f64| {
+                list.iter()
+                    .map(|&r| mm(&rules, r, k))
+                    .try_fold(None, |acc: Option<f64>, v| {
+                        // A rule without the limit sets none.
+                        let v = v?;
+                        Some(Some(acc.map_or(v, |a| most(a, v))))
+                    })
+                    .flatten()
+            };
+            Some(HeightRule {
+                name: rules.list[last].name.clone(),
+                max: lenient("MAXHEIGHT", f64::max),
+                min: lenient("MINHEIGHT", f64::min),
+                preferred: mm(&rules, last, "PREFHEIGHT"),
+            })
+        })
+        .collect()
+}
+
 /// Copper too near the board outline, or outside it.
 fn edge(board: &Board, info: &NetInfo, items: &[Copper], out: &mut Vec<Violation>) {
     let mut rules = Rules::new(board, info, "BoardOutlineClearance");

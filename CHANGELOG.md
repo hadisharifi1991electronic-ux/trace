@@ -3,6 +3,30 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.54.0 (2026-11-14)
+
+- 3D clearance (Edit > 3D clearance…, `trace clear3d`): part bodies that
+  run into each other or come closer than a set room, parts taller or
+  lower than the board's Height rules (Altium MAXHEIGHT / MINHEIGHT, by
+  side or part) or a limit per side, and bodies hanging over the board
+  edge. Bodies are the parts' 3D models, compared by their outlines and
+  then by height maps, so a part under a shield can's lid or a
+  connector's overhang is not a collision; parts without a model get a
+  box sized from their pads. Click a finding to select and show it.
+- Pair-aware length tuning (`trace match` with a pair's name): both legs
+  of a differential pair meander together, one meander offset to each
+  leg, so the pair keeps its gap and its skew while its length grows to
+  the target. Pairs in a match group are tuned first, and their mean
+  length counts towards the group.
+- 3D models: models in centimetres (and other metre prefixes) now come
+  in at their true size; STEP assemblies whose writer lists the parent
+  first now place their parts; a model with a broken plane, or a spline
+  edge read past its own span, no longer makes reading use all memory;
+  and bottom-side parts turned by a quarter turn now face the right way.
+  On the LimeSDR-USB every model now matches OpenCascade's size.
+- Net ties found on their own are now only parts with pads really laid
+  one on another; 0.53 also took parts whose neighbouring pads touch.
+
 ## 0.53.0 (2026-11-14)
 
 - Design reuse (Edit > Copy block layout…, `trace reuse`): a block laid

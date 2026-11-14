@@ -218,7 +218,7 @@ fn search(ask: &Ask, from: P, to: P, partial: bool) -> Option<(Vec<P>, bool)> {
 /// Keeps only the corners of a grid path, then pulls it tight: from each
 /// corner, the furthest later one that a clear one- or two-segment 45°
 /// path reaches.
-fn tighten(ask: &Ask, pts: Vec<P>) -> Vec<P> {
+pub fn tighten(ask: &Ask, pts: Vec<P>) -> Vec<P> {
     let mut corners: Vec<P> = Vec::with_capacity(pts.len());
     for p in pts {
         if corners.len() >= 2 {

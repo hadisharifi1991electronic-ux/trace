@@ -603,6 +603,9 @@ pub struct Obstacles {
     grid: HashMap<(u8, i32, i32), Vec<usize>>,
     /// The highest copper layer an item is on.
     top: u8,
+    /// Nets whose rules ask more room of everything near them.
+    net_gap: HashMap<u32, f64>,
+    max_gap: f64,
 }
 
 /// The grid layer of items on every copper layer.
@@ -797,6 +800,41 @@ impl Obstacles {
             boxes,
             grid,
             top,
+            net_gap: HashMap::new(),
+            max_gap: 0.0,
+        }
+    }
+
+    /// Makes everything keep at least `gap` (mil) from the copper of each
+    /// net listed, whatever clearance a check asks for.
+    pub fn set_net_gaps(&mut self, gaps: HashMap<u32, f64>) {
+        self.max_gap = gaps.values().copied().fold(0.0, f64::max);
+        self.net_gap = gaps;
+    }
+
+    /// Adds copper placed since the board was read: a capsule on `layer`,
+    /// or on every layer for `None` (a through via).
+    pub fn add(&mut self, layer: Option<u8>, a: P, b: P, r: f64, net: Option<u32>) {
+        let shape = Shape::Capsule { a, b, r };
+        let bb = shape.bbox();
+        let i = self.items.len();
+        self.items.push(Obstacle {
+            layer,
+            net,
+            shape,
+            track: None,
+        });
+        self.boxes.push(bb);
+        for gx in (bb[0] / CELL).floor() as i32..=(bb[2] / CELL).floor() as i32 {
+            for gy in (bb[1] / CELL).floor() as i32..=(bb[3] / CELL).floor() as i32 {
+                self.grid
+                    .entry((layer.unwrap_or(ALL), gx, gy))
+                    .or_default()
+                    .push(i);
+            }
+        }
+        if let Some(l) = layer {
+            self.top = self.top.max(l);
         }
     }
 
@@ -971,7 +1009,7 @@ impl Obstacles {
         clearance: f64,
         f: &mut dyn FnMut(&Obstacle, f64),
     ) {
-        let reach = r + clearance;
+        let reach = r + clearance.max(self.max_gap);
         let (x0, y0) = (a[0].min(b[0]) - reach, a[1].min(b[1]) - reach);
         let (x1, y1) = (a[0].max(b[0]) + reach, a[1].max(b[1]) + reach);
         let (gx0, gx1) = ((x0 / CELL).floor() as i32, (x1 / CELL).floor() as i32);
@@ -1008,7 +1046,11 @@ impl Obstacles {
                             continue;
                         }
                         let gap = o.shape.gap(a, b, r);
-                        if gap < clearance - 1e-3 {
+                        let need = match o.net.and_then(|n| self.net_gap.get(&n)) {
+                            Some(&g) => g.max(clearance),
+                            None => clearance,
+                        };
+                        if gap < need - 1e-3 {
                             f(o, gap);
                         }
                     }

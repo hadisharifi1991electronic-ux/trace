@@ -3,6 +3,7 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod autowin;
 mod canvas;
 mod clearwin;
 mod cm;
@@ -136,6 +137,7 @@ pub struct App {
     tests: testwin::TestWindow,
     reuse: reusewin::ReuseWindow,
     clear3d: clearwin::ClearWindow,
+    autoroute: autowin::AutoWindow,
     variants: varwin::VariantWindow,
     fan: fanwin::FanoutWindow,
     swap: swapwin::SwapWindow,
@@ -226,6 +228,7 @@ impl App {
             tests: testwin::TestWindow::default(),
             reuse: reusewin::ReuseWindow::default(),
             clear3d: clearwin::ClearWindow::default(),
+            autoroute: autowin::AutoWindow::default(),
             variants: varwin::VariantWindow::default(),
             fan: fanwin::FanoutWindow::default(),
             swap: swapwin::SwapWindow::default(),
@@ -1601,6 +1604,17 @@ impl App {
                 {
                     ui.close_menu();
                     self.delete_picked();
+                }
+                if ui
+                    .add_enabled(has, egui::Button::new("Autoroute…"))
+                    .on_hover_text(
+                        "Route the open connections with tracks and vias, around what is \
+                         already on the board",
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.autoroute.open = true;
                 }
                 if ui
                     .add_enabled(
@@ -3870,6 +3884,15 @@ impl eframe::App for App {
             .and_then(|scene| self.reuse.show(ctx, &scene.board, &sel_parts));
         if let Some((label, edits)) = reused {
             self.apply_edits(&label, edits);
+        }
+        let auto_act = match &self.scene {
+            Some(scene) => self.autoroute.show(ctx, &scene.board, self.selected),
+            None => None,
+        };
+        match auto_act {
+            Some(autowin::AutoAct::Edit(label, edits)) => self.apply_edits(&label, edits),
+            Some(autowin::AutoAct::ShowNet(n)) => self.select_net(n, true),
+            None => {}
         }
         let shown = match &self.scene {
             Some(scene) => self.clear3d.show(ctx, &scene.board, &mut self.view3d),

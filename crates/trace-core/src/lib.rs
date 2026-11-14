@@ -4,6 +4,7 @@
 //! types, and the editor, router and checkers only ever read these types.
 
 pub mod annotate;
+pub mod autoroute;
 pub mod backdrill;
 pub mod board;
 pub mod body;

@@ -74,6 +74,13 @@ USAGE:
               [--rows 1] [--via 16/8] [--layers 1-4] [--on 1,3] [--clearance C]
                                                 Line a net's tracks (RF lines, a pair) with ground vias on both
                                                 sides, a twentieth of a wavelength apart at GHz (default 6)
+    trace autoroute <board> <out.tracepcb> [--nets a,b] [--unroute] [--layers 1,4] [--width 6mil]
+                    [--clearance 6mil] [--via 20/10] [--via-cost 60] [--poured]
+                                                Route the open connections (of the nets named, or all but the
+                                                poured ones unless --poured): tracks and through vias around
+                                                what is on the board, shortest first. --unroute takes up the
+                                                named nets' routing first. Layers count from 1 (top); planes
+                                                are left out by default
     trace teardrops <board> <out.tracepcb> [--nets a,b] [--smd] [--no-vias] [--no-th] [--length 1.0]
               [--width 0.9] [--clearance C] [--remove]
                                                 Teardrops where tracks meet vias and through-hole pads (--smd:
@@ -209,6 +216,7 @@ fn main() -> ExitCode {
         ["pairsize", file, layer, rest @ ..] => pairsize(file, layer, rest),
         ["validate", rest @ ..] => validate(rest),
         ["stitch", file, net, out, rest @ ..] => stitch_cmd(file, net, out, rest),
+        ["autoroute", file, out, rest @ ..] => autoroute_cmd(file, out, rest),
         ["teardrops", file, out, rest @ ..] => teardrops_cmd(file, out, rest),
         ["gloss", file, out, rest @ ..] => gloss_cmd(file, out, rest),
         ["fanout", file, parts, out, rest @ ..] => fanout_cmd(file, parts, out, rest),
@@ -2660,6 +2668,113 @@ fn save_edits(
     } else {
         trace_core::file::save(&b, Path::new(out))?;
     }
+    Ok(())
+}
+
+fn autoroute_cmd(file: &str, out: &str, rest: &[&str]) -> Res {
+    use trace_core::autoroute::{autoroute, unroute, Goal};
+    let mut b = board(file)?;
+    let mut goal = Goal::default();
+    let mut rip = false;
+    let mut i = 0;
+    while i < rest.len() {
+        let a = rest[i];
+        let val = || rest.get(i + 1).copied().ok_or(format!("{a} needs a value"));
+        match a {
+            "--nets" => {
+                goal.nets = Some(nets_list(&b, val()?)?);
+                i += 1;
+            }
+            "--layers" => {
+                let v: Result<Vec<u8>, String> = val()?
+                    .split(',')
+                    .map(|x| {
+                        x.trim()
+                            .parse::<u8>()
+                            .ok()
+                            .filter(|&n| n >= 1)
+                            .map(|n| n - 1)
+                            .ok_or(format!("not a layer number: {x}"))
+                    })
+                    .collect();
+                goal.layers = Some(v?);
+                i += 1;
+            }
+            "--width" => {
+                goal.width = Some(mil_of(val()?)?);
+                i += 1;
+            }
+            "--clearance" => {
+                goal.clearance = Some(mil_of(val()?)?);
+                i += 1;
+            }
+            "--via" => {
+                let v = val()?;
+                let (d, h) = v
+                    .split_once('/')
+                    .ok_or(format!("--via wants pad/drill: {v}"))?;
+                let num = |x: &str| {
+                    x.trim()
+                        .parse::<f64>()
+                        .map_err(|_| format!("not a number: {x}"))
+                };
+                goal.via = Some((num(d)?, num(h)?));
+                i += 1;
+            }
+            "--via-cost" => {
+                goal.via_cost = val()?.parse().map_err(|_| "--via-cost wants mil")?;
+                i += 1;
+            }
+            "--poured" => goal.skip_poured = false,
+            "--unroute" => rip = true,
+            o => return Err(format!("unknown option {o}").into()),
+        }
+        i += 1;
+    }
+    if rip {
+        let nets = goal.nets.clone().ok_or("--unroute needs --nets")?;
+        let mut n = 0;
+        for net in nets {
+            let edits = unroute(&b, net);
+            n += edits.len();
+            for e in &edits {
+                e.apply(&mut b);
+            }
+        }
+        trace_core::connectivity::analyse(&mut b);
+        println!("took up {n} tracks, arcs and vias");
+    }
+    let t = std::time::Instant::now();
+    let (edits, r) = autoroute(&b, &goal);
+    println!(
+        "{} (layers {}) in {:.1} s",
+        r.summary(),
+        r.layers
+            .iter()
+            .map(|l| (l + 1).to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+        t.elapsed().as_secs_f64()
+    );
+    for o in r.open.iter().take(20) {
+        let p = &b.geometry.pads;
+        let name = |i: usize| {
+            let q = &p[i];
+            let part = q
+                .component
+                .and_then(|c| b.components.get(c as usize))
+                .map_or("", |c| c.designator.as_str());
+            format!("{part}.{}", q.name)
+        };
+        println!(
+            "  open: {} {} - {}",
+            b.nets.get(o.net as usize).map_or("?", |n| n.name.as_str()),
+            name(o.from),
+            name(o.to)
+        );
+    }
+    save_edits(b, edits, out)?;
+    println!("saved {out}");
     Ok(())
 }
 

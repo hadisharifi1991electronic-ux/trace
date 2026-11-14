@@ -281,6 +281,7 @@ trace assembly board.PcbDoc out.pdf [--a4]   Assembly drawing: top and bottom vi
 trace fabdrawing board.PcbDoc out.pdf [--a4] Fabrication drawing: drill symbols, dimensions, drill table, stack-up, notes
 trace reuse board.PcbDoc U1,R1,C1 U2 out.tracepcb   copy U1's block layout onto U2's copy
 trace nettie board.PcbDoc NT1 out.tracepcb      mark a part as a net tie
+trace autoroute board.PcbDoc out.tracepcb [--nets a,b] [--layers 1,4] [--via 20/10]   route the open connections
 trace clear3d board.PcbDoc [--clearance 0.25mm] [--max-top 10mm] [--max-bottom 3mm]   3D clearance and height check
 trace testpoints board.PcbDoc out.tracepcb [--both] [--smd] [--report tp.csv]   probe point per net, coverage
 trace variants board.PcbDoc       assembly variants; add --variant NAME to fab, assembly, step...
@@ -498,6 +499,10 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   routing is copied with the copy's nets.
 - Net ties: Edit > Net tie: mark selected parts (or `trace nettie`) lets
   a part's own copper join its nets without a short in the rule check.
+- Autorouter: Edit > Autoroute… (or `trace autoroute`) routes the open
+  connections with tracks and through vias around what is on the board,
+  following each net's width and clearance rules, on the layers chosen
+  (planes left out). Runs in the background; one undo step.
 - 3D clearance: Edit > 3D clearance… (or `trace clear3d`) checks the part
   bodies (their 3D models, or boxes from the pads for parts without one)
   for collisions and a least room between them, parts taller or lower

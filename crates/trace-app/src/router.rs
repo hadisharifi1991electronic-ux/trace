@@ -939,33 +939,7 @@ fn too_close(board: &Board, h: &Hit, clearance: f64) -> String {
 
 /// Edits that remove every track, arc and via of a net.
 pub fn unroute(board: &Board, net: u32) -> Vec<Edit> {
-    let g = &board.geometry;
-    let mut edits = Vec::new();
-    for (i, t) in g.tracks.iter().enumerate().rev() {
-        if t.net == Some(net) && matches!(t.layer, LayerRef::Copper(_)) {
-            edits.push(Edit::RemoveTrack {
-                index: i,
-                track: t.clone(),
-            });
-        }
-    }
-    for (i, a) in g.arcs.iter().enumerate().rev() {
-        if a.net == Some(net) && matches!(a.layer, LayerRef::Copper(_)) {
-            edits.push(Edit::RemoveArc {
-                index: i,
-                arc: a.clone(),
-            });
-        }
-    }
-    for (i, v) in g.vias.iter().enumerate().rev() {
-        if v.net == Some(net) {
-            edits.push(Edit::RemoveVia {
-                index: i,
-                via: v.clone(),
-            });
-        }
-    }
-    edits
+    trace_core::autoroute::unroute(board, net)
 }
 
 #[cfg(test)]

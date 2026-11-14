@@ -3,6 +3,24 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.55.0 (2026-11-14)
+
+- Autorouter (Edit > Autoroute…, `trace autoroute`): routes the open
+  connections of every net (or the selected one; poured nets are left to
+  their pours) with tracks and through vias, around everything already on
+  the board. Each net's pieces are joined along their shortest links,
+  shortest first; each link is an A* search over the chosen layers (0°,
+  45° and 90° steps, a via where one fits on every layer, at a set cost)
+  pulled tight and checked segment by segment. Track width and clearance
+  follow each net's Width and Clearance rules (a net class asking more
+  room keeps it from everything routed near it); vias are the board's most
+  used size. Plane layers are left out by default. Links that fail are
+  tried again with a wider search and dearer vias. Runs in the background
+  in the app; one undo step. On the Sinara Clocker with all 109 signal
+  nets taken up it routes 180 of 188 links in 8 s with no clearance or
+  width errors.
+- `trace autoroute --unroute --nets ...` takes the nets' routing up first.
+
 ## 0.54.0 (2026-11-14)
 
 - 3D clearance (Edit > 3D clearance…, `trace clear3d`): part bodies that

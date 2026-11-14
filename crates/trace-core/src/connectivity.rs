@@ -146,12 +146,51 @@ fn lengths(board: &mut Board) {
 /// `via_length`. Call after any change to the geometry.
 pub fn analyse(board: &mut Board) {
     lengths(board);
-    let copper = board.stackup.copper_layers().count() as u8;
-    if copper == 0 {
+    if board.stackup.copper_layers().count() == 0 {
         return;
     }
     let depth = board.stackup.copper_depths();
+    let t = trace_nets(board);
+    let mut barrel = vec![0i64; board.nets.len()];
+    for (vi, (lo, hi)) in t.via_layers {
+        let v = &board.geometry.vias[vi];
+        if let (Some(n), Some(a), Some(b)) = (v.net, depth.get(lo as usize), depth.get(hi as usize))
+        {
+            if let Some(slot) = barrel.get_mut(n as usize) {
+                *slot += (b.0 - a.0).abs();
+            }
+        }
+    }
+    for (i, net) in board.nets.iter_mut().enumerate() {
+        let (pieces, pads) = t
+            .islands
+            .get(&(i as u32))
+            .map(|v| (v.len(), v.iter().map(Vec::len).sum()))
+            .unwrap_or((0, 0));
+        net.pieces = pieces;
+        net.pads = pads;
+        net.via_length = Length(barrel[i]);
+    }
+}
+
+/// Each net's pads (indices into the board's pads) grouped by the pieces
+/// of copper that join them: a net routed in full has one group.
+pub fn islands(board: &Board) -> HashMap<u32, Vec<Vec<usize>>> {
+    if board.stackup.copper_layers().count() == 0 {
+        return HashMap::new();
+    }
+    trace_nets(board).islands
+}
+
+struct Traced {
+    islands: HashMap<u32, Vec<Vec<usize>>>,
+    via_layers: HashMap<usize, (u8, u8)>,
+}
+
+fn trace_nets(board: &Board) -> Traced {
+    let copper = board.stackup.copper_layers().count() as u8;
     let g = &board.geometry;
+    let mut pad_of: HashMap<(u32, usize), usize> = HashMap::new();
     let layers_of = |l: &LayerRef| -> Vec<u8> {
         match l {
             LayerRef::Copper(i) => vec![*i],
@@ -235,7 +274,7 @@ pub fn analyse(board: &mut Board) {
             Kind::Via(vi),
         );
     }
-    for p in &g.pads {
+    for (pi, p) in g.pads.iter().enumerate() {
         let (x, y, sx, sy) = (p.at.x.mil(), p.at.y.mil(), p.size_x.mil(), p.size_y.mil());
         let shape = if (sx - sy).abs() < 1e-6 {
             Capsule::point(x, y, sx.max(sy) / 2.0)
@@ -257,7 +296,10 @@ pub fn analyse(board: &mut Board) {
                 r,
             }
         };
-        add(p.net, layers_of(&p.layer), vec![shape], Kind::Pad);
+        let item = add(p.net, layers_of(&p.layer), vec![shape], Kind::Pad);
+        if let (Some(n), false) = (p.net, layers_of(&p.layer).is_empty()) {
+            pad_of.insert((n, item), pi);
+        }
     }
 
     // Copper areas (regions and poured fills): their edges join what they
@@ -306,7 +348,7 @@ pub fn analyse(board: &mut Board) {
     };
 
     let mut via_layers: HashMap<usize, (u8, u8)> = HashMap::new();
-    let mut results: HashMap<u32, (usize, usize)> = HashMap::new(); // net -> (pieces, pads)
+    let mut islands: HashMap<u32, Vec<Vec<usize>>> = HashMap::new();
     for (net, (features, items)) in &by_net {
         let mut uf = UnionFind((0..*items).collect());
         let mut grid: HashMap<(u8, i64, i64), Vec<usize>> = HashMap::new();
@@ -353,35 +395,26 @@ pub fn analyse(board: &mut Board) {
                 }
             }
         }
-        let mut pad_roots: Vec<usize> = features
+        let mut pad_items: Vec<usize> = features
             .iter()
             .filter(|f| f.kind == Kind::Pad)
             .map(|f| f.item)
             .collect();
-        pad_roots.sort_unstable();
-        pad_roots.dedup();
-        let pads = pad_roots.len();
-        let mut roots: Vec<usize> = pad_roots.into_iter().map(|i| uf.find(i)).collect();
-        roots.sort_unstable();
-        roots.dedup();
-        results.insert(*net, (roots.len(), pads));
-    }
-
-    let mut barrel = vec![0i64; board.nets.len()];
-    for (vi, (lo, hi)) in via_layers {
-        let v = &board.geometry.vias[vi];
-        if let (Some(n), Some(a), Some(b)) = (v.net, depth.get(lo as usize), depth.get(hi as usize))
-        {
-            if let Some(slot) = barrel.get_mut(n as usize) {
-                *slot += (b.0 - a.0).abs();
+        pad_items.sort_unstable();
+        pad_items.dedup();
+        let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+        for it in pad_items {
+            if let Some(&pi) = pad_of.get(&(*net, it)) {
+                groups.entry(uf.find(it)).or_default().push(pi);
             }
         }
+        let mut list: Vec<Vec<usize>> = groups.into_values().collect();
+        list.sort();
+        islands.insert(*net, list);
     }
-    for (i, net) in board.nets.iter_mut().enumerate() {
-        let (pieces, pads) = results.get(&(i as u32)).copied().unwrap_or((0, 0));
-        net.pieces = pieces;
-        net.pads = pads;
-        net.via_length = Length(barrel[i]);
+    Traced {
+        islands,
+        via_layers,
     }
 }
 

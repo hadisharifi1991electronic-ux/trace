@@ -660,6 +660,60 @@ impl Scopes {
     }
 }
 
+/// What the rules ask of each net's tracks (mil): the preferred width of
+/// the first Width rule by priority that takes them, and the largest gap of
+/// the Clearance rules that name them (a scope other than `All`) or apply
+/// to everything.
+pub fn net_rules(board: &Board) -> Vec<(Option<f64>, Option<f64>)> {
+    let scopes = Scopes::new(board);
+    let of = |kind: &str| {
+        let mut v: Vec<&Rule> = board
+            .rules
+            .iter()
+            .filter(|r| r.enabled && r.kind.eq_ignore_ascii_case(kind))
+            .collect();
+        v.sort_by_key(|r| r.priority);
+        v
+    };
+    let (widths, gaps) = (of("Width"), of("Clearance"));
+    let mil = |r: &Rule, keys: &[&str]| {
+        keys.iter()
+            .find_map(|k| param(r, k))
+            .and_then(Length::parse)
+            .map(Length::mil)
+            .filter(|&v| v > 0.0)
+    };
+    fn scope(r: &Rule, k: usize) -> &str {
+        r.scope.get(k).map(String::as_str).unwrap_or("All").trim()
+    }
+    (0..board.nets.len())
+        .map(|n| {
+            let t = Thing {
+                net: Some(n as u32),
+                obj: Obj::Track,
+                component: None,
+                hole: None,
+                layer: None,
+                bbox: None,
+            };
+            let takes = |r: &Rule, k: usize| scopes.judge(scope(r, k), &t) == Some(true);
+            let w = widths
+                .iter()
+                .find(|r| takes(r, 0))
+                .and_then(|r| mil(r, &["PREFEREDWIDTH", "PREFERREDWIDTH", "MINLIMIT"]));
+            let g = gaps
+                .iter()
+                .filter(|r| {
+                    let all = |k| scope(r, k).eq_ignore_ascii_case("All");
+                    (all(0) && all(1)) || (0..2).any(|k| !all(k) && takes(r, k))
+                })
+                .filter_map(|r| mil(r, &["GAP"]))
+                .fold(None, |a: Option<f64>, v| Some(a.map_or(v, |a| a.max(v))));
+            (w, g)
+        })
+        .collect()
+}
+
 fn judge(scope: &str, s: &Subject) -> Option<bool> {
     let mut p = Parser {
         t: tokens(scope),

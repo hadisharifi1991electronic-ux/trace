@@ -99,6 +99,34 @@ pub fn fence_pitch(f_ghz: f64, er: f64) -> f64 {
     lambda / 20.0
 }
 
+/// The highest effective permittivity the tracks of `nets` see (on
+/// `layers`, or all): the bulk Er in a stripline, less in a microstrip,
+/// where part of the field is in air. 4 when they have no tracks.
+pub fn fence_eeff(board: &Board, nets: &[u32], layers: &[u8]) -> f64 {
+    let geo = board.layer_geometry();
+    let mut e: f64 = 0.0;
+    for t in &board.geometry.tracks {
+        let LayerRef::Copper(l) = t.layer else {
+            continue;
+        };
+        if t.text || !t.net.is_some_and(|n| nets.contains(&n)) {
+            continue;
+        }
+        if !layers.is_empty() && !layers.contains(&l) {
+            continue;
+        }
+        if let Some(g) = geo.iter().find(|g| g.copper == l) {
+            let d = g.delay_ps_per_in(t.width.mil());
+            e = e.max((d * 11.803 / 1000.0).powi(2));
+        }
+    }
+    if e > 1.0 {
+        e
+    } else {
+        4.0
+    }
+}
+
 /// Why a spot was left out.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct Skipped {
@@ -108,13 +136,16 @@ pub struct Skipped {
     pub clearance: usize,
     /// Not fully on the net's copper on enough layers.
     pub no_copper: usize,
-    /// Too near a via of the net already there or just placed.
+    /// Too near a via of the net already on the board: there is one
+    /// doing the job.
+    pub covered: usize,
+    /// Too near a via just placed.
     pub spacing: usize,
 }
 
 impl Skipped {
     pub fn total(&self) -> usize {
-        self.edge + self.clearance + self.no_copper + self.spacing
+        self.edge + self.clearance + self.no_copper + self.covered + self.spacing
     }
 }
 
@@ -158,9 +189,10 @@ impl Placed {
     pub fn summary(&self) -> String {
         let s = &self.skipped;
         format!(
-            "{} vias placed of {} spots tried; left out: {} clearance, {} not on the net's copper, {} spacing, {} board edge",
+            "{} vias placed of {} spots tried; left out: {} already covered by the net's own vias, {} clearance, {} not on the net's copper, {} spacing, {} board edge",
             self.vias.len(),
             self.tried,
+            s.covered,
             s.clearance,
             s.no_copper,
             s.spacing,
@@ -306,8 +338,9 @@ struct Site {
     outline: Option<Area>,
     slots: Vec<Area>,
     keep_tracks: Vec<(P, P, f64)>,
-    /// Vias of the net, there and placed, by cell.
+    /// Vias of the net already there, and those placed, by cell.
     vias: HashMap<(i32, i32), Vec<P>>,
+    placed: HashMap<(i32, i32), Vec<P>>,
 }
 
 #[derive(PartialEq)]
@@ -315,6 +348,7 @@ enum Why {
     Edge,
     Clearance,
     NoCopper,
+    Covered,
     Spacing,
 }
 
@@ -372,6 +406,7 @@ impl Site {
                 .collect(),
             keep_tracks,
             vias,
+            placed: HashMap::new(),
         }
     }
 
@@ -402,17 +437,20 @@ impl Site {
         // Spacing from the net's vias.
         let reach = (spacing / CELL).ceil() as i32;
         let (gx, gy) = (cell(c[0]), cell(c[1]));
-        for x in gx - reach..=gx + reach {
-            for y in gy - reach..=gy + reach {
-                if let Some(list) = self.vias.get(&(x, y)) {
-                    if list
-                        .iter()
-                        .any(|q| (q[0] - c[0]).hypot(q[1] - c[1]) < spacing)
-                    {
-                        return Err(Why::Spacing);
-                    }
-                }
-            }
+        let near = |m: &HashMap<(i32, i32), Vec<P>>| {
+            (gx - reach..=gx + reach).any(|x| {
+                (gy - reach..=gy + reach).any(|y| {
+                    m.get(&(x, y)).is_some_and(|l| {
+                        l.iter().any(|q| (q[0] - c[0]).hypot(q[1] - c[1]) < spacing)
+                    })
+                })
+            })
+        };
+        if near(&self.vias) {
+            return Err(Why::Covered);
+        }
+        if near(&self.placed) {
+            return Err(Why::Spacing);
         }
         // Tracks, pads, holes and vias, on every layer it passes.
         if self
@@ -477,7 +515,7 @@ impl Site {
     }
 
     fn keep(&mut self, c: P) {
-        self.vias
+        self.placed
             .entry((cell(c[0]), cell(c[1])))
             .or_default()
             .push(c);
@@ -545,6 +583,7 @@ fn place(
             Err(Why::Edge) => out.skipped.edge += 1,
             Err(Why::Clearance) => out.skipped.clearance += 1,
             Err(Why::NoCopper) => out.skipped.no_copper += 1,
+            Err(Why::Covered) => out.skipped.covered += 1,
             Err(Why::Spacing) => out.skipped.spacing += 1,
         }
     }
@@ -930,6 +969,9 @@ mod tests {
             layers: vec![],
         };
         assert!((goal.pitch - 51.8).abs() < 0.5, "{}", goal.pitch);
+        // The RF track is a microstrip: part of its field is in air.
+        let e = fence_eeff(&b, &[1], &[]);
+        assert!(e > 2.3 && e < 3.3, "{e}");
         let p = fence(&b, &goal).unwrap();
         let (mut up, mut down) = (0, 0);
         for v in &p.vias {

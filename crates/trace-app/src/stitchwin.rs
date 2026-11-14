@@ -288,34 +288,12 @@ impl StitchWindow {
             std::mem::swap(&mut self.via.from, &mut self.via.to);
         }
         self.via.to = self.via.to.min(n_layers - 1);
-        // λ/20 in the highest Er beside the fenced tracks' layers.
-        let geo = board.layer_geometry();
-        let er = {
-            let used: Vec<u8> = board
-                .geometry
-                .tracks
-                .iter()
-                .filter(|t| t.net.is_some_and(|n| fenced.contains(&n)))
-                .filter_map(|t| match t.layer {
-                    LayerRef::Copper(l) => Some(l),
-                    _ => None,
-                })
-                .collect();
-            let e = geo
-                .iter()
-                .filter(|g| used.is_empty() || used.contains(&g.copper))
-                .map(|g| g.er)
-                .fold(1.0, f64::max);
-            if e > 1.0 {
-                e
-            } else {
-                4.0
-            }
-        };
+        // λ/20 at the highest effective Er the fenced tracks see.
+        let er = stitch::fence_eeff(board, &fenced, &[]);
         if self.mode == Mode::Fence && !self.own_pitch {
             self.pitch = stitch::fence_pitch(self.ghz, er);
             ui.weak(format!(
-                "Vias every {:.1} mil: a twentieth of a wavelength at {} GHz in Er {:.2}.",
+                "Vias every {:.1} mil: a twentieth of a wavelength at {} GHz (effective Er {:.2}).",
                 self.pitch, self.ghz, er
             ));
         }

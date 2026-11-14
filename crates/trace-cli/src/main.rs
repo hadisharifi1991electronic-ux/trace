@@ -2421,14 +2421,8 @@ fn fence_cmd(file: &str, nets: &str, out: &str, rest: &[&str]) -> Res {
     let ground = ground
         .or_else(|| ground_net(&b))
         .ok_or("no ground net found; give --ground")?;
-    // The highest Er the fenced tracks see sets the wavelength.
-    let geo = b.layer_geometry();
-    let er = geo
-        .iter()
-        .filter(|g| on.is_empty() || on.contains(&g.copper))
-        .map(|g| g.er)
-        .fold(1.0, f64::max);
-    let er = if er > 1.0 { er } else { 4.0 };
+    // The highest effective Er the fenced tracks see sets the wavelength.
+    let er = trace_core::stitch::fence_eeff(&b, &nets, &on);
     let mut rules = o.rules;
     // A fence via need only reach the ground plane.
     rules.min_layers = 1;
@@ -2454,7 +2448,7 @@ fn fence_cmd(file: &str, nets: &str, out: &str, rest: &[&str]) -> Res {
             .join(", "),
         goal.pitch,
         if pitch.is_none() {
-            format!(" (a twentieth of a wavelength at {ghz} GHz, Er {er:.2})")
+            format!(" (a twentieth of a wavelength at {ghz} GHz, effective Er {er:.2})")
         } else {
             String::new()
         },

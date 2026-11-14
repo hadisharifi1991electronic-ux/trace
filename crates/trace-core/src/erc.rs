@@ -2,12 +2,13 @@
 //! and Allegro's (OrCAD's) ERC share: parts without a designator or with
 //! one used twice, pins left unconnected (an error for inputs), nets with
 //! only one pin or none, outputs driving each other or a supply, inputs
-//! with nothing driving them, nets with two names, and wire ends left
-//! hanging. A No-ERC marker on a pin or wire end leaves it out.
+//! with nothing driving them, nets with two names, wire ends left
+//! hanging, and sheet symbols, sheet entries and ports that lead nowhere. A No-ERC marker on a pin or wire end leaves it out.
 
 use crate::annotate::unannotated;
+use crate::hier::{self, Scope};
 use crate::schematic::{Drawing, PinKind, Pt, Sheet, TagKind};
-use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Level {
@@ -28,10 +29,13 @@ pub enum Rule {
     TwoNames,
     FloatingLabel,
     WireEnd,
+    SheetMissing,
+    EntryWithoutPort,
+    PortWithoutEntry,
 }
 
 impl Rule {
-    pub const ALL: [Rule; 11] = [
+    pub const ALL: [Rule; 14] = [
         Rule::Unannotated,
         Rule::DuplicateDesignator,
         Rule::FloatingInput,
@@ -43,6 +47,9 @@ impl Rule {
         Rule::TwoNames,
         Rule::FloatingLabel,
         Rule::WireEnd,
+        Rule::SheetMissing,
+        Rule::EntryWithoutPort,
+        Rule::PortWithoutEntry,
     ];
 
     pub fn label(self) -> &'static str {
@@ -58,6 +65,9 @@ impl Rule {
             Rule::TwoNames => "Net with two names",
             Rule::FloatingLabel => "Net label not on a wire",
             Rule::WireEnd => "Wire end not connected",
+            Rule::SheetMissing => "Sheet symbol's sheet not in the project",
+            Rule::EntryWithoutPort => "Sheet entry with no port on its sheet",
+            Rule::PortWithoutEntry => "Port with no sheet entry above it",
         }
     }
 
@@ -67,7 +77,8 @@ impl Rule {
             Rule::Unannotated
             | Rule::DuplicateDesignator
             | Rule::FloatingInput
-            | Rule::OutputConflict => Level::Error,
+            | Rule::OutputConflict
+            | Rule::SheetMissing => Level::Error,
             _ => Level::Warning,
         }
     }
@@ -121,26 +132,16 @@ fn marked(d: &Drawing, p: Pt) -> bool {
 /// A pin of the project: (sheet, pin index).
 type PinRef = (usize, usize);
 
-struct Dsu(Vec<usize>);
-
-impl Dsu {
-    fn find(&mut self, mut i: usize) -> usize {
-        while self.0[i] != i {
-            self.0[i] = self.0[self.0[i]];
-            i = self.0[i];
-        }
-        i
-    }
-    fn join(&mut self, a: usize, b: usize) {
-        let (a, b) = (self.find(a), self.find(b));
-        if a != b {
-            self.0[a] = b;
-        }
-    }
+/// Checks the sheets of one project, joined as Altium's Automatic scope
+/// would.
+pub fn check(sheets: &[&Sheet]) -> Vec<Issue> {
+    let names: Vec<&str> = sheets.iter().map(|s| s.name.as_str()).collect();
+    check_with(sheets, &names, Scope::Automatic)
 }
 
-/// Checks the sheets of one project.
-pub fn check(sheets: &[&Sheet]) -> Vec<Issue> {
+/// Checks the sheets of one project, their nets joined as `scope` says;
+/// `names` are the sheets' file names, as sheet symbols name them.
+pub fn check_with(sheets: &[&Sheet], names: &[&str], scope: Scope) -> Vec<Issue> {
     let mut out = Vec::new();
     let pin_name = |s: usize, p: usize| -> String {
         let d = &sheets[s].drawing;
@@ -193,52 +194,48 @@ pub fn check(sheets: &[&Sheet]) -> Vec<Issue> {
         }
     }
 
-    // Project nets: each sheet's nets, joined by name and by pins drawn on
-    // two sheets.
-    let mut first = Vec::new();
-    let mut n = 0;
-    for s in sheets {
-        first.push(n);
-        n += s.drawing.nets.len();
+    // Project nets, joined as the sheet hierarchy and scope say.
+    let drawings: Vec<&Drawing> = sheets.iter().map(|s| &s.drawing).collect();
+    let j = hier::join(&drawings, Some(names), scope);
+    for &(si, li) in &j.missing {
+        let l = &sheets[si].drawing.links[li];
+        out.push(Issue {
+            rule: Rule::SheetMissing,
+            level: Rule::SheetMissing.level(),
+            sheet: si,
+            at: [(l.min[0] + l.max[0]) / 2.0, (l.min[1] + l.max[1]) / 2.0],
+            text: format!(
+                "sheet symbol names {}, which the project does not have",
+                l.file
+            ),
+        });
     }
-    let mut dsu = Dsu((0..n).collect());
-    let mut by_name: HashMap<String, usize> = HashMap::new();
-    let mut by_pin: HashMap<(String, String), usize> = HashMap::new();
-    for (si, s) in sheets.iter().enumerate() {
-        let d = &s.drawing;
-        for (ni, net) in d.nets.iter().enumerate() {
-            let g = first[si] + ni;
-            for &t in &net.tags {
-                let text = d.tags[t as usize].text.trim().to_ascii_uppercase();
-                if text.is_empty() {
-                    continue;
-                }
-                match by_name.get(&text) {
-                    Some(&o) => dsu.join(g, o),
-                    None => {
-                        by_name.insert(text, g);
-                    }
-                }
-            }
-            for &p in &net.pins {
-                let pin = &d.pins[p as usize];
-                let Some(part) = d.parts.get(pin.part as usize) else {
-                    continue;
-                };
-                if unannotated(&part.designator) {
-                    continue;
-                }
-                let k = (
-                    part.designator.to_ascii_uppercase(),
-                    pin.number.to_ascii_uppercase(),
-                );
-                match by_pin.get(&k) {
-                    Some(&o) => dsu.join(g, o),
-                    None => {
-                        by_pin.insert(k, g);
-                    }
-                }
-            }
+    if j.scope != Scope::Flat {
+        for &(si, t) in &j.lone_entries {
+            let tag = &sheets[si].drawing.tags[t];
+            let child = j.tree.entry_of[si][t]
+                .and_then(|li| j.tree.child[si][li])
+                .map_or("its sheet".to_string(), |c| names[c].to_string());
+            out.push(Issue {
+                rule: Rule::EntryWithoutPort,
+                level: Rule::EntryWithoutPort.level(),
+                sheet: si,
+                at: tag.at.first().copied().unwrap_or_default(),
+                text: format!("sheet entry {} has no port on {child}", tag.text),
+            });
+        }
+        for &(si, t) in &j.lone_ports {
+            let tag = &sheets[si].drawing.tags[t];
+            out.push(Issue {
+                rule: Rule::PortWithoutEntry,
+                level: Rule::PortWithoutEntry.level(),
+                sheet: si,
+                at: tag.at.first().copied().unwrap_or_default(),
+                text: format!(
+                    "port {} has no sheet entry on the sheet symbol above",
+                    tag.text
+                ),
+            });
         }
     }
     #[derive(Default)]
@@ -252,12 +249,18 @@ pub fn check(sheets: &[&Sheet]) -> Vec<Issue> {
         tags: Vec<(usize, Pt)>,
     }
     let mut nets: BTreeMap<usize, PNet> = BTreeMap::new();
-    for (si, s) in sheets.iter().enumerate() {
-        let d = &s.drawing;
+    // A sheet placed as several channels is checked once: its pins count
+    // once on each net.
+    for (ii, inst) in j.instances.iter().enumerate() {
+        let si = inst.sheet;
+        let d = &sheets[si].drawing;
         for (ni, net) in d.nets.iter().enumerate() {
-            let r = dsu.find(first[si] + ni);
-            let e = nets.entry(r).or_default();
-            e.pins.extend(net.pins.iter().map(|&p| (si, p as usize)));
+            let e = nets.entry(j.of[ii][ni]).or_default();
+            for &p in &net.pins {
+                if !e.pins.contains(&(si, p as usize)) {
+                    e.pins.push((si, p as usize));
+                }
+            }
             e.wired |= !net.wires.is_empty();
             for &t in &net.tags {
                 let tag = &d.tags[t as usize];
@@ -496,7 +499,10 @@ pub fn check(sheets: &[&Sheet]) -> Vec<Issue> {
         (a.level, a.rule, a.sheet)
             .cmp(&(b.level, b.rule, b.sheet))
             .then(a.text.cmp(&b.text))
+            .then(a.at[0].total_cmp(&b.at[0]))
+            .then(a.at[1].total_cmp(&b.at[1]))
     });
+    out.dedup_by(|a, b| a.rule == b.rule && a.sheet == b.sheet && a.at == b.at && a.text == b.text);
     out
 }
 

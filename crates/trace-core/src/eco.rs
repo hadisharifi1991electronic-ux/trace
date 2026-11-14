@@ -7,6 +7,7 @@
 
 use crate::edit::Edit;
 use crate::footprint::{add_parts, parts_using, spots_beside, Footprint, NewPart};
+use crate::hier::{self, Scope};
 use crate::schematic::Drawing;
 use crate::{Board, Net};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -28,79 +29,43 @@ pub struct ProjectNet {
 /// The project's nets: each sheet's nets, joined across sheets by name
 /// (net labels, power ports, ports and sheet entries alike).
 pub fn netlist(sheets: &[&Drawing]) -> Vec<ProjectNet> {
-    let mut out: Vec<ProjectNet> = Vec::new();
-    let mut by_name: HashMap<String, usize> = HashMap::new();
-    let mut by_pin: HashMap<PinKey, usize> = HashMap::new();
-    let mut parent: Vec<usize> = Vec::new();
-    fn find(p: &mut [usize], mut i: usize) -> usize {
-        while p[i] != i {
-            p[i] = p[p[i]];
-            i = p[i];
-        }
-        i
-    }
-    for d in sheets {
-        for n in &d.nets {
+    netlist_in(sheets, None, Scope::Automatic)
+}
+
+/// The project's nets, joined as the sheet hierarchy and `scope` say
+/// ([`hier::join`]); without `names` every name joins across sheets.
+pub fn netlist_in(sheets: &[&Drawing], names: Option<&[&str]>, scope: Scope) -> Vec<ProjectNet> {
+    let j = hier::join(sheets, names, scope);
+    let net_names = hier::net_names(sheets, &j);
+    let mut out: Vec<Option<ProjectNet>> = vec![None; j.count];
+    let mut order = Vec::new();
+    for (ii, inst) in j.instances.iter().enumerate() {
+        let d = sheets[inst.sheet];
+        for (ni, n) in d.nets.iter().enumerate() {
+            let pn = j.of[ii][ni];
             let pins: Vec<PinKey> = n
                 .pins
                 .iter()
                 .filter_map(|&p| {
                     let pin = d.pins.get(p as usize)?;
                     let part = d.parts.get(pin.part as usize)?;
-                    Some(key(&part.designator, &pin.number))
+                    Some(key(&inst.designator(part.designator.trim()), &pin.number))
                 })
                 .collect();
             if pins.is_empty() && n.name.is_none() {
                 continue;
             }
-            let i = out.len();
-            out.push(ProjectNet {
-                name: n.name.clone(),
-                pins: pins.iter().cloned().collect(),
+            let m = out[pn].get_or_insert_with(|| {
+                order.push(pn);
+                ProjectNet {
+                    name: net_names[pn].clone(),
+                    pins: BTreeSet::new(),
+                }
             });
-            parent.push(i);
-            if let Some(name) = &n.name {
-                match by_name.get(&name.to_ascii_uppercase()) {
-                    Some(&o) => {
-                        let (a, b) = (find(&mut parent, i), find(&mut parent, o));
-                        parent[a] = b;
-                    }
-                    None => {
-                        by_name.insert(name.to_ascii_uppercase(), i);
-                    }
-                }
-            }
-            // A pin drawn twice (a part on two sheets) joins its nets.
-            for k in pins {
-                match by_pin.get(&k) {
-                    Some(&o) => {
-                        let (a, b) = (find(&mut parent, i), find(&mut parent, o));
-                        parent[a] = b;
-                    }
-                    None => {
-                        by_pin.insert(k, i);
-                    }
-                }
-            }
+            m.pins.extend(pins);
         }
     }
-    let mut merged: HashMap<usize, ProjectNet> = HashMap::new();
-    let mut order = Vec::new();
-    for (i, n) in out.into_iter().enumerate() {
-        let r = find(&mut parent, i);
-        let m = merged.entry(r).or_insert_with(|| {
-            order.push(r);
-            ProjectNet::default()
-        });
-        if m.name.is_none() {
-            m.name = n.name;
-        }
-        m.pins.extend(n.pins);
-    }
-    order
-        .into_iter()
-        .filter_map(|r| merged.remove(&r))
-        .collect()
+    order.into_iter().filter_map(|i| out[i].take()).collect()
 }
 
 /// One change the plan makes, for the person to read before applying.
@@ -204,6 +169,17 @@ pub struct PartInfo {
 pub struct Sources<'a> {
     pub parts: Option<&'a HashMap<String, PartInfo>>,
     pub library: &'a [Footprint],
+    /// The sheets' names, before and after, and how they join; without
+    /// them every name joins across sheets.
+    pub hier: Option<Hier<'a>>,
+}
+
+/// The sheet names that let sheet symbols be followed.
+#[derive(Clone, Copy, Debug)]
+pub struct Hier<'a> {
+    pub before: &'a [&'a str],
+    pub after: &'a [&'a str],
+    pub scope: Scope,
 }
 
 impl Sources<'_> {
@@ -246,8 +222,13 @@ pub fn plan_with(
     board: &Board,
     sources: Sources,
 ) -> Plan {
-    let old = netlist(before);
-    let new = netlist(after);
+    let (old, new) = match sources.hier {
+        Some(h) => (
+            netlist_in(before, Some(h.before), h.scope),
+            netlist_in(after, Some(h.after), h.scope),
+        ),
+        None => (netlist(before), netlist(after)),
+    };
     // A designator as on the board.
     let on_board = |k: &PinKey| -> PinKey {
         match renames.get(&k.0) {
@@ -684,6 +665,7 @@ mod tests {
         let sources = Sources {
             parts: Some(&info),
             library: &[],
+            hier: None,
         };
         let p = plan_with(&[&d], &[&e], &HashMap::new(), &b, sources);
         let text: Vec<String> = p.changes.iter().map(Change::describe).collect();

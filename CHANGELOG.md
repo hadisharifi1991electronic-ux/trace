@@ -3,6 +3,28 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.56.0 (2026-11-14)
+
+- Hierarchical schematics: sheet symbols are followed, and the sheets'
+  nets join as the project's net identifier scope says (Altium's
+  HierarchyMode, which OrCAD Capture's hierarchy matches): flat (ports
+  join everywhere, net labels stay on their sheet), hierarchical (ports
+  join the sheet entries of their sheet symbol), strict hierarchical
+  (power ports stay on their sheet too), global (net labels and ports
+  join everywhere) or automatic. ERC, Update PCB and the new `trace
+  hierarchy` follow it; LimeSDR-USB (global) gives the board's 627 nets.
+- Multi-channel sheets: a sheet placed by several sheet symbols, or by a
+  Repeat(CH,1,4) one, gets one copy per channel, with its own nets and its
+  parts named R1_CH1, R1_CH2 and so on.
+- ERC: sheet symbols naming a sheet the project lacks (error), sheet
+  entries with no port on their sheet, ports with no sheet entry above.
+- Schematic view: the sheet list is the sheet tree, ⬆ goes up to the
+  sheet that places the current one, double-clicking a sheet entry goes to
+  its port below and a port to its sheet entry above, and "Nets join"
+  changes the scope (saved in the Trace schematic).
+- Two sheet entries of the same name on one sheet no longer join unless
+  wired together.
+
 ## 0.55.0 (2026-11-14)
 
 - Autorouter (Edit > Autoroute…, `trace autoroute`): routes the open

@@ -20,7 +20,13 @@ checker and simulator all read.
   also brings in its project's schematic. Click a wire or pin to select its
   net on the board too; on the board, "Show in schematic" jumps to the sheet
   with the selected net, and the sheet list marks every sheet that has it.
-  Double-click a sheet symbol to open its sheet
+  Double-click a sheet symbol to open its sheet, a sheet entry to go to its
+  port on the sheet below, a port to go up to its sheet entry; the sheet
+  list shows the sheet tree (⬆ goes up), and "Nets join" sets how nets
+  join across sheets (Altium's net identifier scope, read from the
+  project: flat, hierarchical, strict hierarchical or global). A sheet
+  placed by several sheet symbols, or by a Repeat(CH,1,4) one, is a
+  multi-channel sheet: each copy's parts are named R1_CH1, R1_CH2 and so on
 - edit the schematic: drag parts (their wires follow), Space turns, Delete
   removes; W draws wires (click the corners, end on a pin or wire), N
   places net labels; change a part's designator or value in the side
@@ -244,7 +250,8 @@ trace stitch board.PcbDoc GND out.tracepcb [--grid 100mil] [--stagger] [--via 16
                                  stitch a net's pours and planes with vias on a grid
 trace fence board.PcbDoc RF_P,RF_N out.tracepcb [--ground GND] [--ghz 6] [--gap 8mil] [--rows 2]
                                  line the nets' tracks with ground vias on both sides, λ/20 apart at GHz
-trace erc project.PrjPcb [--all]  electrical rule check of the sheets (.SchDoc, .PrjPcb or .tracesch)
+trace erc project.PrjPcb [--all] [--scope global]  electrical rule check of the sheets (.SchDoc, .PrjPcb or .tracesch)
+trace hierarchy project.PrjPcb [--scope hierarchical]  sheet tree, channels and how the sheets' nets join
 trace annotate project.PrjPcb out.tracesch [--all] [--down] [--start 1] [--per-sheet 100]
                                  number parts without a number (or all) in sheet order
 trace swap board.PcbDoc U1 A1 A2 out.tracepcb
@@ -587,8 +594,9 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   harnesses are drawn as lines without their connectors' labels.
 - Schematic nets are joined within a sheet (wires, labels, power ports,
   ports); across sheets they are matched to the board through part pins.
-- Update PCB joins nets of the same name across sheets (flat), and moves
-  pads between nets only: tracks keep their old nets, so the DRC shows
+- Update PCB and the ERC join the sheets as the project's net identifier
+  scope says. Repeat() sheet entries (a bus split across channels) are
+  taken as one net for every channel. Update PCB moves pads between nets only: tracks keep their old nets, so the DRC shows
   what to reroute. A part new on the sheets is put beside the board with
   its nets when its footprint is in the open footprint library or on
   another part of the board; otherwise it is listed for placing by hand.

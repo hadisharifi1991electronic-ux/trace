@@ -24,6 +24,7 @@ pub mod font;
 pub mod footprint;
 pub mod geometry;
 pub mod gloss;
+pub mod hier;
 pub mod ibis;
 pub mod impedance;
 pub mod nettie;

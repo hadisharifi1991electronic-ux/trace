@@ -89,7 +89,10 @@ USAGE:
                                                 Tidy routing: zero-length and duplicate tracks, straight joins
                                                 merged, dangling ends cut back, square corners chamfered (--corners)
     trace swap <board> <part> <pin> <pin> <out.tracepcb>
-    trace erc <sheet.SchDoc|project.PrjPcb|sch.tracesch> [--all]
+    trace erc <sheet.SchDoc|project.PrjPcb|sch.tracesch> [--all] [--scope automatic|flat|hierarchical|strict|global]
+    trace hierarchy <project.PrjPcb|sch.tracesch> [--scope S]
+                                                Sheet tree, and how the sheets' nets join (the project's
+                                                net identifier scope unless --scope says)
     trace annotate <sheet.SchDoc|project.PrjPcb|sch.tracesch> <out.tracesch> [--all] [--down] [--start N] [--per-sheet 100]
     trace fanout <board> <U1[,U2]> <out.tracepcb> [--via 18/8] [--layers 1-4] [--in-pad] [--inward]
               [--skip-rows N] [--width W] [--clearance C] [--no-net]
@@ -227,6 +230,7 @@ fn main() -> ExitCode {
         ["variants", file] => board(file).map(|b| print!("{}", trace_core::variant::summary(&b))),
         ["testpoints", file, rest @ ..] => testpoints_cmd(file, rest),
         ["erc", file, rest @ ..] => erc_cmd(file, rest),
+        ["hierarchy", file, rest @ ..] => hierarchy_cmd(file, rest),
         ["swap", file, part, a, b, out] => swap_cmd(file, part, a, b, out),
         ["annotate", file, out, rest @ ..] => annotate_cmd(file, out, rest),
         ["fence", file, nets, out, rest @ ..] => fence_cmd(file, nets, out, rest),
@@ -3163,16 +3167,58 @@ fn swap_cmd(file: &str, part: &str, a: &str, b: &str, out: &str) -> Res {
     Ok(())
 }
 
+/// How the sheets' nets join: `--scope`, else the Trace schematic's or
+/// the project's setting.
+fn scope_of(
+    file: &str,
+    saved: &Option<trace_core::SchFile>,
+    given: Option<&str>,
+) -> Result<trace_core::hier::Scope, Box<dyn std::error::Error>> {
+    use trace_core::hier::Scope;
+    if let Some(g) = given {
+        return Scope::parse(g).ok_or_else(|| {
+            format!("--scope takes automatic, flat, hierarchical, strict or global, not {g}").into()
+        });
+    }
+    if let Some(f) = saved {
+        return Ok(f.scope);
+    }
+    if file.to_ascii_lowercase().ends_with(".prjpcb") {
+        return Ok(trace_altium::project_scope(file));
+    }
+    Ok(Scope::Automatic)
+}
+
+/// `--scope X` among the options, and the options left.
+fn take_scope<'a>(rest: &[&'a str]) -> Result<(Option<&'a str>, Vec<&'a str>), String> {
+    let mut left = Vec::new();
+    let mut scope = None;
+    let mut i = 0;
+    while i < rest.len() {
+        if rest[i] == "--scope" {
+            scope = Some(*rest.get(i + 1).ok_or("--scope needs a value")?);
+            i += 2;
+            continue;
+        }
+        left.push(rest[i]);
+        i += 1;
+    }
+    Ok((scope, left))
+}
+
 fn erc_cmd(file: &str, rest: &[&str]) -> Res {
-    use trace_core::erc::{check, summary, Level};
+    use trace_core::erc::{check_with, summary, Level};
+    let (given, rest) = take_scope(rest)?;
     let all = rest.contains(&"--all");
     if let Some(o) = rest.iter().find(|a| **a != "--all") {
         return Err(format!("unknown option {o}").into());
     }
     let t = std::time::Instant::now();
-    let (sheets, _) = sheets_of(file)?;
+    let (sheets, saved) = sheets_of(file)?;
+    let scope = scope_of(file, &saved, given)?;
     let refs: Vec<&trace_core::Sheet> = sheets.iter().map(|s| &s.1).collect();
-    let v = check(&refs);
+    let names: Vec<&str> = sheets.iter().map(|s| s.0.as_str()).collect();
+    let v = check_with(&refs, &names, scope);
     let shown = if all { v.len() } else { v.len().min(60) };
     for i in &v[..shown] {
         println!(
@@ -3191,11 +3237,76 @@ fn erc_cmd(file: &str, rest: &[&str]) -> Res {
     if shown < v.len() {
         println!("  ... {} more (--all lists them)", v.len() - shown);
     }
+    let drawings: Vec<&trace_core::Drawing> = refs.iter().map(|s| &s.drawing).collect();
     println!(
-        "{} sheets: {} in {:.2} s",
+        "{} sheets, nets joined {}: {} in {:.2} s",
         sheets.len(),
+        scope.resolve(&drawings).label().to_lowercase(),
         summary(&v),
         t.elapsed().as_secs_f64()
+    );
+    Ok(())
+}
+
+/// Prints the sheet tree and how many project nets the sheets make.
+fn hierarchy_cmd(file: &str, rest: &[&str]) -> Res {
+    use trace_core::hier;
+    let (given, rest) = take_scope(rest)?;
+    if let Some(o) = rest.first() {
+        return Err(format!("unknown option {o}").into());
+    }
+    let (sheets, saved) = sheets_of(file)?;
+    let scope = scope_of(file, &saved, given)?;
+    let drawings: Vec<&trace_core::Drawing> = sheets.iter().map(|s| &s.1.drawing).collect();
+    let names: Vec<&str> = sheets.iter().map(|s| s.0.as_str()).collect();
+    let j = hier::join(&drawings, Some(&names), scope);
+    for (s, depth) in j.tree.order() {
+        let d = drawings[s];
+        let count =
+            |k: trace_core::schematic::TagKind| d.tags.iter().filter(|t| t.kind == k).count();
+        println!(
+            "{}{}  ({} sheet symbols, {} ports, {} sheet entries)",
+            "  ".repeat(depth),
+            names[s],
+            d.links.len(),
+            count(trace_core::schematic::TagKind::Port),
+            count(trace_core::schematic::TagKind::SheetEntry),
+        );
+    }
+    for (s, name) in names.iter().enumerate() {
+        let ch: Vec<&str> = j
+            .instances
+            .iter()
+            .filter(|i| i.sheet == s && !i.suffix.is_empty())
+            .map(|i| i.suffix.as_str())
+            .collect();
+        if !ch.is_empty() {
+            println!(
+                "{name} is placed {} times; its parts are named R1_{} and so on",
+                ch.len(),
+                ch.join(", R1_")
+            );
+        }
+    }
+    for &(s, li) in &j.missing {
+        println!(
+            "missing: {} places {}",
+            names[s], drawings[s].links[li].file
+        );
+    }
+    let joined = |names: Option<&[&str]>| {
+        trace_core::eco::netlist_in(&drawings, names, scope)
+            .iter()
+            .filter(|n| n.pins.len() >= 2)
+            .count()
+    };
+    println!(
+        "{}: {} nets join two or more pins ({} if every name joined across sheets); {} sheet entries and {} ports lead nowhere",
+        scope.resolve(&drawings).label(),
+        joined(Some(&names)),
+        joined(None),
+        j.lone_entries.len(),
+        j.lone_ports.len()
     );
     Ok(())
 }

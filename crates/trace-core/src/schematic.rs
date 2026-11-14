@@ -109,6 +109,33 @@ pub struct SheetLink {
     pub min: Pt,
     pub max: Pt,
     pub file: String,
+    /// The sheet symbol's name: its channel (CH1), or Repeat(CH,1,4) for
+    /// four channels from one symbol.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub name: String,
+}
+
+impl SheetLink {
+    /// The channels it places: one per sheet symbol, or one per number of
+    /// a Repeat(name,first,last).
+    pub fn channels(&self) -> Vec<String> {
+        let n = self.name.trim();
+        if let Some(inner) = n
+            .get(..7)
+            .filter(|h| h.eq_ignore_ascii_case("repeat("))
+            .and_then(|_| n[7..].strip_suffix(')'))
+        {
+            let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+            if let [name, a, b] = parts[..] {
+                if let (Ok(a), Ok(b)) = (a.parse::<i64>(), b.parse::<i64>()) {
+                    if a <= b && b - a < 1000 {
+                        return (a..=b).map(|i| format!("{name}{i}")).collect();
+                    }
+                }
+            }
+        }
+        vec![n.to_string()]
+    }
 }
 
 /// A picture placed on the sheet: the file's own bytes (BMP, PNG or JPEG).
@@ -484,11 +511,12 @@ impl Drawing {
                 }
             }
         }
-        // Same text, same net (labels and power ports; ports and entries too
-        // within one sheet).
+        // Same text, same net: labels, power ports and ports within one
+        // sheet. Sheet entries join only by wire (two sheet symbols may
+        // both have a CLK entry), and through their sheet's ports.
         let mut by_name: std::collections::HashMap<&str, usize> = Default::default();
         for (i, t) in self.tags.iter().enumerate() {
-            if t.text.is_empty() {
+            if t.text.is_empty() || t.kind == TagKind::SheetEntry {
                 continue;
             }
             match by_name.get(t.text.as_str()) {
@@ -604,6 +632,13 @@ pub struct SchFile {
     /// in the original board file.
     #[serde(default)]
     pub original_renames: std::collections::BTreeMap<String, String>,
+    /// How the sheets' nets join.
+    #[serde(default, skip_serializing_if = "is_automatic")]
+    pub scope: crate::hier::Scope,
+}
+
+fn is_automatic(s: &crate::hier::Scope) -> bool {
+    *s == crate::hier::Scope::Automatic
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]

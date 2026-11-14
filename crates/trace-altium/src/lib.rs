@@ -17,6 +17,19 @@ pub use pcb::read_pcbdoc;
 pub use pcblib::read_pcblib;
 pub use sch::{read_schdoc, read_schlib, write_schdoc};
 
+/// How a project's sheets join their nets: its `HierarchyMode`, or
+/// Automatic when it does not say.
+pub fn project_scope(prjpcb: impl AsRef<std::path::Path>) -> trace_core::hier::Scope {
+    let text = std::fs::read(prjpcb.as_ref())
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
+        .unwrap_or_default();
+    text.lines()
+        .find_map(|l| l.trim().strip_prefix("HierarchyMode="))
+        .and_then(|v| v.trim().parse::<i64>().ok())
+        .map(trace_core::hier::Scope::from_altium)
+        .unwrap_or_default()
+}
+
 use std::io::{Read, Seek};
 use std::path::Path;
 

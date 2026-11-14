@@ -40,7 +40,8 @@ impl Schematics {
 
     pub(super) fn run_erc(&mut self) {
         let (slots, sheets) = self.sheets();
-        let issues = erc::check(&sheets);
+        let names: Vec<&str> = slots.iter().map(|&i| self.slots[i].name.as_str()).collect();
+        let issues = erc::check_with(&sheets, &names, self.scope);
         self.note = Some(format!("Electrical rule check: {}", erc::summary(&issues)));
         if !self.erc.ran {
             self.erc.warnings = true;

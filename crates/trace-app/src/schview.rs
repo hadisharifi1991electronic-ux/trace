@@ -11,7 +11,9 @@ use std::path::{Path, PathBuf};
 use std::sync::mpsc::{channel, Receiver};
 use trace_core::eco::{Change, PartInfo, Plan, Sources};
 use trace_core::footprint::{designator_prefix, next_designator, Footprint};
+use trace_core::hier::{self, Scope};
 use trace_core::sch_edit::{snap, WIRE_COLOR};
+use trace_core::schematic::{Pt, TagKind};
 use trace_core::{Drawing, SavedSheet, SchFile, SchGeom, Sheet};
 
 mod erc;
@@ -106,6 +108,8 @@ pub struct Schematics {
     redo: Vec<Vec<(usize, Sheet)>>,
     /// Electrical rule check results, and annotation settings.
     erc: erc::ErcState,
+    /// How the sheets' nets join (the project's net identifier scope).
+    pub scope: Scope,
     /// Designators renamed on the sheets: now -> as on the board.
     renames: HashMap<String, String>,
     /// The sheets as first read, which the board file as it was matches,
@@ -479,6 +483,7 @@ impl Schematics {
                 .filter(|p| ext(p) == "schdoc" && p.exists())
                 .collect();
             self.open(sheets, Some(path.to_path_buf()), ctx);
+            self.scope = trace_altium::project_scope(path);
             self.project_libs();
         } else {
             self.open(vec![path.to_path_buf()], None, ctx);
@@ -656,6 +661,7 @@ impl Schematics {
         }
         self.renames = f.renames.into_iter().collect();
         self.original_renames = f.original_renames.into_iter().collect();
+        self.scope = f.scope;
         self.project_libs();
         Ok(())
     }
@@ -709,6 +715,7 @@ impl Schematics {
                 .iter()
                 .map(|(a, b)| (a.clone(), b.clone()))
                 .collect(),
+            scope: self.scope,
         };
         file.save(&path).map_err(|e| e.to_string())?;
         self.saved_to = Some(path.clone());
@@ -781,6 +788,18 @@ impl Schematics {
             .iter()
             .filter_map(|s| s.sheet.as_ref().map(|s| &s.drawing))
             .collect();
+        let before_names: Vec<&str> = base
+            .iter()
+            .zip(&self.slots)
+            .filter(|(b, _)| b.is_some())
+            .map(|(_, s)| s.name.as_str())
+            .collect();
+        let after_names: Vec<&str> = self
+            .slots
+            .iter()
+            .filter(|s| s.sheet.is_some())
+            .map(|s| s.name.as_str())
+            .collect();
         // Renames still standing: the new name is on a sheet, the old one
         // no longer is.
         let on_sheets: HashSet<String> = after
@@ -825,6 +844,11 @@ impl Schematics {
         let sources = Sources {
             parts: Some(&parts),
             library,
+            hier: Some(trace_core::eco::Hier {
+                before: &before_names,
+                after: &after_names,
+                scope: self.scope,
+            }),
         };
         trace_core::eco::plan_with(&before, &after, &renames, &scene.board, sources)
     }
@@ -968,6 +992,38 @@ impl Schematics {
             self.drag = None;
             self.needs_fit = true;
         }
+    }
+
+    /// How the sheets nest (sheets not read yet count as empty).
+    fn hier_tree(&self) -> hier::Tree {
+        let empty = Drawing::default();
+        let names: Vec<&str> = self.slots.iter().map(|s| s.name.as_str()).collect();
+        let ds: Vec<&Drawing> = self
+            .slots
+            .iter()
+            .map(|s| s.sheet.as_ref().map_or(&empty, |s| &s.drawing))
+            .collect();
+        hier::tree(&names, &ds)
+    }
+
+    /// The port a sheet entry leads to, or the sheet entry above a port.
+    fn other_end(&self, sheet: usize, tag: usize) -> Option<(usize, Pt)> {
+        let empty = Drawing::default();
+        let ds: Vec<&Drawing> = self
+            .slots
+            .iter()
+            .map(|s| s.sheet.as_ref().map_or(&empty, |s| &s.drawing))
+            .collect();
+        let (s, t) = hier::other_end(&ds, &self.hier_tree(), sheet, tag)?;
+        Some((s, ds[s].tags[t].at.first().copied()?))
+    }
+
+    /// Goes to sheet `i` and frames `at`.
+    fn go_to(&mut self, i: usize, at: Pt) {
+        self.select_sheet(i);
+        self.needs_fit = false;
+        let (x, y) = (at[0] as f32, at[1] as f32);
+        self.focus = Some([x - 2400.0, y - 1600.0, x + 2400.0, y + 1600.0]);
     }
 
     fn pad_nets(&mut self, scene: &Scene) -> &HashMap<(String, String), u32> {
@@ -1281,21 +1337,90 @@ impl Schematics {
             ui.label(RichText::new(n).weak().small());
         }
         ui.separator();
-        ui.label(RichText::new("Sheets").weak());
+        let tree = self.hier_tree();
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("Sheets").weak());
+            if let Some((p, li)) = tree.parent.get(self.current).copied().flatten() {
+                let name = self.slots[p].name.clone();
+                if ui
+                    .small_button(format!("⬆ {name}"))
+                    .on_hover_text("Up to the sheet that places this one")
+                    .clicked()
+                {
+                    let at = self.slots[p].sheet.as_ref().and_then(|s| {
+                        let l = s.drawing.links.get(li)?;
+                        Some([(l.min[0] + l.max[0]) / 2.0, (l.min[1] + l.max[1]) / 2.0])
+                    });
+                    match at {
+                        Some(at) => self.go_to(p, at),
+                        None => self.select_sheet(p),
+                    }
+                }
+            }
+        });
+        let before = self.scope;
+        ui.horizontal(|ui| {
+            ui.label("Nets join");
+            egui::ComboBox::from_id_salt("net_scope")
+                .selected_text(self.scope.label())
+                .width(200.0)
+                .show_ui(ui, |ui| {
+                    for s in Scope::ALL {
+                        ui.selectable_value(&mut self.scope, s, s.label());
+                    }
+                })
+                .response
+                .on_hover_text("How nets join across sheets (Altium's net identifier scope, read from the project). Automatic: hierarchical when there are sheet entries, flat when there are ports, global otherwise.");
+        });
+        if self.scope != before {
+            self.dirty = true;
+            self.erc.stale = true;
+        }
         let mut go = None;
         egui::ScrollArea::vertical()
             .id_salt("sheets")
             .max_height(ui.available_height() * 0.6)
             .show(ui, |ui| {
-                for (i, s) in self.slots.iter().enumerate() {
-                    let mut text = RichText::new(&s.name);
+                // Channels each sheet is placed as.
+                let mut placed = vec![0usize; self.slots.len()];
+                for (si, kids) in tree.child.iter().enumerate() {
+                    let Some(sheet) = &self.slots[si].sheet else {
+                        continue;
+                    };
+                    for (li, c) in kids.iter().enumerate() {
+                        if let (Some(c), Some(l)) = (*c, sheet.drawing.links.get(li)) {
+                            placed[c] += l.channels().len();
+                        }
+                    }
+                }
+                for (i, depth) in tree.order() {
+                    let s = &self.slots[i];
+                    let name = if placed[i] > 1 {
+                        format!("{} ×{}", s.name, placed[i])
+                    } else {
+                        s.name.clone()
+                    };
+                    let mut text = RichText::new(name);
                     if self.highlight.get(i).is_some_and(|h| !h.is_empty()) {
                         text = text.color(HIGHLIGHT);
                     }
                     if s.error.is_some() {
                         text = text.strikethrough();
                     }
-                    let r = ui.selectable_label(i == self.current, text);
+                    let r = ui
+                        .horizontal(|ui| {
+                            ui.add_space(depth as f32 * 14.0);
+                            ui.selectable_label(i == self.current, text)
+                        })
+                        .inner;
+                    let r = if placed[i] > 1 {
+                        r.on_hover_text(format!(
+                            "Placed {} times: each copy's parts get the channel's name (R1_CH1)",
+                            placed[i]
+                        ))
+                    } else {
+                        r
+                    };
                     let r = match &s.error {
                         Some(e) => r.on_hover_text(e),
                         None => r,
@@ -1866,9 +1991,13 @@ impl Schematics {
                 .wires
                 .iter()
                 .position(|w| w.windows(2).any(|s| seg_dist(p, s[0], s[1]) < tol));
+            // A port is hit anywhere along its body, between its two ends.
             let hit_tag = d.tags.iter().position(|t| {
                 t.at.iter()
                     .any(|&a| ((a[0] - p[0]).powi(2) + (a[1] - p[1]).powi(2)).sqrt() < tol * 2.0)
+                    || (t.kind == TagKind::Port
+                        && t.at.len() == 2
+                        && seg_dist(p, t.at[0], t.at[1]) < tol * 2.0)
             });
             let net_of = |kind: u8, i: u32| {
                 d.nets.iter().position(|n| match kind {
@@ -1901,6 +2030,18 @@ impl Schematics {
                     hit_net
                         .map(|n| format!(" · {}", net_name(n)))
                         .unwrap_or_default()
+                ))
+            } else if let Some(t) =
+                hit_tag.filter(|&t| matches!(d.tags[t].kind, TagKind::Port | TagKind::SheetEntry))
+            {
+                Some(format!(
+                    "{} {} (double-click for the other end)",
+                    if d.tags[t].kind == TagKind::Port {
+                        "Port"
+                    } else {
+                        "Sheet entry"
+                    },
+                    d.tags[t].text
                 ))
             } else if let Some(n) = hit_net {
                 Some(format!("Net {}", net_name(n)))
@@ -1969,13 +2110,23 @@ impl Schematics {
                             );
                         }
                     } else if resp.double_clicked() {
+                        // A sheet entry leads down to its port, a port up
+                        // to its sheet entry, a sheet symbol into its sheet.
+                        let hop = hit_tag
+                            .filter(|&t| {
+                                matches!(d.tags[t].kind, TagKind::Port | TagKind::SheetEntry)
+                            })
+                            .and_then(|t| self.other_end(cur, t));
+                        if let Some((s, at)) = hop {
+                            self.go_to(s, at);
+                            return None;
+                        }
                         if let Some(i) = hit_link {
-                            let want = d.links[i].file.to_ascii_lowercase();
-                            let target = self.slots.iter().position(|s| {
-                                s.path.file_name().is_some_and(|f| {
-                                    f.to_string_lossy().to_ascii_lowercase() == want
-                                })
-                            });
+                            let want = hier::sheet_key(&d.links[i].file);
+                            let target = self
+                                .slots
+                                .iter()
+                                .position(|s| hier::sheet_key(&s.name) == want);
                             if let Some(t) = target {
                                 self.select_sheet(t);
                                 return None;

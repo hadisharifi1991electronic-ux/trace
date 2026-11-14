@@ -749,6 +749,9 @@ fn read_records(records: &[SchRecord], name: String, file_name: &str) -> Sheet {
 
     // Sheet symbols, for placing their entries.
     let mut sheet_boxes: HashMap<usize, (Pt, Pt)> = HashMap::new();
+    // Each sheet symbol's name (its designator, CH1 or Repeat(CH,1,4)).
+    let mut sheet_names: HashMap<usize, String> = HashMap::new();
+    let mut link_owner: Vec<(usize, usize)> = Vec::new();
     for (k, p) in recs.iter().enumerate() {
         if rec(p) != Some(COMPONENT) && !b.visible(p) {
             continue;
@@ -943,13 +946,18 @@ fn read_records(records: &[SchRecord], name: String, file_name: &str) -> Sheet {
             }
             Some(SHEET_NAME) | Some(SHEET_FILE_NAME) => {
                 if rec(p) == Some(SHEET_FILE_NAME) {
-                    if let Some(&(min, max)) = owner_of(p).and_then(|o| sheet_boxes.get(&o)) {
+                    if let Some(o) = owner_of(p).filter(|o| sheet_boxes.contains_key(o)) {
+                        let (min, max) = sheet_boxes[&o];
+                        link_owner.push((b.d.links.len(), o));
                         b.d.links.push(trace_core::SheetLink {
                             min,
                             max,
                             file: p.str("TEXT"),
+                            name: String::new(),
                         });
                     }
+                } else if let Some(o) = owner_of(p) {
+                    sheet_names.insert(o, p.str("TEXT"));
                 }
                 if !p.bool("ISHIDDEN") {
                     b.label(k, p, p.str("TEXT"));
@@ -958,6 +966,11 @@ fn read_records(records: &[SchRecord], name: String, file_name: &str) -> Sheet {
             Some(TEXT_FRAME) | Some(NOTE) => text_frame(&mut b, k, p),
             Some(PARAMETER_SET) => param_set(&mut b, k, p),
             _ => {}
+        }
+    }
+    for (i, o) in link_owner {
+        if let Some(n) = sheet_names.get(&o) {
+            b.d.links[i].name = n.trim().to_string();
         }
     }
     // Part outlines, from what each part drew.

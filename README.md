@@ -115,6 +115,20 @@ checker and simulator all read.
   pads, silk and 3D model go with it, tracks that end on its pads stretch
   to follow, and a ratsnest shows where its unrouted pads connect. Pours
   are poured again around it, and the design rule check runs again
+- select many things at once: Shift+drag a box (left to right picks what
+  is wholly inside, right to left what it touches), Ctrl+click to add or
+  take away, Ctrl+A for everything. Drag the selection to move it, arrows
+  nudge it 5 mil (50 with Shift), Ctrl+R turns it 90°, Delete removes it.
+  Edit > Align lines up the selected parts and vias (left, right, top,
+  bottom, centres) or spreads them out evenly
+- copy, cut and paste (Ctrl+C, Ctrl+X, Ctrl+V): the copy lands at the
+  cursor. Pasted parts get the next free designators (R12 gives R13…) and
+  no nets; tracks and vias pasted alone keep their nets, so a via pattern
+  can be copied along a line
+- place text (the A icon) on the silkscreen, a copper layer or a
+  mechanical layer, mirrored on the bottom; and linear dimensions (the
+  dimension icon): click two points, then where the line sits, and the
+  length is written on it in mil or mm
 - toolbars as in Altium: icons for files, undo, zoom and views under the
   menu, an Active Bar over the board for the tools, and layer tabs under
   it (click to make a layer current, right-click to hide; LS or Shift+S

@@ -14,6 +14,9 @@ pub struct Prims {
     pub areas: Vec<Polygon>,
     pub cutouts: Vec<Polygon>,
     pub components: Vec<Component>,
+    /// The parts' 3D bodies, when the edit changes them; `None` leaves the
+    /// board's as they are.
+    pub bodies: Option<Vec<crate::Body3d>>,
 }
 
 impl Prims {
@@ -27,6 +30,7 @@ impl Prims {
             areas: g.areas.clone(),
             cutouts: g.cutouts.clone(),
             components: board.components.clone(),
+            bodies: Some(g.bodies.clone()),
         }
     }
 
@@ -38,6 +42,9 @@ impl Prims {
         g.polygons = self.polygons.clone();
         g.areas = self.areas.clone();
         g.cutouts = self.cutouts.clone();
+        if let Some(b) = &self.bodies {
+            g.bodies = b.clone();
+        }
         board.components = self.components.clone();
     }
 }

@@ -3,6 +3,28 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.47.0 (2026-11-14)
+
+- Select many things at once: Shift+drag a box (left to right takes what
+  is wholly inside it, right to left what it touches), Ctrl+click to add
+  or take away, Ctrl+A for everything. A selection of parts, tracks, arcs
+  and vias drags as one, nudges with the arrow keys (5 mil, 50 with
+  Shift), turns 90° with Ctrl+R and deletes with Delete.
+- Edit > Align: left, right, top, bottom, centres on a line, and spread
+  evenly across or up, for the selected parts and vias.
+- Copy, cut and paste (Ctrl+C, Ctrl+X, Ctrl+V), pasting at the cursor.
+  Pasted parts are given the next free designators and no nets; tracks
+  and vias pasted on their own keep their nets.
+- Text: the A tool places stroke text on top or bottom silk (mirrored),
+  the current copper layer or a mechanical layer, at a chosen height,
+  stroke and angle.
+- Dimensions: the dimension tool measures between two points (snapping to
+  pads, vias and track ends) and draws extension lines, arrows and the
+  length in mil or mm, on a mechanical layer by default. Mechanical layers
+  now have their own tab, shown once something is drawn there.
+- On Windows, Shift+Delete (which Windows treats as Cut) now unroutes the
+  selected net as the menu says.
+
 ## 0.46.0 (2026-11-14)
 
 - Teardrops: Edit > "Teardrops and gloss…" (or `trace teardrops <board>

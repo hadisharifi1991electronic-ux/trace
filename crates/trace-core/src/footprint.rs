@@ -161,6 +161,7 @@ impl Footprint {
                 .collect(),
             cutouts: Vec::new(),
             components: Vec::new(),
+            bodies: None,
         };
         let mut b = part_board(board, index, prims);
         let at = Placement::of(board, index)?;
@@ -379,6 +380,7 @@ impl Footprint {
             areas: g.areas,
             cutouts: g.cutouts,
             components: Vec::new(),
+            bodies: None,
         }
     }
 }

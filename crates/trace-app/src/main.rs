@@ -6,6 +6,7 @@
 mod canvas;
 mod cm;
 mod drc;
+mod editing;
 mod fpview;
 mod imp;
 mod pairwin;
@@ -57,6 +58,8 @@ pub enum Tool {
     Measure,
     Route,
     Tune,
+    Text,
+    Dimension,
 }
 
 /// A distance measurement: first point, and second once placed.
@@ -128,6 +131,10 @@ pub struct App {
     join_next: bool,
     /// Layers (from 1) of a via span being added in the route bar.
     new_span: (u8, u8),
+    /// The selection of many things, the clipboard, text and dimensions.
+    pub edit: editing::Editing,
+    /// Show the mechanical layers once the next edit is in (a dimension).
+    pub show_mechanical: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -203,6 +210,8 @@ impl App {
             moving: None,
             join_next: false,
             new_span: (1, 2),
+            edit: editing::Editing::default(),
+            show_mechanical: false,
         };
         if let Some(f) = start_file {
             app.open(f);
@@ -799,6 +808,8 @@ impl App {
         }
         self.dirty = false;
         self.picked = None;
+        self.edit.sel.clear();
+        self.edit.dim.clear();
     }
 
     /// Applies edits as one undoable step and refreshes everything derived
@@ -871,6 +882,7 @@ impl App {
         if let Some(scene) = self.scene.as_mut() {
             trace_core::connectivity::analyse(&mut scene.board);
             scene.rebuild();
+            self.edit.sel.keep_valid(&scene.board);
         }
         self.router.board_changed();
         self.cm.board_changed();
@@ -962,6 +974,139 @@ impl App {
                 ))
             }
         }
+    }
+
+    /// Applies an edit made from the selection, keeping it selected.
+    fn sel_edit(&mut self, label: String, edits: Vec<trace_core::edit::Edit>) {
+        if edits.is_empty() {
+            return;
+        }
+        let keep = self.edit.sel.clone();
+        self.apply_edits(&label, edits);
+        self.edit.sel = keep;
+        if let Some(s) = &self.scene {
+            self.edit.sel.keep_valid(&s.board);
+        }
+    }
+
+    fn select_all(&mut self) {
+        if let Some(s) = &self.scene {
+            self.edit.sel = trace_core::select::Sel::all(&s.board);
+            self.picked = None;
+            self.message = Some((canvas::select_hint(&self.edit.sel), false));
+        }
+    }
+
+    fn copy_sel(&mut self, cut: bool) {
+        let Some(s) = &self.scene else { return };
+        if self.edit.sel.is_empty() {
+            self.message = Some((
+                "Select something first: click it, Shift+drag a box round it, or Ctrl+A.".into(),
+                false,
+            ));
+            return;
+        }
+        let clip = trace_core::select::copy(&s.board, &self.edit.sel);
+        let what = self.edit.sel.describe();
+        // Something on the system clipboard, or Ctrl+V sends no paste.
+        self.ctx.copy_text(format!("Trace: {what}"));
+        self.edit.clip = Some(clip);
+        if cut {
+            self.delete_sel();
+            self.message = Some((
+                format!("Cut {what}. Ctrl+V pastes it at the cursor, Ctrl+Z undoes."),
+                false,
+            ));
+        } else {
+            self.message = Some((
+                format!("Copied {what}. Ctrl+V pastes it at the cursor."),
+                false,
+            ));
+        }
+    }
+
+    fn paste_clip(&mut self) {
+        let (Some(s), Some(clip)) = (&self.scene, &self.edit.clip) else {
+            self.message = Some((
+                "Nothing copied yet: select something and press Ctrl+C.".into(),
+                false,
+            ));
+            return;
+        };
+        let at = self
+            .cursor
+            .map(|[x, y]| [x as f64, y as f64])
+            .unwrap_or([clip.origin[0] + 100.0, clip.origin[1] - 100.0]);
+        // Parts come without nets (new designators the schematic does
+        // not know); tracks and vias alone keep theirs.
+        let keep = clip.parts.is_empty();
+        let p = trace_core::select::paste(&s.board, clip, at, keep);
+        let what = p.sel.describe();
+        let names: Vec<String> = p.renamed.iter().map(|(_, b)| b.clone()).collect();
+        self.apply_edits(&format!("Pasted {what}"), p.edits);
+        self.edit.sel = p.sel;
+        self.picked = None;
+        if !names.is_empty() {
+            let mut list = names.iter().take(6).cloned().collect::<Vec<_>>().join(", ");
+            if names.len() > 6 {
+                list.push_str(", …");
+            }
+            self.message = Some((
+                format!("Pasted {what} as {list}, with no nets. Ctrl+Z undoes it."),
+                false,
+            ));
+        }
+    }
+
+    fn delete_sel(&mut self) {
+        let Some(s) = &self.scene else { return };
+        let what = self.edit.sel.describe();
+        let edits = trace_core::select::delete(&s.board, &self.edit.sel);
+        self.edit.sel.clear();
+        self.apply_edits(&format!("Deleted {what}"), edits);
+    }
+
+    fn nudge_sel(&mut self, dx: f64, dy: f64) {
+        let Some(s) = &self.scene else { return };
+        let edits = trace_core::select::move_by(&s.board, &self.edit.sel, dx, dy);
+        let what = self.edit.sel.describe();
+        self.sel_edit(format!("Moved {what}"), edits);
+    }
+
+    fn rotate_sel(&mut self, deg: f64) {
+        let Some(s) = &self.scene else { return };
+        let edits = trace_core::select::rotate(&s.board, &self.edit.sel, deg, None);
+        let what = self.edit.sel.describe();
+        self.sel_edit(format!("Turned {what} {deg}°"), edits);
+    }
+
+    fn align_sel(&mut self, how: trace_core::select::Align) {
+        let Some(s) = &self.scene else { return };
+        let n = self.edit.sel.parts.len() + self.edit.sel.vias.len();
+        let need = if matches!(
+            how,
+            trace_core::select::Align::SpreadX | trace_core::select::Align::SpreadY
+        ) {
+            3
+        } else {
+            2
+        };
+        if n < need {
+            self.message = Some((
+                format!(
+                    "{} needs {need} or more parts or vias selected.",
+                    how.label()
+                ),
+                true,
+            ));
+            return;
+        }
+        let edits = trace_core::select::align(&s.board, &self.edit.sel, how);
+        if edits.is_empty() {
+            self.message = Some(("Already lined up.".into(), false));
+            return;
+        }
+        self.sel_edit(how.label().to_string(), edits);
     }
 
     fn select_net(&mut self, net: u32, zoom: bool) {
@@ -1225,6 +1370,88 @@ impl App {
                     }
                 }
                 ui.separator();
+                let any = !self.edit.sel.is_empty();
+                if ui
+                    .add_enabled(has, egui::Button::new("Select all").shortcut_text("Ctrl+A"))
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.select_all();
+                }
+                if ui
+                    .add_enabled(any, egui::Button::new("Copy").shortcut_text("Ctrl+C"))
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.copy_sel(false);
+                }
+                if ui
+                    .add_enabled(any, egui::Button::new("Cut").shortcut_text("Ctrl+X"))
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.copy_sel(true);
+                }
+                if ui
+                    .add_enabled(
+                        has && self.edit.clip.is_some(),
+                        egui::Button::new("Paste").shortcut_text("Ctrl+V"),
+                    )
+                    .on_hover_text("Pasted parts get new designators and no nets")
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.paste_clip();
+                }
+                if ui
+                    .add_enabled(
+                        any,
+                        egui::Button::new("Delete selection").shortcut_text("Del"),
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.delete_sel();
+                }
+                if ui
+                    .add_enabled(
+                        any,
+                        egui::Button::new("Turn selection 90°").shortcut_text("Ctrl+R"),
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.rotate_sel(90.0);
+                }
+                ui.add_enabled_ui(any, |ui| {
+                    ui.menu_button("Align", |ui| {
+                        for (k, how) in trace_core::select::Align::ALL.into_iter().enumerate() {
+                            if k == 4 || k == 6 {
+                                ui.separator();
+                            }
+                            if ui.button(how.label()).clicked() {
+                                ui.close_menu();
+                                self.align_sel(how);
+                            }
+                        }
+                    });
+                });
+                ui.separator();
+                if ui
+                    .add_enabled(has, egui::Button::new("Place text"))
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.set_tool(Tool::Text);
+                }
+                if ui
+                    .add_enabled(has, egui::Button::new("Place dimension"))
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.set_tool(Tool::Dimension);
+                }
+                ui.separator();
                 if ui
                     .add_enabled(has, egui::Button::new("Via stitching and fences…"))
                     .on_hover_text(
@@ -1397,6 +1624,7 @@ impl App {
     fn set_tool(&mut self, tool: Tool) {
         self.tool = tool;
         self.measure = None;
+        self.edit.dim.clear();
         self.router.cancel();
         self.router.tune.preview = None;
     }
@@ -1611,11 +1839,19 @@ impl App {
                 self.tune_bar(ui);
                 return;
             }
+            if self.tool == Tool::Text {
+                self.edit.text_bar(ui);
+                return;
+            }
+            if self.tool == Tool::Dimension {
+                self.edit.dim_bar(ui);
+                return;
+            }
             let hint = match (self.tool, self.measure) {
                 (Tool::Measure, None) => "Click the first point.",
                 (Tool::Measure, Some(Measure { b: None, .. })) => "Click the second point.",
                 (Tool::Measure, Some(_)) => "Click to start a new measurement, Esc to clear.",
-                _ => "Drag a part to move it (Space turns, L flips), drag elsewhere to pan, scroll to zoom, click copper to select a net.",
+                _ => "Drag a part to move it (Space turns, L flips), Shift+drag to select a box, Ctrl+click to add, drag elsewhere to pan, scroll to zoom.",
             };
             ui.label(RichText::new(hint).weak());
         });
@@ -1672,6 +1908,21 @@ impl App {
                             .clicked()
                             {
                                 self.set_tool(Tool::Measure);
+                            }
+                            if button(ui, Icon::Text, t == Tool::Text, true, "Place text").clicked()
+                            {
+                                self.set_tool(Tool::Text);
+                            }
+                            if button(
+                                ui,
+                                Icon::Dimension,
+                                t == Tool::Dimension,
+                                true,
+                                "Place a linear dimension",
+                            )
+                            .clicked()
+                            {
+                                self.set_tool(Tool::Dimension);
                             }
                             divider(ui);
                             let pairs = self.router.pairs;
@@ -2736,6 +2987,94 @@ impl eframe::App for App {
                 }
             }
         }
+        // The window turns Ctrl+C, Ctrl+X and Ctrl+V into copy, cut and
+        // paste events rather than keys; on Windows Shift+Delete is a cut
+        // too, which here still unroutes the selected net.
+        let (ev_copy, ev_cut, ev_paste, shift_cut) = if board2d && !typing {
+            ctx.input_mut(|i| {
+                let m = i.modifiers;
+                let mut out = (false, false, false, false);
+                i.events.retain(|e| match e {
+                    egui::Event::Copy => {
+                        out.0 = true;
+                        false
+                    }
+                    egui::Event::Cut if m.shift && !m.command => {
+                        out.3 = true;
+                        false
+                    }
+                    egui::Event::Cut => {
+                        out.1 = true;
+                        false
+                    }
+                    egui::Event::Paste(_) => {
+                        out.2 = true;
+                        false
+                    }
+                    _ => true,
+                });
+                out
+            })
+        } else {
+            (false, false, false, false)
+        };
+        if shift_cut && self.scene.is_some() && self.router.active.is_none() {
+            self.unroute_selected();
+        }
+        // Keys for the selection: Ctrl+A, Ctrl+C, Ctrl+X, Ctrl+V, Ctrl+R,
+        // Delete and the arrows.
+        if board2d
+            && self.scene.is_some()
+            && !typing
+            && self.tool == Tool::Select
+            && self.router.active.is_none()
+            && self.moving.is_none()
+        {
+            use egui::{Key, Modifiers as M};
+            let has = !self.edit.sel.is_empty();
+            let (all, copy, cut, paste, turn, del, arrows, shift) = ctx.input_mut(|i| {
+                let shift = i.modifiers.shift;
+                let arrows = [
+                    (Key::ArrowLeft, [-1.0, 0.0]),
+                    (Key::ArrowRight, [1.0, 0.0]),
+                    (Key::ArrowUp, [0.0, 1.0]),
+                    (Key::ArrowDown, [0.0, -1.0]),
+                ]
+                .into_iter()
+                .filter(|(k, _)| has && i.consume_key(M::NONE, *k))
+                .fold([0.0f64, 0.0], |a, (_, d)| [a[0] + d[0], a[1] + d[1]]);
+                (
+                    i.consume_key(M::COMMAND, Key::A),
+                    i.consume_key(M::COMMAND, Key::C),
+                    i.consume_key(M::COMMAND, Key::X),
+                    i.consume_key(M::COMMAND, Key::V),
+                    has && i.consume_key(M::COMMAND, Key::R),
+                    has && !shift && i.consume_key(M::NONE, Key::Delete),
+                    arrows,
+                    shift,
+                )
+            });
+            if all {
+                self.select_all();
+            }
+            let (copy, cut, paste) = (copy || ev_copy, cut || ev_cut, paste || ev_paste);
+            if copy || cut {
+                self.copy_sel(cut);
+            }
+            if paste {
+                self.paste_clip();
+            }
+            if turn {
+                self.rotate_sel(90.0);
+            }
+            if del {
+                self.delete_sel();
+            }
+            if arrows != [0.0, 0.0] {
+                let k = self.edit.nudge * if shift { 10.0 } else { 1.0 };
+                self.nudge_sel(arrows[0] * k, arrows[1] * k);
+            }
+        }
         let (open_shortcut, fit, flip, esc, measure_key, toggle3d, cm_key, sch_key) = ctx
             .input_mut(|i| {
                 (
@@ -2893,9 +3232,16 @@ impl eframe::App for App {
                 self.measure = None;
             } else if self.tool == Tool::Measure {
                 self.set_tool(Tool::Select);
+            } else if self.tool == Tool::Dimension && !self.edit.dim.is_empty() {
+                self.edit.dim.clear();
+            } else if matches!(self.tool, Tool::Text | Tool::Dimension) {
+                self.set_tool(Tool::Select);
             } else {
                 self.selected = None;
                 self.marker = None;
+                self.edit.sel.clear();
+                self.edit.boxing = None;
+                self.edit.dragging = None;
             }
         }
 

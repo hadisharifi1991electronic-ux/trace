@@ -72,7 +72,7 @@ fn overlaps(a: [f32; 4], b: [f32; 4]) -> bool {
     a[0] <= b[2] && b[0] <= a[2] && a[1] <= b[3] && b[1] <= a[3]
 }
 
-fn draw(shapes: &mut Vec<Shape>, view: &View, g: &Geom, color: Color32) {
+pub(crate) fn draw(shapes: &mut Vec<Shape>, view: &View, g: &Geom, color: Color32) {
     match *g {
         Geom::Seg { x1, y1, x2, y2, w } => {
             let (a, b) = (view.to_screen(x1, y1), view.to_screen(x2, y2));
@@ -101,7 +101,7 @@ fn draw(shapes: &mut Vec<Shape>, view: &View, g: &Geom, color: Color32) {
 }
 
 /// A shape made larger by `e` on every side.
-fn grow(g: &Geom, e: f32) -> Geom {
+pub(crate) fn grow(g: &Geom, e: f32) -> Geom {
     match *g {
         Geom::Seg { x1, y1, x2, y2, w } => Geom::Seg {
             x1,
@@ -150,6 +150,8 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     }
     // Pressing on a part and dragging moves it, as in Altium; anywhere
     // else (or with the right button) dragging pans.
+    // Shift+drag draws a box to select with; pressing on a selection of
+    // more than one part drags all of it.
     if resp.drag_started_by(egui::PointerButton::Primary)
         && app.tool == Tool::Select
         && app.router.active.is_none()
@@ -161,7 +163,20 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             let hit = scene
                 .pick(x, y, tol, app.active, true)
                 .or_else(|| scene.pick(x, y, tol, app.active, false));
-            if let Some(c) = hit.and_then(|i| scene.prims[i].component) {
+            let item = hit.map(|i| crate::editing::item_of(&scene.prims[i]));
+            let in_sel = item.as_ref().is_some_and(|s| {
+                !s.is_empty() && {
+                    let mut both = app.edit.sel.clone();
+                    both.add(s);
+                    both == app.edit.sel
+                }
+            });
+            let single_part = app.edit.sel.parts.len() == 1 && app.edit.sel.len() == 1;
+            if ui.input(|i| i.modifiers.shift) {
+                app.edit.boxing = Some([x, y]);
+            } else if in_sel && !single_part {
+                app.edit.dragging = Some([x, y]);
+            } else if let Some(c) = hit.and_then(|i| scene.prims[i].component) {
                 app.moving =
                     crate::placing::Moving::start(&scene.board, c as usize, [x as f64, y as f64]);
                 if let Some(d) = scene.board.components.get(c as usize) {
@@ -210,6 +225,38 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
                 app.moving = None;
             }
+        }
+    } else if app.edit.boxing.is_some() || app.edit.dragging.is_some() {
+        if resp.drag_stopped() || !ui.input(|i| i.pointer.primary_down()) {
+            let end = resp
+                .interact_pointer_pos()
+                .or(resp.hover_pos())
+                .map(|p| app.view.to_board(p));
+            if let (Some(a), Some(b)) = (app.edit.boxing.take(), end) {
+                let bx = [
+                    a[0].min(b[0]) as f64,
+                    a[1].min(b[1]) as f64,
+                    a[0].max(b[0]) as f64,
+                    a[1].max(b[1]) as f64,
+                ];
+                let found = trace_core::select::Sel::in_box(&scene.board, bx, b[0] < a[0]);
+                if ui.input(|i| i.modifiers.command) {
+                    app.edit.sel.add(&found);
+                } else {
+                    app.edit.sel = found;
+                }
+                app.picked = None;
+                app.message = Some((select_hint(&app.edit.sel), false));
+            }
+            if let (Some(a), Some(b)) = (app.edit.dragging.take(), end) {
+                let (dx, dy) = ((b[0] - a[0]) as f64, (b[1] - a[1]) as f64);
+                let edits = trace_core::select::move_by(&scene.board, &app.edit.sel, dx, dy);
+                if !edits.is_empty() {
+                    placed = Some((format!("Moved {}", app.edit.sel.describe()), edits));
+                }
+            }
+            app.edit.boxing = None;
+            app.edit.dragging = None;
         }
     } else if resp.dragged() {
         let d = resp.drag_delta();
@@ -370,12 +417,47 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                         _ => Some(Measure { a: at, b: None }),
                     };
                 }
+                Tool::Text => {
+                    let t =
+                        app.edit
+                            .text_tracks([x as f64, y as f64], app.active, scene.copper_count);
+                    if !t.is_empty() {
+                        pending_label =
+                            format!("Placed text \u{201c}{}\u{201d}", app.edit.text.trim());
+                        pending = Some(trace_core::select::add_tracks(&scene.board, t).0);
+                    }
+                }
+                Tool::Dimension => {
+                    if let Some(t) = app.edit.dim_click(
+                        [at[0] as f64, at[1] as f64],
+                        app.active,
+                        scene.copper_count,
+                    ) {
+                        if !t.is_empty() {
+                            pending_label = "Placed a dimension".into();
+                            pending = Some(trace_core::select::add_tracks(&scene.board, t).0);
+                            app.show_mechanical = true;
+                        }
+                    }
+                }
                 Tool::Select => {
                     app.marker = None;
-                    app.picked = scene
+                    let hit = scene
                         .pick(x, y, tol, app.active, true)
-                        .or_else(|| scene.pick(x, y, tol, app.active, false))
-                        .map(|i| scene.prims[i].source);
+                        .or_else(|| scene.pick(x, y, tol, app.active, false));
+                    let item = hit
+                        .map(|i| crate::editing::item_of(&scene.prims[i]))
+                        .unwrap_or_default();
+                    if ui.input(|i| i.modifiers.command) {
+                        // Ctrl+click adds to the selection or takes away.
+                        app.edit.sel.toggle(&item);
+                        app.message = Some((select_hint(&app.edit.sel), false));
+                        app.picked = None;
+                        app.edit.boxing = None;
+                    } else {
+                        app.edit.sel = item;
+                    }
+                    app.picked = hit.map(|i| scene.prims[i].source);
                     match net_at(x, y).0 {
                         Some(n) => {
                             app.selected = Some(n);
@@ -433,6 +515,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             Slot::Copper(i) => -(i as i32),
             Slot::Vias => 50,
             Slot::TopSilk => 100,
+            Slot::Mechanical => 120,
             Slot::BottomSilk => -100,
             Slot::Pours | Slot::Other => -1000,
         }
@@ -581,6 +664,38 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
+    // The selection, where it is or where it is being dragged.
+    let drag_offset = app
+        .edit
+        .dragging
+        .zip(pointer)
+        .map(|(a, b)| [b[0] - a[0], b[1] - a[1]]);
+    app.edit
+        .draw(&mut shapes, scene, &view, drag_offset, app.picked.is_some());
+    if let Some(p) = pointer {
+        app.edit.draw_box(&mut shapes, &view, p);
+    }
+    match app.tool {
+        Tool::Text => {
+            if let Some([x, y]) = pointer {
+                let t = app
+                    .edit
+                    .text_tracks([x as f64, y as f64], app.active, scene.copper_count);
+                crate::editing::Editing::draw_preview(&mut shapes, &view, &t);
+            }
+        }
+        Tool::Dimension => {
+            let t = app.edit.dim_tracks(
+                snapped.map(|p| [p[0] as f64, p[1] as f64]),
+                app.active,
+                scene.copper_count,
+            );
+            crate::editing::Editing::draw_preview(&mut shapes, &view, &t);
+            app.edit.draw_dim_points(&mut shapes, &view);
+        }
+        _ => {}
+    }
+
     // Part designators once zoomed in far enough to read them.
     if view.scale > 0.35 {
         let font = egui::FontId::proportional((view.scale * 22.0).clamp(10.0, 14.0));
@@ -651,7 +766,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         lifted_part,
     );
 
-    if app.tool == Tool::Measure || app.measure.is_some() {
+    if app.tool == Tool::Measure || app.tool == Tool::Dimension || app.measure.is_some() {
         draw_measure(ui, &mut shapes, &view, app.measure, snapped);
     }
     if resp.double_clicked() && app.tool == Tool::Route && pending.is_none() {
@@ -768,6 +883,17 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         app.apply_edits(&pending_label, edits);
         if std::mem::take(&mut app.join_next) {
             app.router.history.merge_last();
+        }
+        if std::mem::take(&mut app.show_mechanical) {
+            if let Some(scene) = app.scene.as_mut() {
+                for l in scene
+                    .layers
+                    .iter_mut()
+                    .filter(|l| l.slot == Slot::Mechanical)
+                {
+                    l.visible = true;
+                }
+            }
         }
     } else if let Some(edits) = app.router.shoved.take() {
         let n = edits
@@ -1421,4 +1547,15 @@ fn draw_moving(shapes: &mut Vec<Shape>, scene: &Scene, view: &View, m: &crate::p
             rats,
         ));
     }
+}
+
+/// What the selection holds, and what can be done with it.
+pub fn select_hint(sel: &trace_core::select::Sel) -> String {
+    if sel.is_empty() {
+        return "Nothing selected.".into();
+    }
+    format!(
+        "Selected {}. Drag to move, arrows nudge, Ctrl+R turns, Delete removes, Ctrl+C copies; Edit > Align lines them up.",
+        sel.describe()
+    )
 }

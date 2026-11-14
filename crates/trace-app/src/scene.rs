@@ -14,6 +14,8 @@ pub enum Slot {
     Vias,
     /// Switch for copper pours and planes; they are drawn with their layer.
     Pours,
+    /// Every mechanical layer: dimensions, assembly and fabrication notes.
+    Mechanical,
     Other,
 }
 
@@ -250,7 +252,6 @@ impl Scene {
     }
 
     /// Rebuilds the drawing after the board changed, keeping layer settings.
-    #[allow(dead_code)] // used by editing, paused for now
     pub fn rebuild(&mut self) {
         let board = std::mem::take(&mut self.board);
         let mut next = Self::from_board(std::mem::take(&mut self.path), board);
@@ -274,6 +275,7 @@ impl Scene {
             LayerRef::AllCopper => Slot::Copper(0),
             LayerRef::TopSilk => Slot::TopSilk,
             LayerRef::BottomSilk => Slot::BottomSilk,
+            LayerRef::Mechanical(_) => Slot::Mechanical,
             _ => Slot::Other,
         };
         let g = &board.geometry;
@@ -423,6 +425,16 @@ impl Scene {
             visible: false,
             count: 0,
         });
+        if prims.iter().any(|p| p.slot == Slot::Mechanical) {
+            // Shown once something is drawn there in Trace (a dimension).
+            layers.push(Layer {
+                slot: Slot::Mechanical,
+                name: "Mechanical".into(),
+                color: [236, 170, 90],
+                visible: false,
+                count: 0,
+            });
+        }
         for p in &prims {
             if let Some(l) = layers.iter_mut().find(|l| l.slot == p.slot) {
                 l.count += 1;

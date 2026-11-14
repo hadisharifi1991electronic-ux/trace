@@ -28,6 +28,8 @@ pub enum Icon {
     Tune,
     Via,
     Unroute,
+    Text,
+    Dimension,
 }
 
 const RED: Color32 = Color32::from_rgb(236, 84, 84);
@@ -342,6 +344,21 @@ fn draw(p: &egui::Painter, icon: Icon, r: Rect, fg: Color32, enabled: bool) {
                 let l = if i % 2 == 0 { 0.2 } else { 0.12 };
                 line(&[(x, y), (x + l, y + l)], s(1.0, Color32::from_gray(40)));
             }
+        }
+        Icon::Text => {
+            let st = s(1.8, fg);
+            line(&[(0.15, 1.0), (0.5, 0.0), (0.85, 1.0)], st);
+            line(&[(0.3, 0.62), (0.7, 0.62)], st);
+        }
+        Icon::Dimension => {
+            let st = s(1.2, tint(GOLD));
+            line(&[(0.0, 0.2), (0.0, 1.0)], s(1.0, fg));
+            line(&[(1.0, 0.2), (1.0, 1.0)], s(1.0, fg));
+            line(&[(0.0, 0.6), (1.0, 0.6)], st);
+            line(&[(0.0, 0.6), (0.2, 0.45)], st);
+            line(&[(0.0, 0.6), (0.2, 0.75)], st);
+            line(&[(1.0, 0.6), (0.8, 0.45)], st);
+            line(&[(1.0, 0.6), (0.8, 0.75)], st);
         }
         Icon::Route => {
             let st = Stroke::new(w * 0.16, tint(RED));

@@ -19,6 +19,7 @@ pub mod footprint;
 pub mod geometry;
 pub mod ibis;
 pub mod impedance;
+pub mod pairopt;
 pub mod panel;
 pub mod pi;
 pub mod place;
@@ -27,7 +28,10 @@ pub mod route;
 pub mod sch_edit;
 pub mod schematic;
 pub mod sim;
+pub mod touchstone;
 pub mod units;
+pub mod validate;
+pub mod viaopt;
 pub mod walk;
 
 pub use board::*;

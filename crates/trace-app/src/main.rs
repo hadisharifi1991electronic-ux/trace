@@ -8,6 +8,7 @@ mod cm;
 mod drc;
 mod fpview;
 mod imp;
+mod pairwin;
 mod panelize;
 mod placing;
 mod power;
@@ -116,6 +117,7 @@ pub struct App {
     sim: simwin::SimWindow,
     power: power::PowerWindow,
     via: viawin::ViaWindow,
+    pairs: pairwin::PairWindow,
     /// The part being dragged.
     moving: Option<placing::Moving>,
     /// The next board edit joins the last step (a part placed then dropped).
@@ -191,6 +193,7 @@ impl App {
             sim: simwin::SimWindow::default(),
             power: power::PowerWindow::default(),
             via: viawin::ViaWindow::default(),
+            pairs: pairwin::PairWindow::default(),
             moving: None,
             join_next: false,
             new_span: (1, 2),
@@ -1342,6 +1345,17 @@ impl App {
                 {
                     ui.close_menu();
                     self.via.open = true;
+                }
+                if ui
+                    .add_enabled(
+                        self.scene.is_some(),
+                        egui::Button::new("Pair cross-sections…"),
+                    )
+                    .on_hover_text("Every track width and gap on a layer that gives the target Zdiff, ranked by loss, with crosstalk and etch sensitivity")
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.pairs.open = true;
                 }
             });
             ui.menu_button("Help", |ui| {
@@ -3068,6 +3082,7 @@ impl eframe::App for App {
                 .show(ctx, &scene.board, self.imp.stackup(), self.selected);
             self.power.show(ctx, &scene.board, self.selected);
             self.via.show(ctx, &scene.board, self.imp.stackup());
+            self.pairs.show(ctx, &scene.board, self.imp.stackup());
         }
     }
 

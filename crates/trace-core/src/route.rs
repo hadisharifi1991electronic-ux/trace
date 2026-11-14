@@ -361,6 +361,11 @@ pub fn board_width(board: &Board) -> f64 {
     .unwrap_or(DEFAULT_WIDTH)
 }
 
+/// Smallest track width a `Width` rule for everything allows, mil.
+pub fn board_min_width(board: &Board) -> Option<f64> {
+    rule_param(board, "Width", &["MINLIMIT"])
+}
+
 fn rule_param(board: &Board, kind: &str, keys: &[&str]) -> Option<f64> {
     let mut rules: Vec<_> = board
         .rules

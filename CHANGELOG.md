@@ -3,6 +3,36 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.43.0 (2026-11-14)
+
+- Via optimiser: View > "Via S-parameters (3D)…" > Optimise (or `trace
+  via … --optimise GHz`) sweeps the antipad, one oval antipad around a
+  pair or a round one each, the pair's pitch, and the return vias' count
+  and distance, for the best worst-case return loss up to the frequency
+  given, then solves the winner in full. Every setup tried is listed, and
+  "Use this setup" loads the best one.
+- Oval antipads for via pairs (`--oval`).
+- Pair cross-sections: View > "Pair cross-sections…" (or `trace
+  pairsize`) lists every track width from the board's minimum, with the
+  gap that gives the target Zdiff on a layer (2D field solver), its
+  differential loss (copper and dielectric), delay, crosstalk to the next
+  pair, the space it takes and how far Zdiff moves with 0.5 mil of etch,
+  and picks the lowest loss under a crosstalk limit.
+- Touchstone files: `trace cascade` reads .s1p and .s2p files and gives
+  the return loss into a chain of vias and lines ending in a load, such
+  as a chip's port model.
+- Accuracy checks: `trace validate` runs every solver against exact
+  answers (Cohn's stripline and coupled stripline, ρL/wt), textbook
+  formulas (Hammerstad and Jensen, conformal CPW), the 2D solver and
+  finer grids, and prints each error.
+- Fixed: the 3D via solver drew thin metal edges on grid lines, which act
+  as if they reach a third of a cell further, so traces came out about
+  9% low in impedance and vias too capacitive; metal is now drawn a third
+  of a cell inside its true edges (trace impedance within 1% of the 2D
+  solver), and cells default to a quarter of the drill (a stub's notch
+  within about 2% of where finer grids converge, from about 7%).
+- Stub notches are found between frequency points.
+
 ## 0.42.0 (2026-11-14)
 
 - 3D full-wave solver for vias: the finite-difference time-domain

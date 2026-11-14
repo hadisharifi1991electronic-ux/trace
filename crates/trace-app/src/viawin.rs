@@ -3,11 +3,14 @@
 
 use eframe::egui::{self, Color32, RichText, Stroke};
 use std::sync::atomic::{AtomicU32, Ordering};
-use std::sync::{mpsc, Arc};
+use std::sync::{mpsc, Arc, Mutex};
 use trace_core::fdtd::{self, ViaResult, ViaSetup};
+use trace_core::viaopt::{self, ViaOpt};
 use trace_core::{Board, Stackup};
 
 type Solved = Result<ViaResult, String>;
+type Optimised = Result<ViaOpt, String>;
+type OptRun = (mpsc::Receiver<Optimised>, Arc<Mutex<(f64, String)>>);
 
 pub struct ViaWindow {
     pub open: bool,
@@ -19,6 +22,10 @@ pub struct ViaWindow {
     board_key: (usize, usize),
     running: Option<(mpsc::Receiver<Solved>, Arc<AtomicU32>)>,
     result: Option<(ViaSetup, Result<ViaResult, String>)>,
+    /// The optimiser: goal frequency, run, outcome.
+    opt_f: f64,
+    opt_running: Option<OptRun>,
+    opt: Option<Optimised>,
 }
 
 impl Default for ViaWindow {
@@ -32,6 +39,9 @@ impl Default for ViaWindow {
             board_key: (0, 0),
             running: None,
             result: None,
+            opt_f: 10.0,
+            opt_running: None,
+            opt: None,
         }
     }
 }
@@ -53,6 +63,18 @@ impl ViaWindow {
                     ctx.request_repaint_after(std::time::Duration::from_millis(200))
                 }
                 Err(mpsc::TryRecvError::Disconnected) => self.running = None,
+            }
+        }
+        if let Some((rx, _)) = &self.opt_running {
+            match rx.try_recv() {
+                Ok(r) => {
+                    self.opt = Some(r);
+                    self.opt_running = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(250))
+                }
+                Err(mpsc::TryRecvError::Disconnected) => self.opt_running = None,
             }
         }
         let mut open = self.open;
@@ -152,8 +174,13 @@ impl ViaWindow {
                 ui.end_row();
                 ui.label("Pair");
                 ui.checkbox(&mut self.is_pair, "differential, vias at");
-                mil(ui, &mut self.pitch, s.antipad.max(s.pad) + 1.0, 300.0);
+                mil(ui, &mut self.pitch, s.pad + 1.0, 300.0);
                 s.pair = self.is_pair.then_some(self.pitch);
+                ui.add_enabled(
+                    self.is_pair,
+                    egui::Checkbox::new(&mut s.antipad_oval, "one oval antipad"),
+                )
+                .on_hover_text("One clearance around both vias instead of a round one each");
                 ui.end_row();
                 ui.label("Stub");
                 ui.checkbox(&mut s.backdrill, "backdrilled (no stub)");
@@ -218,6 +245,7 @@ impl ViaWindow {
                 }
             }
         });
+        self.optimiser(ui, ctx, stackup);
         let Some((_, res)) = &self.result else {
             return;
         };
@@ -255,6 +283,110 @@ impl ViaWindow {
             ui.weak(n);
         }
         plot(ui, r, kind);
+    }
+}
+
+impl ViaWindow {
+    fn optimiser(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, stackup: &Stackup) {
+        ui.horizontal(|ui| {
+            let busy = self.opt_running.is_some() || self.running.is_some();
+            let ok = self.setup.from != self.setup.to && !busy;
+            if ui
+                .add_enabled(ok, egui::Button::new("Optimise"))
+                .on_hover_text(
+                    "Sweeps the antipad (round or oval), the pair's pitch and the return vias \
+                     with quick 3D solves, for the best return loss up to the frequency given",
+                )
+                .clicked()
+            {
+                let st = stackup.clone();
+                let base = self.setup.clone();
+                let goal = viaopt::ViaGoal::around(&base, self.opt_f);
+                let (tx, rx) = mpsc::channel();
+                let prog = Arc::new(Mutex::new((0.0, String::new())));
+                let p2 = prog.clone();
+                let c = ctx.clone();
+                std::thread::spawn(move || {
+                    let r = viaopt::optimise(&st, &base, &goal, &|f, what| {
+                        if let Ok(mut p) = p2.lock() {
+                            *p = (f, what.to_string());
+                        }
+                    });
+                    let _ = tx.send(r);
+                    c.request_repaint();
+                });
+                self.opt = None;
+                self.opt_running = Some((rx, prog));
+            }
+            ui.label("for the best return loss up to");
+            ui.add(
+                egui::DragValue::new(&mut self.opt_f)
+                    .speed(0.5)
+                    .range(1.0..=self.setup.fmax_ghz.max(1.0))
+                    .suffix(" GHz"),
+            );
+            if let Some((_, p)) = &self.opt_running {
+                ui.spinner();
+                if let Ok(p) = p.lock() {
+                    ui.label(format!("{:.0} %: trying {}", p.0 * 100.0, p.1));
+                }
+            }
+        });
+        let mut use_best = None;
+        match &self.opt {
+            Some(Err(e)) => {
+                ui.colored_label(Color32::from_rgb(230, 110, 90), e);
+            }
+            Some(Ok(o)) => {
+                let (s0, _) = viaopt::judge(&o.start, self.opt_f);
+                let (s1, il) = viaopt::judge(&o.best, self.opt_f);
+                ui.label(
+                    RichText::new(format!(
+                        "Best: {}. Worst return loss to {:.1} GHz {:.1} dB (was {:.1} dB); {:.2} dB through at {:.1} GHz.",
+                        viaopt::describe(&o.best_setup),
+                        self.opt_f,
+                        s1,
+                        s0,
+                        il,
+                        self.opt_f
+                    ))
+                    .strong(),
+                );
+                ui.horizontal(|ui| {
+                    if ui.button("Use this setup").clicked() {
+                        use_best = Some((o.best_setup.clone(), o.best.clone()));
+                    }
+                    ui.weak(format!("{} setups tried", o.trials.len()));
+                });
+                egui::CollapsingHeader::new("Setups tried")
+                    .id_salt("via-trials")
+                    .show(ui, |ui| {
+                        egui::Grid::new("via-trials-grid")
+                            .striped(true)
+                            .show(ui, |ui| {
+                                ui.strong("Setup");
+                                ui.strong("Worst RL");
+                                ui.strong("Through");
+                                ui.end_row();
+                                for t in &o.trials {
+                                    ui.label(viaopt::describe(&t.setup));
+                                    ui.label(format!("{:.1} dB", t.worst_rl));
+                                    ui.label(format!("{:.2} dB", t.il));
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            }
+            None => {}
+        }
+        if let Some((s, r)) = use_best {
+            self.is_pair = s.pair.is_some();
+            if let Some(p) = s.pair {
+                self.pitch = p;
+            }
+            self.setup = s.clone();
+            self.result = Some((s, Ok(r)));
+        }
     }
 }
 

@@ -47,11 +47,22 @@ USAGE:
                                                 vias from the source part to the loads (no --load: the total,
                                                 default 1 A, shared by pad count); with out, a drop map per layer
     trace via <board> <layer> <layer> [--drill D] [--pad P] [--antipad A] [--width W] [--width2 W]
-              [--pair PITCH] [--returns N@D] [--backdrill] [--fmax 40] [--cell C] [out.s2p] [out.svg]
+              [--pair PITCH] [--oval] [--returns N@D] [--backdrill] [--fmax 40] [--cell C]
+              [--optimise GHz] [out.s2p] [out.svg]
                                                 3D full-wave (FDTD) solve of a via from one layer to another
                                                 with the board's stack-up (default drill, pad and antipad from
                                                 its commonest via): S11/S21, or Sdd for a pair, as Touchstone
-                                                and a plot; the stub resonance when the barrel runs on
+                                                and a plot; the stub resonance when the barrel runs on.
+                                                --optimise GHz sweeps the antipad (--oval for a pair), the
+                                                pitch and the return vias for the best return loss to GHz
+    trace pairsize <board> <layer> [--zdiff 100] [--wmin W] [--wmax W] [--gap S] [--ghz 8] [--next D] [--xtalk 2]
+                                                Every track width and gap on a layer that gives the target Zdiff
+                                                (2D field solver), ranked by loss, with crosstalk and etch
+    trace cascade <load.s1p> [stage.s2p | --line Z@len@Eeff[@dB/in]]... [--ref R] [--step GHz]
+                                                Return loss into a chain of two-ports (vias from trace via, lines)
+                                                ending in a load such as a chip's port model, input side first
+    trace validate [--quick] [out.txt]          Accuracy checks: the field, IR drop and 3D via solvers against
+                                                exact answers, the 2D solver and finer grids (--quick: no 3D)
     trace stubs <board> [out.tracepcb]          Via stubs on nets with a stub rule (default: pair nets, 10 mil);
                                                 with out, backdrill those too long and save the board
     trace view <board> [out.html]               Open the board in the viewer (in your browser)
@@ -101,6 +112,9 @@ fn main() -> ExitCode {
         ["sim", file, from, to, rest @ ..] => sim(file, from, to, rest),
         ["ir", file, net, rest @ ..] => ir(file, net, rest),
         ["via", file, from, to, rest @ ..] => via(file, from, to, rest),
+        ["pairsize", file, layer, rest @ ..] => pairsize(file, layer, rest),
+        ["validate", rest @ ..] => validate(rest),
+        ["cascade", load, rest @ ..] => cascade(load, rest),
         ["stubs", file] => stubs(file, None),
         ["stubs", file, out] => stubs(file, Some(out)),
         ["convert", file, out] => convert(file, out),
@@ -1432,6 +1446,253 @@ fn ir(file: &str, net: &str, rest: &[&str]) -> Res {
     Ok(())
 }
 
+fn pairsize(file: &str, layer: &str, rest: &[&str]) -> Res {
+    use trace_core::pairopt::{self, PairGoal};
+    let b = board(file)?;
+    let geo = b.layer_geometry();
+    let g = layer
+        .parse::<usize>()
+        .ok()
+        .and_then(|n| geo.get(n.checked_sub(1)?))
+        .or_else(|| geo.iter().find(|g| g.name.eq_ignore_ascii_case(layer)))
+        .ok_or_else(|| {
+            format!(
+                "no copper layer {layer}; layers: {}",
+                geo.iter()
+                    .map(|g| g.name.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            )
+        })?;
+    let mut goal = PairGoal::new(100.0);
+    if let Some(w) = trace_core::route::board_min_width(&b) {
+        goal.w_min = w.max(1.0);
+    }
+    goal.s_min = trace_core::route::board_clearance(&b).clamp(2.0, 20.0);
+    let mut next_max = 2.0;
+    let mut it = rest.iter();
+    let num = |x: Option<&&str>, what: &str| -> Result<f64, String> {
+        let x = x.ok_or(format!("{what} needs a value"))?;
+        x.trim_end_matches(|c: char| c.is_ascii_alphabetic() || c == '%')
+            .parse()
+            .map_err(|_| format!("not a number: {x}"))
+    };
+    while let Some(&a) = it.next() {
+        match a {
+            "--zdiff" => goal.zdiff = num(it.next(), a)?,
+            "--wmin" => goal.w_min = num(it.next(), a)?,
+            "--wmax" => goal.w_max = num(it.next(), a)?,
+            "--gap" => goal.s_min = num(it.next(), a)?,
+            "--ghz" => goal.f = num(it.next(), a)? * 1e9,
+            "--next" => goal.neighbour = Some(num(it.next(), a)?),
+            "--xtalk" => next_max = num(it.next(), a)?,
+            _ => return Err(format!("unknown option {a}").into()),
+        }
+    }
+    println!(
+        "{}: {:.0} Ω pairs, tracks {:.2} to {:.2} mil, gap at least {:.2} mil, loss at {:.1} GHz",
+        g.name,
+        goal.zdiff,
+        goal.w_min,
+        goal.w_max,
+        goal.s_min,
+        goal.f / 1e9
+    );
+    let opts = pairopt::pair_options(g, &goal);
+    if opts.is_empty() {
+        return Err("no width in that range reaches the target with the gap allowed".into());
+    }
+    let best = pairopt::best(&opts, next_max, None);
+    println!(
+        "{:>7} {:>7} {:>7} {:>9} {:>8} {:>8} {:>8} {:>7} {:>7} {:>7} {:>6}",
+        "width",
+        "gap",
+        "Zdiff",
+        "dB/in",
+        "copper",
+        "diel",
+        "ps/in",
+        "NEXT%",
+        "FEXT%",
+        "span",
+        "etch"
+    );
+    for (i, o) in opts.iter().enumerate() {
+        println!(
+            "{:>7.2} {:>7.2} {:>7.1} {:>9.3} {:>8.3} {:>8.3} {:>8.1} {:>7.2} {:>7.2} {:>7.1} {:>6.1}{}",
+            o.w,
+            o.s,
+            o.zdiff,
+            o.loss,
+            o.loss_cu,
+            o.loss_diel,
+            o.delay,
+            o.next,
+            o.fext,
+            o.span,
+            o.etch,
+            if Some(i) == best { "  <- best" } else { "" }
+        );
+    }
+    if best.is_none() {
+        println!("None keeps crosstalk under {next_max} %.");
+    }
+    Ok(())
+}
+
+fn cascade(load: &str, rest: &[&str]) -> Res {
+    use trace_core::fdtd::Cx;
+    use trace_core::touchstone::{self, Network};
+    enum Stage {
+        File(String, Network),
+        Line(f64, f64, f64, f64),
+    }
+    let ld = touchstone::read(std::path::Path::new(load))?;
+    if ld.ports != 1 {
+        return Err("the load must be a one-port (.s1p)".into());
+    }
+    let mut stages = Vec::new();
+    let mut z_print = None;
+    let mut step = None;
+    let mut it = rest.iter();
+    while let Some(&a) = it.next() {
+        match a {
+            "--line" => {
+                let x = it.next().ok_or("--line needs Z@length[@Eeff[@dB/in]]")?;
+                let v: Vec<f64> = x
+                    .split('@')
+                    .map(|p| p.trim_end_matches("mil").parse::<f64>())
+                    .collect::<Result<_, _>>()
+                    .map_err(|_| format!("not Z@length@Eeff@dB/in: {x}"))?;
+                if v.len() < 2 {
+                    return Err(format!("--line needs Z@length: {x}").into());
+                }
+                stages.push(Stage::Line(
+                    v[0],
+                    v[1],
+                    v.get(2).copied().unwrap_or(4.0),
+                    v.get(3).copied().unwrap_or(0.0),
+                ));
+            }
+            "--ref" => {
+                z_print = Some(
+                    it.next()
+                        .and_then(|r| r.parse::<f64>().ok())
+                        .ok_or("--ref needs ohms")?,
+                )
+            }
+            "--step" => {
+                step = Some(
+                    it.next()
+                        .and_then(|r| r.parse::<f64>().ok())
+                        .ok_or("--step needs GHz")?,
+                )
+            }
+            _ if !a.starts_with("--") => {
+                let n = touchstone::read(std::path::Path::new(a))?;
+                if n.ports != 2 {
+                    return Err(format!("{a}: stages must be two-ports (.s2p)").into());
+                }
+                stages.push(Stage::File(a.to_string(), n));
+            }
+            _ => return Err(format!("unknown option {a}").into()),
+        }
+    }
+    let zr = z_print.unwrap_or_else(|| {
+        stages
+            .iter()
+            .find_map(|s| match s {
+                Stage::File(_, n) => Some(n.z_ref),
+                _ => None,
+            })
+            .unwrap_or(ld.z_ref)
+    });
+    // The band all files share.
+    let (mut lo, mut hi) = (ld.f[0], *ld.f.last().unwrap());
+    for s in &stages {
+        if let Stage::File(_, n) = s {
+            lo = lo.max(n.f[0]);
+            hi = hi.min(*n.f.last().unwrap());
+        }
+    }
+    if hi <= lo {
+        return Err("the files share no frequencies".into());
+    }
+    println!("Load {load} ({} Ω reference in the file)", ld.z_ref);
+    for (i, s) in stages.iter().enumerate() {
+        match s {
+            Stage::File(p, n) => println!("  stage {}: {p} ({} Ω)", i + 1, n.z_ref),
+            Stage::Line(z, l, e, db) => println!(
+                "  stage {}: line {z} Ω, {l} mil, Eeff {e}, {db} dB/in",
+                i + 1
+            ),
+        }
+    }
+    println!("Return loss in a {zr} Ω reference, from the first stage's input:");
+    println!(
+        "{:>9} {:>14} {:>10} {:>18} {:>10}",
+        "GHz", "load Z (Ω)", "load dB", "input Z (Ω)", "input dB"
+    );
+    let dstep = step.unwrap_or(((hi - lo) / 20.0).max(0.01));
+    let mut f = lo.max(dstep.min(hi));
+    while f <= hi + 1e-9 {
+        let zl = ld.impedance(f).ok_or("load outside its band")?;
+        let mut z = zl;
+        for s in stages.iter().rev() {
+            z = match s {
+                Stage::File(_, n) => {
+                    let m = n.at(f).ok_or("stage outside its band")?;
+                    touchstone::input_impedance(&m, n.z_ref, z)
+                }
+                Stage::Line(zc, l, e, db) => {
+                    let m = touchstone::line(*zc, *e, *l, *db, f, zr);
+                    touchstone::input_impedance(&m, zr, z)
+                }
+            };
+        }
+        let fmt = |z: Cx| format!("{:.1}{:+.1}j", z.re, z.im);
+        println!(
+            "{f:9.3} {:>14} {:10.2} {:>18} {:10.2}",
+            fmt(zl),
+            touchstone::z_to_gamma(zl, zr).db(),
+            fmt(z),
+            touchstone::z_to_gamma(z, zr).db()
+        );
+        f += dstep;
+    }
+    Ok(())
+}
+
+fn validate(rest: &[&str]) -> Res {
+    use trace_core::validate;
+    let quick = rest.contains(&"--quick");
+    let mut c = validate::field_checks();
+    c.extend(validate::ir_checks());
+    if !quick {
+        let t = std::time::Instant::now();
+        let last = std::cell::Cell::new(-1i32);
+        c.extend(validate::via_checks(&|p| {
+            let pc = (p * 100.0) as i32 / 5 * 5;
+            if pc > last.get() {
+                last.set(pc);
+                eprint!("\r  3D checks… {pc}%");
+            }
+        }));
+        eprintln!("\r  3D checks: {:.0} s      ", t.elapsed().as_secs_f64());
+    }
+    let text = validate::report(&c);
+    print!("{text}");
+    if let Some(out) = rest.iter().find(|a| !a.starts_with("--")) {
+        std::fs::write(out, &text)?;
+        println!("Wrote {out}");
+    }
+    if c.iter().all(|c| c.pass()) {
+        Ok(())
+    } else {
+        Err("some checks failed".into())
+    }
+}
+
 fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     use trace_core::fdtd::{self, ViaSetup};
     let b = board(file)?;
@@ -1460,6 +1721,7 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
         v.antipad = a;
     }
     let mut outs: Vec<&str> = Vec::new();
+    let mut optimise: Option<f64> = None;
     let mut it = rest.iter();
     let len = |x: Option<&&str>, what: &str| -> Result<f64, Box<dyn std::error::Error>> {
         let x = x.ok_or(format!("{what} needs a length"))?;
@@ -1475,6 +1737,15 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
             "--pair" => v.pair = Some(len(it.next(), a)?),
             "--cell" => v.cell = len(it.next(), a)?,
             "--backdrill" => v.backdrill = true,
+            "--oval" => v.antipad_oval = true,
+            "--optimise" | "--optimize" => {
+                let x = it.next().ok_or("--optimise needs GHz")?;
+                optimise = Some(
+                    x.trim_end_matches(['G', 'g', 'H', 'h', 'z'])
+                        .parse::<f64>()
+                        .map_err(|_| format!("not a frequency: {x}"))?,
+                );
+            }
             "--returns" => {
                 let x = it.next().ok_or("--returns needs N or N@distance")?;
                 let (n, d) = x.split_once('@').unwrap_or((x, ""));
@@ -1507,6 +1778,45 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
         v.return_dist,
         if v.backdrill { ", backdrilled" } else { "" }
     );
+    if let Some(fg) = optimise {
+        use trace_core::viaopt;
+        let goal = viaopt::ViaGoal::around(&v, fg);
+        let t = std::time::Instant::now();
+        let o = viaopt::optimise(&b.stackup, &v, &goal, &|p, what| {
+            eprint!("\r  optimising… {:3.0}% {what:<40}", p * 100.0);
+        })?;
+        eprintln!(
+            "\r  optimised in {:.0} s{:50}",
+            t.elapsed().as_secs_f64(),
+            ""
+        );
+        println!("Setups tried (worst return loss to {fg} GHz, through loss at {fg} GHz):");
+        for tr in &o.trials {
+            println!(
+                "  {:>7.1} dB {:>7.2} dB  {}",
+                tr.worst_rl,
+                tr.il,
+                viaopt::describe(&tr.setup)
+            );
+        }
+        let (s0, _) = viaopt::judge(&o.start, fg);
+        let (s1, il) = viaopt::judge(&o.best, fg);
+        println!(
+            "Best: {}\n  worst return loss {s1:.1} dB (was {s0:.1} dB), {il:.2} dB through at {fg} GHz",
+            viaopt::describe(&o.best_setup)
+        );
+        let title = format!("Via {} to {} (optimised)", names(v.from), names(v.to));
+        for out in outs {
+            let text = if out.to_ascii_lowercase().ends_with(".svg") {
+                o.best.svg(&title)
+            } else {
+                o.best.touchstone(&title)
+            };
+            std::fs::write(out, text)?;
+            println!("Wrote {out}");
+        }
+        return Ok(());
+    }
     let t = std::time::Instant::now();
     let last = std::cell::Cell::new(-1i32);
     let r = fdtd::solve_with(&b.stackup, &v, &|p| {

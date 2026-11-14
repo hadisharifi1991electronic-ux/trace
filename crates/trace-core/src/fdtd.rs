@@ -33,6 +33,7 @@ pub struct Cx {
     pub im: f64,
 }
 
+#[allow(clippy::should_implement_trait)]
 impl Cx {
     pub fn new(re: f64, im: f64) -> Cx {
         Cx { re, im }
@@ -46,26 +47,26 @@ impl Cx {
     pub fn deg(self) -> f64 {
         self.im.atan2(self.re).to_degrees()
     }
-    fn mul(self, o: Cx) -> Cx {
+    pub fn mul(self, o: Cx) -> Cx {
         Cx::new(
             self.re * o.re - self.im * o.im,
             self.re * o.im + self.im * o.re,
         )
     }
-    fn div(self, o: Cx) -> Cx {
+    pub fn div(self, o: Cx) -> Cx {
         let d = o.re * o.re + o.im * o.im;
         Cx::new(
             (self.re * o.re + self.im * o.im) / d,
             (self.im * o.re - self.re * o.im) / d,
         )
     }
-    fn add(self, o: Cx) -> Cx {
+    pub fn add(self, o: Cx) -> Cx {
         Cx::new(self.re + o.re, self.im + o.im)
     }
-    fn scale(self, k: f64) -> Cx {
+    pub fn scale(self, k: f64) -> Cx {
         Cx::new(self.re * k, self.im * k)
     }
-    fn expj(phi: f64) -> Cx {
+    pub fn expj(phi: f64) -> Cx {
         Cx::new(phi.cos(), phi.sin())
     }
 }
@@ -80,6 +81,9 @@ pub struct ViaSetup {
     pub pad: f64,
     /// Diameter of the clearance hole in the planes.
     pub antipad: f64,
+    /// For a pair, one oval clearance around both vias (the antipad's
+    /// width, stretched along the pair) instead of a round one each.
+    pub antipad_oval: bool,
     /// Trace widths on the two layers (None: 50 Ω from the field solver).
     pub w_from: Option<f64>,
     pub w_to: Option<f64>,
@@ -110,6 +114,7 @@ impl ViaSetup {
             drill: 8.0,
             pad: 18.0,
             antipad: 30.0,
+            antipad_oval: false,
             w_from: None,
             w_to: None,
             pair: None,
@@ -138,6 +143,9 @@ pub struct ViaResult {
     /// Trace widths used and their impedance (single-ended), mil and Ω.
     pub w: [f64; 2],
     pub z0: [f64; 2],
+    /// Each trace's impedance as the 3D grid measures it (from its two
+    /// probes, at a quarter of the band; differential for a pair), Ω.
+    pub z_line: [f64; 2],
     /// Length of the stub below the outgoing layer, mil.
     pub stub: f64,
     pub cells: usize,
@@ -170,7 +178,23 @@ impl ViaResult {
                 }
             }
         }
-        best.map(|(i, _)| (self.f[i], db[i]))
+        // Between samples: the vertex of a parabola through the three
+        // points around the lowest.
+        best.map(|(i, _)| {
+            let (a, b, c) = (db[i - 1], db[i], db[i + 1]);
+            let den = a - 2.0 * b + c;
+            let t = if den.abs() > 1e-12 {
+                (0.5 * (a - c) / den).clamp(-0.5, 0.5)
+            } else {
+                0.0
+            };
+            let df = if t >= 0.0 {
+                self.f[i + 1] - self.f[i]
+            } else {
+                self.f[i] - self.f[i - 1]
+            };
+            (self.f[i] + t * df, b - 0.25 * (a - c) * t)
+        })
     }
 
     /// The S-parameters as a Touchstone 2-port file (magnitude and angle).
@@ -651,14 +675,21 @@ pub fn solve_with(
     let mut d0 = if setup.cell > 0.0 {
         setup.cell
     } else {
-        (setup.drill / 3.0)
+        // A quarter of the drill: a stub's notch then lands within about
+        // 2% of where finer grids converge (a third gave about 7%).
+        (setup.drill / 4.0)
             .min(w[0].min(w[1]) / 2.0)
             .min(hmin / 2.0)
-            .clamp(0.5, 4.0)
+            .clamp(0.5, 3.0)
     };
     // Make the trace widths whole numbers of cells.
+    // A thin metal edge on a grid line acts as if it reached about a third
+    // of a cell further (the one-third rule), so metal is drawn a third of
+    // a cell inside its true edges: traces, pads and barrels shrink by
+    // that, antipads grow. The narrower trace spans whole cells plus that.
     let wmin = w[0].min(w[1]);
-    d0 = wmin / (wmin / d0).round().max(1.0);
+    d0 = wmin / ((wmin / d0 - 2.0 / 3.0).round().max(1.0) + 2.0 / 3.0);
+    let edge = d0 / 3.0;
     let lambda = C0 / (setup.fmax_ghz * 1e9) / er_max.sqrt() / MIL;
     let dmax = (lambda / 20.0).max(d0);
     let hbig = st.slabs.iter().map(|s| s.1 - s.0).fold(0.0, f64::max);
@@ -716,7 +747,7 @@ pub fn solve_with(
             yspan,
             -core - half_pair,
             core + half_pair,
-            -w[0] / 2.0 + half_pair,
+            -(w[0] / 2.0 - edge) + half_pair,
             d0,
             dmax,
             1.25,
@@ -872,6 +903,14 @@ pub fn solve_with(
             .any(|c| (p[0] - c[0]).hypot(p[1] - c[1]) <= r + 1e-9)
     };
     // Planes with antipads.
+    let oval = setup.antipad_oval && sig.len() == 2;
+    let clear = |p: [f64; 2]| {
+        if oval {
+            seg_dist(p, sig[0], sig[1]) <= ra + edge + 1e-9
+        } else {
+            inside(p, &sig, ra + edge)
+        }
+    };
     for (l, &is_plane) in planes.iter().enumerate() {
         if !is_plane {
             continue;
@@ -879,10 +918,10 @@ pub fn solve_with(
         let k = ksheet[l];
         for i in 0..=nx {
             for j in 0..=ny {
-                if i < nx && (thru || !inside([xm(i), y[j]], &sig, ra)) {
+                if i < nx && (thru || !clear([xm(i), y[j]])) {
                     pec(&mut cax, &mut cbx, id(i, j, k));
                 }
-                if j < ny && (thru || !inside([x[i], ym(j)], &sig, ra)) {
+                if j < ny && (thru || !clear([x[i], ym(j)])) {
                     pec(&mut cay, &mut cby, id(i, j, k));
                 }
             }
@@ -896,10 +935,10 @@ pub fn solve_with(
         let k = ksheet[l];
         for i in 0..=nx {
             for j in 0..=ny {
-                if i < nx && inside([xm(i), y[j]], &sig, rp) {
+                if i < nx && inside([xm(i), y[j]], &sig, rp - edge) {
                     pec(&mut cax, &mut cbx, id(i, j, k));
                 }
-                if j < ny && inside([x[i], ym(j)], &sig, rp) {
+                if j < ny && inside([x[i], ym(j)], &sig, rp - edge) {
                     pec(&mut cay, &mut cby, id(i, j, k));
                 }
             }
@@ -915,6 +954,7 @@ pub fn solve_with(
                   cby: &mut Vec<f32>,
                   caz: &mut Vec<f32>,
                   cbz: &mut Vec<f32>| {
+        let rd = (rd - edge).max(0.0);
         for i in 0..=nx {
             for j in 0..=ny {
                 for k in k0..=k1 {
@@ -975,7 +1015,7 @@ pub fn solve_with(
         for (t, &l) in [from, to].iter().enumerate() {
             let yc = c[1];
             let js: Vec<usize> = (0..=ny)
-                .filter(|&j| (y[j] - yc).abs() <= w[t] / 2.0 + d0 * 0.01)
+                .filter(|&j| (y[j] - yc).abs() <= w[t] / 2.0 - edge + d0 * 0.01)
                 .collect();
             let js = if js.is_empty() {
                 vec![near(&y, yc)]
@@ -1412,6 +1452,7 @@ pub fn solve_with(
         z_ref: zr,
         w,
         z0,
+        z_line: zline,
         stub,
         cells: nx * ny * nz,
         steps,

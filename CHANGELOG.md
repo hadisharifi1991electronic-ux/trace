@@ -3,6 +3,27 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.52.0 (2026-11-14)
+
+- Test points (Edit > Test points…, `trace testpoints`): one probe point
+  per net with two or more pads, from the bottom, the top or both sides,
+  on a via, a through-hole pad, a test point part's pad or (when allowed)
+  a surface pad, big enough to hit, clear of part bodies, the board edge
+  and the other probes (1.27 mm by default). Nets with the fewest choices
+  go first. Shows the coverage and each net left without one and why;
+  click a net to find it. Marked points are kept in the board, written to
+  a `-Testpoints.csv` with the fab outputs, and open the mask on probed
+  vias. Undo takes them back.
+- Assembly variants (Edit > Assembly variants…, `trace variants`, and
+  `--variant <name>` on any command): parts not fitted and parts with
+  changed parameters (an alternate value or part number) in each build. A
+  PcbDoc brings the variants of the Altium project (.PrjPcb) beside it.
+  For the chosen variant the BOM and pick and place leave out the parts
+  not fitted and use the changed values; the assembly drawing crosses
+  them out and leaves them off the parts list; IPC-2581 marks them not
+  populated; STEP and the 3D view leave them off. Variants follow
+  designators renamed by annotation or Update PCB.
+
 ## 0.51.0 (2026-11-14)
 
 - STEP export (File > Export STEP (3D)…, `trace step`, or `trace convert`

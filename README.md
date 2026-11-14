@@ -278,6 +278,8 @@ trace fab board.PcbDoc out.zip   Gerber X2, drill, IPC-356, pick-and-place and B
 trace odb board.PcbDoc out.tgz   ODB++ job: layers, drills, parts, nets and stack-up (or a folder)
 trace assembly board.PcbDoc out.pdf [--a4]   Assembly drawing: top and bottom views, parts list
 trace fabdrawing board.PcbDoc out.pdf [--a4] Fabrication drawing: drill symbols, dimensions, drill table, stack-up, notes
+trace testpoints board.PcbDoc out.tracepcb [--both] [--smd] [--report tp.csv]   probe point per net, coverage
+trace variants board.PcbDoc       assembly variants; add --variant NAME to fab, assembly, step...
 trace step board.PcbDoc out.step [--vias] [--no-parts] [--min-hole 0.3]   STEP (AP214) board solid and part boxes
 trace field board.PcbDoc         2D field solver on each layer (50/100 ohm widths, delay, loss)
 trace field board.PcbDoc 1 11 --ground 6 out.svg   One cross-section, with its field drawn
@@ -476,6 +478,16 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   does not read Altium's assembly or courtyard layers; pin 1 is marked on
   diodes and parts with 3 or more pins. Text is Helvetica, so a few
   characters outside Latin-1 print as "?" (Ω prints as "Ohm").
+- Test points: Edit > Test points… (or `trace testpoints`) picks one
+  probe point per net for bed-of-nails or flying-probe test, on vias and
+  through-hole pads (surface pads when allowed), clear of parts, the edge
+  and the other probes, and lists the nets it could not reach and why.
+  The fab outputs then include a test point report.
+- Assembly variants: Edit > Assembly variants… (or `trace variants`)
+  lists the builds of the board and which parts each leaves off or
+  changes; Altium project variants come in with the PcbDoc. Pick one for
+  the outputs (or pass `--variant name` on the command line): BOM, pick
+  and place, assembly drawing, IPC-2581, STEP and the 3D view follow it.
 - Fabrication drawing: File > Export fabrication drawing (PDF)… (or
   `trace fabdrawing`) draws the outline with every hole marked by its
   size's symbol, the overall dimensions and the drill table (size,

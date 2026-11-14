@@ -39,9 +39,11 @@ pub mod stackfile;
 pub mod stitch;
 pub mod swap;
 pub mod teardrop;
+pub mod testpoint;
 pub mod touchstone;
 pub mod units;
 pub mod validate;
+pub mod variant;
 pub mod viaopt;
 pub mod walk;
 

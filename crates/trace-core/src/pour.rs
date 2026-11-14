@@ -871,6 +871,7 @@ fn touched(board: &Board, e: &Edit) -> Option<([f64; 4], Vec<u8>)> {
             let b = crate::place::area(board, *index, *from, *to)?;
             Some((b, (0..n).collect()))
         }
+        Edit::Fab { .. } => None,
         Edit::Netlist { pads, .. } => {
             // Pads that change net: pours about them connect differently.
             let mut b = [f64::MAX, f64::MAX, f64::MIN, f64::MIN];

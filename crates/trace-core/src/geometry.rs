@@ -115,6 +115,11 @@ pub struct Fab {
     /// Vias: drilled out from the bottom.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub back_bottom: Option<Backdrill>,
+    /// A test point: probed from the top or the bottom.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub test_top: bool,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub test_bottom: bool,
 }
 
 /// A backdrill: a drill larger than the hole that removes the barrel from

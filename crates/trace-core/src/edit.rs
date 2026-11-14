@@ -140,6 +140,12 @@ pub enum Edit {
         /// (part, designator before, designator after).
         names: Vec<(usize, String, String)>,
     },
+    /// Changes the fabrication details of pads and vias (test points,
+    /// tenting): (index, before, after).
+    Fab {
+        pads: Vec<(usize, crate::Fab, crate::Fab)>,
+        vias: Vec<(usize, crate::Fab, crate::Fab)>,
+    },
     /// Swaps every part and primitive list, as changing footprints does.
     /// `area` (mil) is where copper changed, for pouring again.
     Parts {
@@ -188,6 +194,18 @@ impl Edit {
             Edit::RemoveVia { index, .. } => remove(&mut board.geometry.vias, *index),
             Edit::SetPolygons { after, .. } => board.geometry.polygons = after.clone(),
             Edit::Parts { after, .. } => after.put(board),
+            Edit::Fab { pads, vias } => {
+                for &(i, _, f) in pads {
+                    if let Some(p) = board.geometry.pads.get_mut(i) {
+                        p.fab = f;
+                    }
+                }
+                for &(i, _, f) in vias {
+                    if let Some(v) = board.geometry.vias.get_mut(i) {
+                        v.fab = f;
+                    }
+                }
+            }
             Edit::Shapes { after, .. } => after.put(board),
             Edit::Netlist {
                 nets_after,
@@ -205,6 +223,15 @@ impl Edit {
                     if let Some(c) = board.components.get_mut(*i) {
                         c.designator = name.clone();
                     }
+                }
+                // Variants name parts by designator: they follow.
+                let renames: std::collections::BTreeMap<String, String> = names
+                    .iter()
+                    .filter(|(_, a, b)| a != b)
+                    .map(|(_, a, b)| (a.clone(), b.clone()))
+                    .collect();
+                if !renames.is_empty() {
+                    crate::variant::rename(board, &renames);
                 }
             }
         }
@@ -267,6 +294,10 @@ impl Edit {
                 before: after.clone(),
                 after: before.clone(),
                 area: *area,
+            },
+            Edit::Fab { pads, vias } => Edit::Fab {
+                pads: pads.iter().map(|&(i, a, b)| (i, b, a)).collect(),
+                vias: vias.iter().map(|&(i, a, b)| (i, b, a)).collect(),
             },
             Edit::Netlist {
                 nets_before,

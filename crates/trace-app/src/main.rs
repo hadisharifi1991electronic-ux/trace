@@ -22,8 +22,10 @@ mod simwin;
 mod stitchwin;
 mod swapwin;
 mod symlib;
+mod testwin;
 mod tidywin;
 mod toolbar;
+mod varwin;
 mod viawin;
 mod view3d;
 
@@ -129,6 +131,8 @@ pub struct App {
     pairs: pairwin::PairWindow,
     stitch: stitchwin::StitchWindow,
     tidy: tidywin::TidyWindow,
+    tests: testwin::TestWindow,
+    variants: varwin::VariantWindow,
     fan: fanwin::FanoutWindow,
     swap: swapwin::SwapWindow,
     /// The part being dragged.
@@ -215,6 +219,8 @@ impl App {
             pairs: pairwin::PairWindow::default(),
             stitch: stitchwin::StitchWindow::default(),
             tidy: tidywin::TidyWindow::default(),
+            tests: testwin::TestWindow::default(),
+            variants: varwin::VariantWindow::default(),
             fan: fanwin::FanoutWindow::default(),
             swap: swapwin::SwapWindow::default(),
             moving: None,
@@ -1706,6 +1712,25 @@ impl App {
                 {
                     ui.close_menu();
                     self.tidy.open = true;
+                }
+                if ui
+                    .add_enabled(has, egui::Button::new("Test points…"))
+                    .on_hover_text(
+                        "One probe point per net for bed-of-nails or flying-probe test, \
+                         clear of parts, the edge and other probes",
+                    )
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.tests.open = true;
+                }
+                if ui
+                    .add_enabled(has, egui::Button::new("Assembly variants…"))
+                    .on_hover_text("Parts left off or changed in each build of the board")
+                    .clicked()
+                {
+                    ui.close_menu();
+                    self.variants.open = true;
                 }
                 if ui
                     .add_enabled(has, egui::Button::new("Backdrill long via stubs"))
@@ -3743,7 +3768,40 @@ impl eframe::App for App {
         if let Some((label, edits)) = tidied {
             self.apply_edits(&label, edits);
         }
+        let tested = self
+            .scene
+            .as_ref()
+            .and_then(|scene| self.tests.show(ctx, &scene.board));
+        match tested {
+            Some(testwin::TestAct::Edit(label, edits)) => self.apply_edits(&label, edits),
+            Some(testwin::TestAct::ShowNet(n)) => self.select_net(n, true),
+            Some(testwin::TestAct::Report(csv)) => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("CSV", &["csv"])
+                    .set_file_name("testpoints.csv")
+                    .save_file()
+                {
+                    self.message = Some(match std::fs::write(&path, csv) {
+                        Ok(()) => (format!("Saved {}", path.display()), false),
+                        Err(e) => (format!("Could not save: {e}"), true),
+                    });
+                }
+            }
+            None => {}
+        }
         let sel_parts: Vec<usize> = self.edit.sel.parts.iter().copied().collect();
+        let var_act = self
+            .scene
+            .as_ref()
+            .and_then(|scene| self.variants.show(ctx, &scene.board, &sel_parts));
+        if let (Some(a), Some(scene)) = (var_act, self.scene.as_mut()) {
+            let msg = a.apply(&mut scene.board);
+            self.dirty = true;
+            self.view3d.rebuild();
+            if !msg.is_empty() {
+                self.message = Some((msg, false));
+            }
+        }
         let fanned = self
             .scene
             .as_ref()

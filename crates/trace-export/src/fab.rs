@@ -138,6 +138,13 @@ pub fn fab_files(board: &Board, stem: &str, opt: &FabOptions) -> Vec<FabFile> {
     put(".ipc", ipc356(board, stem, n));
     put("-PickPlace.csv", pick_place(board));
     put("-BOM.csv", bom(board));
+    let tests = trace_core::testpoint::existing(board);
+    if !tests.is_empty() {
+        put(
+            "-Testpoints.csv",
+            trace_core::testpoint::report_csv(board, &tests, &[]),
+        );
+    }
     out
 }
 
@@ -1273,7 +1280,11 @@ fn pick_place(board: &Board) -> String {
         "Designator,Value,Part Number,Footprint,Layer,Center-X(mm),Center-Y(mm),Rotation,Ref-X(mm),Ref-Y(mm)\n",
     );
     let mid = centres(board);
-    let mut order: Vec<usize> = (0..board.components.len()).collect();
+    let off = trace_core::variant::not_fitted(board);
+    let parts = trace_core::variant::parts(board);
+    let mut order: Vec<usize> = (0..board.components.len())
+        .filter(|i| !off.contains(i))
+        .collect();
     order.sort_by(|&a, &b| {
         natural(
             &board.components[a].designator,
@@ -1281,7 +1292,7 @@ fn pick_place(board: &Board) -> String {
         )
     });
     for i in order {
-        let c = &board.components[i];
+        let c = &parts[i];
         let [value, part, ..] = part_info(c);
         let _ = writeln!(
             o,
@@ -1339,7 +1350,9 @@ fn bom(board: &Board) -> String {
     // Parts alike in value, part number, maker, description and footprint.
     type Key = ([String; 4], String);
     let mut groups: BTreeMap<Key, Vec<&str>> = BTreeMap::new();
-    for c in &board.components {
+    let off = trace_core::variant::not_fitted(board);
+    let parts = trace_core::variant::parts(board);
+    for (_, c) in parts.iter().enumerate().filter(|(i, _)| !off.contains(i)) {
         groups
             .entry((part_info(c), c.footprint.clone()))
             .or_default()

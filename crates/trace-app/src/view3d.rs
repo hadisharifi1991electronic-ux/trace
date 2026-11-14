@@ -496,7 +496,11 @@ fn place_models(
         let Some(Some(mesh)) = models.get(body.model as usize) else {
             continue;
         };
-        if body.opacity <= 0.05 {
+        if body.opacity <= 0.05
+            || body
+                .component
+                .is_some_and(|c| !trace_core::variant::fitted(&scene.board, c as usize))
+        {
             continue;
         }
         let [rx, ry, rz] = body.model_rotation_deg;
@@ -606,7 +610,8 @@ fn bodies(
     let mut count = 0;
     for (ci, comp) in board.components.iter().enumerate() {
         let pads = &pads_of[ci];
-        if pads.is_empty() || skip.contains(&(ci as u32)) {
+        if pads.is_empty() || skip.contains(&(ci as u32)) || !trace_core::variant::fitted(board, ci)
+        {
             continue;
         }
         let des = comp.designator.to_ascii_uppercase();
@@ -1044,6 +1049,11 @@ impl View3d {
         self.built = None;
         self.loader = None;
         self.models = None;
+    }
+
+    /// Build the mesh again from the same board (parts fitted changed).
+    pub fn rebuild(&mut self) {
+        self.built = None;
     }
 
     pub fn destroy(&self, gl: &glow::Context) {

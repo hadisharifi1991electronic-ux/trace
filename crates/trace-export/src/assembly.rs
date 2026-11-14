@@ -34,6 +34,7 @@ const PAD: Rgb = [196, 196, 196];
 const SILK: Rgb = [60, 60, 60];
 const PIN1: Rgb = [176, 24, 24];
 const LABEL: Rgb = [15, 35, 80];
+const DNP: Rgb = [205, 95, 30];
 
 pub(crate) fn mm(p: Point) -> [f64; 2] {
     [p.x.mm(), p.y.mm()]
@@ -133,6 +134,8 @@ struct PartArt {
     silk: Vec<(Vec<[f64; 2]>, f64)>,
     silk_fill: Vec<Vec<[f64; 2]>>,
     pin1: Option<([f64; 2], f64)>,
+    /// Left off in the variant drawn.
+    dnp: bool,
 }
 
 fn parts_on(board: &Board, side: Side) -> Vec<PartArt> {
@@ -175,6 +178,7 @@ fn parts_on(board: &Board, side: Side) -> Vec<PartArt> {
             }
         }
     }
+    let off = trace_core::variant::not_fitted(board);
     let mut out = Vec::new();
     for (i, c) in board.components.iter().enumerate() {
         if c.side != side {
@@ -232,6 +236,7 @@ fn parts_on(board: &Board, side: Side) -> Vec<PartArt> {
             silk: std::mem::take(&mut silk[i]),
             silk_fill: std::mem::take(&mut fills[i]),
             pin1,
+            dnp: off.contains(&i),
         });
     }
     out
@@ -400,7 +405,7 @@ fn view(board: &Board, side: Side, paper: Paper, sheet: &Sheet) -> Page {
             page.polygon(&tfv(&v), None, Some((0.9, INK)));
         }
     }
-    for a in &parts {
+    for a in parts.iter().filter(|a| !a.dnp) {
         page.polygon(&tfv(&a.body), Some(BODY), Some((0.4, BODY_EDGE)));
     }
     for a in &parts {
@@ -416,7 +421,14 @@ fn view(board: &Board, side: Side, paper: Paper, sheet: &Sheet) -> Page {
             page.polygon(&tfv(f), Some(SILK), None);
         }
     }
-    for a in &parts {
+    // Parts left off: the body outlined and crossed out.
+    for a in parts.iter().filter(|a| a.dnp) {
+        let b = tfv(&a.body);
+        page.polygon(&b, None, Some((0.5, DNP)));
+        page.polyline(&[b[0], b[2]], 0.5, DNP);
+        page.polyline(&[b[1], b[3]], 0.5, DNP);
+    }
+    for a in parts.iter().filter(|a| !a.dnp) {
         if let Some((at, size)) = a.pin1 {
             page.dot(tf(at), (size * s * 0.3).clamp(0.7, 3.0), PIN1);
         }
@@ -451,7 +463,9 @@ struct Row {
 
 fn rows(board: &Board) -> Vec<Row> {
     let mut groups: BTreeMap<(String, String), (Vec<String>, BTreeSet<bool>)> = BTreeMap::new();
-    for c in &board.components {
+    let off = trace_core::variant::not_fitted(board);
+    let parts = trace_core::variant::parts(board);
+    for (_, c) in parts.iter().enumerate().filter(|(i, _)| !off.contains(i)) {
         let [value, ..] = part_info(c);
         let e = groups.entry((value, c.footprint.clone())).or_default();
         e.0.push(c.designator.clone());
@@ -610,7 +624,19 @@ fn list(rows: &[Row], page_rows: &[(usize, Vec<String>)], paper: Paper, sheet: &
 /// list.
 pub fn assembly_pdf(board: &Board, title: &str, paper: Paper) -> Vec<u8> {
     let date = today();
-    let count = |side| board.components.iter().filter(|c| c.side == side).count();
+    let off = trace_core::variant::not_fitted(board);
+    let count = |side| {
+        board
+            .components
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| c.side == side && !off.contains(i))
+            .count()
+    };
+    let variant = match trace_core::variant::name(board) {
+        "" => String::new(),
+        v => format!(" ({v})"),
+    };
     let (top, bottom) = (count(Side::Top), count(Side::Bottom));
     let mut sides = vec![Side::Top];
     if bottom > 0 {
@@ -629,12 +655,16 @@ pub fn assembly_pdf(board: &Board, title: &str, paper: Paper) -> Vec<u8> {
         let sheet = Sheet {
             title,
             what: if side == Side::Top {
-                "Assembly drawing, top side".into()
+                format!("Assembly drawing{variant}, top side")
             } else {
-                "Assembly drawing, bottom side seen from below (mirrored)".into()
+                format!("Assembly drawing{variant}, bottom side seen from below (mirrored)")
             },
             contents: format!("{n} part{}", if n == 1 { "" } else { "s" }),
-            note: "Red dot: pin 1 (diodes, and parts with 3 or more pins)".into(),
+            note: if off.is_empty() {
+                "Red dot: pin 1 (diodes, and parts with 3 or more pins)".into()
+            } else {
+                "Red dot: pin 1. Crossed out: not fitted".into()
+            },
             date: &date,
             index: i + 1,
             count: total,
@@ -644,8 +674,12 @@ pub fn assembly_pdf(board: &Board, title: &str, paper: Paper) -> Vec<u8> {
     for (k, pr) in lists.iter().enumerate() {
         let sheet = Sheet {
             title,
-            what: "Assembly drawing, parts list".into(),
-            contents: format!("{} parts, {} lines", board.components.len(), rows.len()),
+            what: format!("Assembly drawing{variant}, parts list"),
+            contents: format!(
+                "{} parts, {} lines",
+                rows.iter().map(|r| r.qty).sum::<usize>(),
+                rows.len()
+            ),
             note: if lists.len() > 1 {
                 format!("List page {} of {}", k + 1, lists.len())
             } else {
@@ -751,6 +785,32 @@ mod tests {
         }
         // R2 is turned, so its designator is too.
         assert!(c.contains("0 1 -1 0"));
+    }
+
+    #[test]
+    fn a_variant_leaves_parts_off_the_list() {
+        let mut b = Board {
+            components: vec![
+                part("R1", 5.0, Side::Top, 0.0),
+                part("R2", 10.0, Side::Top, 0.0),
+            ],
+            ..Default::default()
+        };
+        for (i, c) in b.components.iter().enumerate() {
+            b.geometry.pads.push(pad(i as u32, "1", c.x.mm() - 0.8));
+            b.geometry.pads.push(pad(i as u32, "2", c.x.mm() + 0.8));
+        }
+        let mut v = trace_core::variant::Variant::new("Lite");
+        v.not_fitted.insert("R2".into());
+        b.variants.push(v);
+        b.variant = Some(0);
+        let c = contents(&assembly_pdf(&b, "Test board", Paper::A3));
+        assert!(c.contains("Lite"), "the variant's name in the title");
+        assert!(c.contains("Crossed out: not fitted"));
+        assert!(c.contains("(1 parts, 1 lines)"));
+        // R2 is still drawn, crossed out, but not listed.
+        assert!(c.contains("(R2)"));
+        assert!(!c.contains("(R1, R2)"));
     }
 
     #[test]

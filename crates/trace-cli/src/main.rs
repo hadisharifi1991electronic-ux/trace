@@ -87,6 +87,15 @@ USAGE:
                                                 Fan out BGA and other surface parts: a short track from each
                                                 pad to a via between the pads (away from the centre), or a via
                                                 in the pad; outer rows can be left for surface routing
+    trace testpoints <board> [out.tracepcb] [--top|--both] [--smd] [--no-vias] [--no-th] [--size 0.5mm]
+              [--spacing 1.27mm] [--clearance 0.5mm] [--edge 2mm] [--tented] [--fresh] [--report out.csv]
+                                                Test points for bed-of-nails or flying-probe test: one probe point
+                                                per net (bottom side by default) on a via or pad big enough, clear
+                                                of parts, the edge and other probes; coverage and the nets missed
+    trace variants <board>                      Assembly variants (read from the Altium project beside a PcbDoc):
+                                                parts not fitted and changed in each. Any command takes
+                                                --variant <name> to make its BOM, pick and place, assembly
+                                                drawing or STEP for that variant
     trace stackup <board> [out.txt]             Print the board's stack-up as a stack-up file (name, kind,
                                                 thickness, Er, Df); edit it and give it back with --stackup
     trace validate [--quick] [out.txt]          Accuracy checks: the field, IR drop and 3D via solvers against
@@ -122,6 +131,8 @@ USAGE:
 
 /// A stack-up file given with --stackup, put on every board loaded.
 static STACKUP: std::sync::OnceLock<trace_core::Stackup> = std::sync::OnceLock::new();
+/// The assembly variant outputs are made for (`--variant`).
+static VARIANT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
@@ -142,6 +153,14 @@ fn main() -> ExitCode {
                 return ExitCode::FAILURE;
             }
         }
+        args.drain(i..i + 2);
+    }
+    if let Some(i) = args.iter().position(|a| a == "--variant") {
+        let Some(name) = args.get(i + 1).cloned() else {
+            eprintln!("error: --variant needs a name");
+            return ExitCode::FAILURE;
+        };
+        let _ = VARIANT.set(name);
         args.drain(i..i + 2);
     }
     let result = match args
@@ -176,6 +195,8 @@ fn main() -> ExitCode {
         ["teardrops", file, out, rest @ ..] => teardrops_cmd(file, out, rest),
         ["gloss", file, out, rest @ ..] => gloss_cmd(file, out, rest),
         ["fanout", file, parts, out, rest @ ..] => fanout_cmd(file, parts, out, rest),
+        ["variants", file] => board(file).map(|b| print!("{}", trace_core::variant::summary(&b))),
+        ["testpoints", file, rest @ ..] => testpoints_cmd(file, rest),
         ["erc", file, rest @ ..] => erc_cmd(file, rest),
         ["swap", file, part, a, b, out] => swap_cmd(file, part, a, b, out),
         ["annotate", file, out, rest @ ..] => annotate_cmd(file, out, rest),
@@ -344,6 +365,9 @@ fn load(file: &str) -> Result<Design, Box<dyn std::error::Error>> {
     let mut d = load_file(file)?;
     if let (Design::Board(b), Some(st)) = (&mut d, STACKUP.get()) {
         trace_core::stackfile::apply(b, st)?;
+    }
+    if let (Design::Board(b), Some(v)) = (&mut d, VARIANT.get()) {
+        trace_core::variant::choose(b, Some(v))?;
     }
     Ok(d)
 }
@@ -2652,6 +2676,88 @@ fn teardrops_cmd(file: &str, out: &str, rest: &[&str]) -> Res {
         save_edits(b, edits, out)?;
     }
     println!("saved {out}");
+    Ok(())
+}
+
+fn testpoints_cmd(file: &str, rest: &[&str]) -> Res {
+    use trace_core::testpoint::{assign, mark, report_csv, Sides, TestGoal};
+    let b = board(file)?;
+    let mut goal = TestGoal::default();
+    let (mut out, mut report) = (None, None);
+    let mut i = 0;
+    while i < rest.len() {
+        let a = rest[i];
+        let val = || rest.get(i + 1).copied().ok_or(format!("{a} needs a value"));
+        let len = |v: &str| Length::parse(v).ok_or(format!("not a length: {v}"));
+        match a {
+            "--top" => goal.sides = Sides::Top,
+            "--both" => goal.sides = Sides::Both,
+            "--smd" => goal.smd_pads = true,
+            "--no-vias" => goal.vias = false,
+            "--no-th" => goal.th_pads = false,
+            "--tented" => goal.tented = true,
+            "--fresh" => goal.keep = false,
+            "--size" | "--spacing" | "--clearance" | "--edge" => {
+                let l = len(val()?)?;
+                match a {
+                    "--size" => goal.min_size = l,
+                    "--spacing" => goal.spacing = l,
+                    "--clearance" => goal.part_clearance = l,
+                    _ => goal.edge = l,
+                }
+                i += 1;
+            }
+            "--report" => {
+                report = Some(val()?);
+                i += 1;
+            }
+            o if !o.starts_with("--") && out.is_none() => out = Some(o),
+            o => return Err(format!("unknown option {o}").into()),
+        }
+        i += 1;
+    }
+    let r = assign(&b, &goal);
+    let (top, bottom) = r.points.iter().fold(
+        (0, 0),
+        |(t, b), p| {
+            if p.top {
+                (t + 1, b)
+            } else {
+                (t, b + 1)
+            }
+        },
+    );
+    println!(
+        "{} of {} nets have a probe point ({:.1} %): {} on the top, {} on the bottom",
+        r.nets - r.missing.len(),
+        r.nets,
+        r.coverage(),
+        top,
+        bottom
+    );
+    let mut why: std::collections::BTreeMap<&str, usize> = Default::default();
+    for (_, w) in &r.missing {
+        *why.entry(w).or_default() += 1;
+    }
+    for (w, n) in &why {
+        println!("  {n} nets: {w}");
+    }
+    for (net, w) in r.missing.iter().take(20) {
+        let name = b.nets.get(*net as usize).map_or("?", |n| n.name.as_str());
+        println!("    {name}: {w}");
+    }
+    if r.missing.len() > 20 {
+        println!("    ... and {} more (see --report)", r.missing.len() - 20);
+    }
+    if let Some(p) = report {
+        std::fs::write(p, report_csv(&b, &r.points, &r.missing))?;
+        println!("wrote {p}");
+    }
+    if let Some(o) = out {
+        let edits: Vec<_> = mark(&b, &r.points).into_iter().collect();
+        save_edits(b, edits, o)?;
+        println!("saved {o}");
+    }
     Ok(())
 }
 

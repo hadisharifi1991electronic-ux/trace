@@ -23,7 +23,7 @@ type LayerOut = (
     Option<(String, String)>,
 );
 
-/// One BOM reference: designator, side and the part's own name.
+/// One BOM reference: designator, populated ("true" or "false") and layer.
 type BomRef = (String, &'static str, String);
 
 fn mm(v: i64) -> String {
@@ -441,7 +441,8 @@ pub fn to_ipc2581(board: &Board, name: &str) -> (String, usize) {
     let mut packages: BTreeMap<String, String> = BTreeMap::new();
     let mut comps = String::new();
     let mut bom: BTreeMap<(String, String), Vec<BomRef>> = BTreeMap::new();
-    for (ci, c) in board.components.iter().enumerate() {
+    let vparts = trace_core::variant::parts(board);
+    for (ci, c) in vparts.iter().enumerate() {
         let pkg = name_ok(if c.footprint.is_empty() {
             &c.designator
         } else {
@@ -528,10 +529,10 @@ pub fn to_ipc2581(board: &Board, name: &str) -> (String, usize) {
         );
         bom.entry((part, pkg.clone())).or_default().push((
             c.designator.clone(),
-            if c.side == Side::Bottom {
-                "BOTTOM"
+            if trace_core::variant::fitted(board, ci) {
+                "true"
             } else {
-                "TOP"
+                "false"
             },
             layer,
         ));
@@ -602,12 +603,12 @@ pub fn to_ipc2581(board: &Board, name: &str) -> (String, usize) {
             s,
             "<BomItem OEMDesignNumberRef=\"{}\" quantity=\"{}\" category=\"ELECTRICAL\">",
             esc(part),
-            refs.len()
+            refs.iter().filter(|r| r.1 == "true").count()
         );
-        for (d, _, layer) in refs {
+        for (d, populate, layer) in refs {
             let _ = write!(
                 s,
-                "<RefDes name=\"{}\" packageRef=\"{}\" populate=\"true\" layerRef=\"{}\"/>",
+                "<RefDes name=\"{}\" packageRef=\"{}\" populate=\"{populate}\" layerRef=\"{}\"/>",
                 esc(d),
                 esc(pkg),
                 esc(layer)

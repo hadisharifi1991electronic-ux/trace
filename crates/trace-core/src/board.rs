@@ -20,6 +20,13 @@ pub struct Board {
     /// copy, so rules written for the board apply to every copy.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub panel: Option<PanelOf>,
+    /// Assembly variants: parts left off or changed in each.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<crate::variant::Variant>,
+    /// The variant outputs (BOM, pick and place, assembly drawing, STEP)
+    /// are made for; `None` is the board as designed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub variant: Option<usize>,
 }
 
 /// How a panel's nets and parts follow from its board: `nets` nets and

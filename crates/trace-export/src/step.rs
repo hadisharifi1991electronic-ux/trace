@@ -536,8 +536,9 @@ pub fn to_step(
     let mut k = 1;
     place(&mut w, k, top, bp, "PCB");
     if opt.parts {
+        let off = trace_core::variant::not_fitted(board);
         let bodies: Vec<PartBody> = part_bodies(board);
-        for b in &bodies {
+        for b in bodies.iter().filter(|b| !off.contains(&b.component)) {
             let d = &board.components[b.component].designator;
             let (z0, z1) = b.z(t);
             let ring = Ring::Poly(b.corners.to_vec());

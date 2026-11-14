@@ -730,10 +730,59 @@ pub(crate) fn parse_pour(p: &Props, layers: &LayerMap) -> Pour {
 /// pairs, components and design rules.
 /// Also reads boards saved as ASCII (`File > Save As`, "PCB ASCII File").
 pub fn read_pcbdoc(path: impl AsRef<Path>) -> Result<Board> {
-    if crate::pcb_ascii::is_ascii(path.as_ref()) {
-        return crate::pcb_ascii::read(path.as_ref());
+    let mut b = if crate::pcb_ascii::is_ascii(path.as_ref()) {
+        crate::pcb_ascii::read(path.as_ref())?
+    } else {
+        read_binary(path.as_ref())?
+    };
+    if b.variants.is_empty() {
+        b.variants = project_variants(path.as_ref());
     }
-    let mut c = Container::open(path.as_ref())?;
+    Ok(b)
+}
+
+/// Assembly variants from the project (.PrjPcb) beside the board that
+/// lists it.
+pub fn project_variants(board: &Path) -> Vec<trace_core::variant::Variant> {
+    let Some(name) = board
+        .file_name()
+        .map(|n| n.to_string_lossy().to_ascii_lowercase())
+    else {
+        return Vec::new();
+    };
+    let dir = board
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .unwrap_or(Path::new("."));
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    for e in rd.flatten() {
+        let p = e.path();
+        if !p
+            .extension()
+            .is_some_and(|x| x.eq_ignore_ascii_case("prjpcb"))
+        {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(&p) else {
+            continue;
+        };
+        let text = String::from_utf8_lossy(&bytes);
+        let lists = text.lines().any(|l| {
+            l.trim_end()
+                .strip_prefix("DocumentPath=")
+                .is_some_and(|d| d.replace('\\', "/").to_ascii_lowercase().ends_with(&name))
+        });
+        if lists {
+            return trace_core::variant::from_prjpcb(&text);
+        }
+    }
+    Vec::new()
+}
+
+fn read_binary(path: &Path) -> Result<Board> {
+    let mut c = Container::open(path)?;
     let board_data = c
         .stream("/Board6/Data")?
         .ok_or_else(|| Error::MissingStream("Board6/Data".into()))?;

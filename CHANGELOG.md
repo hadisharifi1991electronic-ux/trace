@@ -3,6 +3,15 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.57.2 (2026-11-14)
+
+- PDN: a sub-rail whose bead sits off its plane (on a short track) is
+  still fed by that bead, joined at the nearest point of the plane; it
+  was taken as feeding the rail before it, which left the sub-rail with
+  no supply (ADRV9026 board: VANA1_1P3, VRFVCO1_1P3).
+- PDN: connectors are not taken as loads on a rail that feeds sub-rails;
+  the sub-rail list says how many more there are past ten.
+
 ## 0.57.1 (2026-11-14)
 
 - PDN: ferrite beads, filter inductors and 0 Ω links to other rails are

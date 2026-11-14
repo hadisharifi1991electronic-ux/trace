@@ -979,6 +979,33 @@ pub fn model(board: &Board, setup: &Setup) -> Result<Model, String> {
         v.sort_unstable();
         v
     };
+    // Off the planes (a bead on a short track): the nearest node.
+    let port_near = |part: usize| -> Vec<usize> {
+        let p = port_of(part);
+        if !p.is_empty() {
+            return p;
+        }
+        let mut best: Option<(f64, usize)> = None;
+        for pad in g
+            .pads
+            .iter()
+            .filter(|p| p.net == Some(net) && p.component == Some(part as u32))
+        {
+            let (x, y) = (pad.at.x.mil(), pad.at.y.mil());
+            for (k, &node) in id.iter().enumerate() {
+                if node == usize::MAX {
+                    continue;
+                }
+                let cx = origin[0] + ((k % cols) as f64 + 0.5) * cell;
+                let cy = origin[1] + ((k / cols) as f64 + 0.5) * cell;
+                let d2 = (cx - x).powi(2) + (cy - y).powi(2);
+                if best.is_none_or(|b| d2 < b.0) {
+                    best = Some((d2, node));
+                }
+            }
+        }
+        best.map(|b| vec![b.1]).unwrap_or_default()
+    };
     let designator = |i: usize| {
         board
             .components
@@ -1098,7 +1125,7 @@ pub fn model(board: &Board, setup: &Setup) -> Result<Model, String> {
         }
         all_feeds
             .iter()
-            .filter(|f| f.bead && on_plane(f.part) && !setup.loads.contains(&f.part))
+            .filter(|f| f.bead && !setup.loads.contains(&f.part))
             .max_by_key(|f| crate::pi::parts_on(board, f.net).len())
             .map(|f| f.part)
     };
@@ -1123,9 +1150,13 @@ pub fn model(board: &Board, setup: &Setup) -> Result<Model, String> {
             BEAD_L * 1e6,
         ));
     }
+    let upstream = vrm
+        .filter(|_| vrm_bead)
+        .and_then(|v| all_feeds.iter().find(|f| f.part == v))
+        .map(|f| f.net);
     let sub_rails: Vec<Feed> = all_feeds
         .iter()
-        .filter(|f| Some(f.part) != vrm && f.is_rail())
+        .filter(|f| Some(f.part) != vrm && Some(f.net) != upstream && f.is_rail())
         .cloned()
         .collect();
     let loads: Vec<usize> = if setup.loads.is_empty() {
@@ -1139,6 +1170,23 @@ pub fn model(board: &Board, setup: &Setup) -> Result<Model, String> {
             .map(|p| p.0)
             .filter(|p| !skip.contains(p))
             .collect();
+        // Connectors bring a supply in or out; they are loads only when
+        // nothing else is.
+        let connector = |i: usize| {
+            let d = board.components[i].designator.to_ascii_uppercase();
+            let pre: String = d.chars().take_while(|c| c.is_ascii_alphabetic()).collect();
+            matches!(pre.as_str(), "J" | "P" | "CN" | "CON" | "X" | "HDR")
+        };
+        let real: Vec<usize> = chips.iter().copied().filter(|&c| !connector(c)).collect();
+        let chips = if real.iter().any(|&c| on_plane(c)) || sub_rails.is_empty() {
+            if real.iter().any(|&c| on_plane(c)) {
+                real
+            } else {
+                chips
+            }
+        } else {
+            Vec::new()
+        };
         if chips.iter().any(|&c| on_plane(c)) {
             chips
         } else {
@@ -1172,6 +1220,11 @@ pub fn model(board: &Board, setup: &Setup) -> Result<Model, String> {
                 .map(|f| format!("{} ({})", f.net_name, f.designator))
                 .collect::<Vec<_>>()
                 .join(", ")
+                + &if sub_rails.len() > 10 {
+                    format!(" and {} more", sub_rails.len() - 10)
+                } else {
+                    String::new()
+                }
         ));
     }
     let mut ports: Vec<Vec<usize>> = Vec::new();
@@ -1192,7 +1245,18 @@ pub fn model(board: &Board, setup: &Setup) -> Result<Model, String> {
         return Err("no load over the plane pair to look from".into());
     }
     let vrm = vrm.and_then(|v| {
-        let p = port_of(v);
+        let p = if vrm_bead {
+            let p = port_near(v);
+            if port_of(v).is_empty() && !p.is_empty() {
+                notes.push(format!(
+                    "{} is off the plane; joined to it at the nearest point",
+                    designator(v)
+                ));
+            }
+            p
+        } else {
+            port_of(v)
+        };
         if p.is_empty() {
             notes.push(format!(
                 "the regulator {} is not over the plane pair",
@@ -1853,6 +1917,34 @@ mod tests {
         assert_eq!(m.loads, vec![u1]);
         assert_eq!(m.decaps.len(), 1);
         assert!((m.vrm_l - BEAD_L).abs() < 1e-12);
+        assert!(m.sub_rails.is_empty());
+        // The bead off the sub-rail's plane (on a track): still its source.
+        let sub = b.geometry.polygons.len() - 1;
+        b.geometry.polygons[sub].outline = vec![
+            Point::mil(750.0, 0.0),
+            Point::mil(1000.0, 0.0),
+            Point::mil(1000.0, 1000.0),
+            Point::mil(750.0, 1000.0),
+        ];
+        b.components[u1].x = Length::from_mil(900.0);
+        for p in b
+            .geometry
+            .pads
+            .iter_mut()
+            .filter(|p| p.component == Some(u1 as u32))
+        {
+            p.at = Point::mil(p.at.x.mil() + 100.0, p.at.y.mil());
+        }
+        for p in b.geometry.pads.iter_mut().filter(|p| p.at.x.mil() == 700.0) {
+            p.at = Point::mil(800.0, p.at.y.mil());
+        }
+        let m = model(&b, &s).unwrap();
+        assert_eq!(m.vrm, Some(fb));
+        assert!(
+            m.notes.iter().any(|n| n.contains("off the plane")),
+            "{:?}",
+            m.notes
+        );
     }
 
     #[test]

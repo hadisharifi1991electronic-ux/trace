@@ -253,6 +253,38 @@ pub struct Setup {
     /// Capacitors without a value get a typical one for their case
     /// (else they are left out).
     pub assume: bool,
+    /// The chip's own capacitance behind its package (None: left out).
+    pub die: Option<OnChip>,
+    /// Empty sites around each load where the optimiser may add a
+    /// capacitor (0: only the board's own).
+    pub spares: usize,
+}
+
+/// A load's package and die, as one RC behind the package inductance:
+/// the board's impedance, through `pkg_l`, in parallel with `farads`
+/// (with `esr`) is what the die sees.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct OnChip {
+    pub farads: f64,
+    pub esr: f64,
+    pub pkg_l: f64,
+}
+
+impl OnChip {
+    pub fn new(farads: f64) -> OnChip {
+        OnChip {
+            farads,
+            esr: 5e-3,
+            pkg_l: 50e-12,
+        }
+    }
+
+    /// What the die sees with `board` at the package's balls.
+    pub fn seen(&self, w: f64, board: Cx) -> Cx {
+        let zb = board.add(Cx::new(0.0, w * self.pkg_l));
+        let zc = Cx::new(self.esr, -1.0 / (w * self.farads).max(1e-30));
+        zb.mul(zc).div(zb.add(zc))
+    }
 }
 
 impl Setup {
@@ -262,7 +294,7 @@ impl Setup {
             ground: None,
             fmin: 100e3,
             fmax: 1e9,
-            points: 60,
+            points: 120,
             target: None,
             volts: None,
             ripple_pct: 3.0,
@@ -275,6 +307,8 @@ impl Setup {
             cell_mil: 0.0,
             via_drill_mil: 10.0,
             assume: true,
+            die: None,
+            spares: 0,
         }
     }
 }
@@ -292,6 +326,9 @@ pub struct Decap {
     pub mount: f64,
     /// The board gives no value: a typical one for its case is taken.
     pub assumed: bool,
+    /// Not on the board: an empty site near a load where the optimiser
+    /// may add a capacitor.
+    pub spare: bool,
 }
 
 /// A two-pad part joining the supply to another (non-ground) net: a
@@ -428,10 +465,73 @@ pub fn feeds(board: &Board, net: u32, ground: u32) -> Vec<Feed> {
     out
 }
 
+enum BeadModel {
+    /// A ferrite bead: its impedance at 100 MHz, and whether its value
+    /// gave it.
+    Bead { z100: f64, rated: bool },
+    /// A filter inductor, H.
+    Inductor(f64),
+}
+
+/// A bead's rating from its value: "600R@100MHz", "120 ohm", Murata
+/// "BLM18PG221SN1" (221 = 220 Ω); an inductor's from "1uH".
+fn bead_model(f: &Feed) -> BeadModel {
+    let v = f.value.to_ascii_uppercase();
+    let des = f.designator.to_ascii_uppercase();
+    let is_l = (des.starts_with('L') || des.starts_with("FL"))
+        && !(v.contains("BEAD") || v.contains("BLM") || v.contains("FERR"));
+    if is_l {
+        let h = v.find("UH").or_else(|| v.find("µH")).and_then(|i| {
+            let num: String = v[..i]
+                .chars()
+                .rev()
+                .take_while(|c| c.is_ascii_digit() || *c == '.')
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect();
+            num.parse::<f64>().ok().map(|x| x * 1e-6)
+        });
+        return BeadModel::Inductor(h.unwrap_or(BEAD_L));
+    }
+    if let Some(i) = v.find("BLM") {
+        let digits: Vec<char> = v[i..].chars().skip(7).take(3).collect();
+        if digits.len() == 3 && digits.iter().all(|c| c.is_ascii_digit()) {
+            let m: f64 = format!("{}{}", digits[0], digits[1]).parse().unwrap_or(0.0);
+            let e = digits[2].to_digit(10).unwrap_or(0) as i32;
+            let z = m * 10f64.powi(e);
+            if z > 0.0 {
+                return BeadModel::Bead {
+                    z100: z,
+                    rated: true,
+                };
+            }
+        }
+    }
+    let head = v.split('@').next().unwrap_or("");
+    for tok in head.split([' ', ',', '/', '_']) {
+        if let Some(z) = parse_ohms(tok).filter(|z| (5.0..=5000.0).contains(z)) {
+            return BeadModel::Bead {
+                z100: z,
+                rated: true,
+            };
+        }
+    }
+    BeadModel::Bead {
+        z100: 220.0,
+        rated: false,
+    }
+}
+
 /// A ferrite bead or filter inductor feeding a rail, seen from that rail:
 /// its DC resistance and low-frequency inductance (above a few MHz a bead
 /// is mostly loss, so the rail before it hardly shows).
 pub const BEAD_R: f64 = 0.05;
+/// How much better (in the optimiser's log score) the band must get for
+/// a capacitor to be added at an empty site.
+const ADD_GAIN: f64 = 0.03;
+/// The same for changing a capacitor's value (fewer changes, same result).
+const CHANGE_GAIN: f64 = 0.004;
 pub const BEAD_L: f64 = 1e-6;
 
 /// The plane pair analysed.
@@ -457,11 +557,18 @@ pub struct Model {
     pub freqs: Vec<f64>,
     /// Load parts, in port order (ports 0..loads.len()).
     pub loads: Vec<usize>,
+    /// Their designators.
+    pub load_names: Vec<String>,
     pub vrm: Option<usize>,
     pub vrm_r: f64,
     pub vrm_l: f64,
     /// The regulator is a ferrite bead or inductor from another rail.
     pub vrm_bead: bool,
+    /// A bead's loss: the resistance across its inductance, Ω (None: a
+    /// plain inductance).
+    pub vrm_rp: Option<f64>,
+    /// The chip's package and die at each load (None: the balls).
+    pub die: Option<OnChip>,
     /// Sub-rails this supply feeds through beads, inductors or 0 Ω links.
     pub sub_rails: Vec<Feed>,
     pub decaps: Vec<Decap>,
@@ -1085,6 +1192,7 @@ pub fn model(board: &Board, setup: &Setup) -> Result<Model, String> {
             package,
             mount,
             assumed,
+            spare: false,
         });
     }
     if !no_value.is_empty() {
@@ -1132,24 +1240,35 @@ pub fn model(board: &Board, setup: &Setup) -> Result<Model, String> {
     let vrm = setup.vrm.or(guessed).or_else(bead_in);
     let vrm_bead =
         setup.vrm.is_none() && vrm.is_some_and(|v| all_feeds.iter().any(|f| f.part == v && f.bead));
-    let (vrm_r, vrm_l) = if vrm_bead {
-        (BEAD_R, BEAD_L)
-    } else {
-        (setup.vrm_r, setup.vrm_l)
+    let feed_in = vrm
+        .filter(|_| vrm_bead)
+        .and_then(|v| all_feeds.iter().find(|f| f.part == v));
+    let (vrm_r, vrm_l, vrm_rp) = match feed_in {
+        Some(f) => match bead_model(f) {
+            BeadModel::Bead { z100, rated } => {
+                let w100 = std::f64::consts::TAU * 100e6;
+                notes.push(format!(
+                    "fed through {} from {}: a ferrite bead of {} at 100 MHz{} with {} DC resistance",
+                    f.designator,
+                    f.net_name,
+                    ohm_text(z100),
+                    if rated { "" } else { " (assumed; its value gives no rating)" },
+                    ohm_text(BEAD_R)
+                ));
+                (BEAD_R, z100 / w100, Some(1.2 * z100))
+            }
+            BeadModel::Inductor(l) => {
+                notes.push(format!(
+                    "fed through {} from {}: a filter inductor of {:.2} µH",
+                    f.designator,
+                    f.net_name,
+                    l * 1e6
+                ));
+                (BEAD_R, l, None)
+            }
+        },
+        None => (setup.vrm_r, setup.vrm_l, None),
     };
-    if let Some(v) = vrm.filter(|_| vrm_bead) {
-        notes.push(format!(
-            "fed through {} (a bead or filter inductor) from {}: taken as {} + {:.1} µH toward that rail",
-            designator(v),
-            all_feeds
-                .iter()
-                .find(|f| f.part == v)
-                .map(|f| f.net_name.clone())
-                .unwrap_or_default(),
-            ohm_text(BEAD_R),
-            BEAD_L * 1e6,
-        ));
-    }
     let upstream = vrm
         .filter(|_| vrm_bead)
         .and_then(|v| all_feeds.iter().find(|f| f.part == v))
@@ -1271,6 +1390,61 @@ pub fn model(board: &Board, setup: &Setup) -> Result<Model, String> {
     if vrm.is_none() {
         notes.push("no regulator: only the planes and capacitors are counted".into());
     }
+    // Empty sites around each load, for the optimiser to fill.
+    if setup.spares > 0 {
+        let mid = (zs[pl] + zs[gl]) / 2.0;
+        let h = (zs[0] - mid).abs().max(d / 2.0);
+        let r = setup.via_drill_mil.max(4.0) / 2.0;
+        let package = Package::P0402;
+        let mount = MU0 * h / std::f64::consts::PI * (40.0 / r).ln().max(0.5) + 0.1e-9;
+        let mut taken: Vec<usize> = decap_ports.iter().flatten().copied().collect();
+        for &l in &kept_loads {
+            let pads: Vec<(f64, f64)> = g
+                .pads
+                .iter()
+                .filter(|p| p.net == Some(net) && p.component == Some(l as u32))
+                .map(|p| (p.at.x.mil(), p.at.y.mil()))
+                .collect();
+            if pads.is_empty() {
+                continue;
+            }
+            let n = pads.len() as f64;
+            let (cx, cy) = pads
+                .iter()
+                .fold((0.0, 0.0), |a, p| (a.0 + p.0 / n, a.1 + p.1 / n));
+            let reach = pads
+                .iter()
+                .map(|p| (p.0 - cx).hypot(p.1 - cy))
+                .fold(0.0, f64::max)
+                + 80.0;
+            let mut made = 0;
+            for k in 0..setup.spares * 3 {
+                if made == setup.spares {
+                    break;
+                }
+                let a = std::f64::consts::TAU * (k as f64 + 0.5) / (setup.spares * 3) as f64;
+                let Some(node) = node_at(cx + reach * a.cos(), cy + reach * a.sin()) else {
+                    continue;
+                };
+                if taken.contains(&node) {
+                    continue;
+                }
+                taken.push(node);
+                made += 1;
+                decap_ports.push(vec![node]);
+                decaps.push(Decap {
+                    part: usize::MAX,
+                    designator: format!("+{}.{made}", designator(l)),
+                    value: String::new(),
+                    model: CapModel::mlcc(100e-9, package),
+                    package,
+                    mount,
+                    assumed: false,
+                    spare: true,
+                });
+            }
+        }
+    }
     ports.extend(decap_ports);
     let np = ports.len();
     // The sweep.
@@ -1355,11 +1529,14 @@ pub fn model(board: &Board, setup: &Setup) -> Result<Model, String> {
     let shared = (0..n).count() as f64 * cell * cell / 1e6;
     Ok(Model {
         freqs,
+        load_names: kept_loads.iter().map(|&l| designator(l)).collect(),
         loads: kept_loads,
         vrm,
         vrm_r,
         vrm_l,
         vrm_bead,
+        vrm_rp,
+        die: setup.die,
         sub_rails,
         decaps,
         cavity: Cavity {
@@ -1400,6 +1577,14 @@ struct Ended {
 }
 
 impl Model {
+    /// |Z| as the die sees it: through the package when one is given.
+    fn seen(&self, fi: usize, z: Cx) -> Cx {
+        match self.die {
+            Some(d) => d.seen(std::f64::consts::TAU * self.freqs[fi], z),
+            None => z,
+        }
+    }
+
     fn np(&self) -> usize {
         self.loads.len() + usize::from(self.vrm.is_some()) + self.decaps.len()
     }
@@ -1433,7 +1618,12 @@ impl Model {
                 .iter()
                 .map(|&p| {
                     if p < fc {
-                        Cx::new(self.vrm_r, w * self.vrm_l)
+                        let jl = Cx::new(0.0, w * self.vrm_l);
+                        let l = match self.vrm_rp {
+                            Some(rp) => jl.scale(rp).div(jl.add(Cx::new(rp, 0.0))),
+                            None => jl,
+                        };
+                        l.add(Cx::new(self.vrm_r, 0.0))
                     } else {
                         self.cap_z(p - fc, caps[p - fc].as_ref(), w)
                     }
@@ -1471,13 +1661,21 @@ impl Model {
     pub fn evaluate(&self, caps: &[Option<CapModel>]) -> Curves {
         let e = self.ended(caps);
         (0..self.loads.len())
-            .map(|l| e.z.iter().map(|z| z[l].abs()).collect())
+            .map(|l| {
+                e.z.iter()
+                    .enumerate()
+                    .map(|(fi, z)| self.seen(fi, z[l]).abs())
+                    .collect()
+            })
             .collect()
     }
 
     /// The capacitors as on the board.
     pub fn as_built(&self) -> Vec<Option<CapModel>> {
-        self.decaps.iter().map(|d| Some(d.model)).collect()
+        self.decaps
+            .iter()
+            .map(|d| (!d.spare).then_some(d.model))
+            .collect()
     }
 
     /// How many sweep points lie in the target's band.
@@ -1593,12 +1791,18 @@ pub fn optimise(model: &Model, start: &[Option<CapModel>]) -> Plan {
         top + sum / nb as f64
     };
     let score_of = |z: &Vec<Vec<Cx>>| -> f64 {
-        fold(&mut |fi| z[fi].iter().map(|v| v.abs() / target).fold(0.0, f64::max))
+        fold(&mut |fi| {
+            z[fi]
+                .iter()
+                .map(|v| model.seen(fi, *v).abs() / target)
+                .fold(0.0, f64::max)
+        })
     };
     let ratio_of = |z: &Vec<Vec<Cx>>| -> f64 {
         z.iter()
             .take(nb)
-            .flat_map(|zf| zf.iter().map(|v| v.abs() / target))
+            .enumerate()
+            .flat_map(|(fi, zf)| zf.iter().map(move |v| model.seen(fi, *v).abs() / target))
             .fold(0.0, f64::max)
     };
     // The score if port `a` (of the ended ones) took termination `new`.
@@ -1611,7 +1815,7 @@ pub fn optimise(model: &Model, start: &[Option<CapModel>]) -> Plan {
             let g = delta.div(den);
             (0..nl).fold(0.0, |w: f64, l| {
                 let c = e.c[fi][l][a];
-                w.max(e.z[fi][l].add(c.mul(c).mul(g)).abs() / target)
+                w.max(model.seen(fi, e.z[fi][l].add(c.mul(c).mul(g))).abs() / target)
             })
         })
     };
@@ -1660,7 +1864,13 @@ pub fn optimise(model: &Model, start: &[Option<CapModel>]) -> Plan {
                     continue;
                 }
                 let s = trial(&e, a, &terms(k, Some(&cand)));
-                if s < score - 1e-4 && best.is_none_or(|b| s < b.0) {
+                // A new capacitor has to earn its place.
+                let gain = if caps[k].is_none() {
+                    ADD_GAIN
+                } else {
+                    CHANGE_GAIN
+                };
+                if s < score - gain && best.is_none_or(|b| s < b.0) {
                     best = Some((s, cand));
                 }
             }
@@ -1731,6 +1941,162 @@ pub fn farads_text(f: f64) -> String {
 }
 
 /// A frequency for people: 120 kHz, 35.5 MHz.
+/// The impedance at each load (and, when given, with the capacitors as
+/// tried) on log-log axes, with the target up to the band edge: an SVG.
+pub fn svg(m: &Model, built: &Curves, tried: Option<&Curves>, title: &str) -> String {
+    use std::fmt::Write;
+    const COLORS: [&str; 8] = [
+        "#2a78d6", "#eb6834", "#1baf7a", "#eda100", "#e87ba4", "#008300", "#6250d6", "#e34948",
+    ];
+    let (w, h, l, r, t, b) = (900.0, 540.0, 78.0, 150.0, 44.0, 50.0);
+    let (f0, f1) = (
+        m.freqs.first().copied().unwrap_or(1e5),
+        m.freqs.last().copied().unwrap_or(1e9),
+    );
+    let all = built.iter().chain(tried.into_iter().flatten()).flatten();
+    let (mut lo, mut hi) = all.fold((f64::MAX, 0.0f64), |a, &z| (a.0.min(z), a.1.max(z)));
+    if let Some(tg) = m.target {
+        lo = lo.min(tg);
+        hi = hi.max(tg);
+    }
+    let (dlo, dhi) = (
+        lo.max(1e-5).log10().floor(),
+        hi.max(1e-4)
+            .log10()
+            .ceil()
+            .max(lo.max(1e-5).log10().floor() + 1.0),
+    );
+    let x = |f: f64| l + (w - l - r) * (f / f0).log10() / (f1 / f0).log10();
+    let y = |z: f64| t + (h - t - b) * (dhi - z.max(1e-9).log10()) / (dhi - dlo);
+    let mut o = String::new();
+    let _ = writeln!(
+        o,
+        r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" font-family="Helvetica, Arial, sans-serif" font-size="12"><rect width="100%" height="100%" fill="#fcfcfb"/>"##
+    );
+    let _ = writeln!(
+        o,
+        r##"<text x="{l}" y="24" font-size="15" fill="#0b0b0b">{}</text>"##,
+        title.replace('&', "&amp;").replace('<', "&lt;")
+    );
+    if m.band < f1 {
+        let _ = writeln!(
+            o,
+            r##"<rect x="{:.1}" y="{t}" width="{:.1}" height="{}" fill="#f1f0ec"/><text x="{:.1}" y="{}" text-anchor="middle" fill="#52514e" font-size="11">above the target band</text>"##,
+            x(m.band),
+            w - r - x(m.band),
+            h - t - b,
+            (x(m.band) + w - r) / 2.0,
+            t + 14.0
+        );
+    }
+    let mut d = dlo;
+    while d <= dhi + 1e-9 {
+        let _ = writeln!(
+            o,
+            r##"<line x1="{l}" x2="{}" y1="{:.1}" y2="{:.1}" stroke="#e4e3df"/><text x="{}" y="{:.1}" text-anchor="end" fill="#52514e">{}</text>"##,
+            w - r,
+            y(10f64.powf(d)),
+            y(10f64.powf(d)),
+            l - 6.0,
+            y(10f64.powf(d)) + 4.0,
+            ohm_text(10f64.powf(d))
+        );
+        d += 1.0;
+    }
+    let mut dec = f0.log10().ceil();
+    while 10f64.powf(dec) <= f1 * 1.0001 {
+        let f = 10f64.powf(dec);
+        let _ = writeln!(
+            o,
+            r##"<line x1="{:.1}" x2="{:.1}" y1="{t}" y2="{}" stroke="#e4e3df"/><text x="{:.1}" y="{}" text-anchor="middle" fill="#52514e">{}</text>"##,
+            x(f),
+            x(f),
+            h - b,
+            x(f),
+            h - b + 18.0,
+            hz_text(f)
+        );
+        dec += 1.0;
+    }
+    if let Some(tg) = m.target {
+        let _ = writeln!(
+            o,
+            r##"<line x1="{l}" x2="{:.1}" y1="{:.1}" y2="{:.1}" stroke="#52514e" stroke-width="1.4" stroke-dasharray="6 4"/><text x="{}" y="{:.1}" fill="#52514e">target {}</text>"##,
+            x(m.band.min(f1)),
+            y(tg),
+            y(tg),
+            l + 6.0,
+            y(tg) + 16.0,
+            ohm_text(tg)
+        );
+    }
+    let path = |c: &[f64]| {
+        let mut p = String::new();
+        for (i, (&f, &z)) in m.freqs.iter().zip(c).enumerate() {
+            let _ = write!(
+                p,
+                "{}{:.1},{:.1}",
+                if i == 0 { "M" } else { " L" },
+                x(f),
+                y(z)
+            );
+        }
+        p
+    };
+    let des = |i: usize| format!("load {}", i + 1);
+    let mut ly = t + 10.0;
+    for (i, c) in built.iter().enumerate().take(COLORS.len()) {
+        let col = COLORS[i];
+        let dash = if tried.is_some() {
+            r#" stroke-dasharray="3 3""#
+        } else {
+            ""
+        };
+        let _ = writeln!(
+            o,
+            r##"<path d="{}" fill="none" stroke="{col}" stroke-width="2"{dash}/>"##,
+            path(c)
+        );
+        if let Some(tc) = tried.and_then(|t| t.get(i)) {
+            let _ = writeln!(
+                o,
+                r##"<path d="{}" fill="none" stroke="{col}" stroke-width="2"/>"##,
+                path(tc)
+            );
+        }
+        let name = m.load_names.get(i).cloned().unwrap_or_else(|| des(i));
+        let _ = writeln!(
+            o,
+            r##"<line x1="{}" x2="{}" y1="{ly:.1}" y2="{ly:.1}" stroke="{col}" stroke-width="2"/><text x="{}" y="{:.1}" fill="#0b0b0b">{}</text>"##,
+            w - r + 12.0,
+            w - r + 32.0,
+            w - r + 38.0,
+            ly + 4.0,
+            name
+        );
+        ly += 18.0;
+    }
+    if tried.is_some() {
+        let _ = writeln!(
+            o,
+            r##"<text x="{}" y="{:.1}" fill="#52514e" font-size="11">dashed: as built</text><text x="{}" y="{:.1}" fill="#52514e" font-size="11">solid: optimised</text>"##,
+            w - r + 12.0,
+            ly + 8.0,
+            w - r + 12.0,
+            ly + 24.0
+        );
+    }
+    let _ = writeln!(
+        o,
+        r##"<text x="{l}" y="{}" fill="#52514e" font-size="11">|Z| at each load; {} capacitors; plane {} over {}</text></svg>"##,
+        h - 8.0,
+        m.decaps.iter().filter(|d| !d.spare).count(),
+        m.cavity.power_layer,
+        m.cavity.ground_layer
+    );
+    o
+}
+
 /// A frequency band as text; a band of one point reads as that point.
 pub fn band_text(a: f64, b: f64) -> String {
     if hz_text(a) == hz_text(b) {
@@ -1916,7 +2282,9 @@ mod tests {
         assert!(m.vrm_bead);
         assert_eq!(m.loads, vec![u1]);
         assert_eq!(m.decaps.len(), 1);
-        assert!((m.vrm_l - BEAD_L).abs() < 1e-12);
+        // BLM18PG221: 220 Ω at 100 MHz.
+        assert!((m.vrm_l - 220.0 / (std::f64::consts::TAU * 100e6)).abs() < 1e-12);
+        assert_eq!(m.vrm_rp, Some(1.2 * 220.0));
         assert!(m.sub_rails.is_empty());
         // The bead off the sub-rail's plane (on a track): still its source.
         let sub = b.geometry.polygons.len() - 1;
@@ -2023,6 +2391,60 @@ mod tests {
             .fold((0, 0.0), |b, (i, &v)| if v > b.1 { (i, v) } else { b });
         let f = m.freqs[fi];
         assert!(f > 1.3e9 && f < 1.65e9, "peak at {f}");
+    }
+
+    #[test]
+    fn the_optimiser_adds_capacitors_and_the_die_and_bead_count() {
+        let mut b = board(2000.0, 4.0);
+        part(
+            &mut b,
+            "U1",
+            "",
+            &[(1000.0, 1000.0, 0), (1040.0, 1000.0, 1)],
+        );
+        part(
+            &mut b,
+            "C1",
+            "100nF",
+            &[(900.0, 1100.0, 0), (900.0, 1140.0, 1)],
+        );
+        let mut s = Setup::new(0);
+        s.points = 40;
+        s.loads = vec![0];
+        s.target = Some(0.03);
+        s.spares = 4;
+        let m = model(&b, &s).unwrap();
+        assert_eq!(m.decaps.len(), 5);
+        assert_eq!(m.decaps.iter().filter(|d| d.spare).count(), 4);
+        let start = m.as_built();
+        assert_eq!(start.iter().flatten().count(), 1);
+        let plan = optimise(&m, &start);
+        assert!(plan.count_after > 1, "{}", plan.summary());
+        assert!(plan.after < plan.before, "{}", plan.summary());
+        // The die's own capacitance lowers what it sees at high frequency.
+        let mut s2 = s.clone();
+        s2.die = Some(OnChip::new(50e-9));
+        let md = model(&b, &s2).unwrap();
+        let (a, d) = (m.evaluate(&start), md.evaluate(&start));
+        let hi = m.freqs.iter().position(|&f| f >= 200e6).unwrap();
+        assert!(d[0][hi] < a[0][hi] * 0.8, "{} vs {}", d[0][hi], a[0][hi]);
+        // Bead ratings.
+        let feed = |des: &str, value: &str| Feed {
+            part: 0,
+            designator: des.into(),
+            net: 0,
+            net_name: String::new(),
+            bead: true,
+            value: value.into(),
+        };
+        let z = |f: &Feed| match bead_model(f) {
+            BeadModel::Bead { z100, .. } => z100,
+            BeadModel::Inductor(l) => -l,
+        };
+        assert_eq!(z(&feed("E1", "BLM18PG221SN1")), 220.0);
+        assert_eq!(z(&feed("FB2", "600R@100MHz")), 600.0);
+        assert_eq!(z(&feed("FB3", "")), 220.0);
+        assert!((z(&feed("L4", "2.2uH")) + 2.2e-6).abs() < 1e-12);
     }
 
     #[test]

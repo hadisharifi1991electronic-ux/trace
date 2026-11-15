@@ -3,6 +3,27 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.58.0 (2026-11-15)
+
+- PDN, stronger solver:
+  - The chip's own capacitance inside its package (on-package and
+    on-die), behind the package inductance, so the curves are what the
+    die sees (`--die-c 20n --pkg-l 50p`, or "Chip capacitance" in the
+    window). Without it the curves stay at the balls.
+  - Ferrite beads from their rating: Murata BLM codes (BLM18PG221 = 220 Ω
+    at 100 MHz), "600R@100MHz" or a plain ohm value; a bead is an
+    inductance with its loss across it, so it is low at low frequency and
+    resistive near its rating. Filter inductors take their µH value. (A
+    bead was a fixed 1 µH, which made sub-rails look too high at 100 kHz.)
+  - 120 points by default (60 placed sharp resonances poorly).
+- PDN, smarter optimiser:
+  - It can add capacitors at empty sites around each chip (`--add N`, or
+    "new sites per chip"), and adds one only when it clearly helps.
+  - It changes a capacitor's value only for a real gain, so it suggests
+    fewer changes for the same result.
+- PDN charts: `trace pdn … out.svg` and "Save chart…" in the window
+  write the curves (as built, and as optimised) with the target.
+
 ## 0.57.2 (2026-11-14)
 
 - PDN: a sub-rail whose bead sits off its plane (on a short track) is

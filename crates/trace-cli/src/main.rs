@@ -47,11 +47,15 @@ USAGE:
                                                 models (a pair when the net has a partner): waveforms and eye,
                                                 with track loss and crosstalk from nets beside the route
     trace pdn <board> <net> [--ground GND] [--volts 1.0] [--ripple 3] [--amps 2] [--target 10m] [--band 100M]
-              [--fmin 100k] [--fmax 1G] [--points 60] [--vrm U5] [--loads U1,U2] [--cell 50]
-              [--optimise] [--no-assume] [--csv out.csv]
+              [--fmin 100k] [--fmax 1G] [--points 120] [--vrm U5] [--loads U1,U2] [--cell 50]
+              [--die-c 20n] [--die-r 5m] [--pkg-l 50p] [--add 4]
+              [--optimise] [--no-assume] [--csv out.csv] [out.svg]
                                                 PDN impedance of a supply's plane pair against frequency at
                                                 each load, with its capacitors and regulator; target check;
                                                 --optimise picks capacitor values and drops spare ones
+                                                --die-c: the chip's capacitance inside its package (seen through
+                                                --pkg-l), so the curves are what the die sees; --add N: N empty
+                                                sites round each load the optimiser may fill; out.svg: the chart
     trace ir <board> <net> [--source U5] [--volts 1.0] [--load U1=5A ...] [--total 10A] [--plating 0.8mil] [out.svg]
                                                 DC voltage drop (IR drop) over a supply net's pours, tracks and
                                                 vias from the source part to the loads (no --load: the total,
@@ -1451,7 +1455,7 @@ fn pdn_cmd(file: &str, net: &str, rest: &[&str]) -> Res {
             .ok_or(format!("no part {d}"))?)
     };
     let mut s = pdn::Setup::new(find_net(net)?);
-    let (mut opt, mut csv) = (false, None);
+    let (mut opt, mut csv, mut svg) = (false, None, None);
     let mut it = rest.iter();
     while let Some(&a) = it.next() {
         let mut val = || it.next().copied().ok_or(format!("{a} needs a value"));
@@ -1482,9 +1486,31 @@ fn pdn_cmd(file: &str, net: &str, rest: &[&str]) -> Res {
             }
             "--optimise" | "--optimize" => opt = true,
             "--no-assume" => s.assume = false,
+            "--add" => s.spares = num("a count")? as usize,
+            "--die-c" => {
+                let c = num("a capacitance")?;
+                s.die = Some(pdn::OnChip {
+                    farads: c,
+                    ..s.die.unwrap_or(pdn::OnChip::new(c))
+                })
+            }
+            "--die-r" => {
+                let r = num("a resistance")?;
+                let d = s.die.get_or_insert(pdn::OnChip::new(0.0));
+                d.esr = r;
+            }
+            "--pkg-l" => {
+                let l = num("an inductance")?;
+                let d = s.die.get_or_insert(pdn::OnChip::new(0.0));
+                d.pkg_l = l;
+            }
             "--csv" => csv = Some(val()?.to_string()),
+            a if a.to_ascii_lowercase().ends_with(".svg") => svg = Some(a.to_string()),
             _ => return Err(format!("unknown option {a}").into()),
         }
+    }
+    if s.die.is_some_and(|d| d.farads <= 0.0) {
+        return Err("--die-r and --pkg-l need --die-c".into());
     }
     if !(s.fmin > 0.0 && s.fmax > s.fmin) {
         return Err("the sweep needs 0 < fmin < fmax".into());
@@ -1509,7 +1535,7 @@ fn pdn_cmd(file: &str, net: &str, rest: &[&str]) -> Res {
         t.elapsed().as_secs_f64()
     );
     let mut kinds: std::collections::BTreeMap<(i64, &str), usize> = Default::default();
-    for d in &m.decaps {
+    for d in m.decaps.iter().filter(|d| !d.spare) {
         *kinds
             .entry(((d.model.farads * 1e15).round() as i64, d.package.label()))
             .or_default() += 1;
@@ -1521,7 +1547,7 @@ fn pdn_cmd(file: &str, net: &str, rest: &[&str]) -> Res {
         .collect();
     println!(
         "Capacitors: {} ({}); regulator {}",
-        m.decaps.len(),
+        m.decaps.iter().filter(|d| !d.spare).count(),
         if list.is_empty() {
             "none".into()
         } else {
@@ -1603,9 +1629,21 @@ fn pdn_cmd(file: &str, net: &str, rest: &[&str]) -> Res {
         std::fs::write(path, out)?;
         println!("wrote {path}");
     }
+    let title = format!("{} impedance", b.nets[s.net as usize].name);
+    if !opt {
+        if let Some(path) = &svg {
+            std::fs::write(path, pdn::svg(&m, &curves, None, &title))?;
+            println!("wrote {path}");
+        }
+    }
     if opt {
         let t = std::time::Instant::now();
         let plan = pdn::optimise(&m, &m.as_built());
+        if let Some(path) = &svg {
+            let tried = m.evaluate(&plan.caps);
+            std::fs::write(path, pdn::svg(&m, &curves, Some(&tried), &title))?;
+            println!("wrote {path}");
+        }
         println!(
             "Optimised in {:.1} s: {}",
             t.elapsed().as_secs_f64(),

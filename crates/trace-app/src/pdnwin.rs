@@ -18,6 +18,13 @@ pub struct PdnWindow {
     amps: f64,
     band_mhz: f64,
     fmax_mhz: f64,
+    /// The chip's package and die capacitance, nF (0: left out), behind
+    /// its package inductance, pH.
+    die_nf: f64,
+    pkg_ph: f64,
+    /// Empty sites per chip the optimiser may fill.
+    spares: usize,
+    error: Option<String>,
     running: Option<mpsc::Receiver<Result<Model, String>>>,
     model: Option<Result<Model, String>>,
     /// Capacitors as now tried (one per `Model::decaps`).
@@ -45,6 +52,10 @@ impl Default for PdnWindow {
             amps: 1.0,
             band_mhz: 100.0,
             fmax_mhz: 1000.0,
+            die_nf: 0.0,
+            pkg_ph: 50.0,
+            spares: 0,
+            error: None,
             running: None,
             model: None,
             caps: Vec::new(),
@@ -144,6 +155,12 @@ impl PdnWindow {
         s.amps = self.amps;
         s.target_fmax = self.band_mhz * 1e6;
         s.fmax = (self.fmax_mhz * 1e6).max(s.fmin * 10.0);
+        s.die = (self.die_nf > 0.0).then_some(pdn::OnChip {
+            farads: self.die_nf * 1e-9,
+            esr: 5e-3,
+            pkg_l: self.pkg_ph * 1e-12,
+        });
+        s.spares = self.spares;
         s
     }
 
@@ -257,6 +274,27 @@ impl PdnWindow {
             );
         });
         ui.horizontal(|ui| {
+            ui.label("Chip capacitance");
+            ui.add(
+                egui::DragValue::new(&mut self.die_nf)
+                    .speed(1.0)
+                    .range(0.0..=10000.0)
+                    .suffix(" nF"),
+            )
+            .on_hover_text("The chip's own capacitance inside its package (on-package and on-die), from its datasheet or IBIS/PDN model; 0 leaves it out");
+            ui.label("through");
+            ui.add(
+                egui::DragValue::new(&mut self.pkg_ph)
+                    .speed(1.0)
+                    .range(1.0..=5000.0)
+                    .suffix(" pH"),
+            )
+            .on_hover_text("The package's inductance from the balls to that capacitance");
+            ui.label("new sites per chip");
+            ui.add(egui::DragValue::new(&mut self.spares).range(0..=12))
+                .on_hover_text("Empty spots round each chip where Optimise may add a capacitor");
+        });
+        ui.horizontal(|ui| {
             ui.label("Sweep to");
             ui.add(
                 egui::DragValue::new(&mut self.fmax_mhz)
@@ -306,7 +344,7 @@ impl PdnWindow {
         let c = &m.cavity;
         ui.separator();
         ui.label(format!(
-            "{} over {} ({}): {:.2} mil, εr {:.2}, {:.2} in², {:.2} nF of plane; {} capacitors; regulator {}",
+            "{} over {} ({}): {:.2} mil, εr {:.2}, {:.2} in², {:.2} nF of plane; {} capacitors{}; regulator {}",
             c.power_layer,
             c.ground_layer,
             c.ground_net,
@@ -314,7 +352,11 @@ impl PdnWindow {
             c.er,
             c.area_in2,
             c.farads * 1e9,
-            m.decaps.len(),
+            m.decaps.iter().filter(|d| !d.spare).count(),
+            match m.decaps.iter().filter(|d| d.spare).count() {
+                0 => String::new(),
+                n => format!(" (+{n} new sites)"),
+            },
             m.vrm
                 .map(|v| if m.vrm_bead {
                     format!("fed by {} (bead)", des(v))
@@ -407,10 +449,30 @@ impl PdnWindow {
                 self.plan = None;
                 redo = true;
             }
+            if ui
+                .button("Save chart…")
+                .on_hover_text("The curves as an SVG picture")
+                .clicked()
+            {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter("SVG", &["svg"])
+                    .set_file_name(format!("{} impedance.svg", board.nets[net as usize].name))
+                    .save_file()
+                {
+                    let title = format!("{} impedance", board.nets[net as usize].name);
+                    let svg = pdn::svg(m, &self.built, changed.then_some(&self.now), &title);
+                    if let Err(e) = std::fs::write(&path, svg) {
+                        self.error = Some(e.to_string());
+                    }
+                }
+            }
             if let Some(p) = &self.plan {
                 ui.label(p.summary());
             }
         });
+        if let Some(e) = &self.error {
+            ui.colored_label(Color32::LIGHT_RED, e);
+        }
         ui.label(
             RichText::new("Tick a capacitor off, or pick another value, to see what it does; the board itself is not changed.")
                 .weak()
@@ -439,7 +501,9 @@ impl PdnWindow {
                                 }
                             });
                             ui.label(d.package.label());
-                            let shown = if d.assumed {
+                            let shown = if d.spare {
+                                "new site".to_string()
+                            } else if d.assumed {
                                 format!("{} (assumed)", farads_text(d.model.farads))
                             } else {
                                 farads_text(d.model.farads)

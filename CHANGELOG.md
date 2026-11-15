@@ -3,6 +3,16 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.63.1 (2026-11-15)
+
+- Via optimiser: the quick grid can be 10 dB or more off when the return
+  loss is very good, so the four best setups are now always solved again
+  on the finer grid (before, only those within 3 dB of the best), and
+  the CLI lists them with their fine-grid return loss.
+- Sizing to a target impedance: the sized via's S-parameters come from a
+  grid 0.7 times as fine (the quick grid overstated its return loss, for
+  example -49.8 dB against -38.9 dB on the ADRV pair via).
+
 ## 0.63.0 (2026-11-15)
 
 - Via design to manufacturing limits and a target impedance (Via

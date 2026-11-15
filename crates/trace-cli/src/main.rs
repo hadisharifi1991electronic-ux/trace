@@ -2336,6 +2336,10 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
                 ),
             }
         }
+        println!("Front runners solved again on a finer grid (worst return loss to {fg} GHz):");
+        for (setup, rl) in &o.confirmed {
+            println!("  {rl:>7.1} dB  {}", viaopt::describe(setup));
+        }
         let (s0, _) = viaopt::judge(&o.start, fg);
         let (s1, il) = viaopt::judge(&o.best, fg);
         println!(

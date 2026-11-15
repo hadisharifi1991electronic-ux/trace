@@ -88,7 +88,7 @@ impl ViaGoal {
             il_weight: 0.0,
             try_backdrill: false,
             passes: 3,
-            confirm: 3,
+            confirm: 4,
             steps: 4,
         }
     }
@@ -462,8 +462,9 @@ pub fn optimise(
         if front.len() >= goal.confirm.max(1) {
             break;
         }
-        // Only those near the best: within 3 dB, as the grid can tell.
-        if !front.contains(&i) && trials[i].score < trials[best].score + 3.0 {
+        // The quick grid can be 10 dB or more off at very good return
+        // loss, so the next best are confirmed whatever their quick score.
+        if !front.contains(&i) {
             front.push(i);
         }
     }
@@ -552,7 +553,7 @@ pub fn size_to(
     for k in 0..tries {
         let what = format!("antipad {:.1} mil, drill {:.1} mil", v.antipad, v.drill);
         let r = fdtd::solve_with(stackup, &v, &|p| {
-            progress((k as f64 + p) / tries as f64, &what)
+            progress(0.9 * (k as f64 + p) / tries as f64, &what)
         })?;
         let z = r.z_via;
         steps.push((v.clone(), z));
@@ -595,7 +596,19 @@ pub fn size_to(
             v = n;
         }
     }
-    let (miss, setup, result) = best.ok_or("nothing solved")?;
+    let (miss, setup, mut result) = best.ok_or("nothing solved")?;
+    // The S-parameters of the sized via from a grid 0.7 times as fine (the
+    // quick grid overstates very good return loss); its impedance stays
+    // the one the sizing matched.
+    if base.cell <= 0.0 && result.cell > 0.0 {
+        let mut v = setup.clone();
+        v.cell = result.cell * 0.7;
+        let z = result.z_via;
+        result = fdtd::solve_with(stackup, &v, &|p| {
+            progress(0.9 + 0.1 * p, "the sized via on a finer grid")
+        })?;
+        result.z_via = result.z_via.or(z);
+    }
     let reached = miss <= (0.02 * target).max(1.0);
     let note = (!reached).then(|| {
         format!(

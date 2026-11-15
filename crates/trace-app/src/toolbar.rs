@@ -31,14 +31,15 @@ pub enum Icon {
     Text,
     Dimension,
     Shape,
+    Home,
 }
 
 const RED: Color32 = Color32::from_rgb(236, 84, 84);
 const GOLD: Color32 = Color32::from_rgb(222, 184, 74);
 const BLUE: Color32 = Color32::from_rgb(84, 156, 236);
 const GREEN: Color32 = Color32::from_rgb(96, 200, 120);
-const ON_BG: Color32 = Color32::from_rgb(38, 79, 120);
-const ON_EDGE: Color32 = Color32::from_rgb(86, 150, 214);
+const ON_BG: Color32 = Color32::from_rgb(22, 86, 104);
+const ON_EDGE: Color32 = Color32::from_rgb(54, 176, 196);
 
 /// One icon button. `on` shows it pressed; a disabled button still shows
 /// its tooltip.
@@ -81,7 +82,7 @@ pub fn divider(ui: &mut egui::Ui) {
     );
 }
 
-fn draw(p: &egui::Painter, icon: Icon, r: Rect, fg: Color32, enabled: bool) {
+pub fn draw(p: &egui::Painter, icon: Icon, r: Rect, fg: Color32, enabled: bool) {
     // Points in a 0..1 box.
     let at = |x: f32, y: f32| Pos2::new(r.left() + x * r.width(), r.top() + y * r.height());
     let s = |w: f32, c: Color32| Stroke::new(w, c);
@@ -424,6 +425,23 @@ fn draw(p: &egui::Painter, icon: Icon, r: Rect, fg: Color32, enabled: bool) {
             line(&[(0.0, 0.5), (1.0, 0.5)], Stroke::new(w * 0.14, tint(RED)));
             line(&[(0.2, 0.15), (0.8, 0.85)], s(2.5, fg));
             line(&[(0.8, 0.15), (0.2, 0.85)], s(2.5, fg));
+        }
+        Icon::Home => {
+            poly(
+                &[(0.5, 0.06), (0.97, 0.5), (0.03, 0.5)],
+                tint(Color32::from_rgb(64, 168, 196)),
+                s(1.0, fg),
+            );
+            poly(
+                &[(0.17, 0.5), (0.83, 0.5), (0.83, 0.94), (0.17, 0.94)],
+                tint(Color32::from_rgb(64, 168, 196)),
+                s(1.0, fg),
+            );
+            poly(
+                &[(0.42, 0.62), (0.58, 0.62), (0.58, 0.94), (0.42, 0.94)],
+                tint(Color32::from_rgb(20, 40, 60)),
+                Stroke::NONE,
+            );
         }
     }
     let _ = arc;

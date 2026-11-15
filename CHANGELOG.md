@@ -3,6 +3,37 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.60.0 (2026-11-15)
+
+Trace Studio: the workspace now works the way Altium Designer users know,
+in Trace's own navy and teal.
+
+- Menus in Altium's order: File, Edit, View, Project, Place, Design,
+  Tools, Route, Reports, Window, Help. Every earlier command is in one of
+  them (the analysis windows under Tools > Signal and power integrity,
+  outputs under File > Fabrication outputs, Assembly outputs, Export).
+- Docked panels on both sides with a tab strip along the bottom: Projects
+  (the project tree: board, sheets, libraries), Navigator (the old side
+  panel), PCB (nets, parts, classes and pairs with a filter; click to
+  select and zoom), Layers, Properties and Messages. Each panel's title
+  bar moves it to the other side, collapses the dock to a strip of
+  upright tabs, or closes it; the Panels button (status bar, View and
+  Window menus) brings any panel back. The layout is remembered.
+- Properties panel: the board's summary; the selected part's X, Y,
+  rotation and side, track width, via diameter and hole (typed in mil or
+  mm, Enter applies, Ctrl+Z undoes); one width for many selected tracks;
+  the current tool's options (routing, tuning, text, dimension, shapes).
+- Document tabs over the canvas (Home Page, the board, the schematic, the
+  footprint library) and a Home page with Open, recent documents and the
+  keys.
+- Altium keys: P opens the Place key menu (P T track, P I pair, P S text,
+  P D dimension, P G pour, P C component, P F fanout), U the Route key
+  menu (U A autoroute, U F fanout, U R tuning, U U unroute), Ctrl+W routes,
+  Ctrl+M measures, Q switches mil and mm. Help > Keyboard shortcuts lists
+  them all.
+- Status bar: X and Y in the chosen units, the units button, the current
+  layer; View > Theme switches dark and light.
+
 ## 0.58.0 (2026-11-15)
 
 - PDN, stronger solver:

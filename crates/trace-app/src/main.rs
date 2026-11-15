@@ -12,7 +12,9 @@ mod editing;
 mod fanwin;
 mod fpview;
 mod imp;
+mod menus;
 mod pairwin;
+mod panes;
 mod panelize;
 mod pdnwin;
 mod placing;
@@ -24,6 +26,7 @@ mod schview;
 mod shapetool;
 mod simwin;
 mod stitchwin;
+mod studio;
 mod swapwin;
 mod symlib;
 mod testwin;
@@ -42,7 +45,7 @@ fn main() -> eframe::Result {
     let start_file = std::env::args().nth(1).map(PathBuf::from);
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
-            .with_title(concat!("Trace ", env!("CARGO_PKG_VERSION")))
+            .with_title(concat!("Trace Studio ", env!("CARGO_PKG_VERSION")))
             .with_inner_size([1400.0, 900.0])
             .with_min_inner_size([800.0, 500.0])
             .with_drag_and_drop(true)
@@ -155,6 +158,9 @@ pub struct App {
     pub show_mechanical: bool,
     /// The Shape tool: drawing and editing pours, regions and outlines.
     pub shape: shapetool::ShapeTool,
+    /// Trace Studio's workspace: docks, document tabs, units, theme.
+    pub studio: studio::Studio,
+    pub panes: panes::PaneState,
 }
 
 #[derive(Clone, Copy)]
@@ -167,10 +173,8 @@ const RECENT_KEY: &str = "recent_files";
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, start_file: Option<PathBuf>) -> Self {
-        let mut style = (*cc.egui_ctx.style()).clone();
-        style.visuals = egui::Visuals::dark();
-        style.spacing.item_spacing = egui::vec2(8.0, 6.0);
-        cc.egui_ctx.set_style(style);
+        let studio = studio::Studio::from_store(cc.storage.and_then(|s| s.get_string(studio::STORE_KEY)));
+        studio::apply_theme(&cc.egui_ctx, studio.dark);
         let recent = cc
             .storage
             .and_then(|s| s.get_string(RECENT_KEY))
@@ -241,6 +245,8 @@ impl App {
             edit: editing::Editing::default(),
             show_mechanical: false,
             shape: shapetool::ShapeTool::default(),
+            studio,
+            panes: panes::PaneState::default(),
         };
         if let Some(f) = start_file {
             app.open(f);
@@ -249,6 +255,7 @@ impl App {
     }
 
     fn open(&mut self, path: PathBuf) {
+        self.studio.home = false;
         let ext = path
             .extension()
             .map(|e| e.to_string_lossy().to_ascii_lowercase())
@@ -1422,565 +1429,6 @@ impl App {
         ));
     }
 
-    fn menu(&mut self, ui: &mut egui::Ui, ctx: &egui::Context) {
-        egui::menu::bar(ui, |ui| {
-            ui.menu_button("File", |ui| {
-                if ui
-                    .add(egui::Button::new("Open board…").shortcut_text("Ctrl+O"))
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.open_dialog();
-                }
-                if ui.button("Open Gerber or ODB++ folder…").clicked() {
-                    ui.close_menu();
-                    self.open_folder_dialog();
-                }
-                ui.menu_button("Open recent", |ui| {
-                    if self.recent.is_empty() {
-                        ui.label(RichText::new("No recent boards").weak());
-                    }
-                    for p in self.recent.clone() {
-                        let name = p
-                            .file_name()
-                            .map(|n| n.to_string_lossy().into_owned())
-                            .unwrap_or_default();
-                        if ui
-                            .button(name)
-                            .on_hover_text(p.display().to_string())
-                            .clicked()
-                        {
-                            ui.close_menu();
-                            self.open(p);
-                        }
-                    }
-                });
-                ui.separator();
-                if ui
-                    .add_enabled(
-                        self.scene.is_some(),
-                        egui::Button::new("Save as Trace board…"),
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.save_as();
-                }
-                if ui
-                    .add_enabled(
-                        self.scene.is_some(),
-                        egui::Button::new("Save as KiCad board…"),
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.save_kicad();
-                }
-                if ui
-                    .add_enabled(
-                        self.scene.is_some(),
-                        egui::Button::new("Save as Altium board…"),
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.save_altium();
-                }
-                if ui
-                    .add_enabled(self.scene.is_some(), egui::Button::new("Panelize…"))
-                    .on_hover_text("Copies of the board in a panel, with rails, tabs and mouse bites or V-score")
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.panel.open = true;
-                }
-                if ui
-                    .add_enabled(
-                        self.scene.is_some(),
-                        egui::Button::new("Export fab outputs (Gerber, drill, BOM)…"),
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.export_fab();
-                }
-                if ui
-                    .add_enabled(
-                        self.scene.is_some(),
-                        egui::Button::new("Export ODB++…"),
-                    )
-                    .on_hover_text("One ODB++ job (.tgz): every layer, the drills, the parts, the nets and the stack-up")
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.export_odb();
-                }
-                if ui
-                    .add_enabled(
-                        self.scene.is_some(),
-                        egui::Button::new("Export assembly drawing (PDF)…"),
-                    )
-                    .on_hover_text("Top and bottom views with part bodies, designators and pin 1 marks, then the parts list (A3)")
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.export_assembly();
-                }
-                for (kind, label, hint) in [
-                    (ExportKind::FabDrawing, "Export fabrication drawing (PDF)…", "Outline with drill symbols and dimensions, drill table, notes and the stack-up (A3)"),
-                    (ExportKind::Ipc2581, "Export IPC-2581…", "One IPC-2581 revision C file: layers, drills, stack-up, parts, nets and BOM"),
-                    (ExportKind::Step, "Export STEP (3D)…", "The board solid with its holes and the parts as boxes, for mechanical CAD"),
-                    (ExportKind::Dxf, "Export DXF…", "Every layer as a DXF layer, in millimetres"),
-                ] {
-                    if ui
-                        .add_enabled(self.scene.is_some(), egui::Button::new(label))
-                        .on_hover_text(hint)
-                        .clicked()
-                    {
-                        ui.close_menu();
-                        self.export_file(kind);
-                    }
-                }
-                if ui
-                    .add_enabled(
-                        self.scene.is_some(),
-                        egui::Button::new("Export pair report…"),
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.export_pairs();
-                }
-                ui.separator();
-                if ui.button("Quit").clicked() {
-                    ctx.send_viewport_cmd(egui::ViewportCommand::Close);
-                }
-            });
-            ui.menu_button("Edit", |ui| {
-                let has = self.scene.is_some();
-                let undo = self
-                    .router
-                    .history
-                    .undo_label()
-                    .map(|l| format!("Undo {l}"));
-                if ui
-                    .add_enabled(
-                        undo.is_some(),
-                        egui::Button::new(undo.unwrap_or_else(|| "Undo".into()))
-                            .shortcut_text("Ctrl+Z"),
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.undo();
-                }
-                let redo = self
-                    .router
-                    .history
-                    .redo_label()
-                    .map(|l| format!("Redo {l}"));
-                if ui
-                    .add_enabled(
-                        redo.is_some(),
-                        egui::Button::new(redo.unwrap_or_else(|| "Redo".into()))
-                            .shortcut_text("Ctrl+Y"),
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.redo();
-                }
-                ui.separator();
-                if ui
-                    .add_enabled(has, egui::Button::new("Route").shortcut_text("X"))
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.set_tool(Tool::Route);
-                }
-                if ui
-                    .add_enabled(
-                        self.picked.is_some(),
-                        egui::Button::new("Delete clicked track").shortcut_text("Del"),
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.delete_picked();
-                }
-                if ui
-                    .add_enabled(has, egui::Button::new("Autoroute…"))
-                    .on_hover_text(
-                        "Route the open connections with tracks and vias, around what is \
-                         already on the board",
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.autoroute.open = true;
-                }
-                if ui
-                    .add_enabled(
-                        self.selected.is_some() && has,
-                        egui::Button::new("Unroute selected net").shortcut_text("Shift+Del"),
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    if let (Some(n), Some(scene)) = (self.selected, &self.scene) {
-                        let edits = router::unroute(&scene.board, n);
-                        let name = scene.board.nets[n as usize].name.clone();
-                        self.apply_edits(&format!("Unrouted {name}"), edits);
-                    }
-                }
-                ui.separator();
-                let any = !self.edit.sel.is_empty();
-                if ui
-                    .add_enabled(has, egui::Button::new("Select all").shortcut_text("Ctrl+A"))
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.select_all();
-                }
-                if ui
-                    .add_enabled(any, egui::Button::new("Copy").shortcut_text("Ctrl+C"))
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.copy_sel(false);
-                }
-                if ui
-                    .add_enabled(any, egui::Button::new("Cut").shortcut_text("Ctrl+X"))
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.copy_sel(true);
-                }
-                if ui
-                    .add_enabled(
-                        has && self.edit.clip.is_some(),
-                        egui::Button::new("Paste").shortcut_text("Ctrl+V"),
-                    )
-                    .on_hover_text("Pasted parts get new designators and no nets")
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.paste_clip();
-                }
-                if ui
-                    .add_enabled(
-                        any,
-                        egui::Button::new("Delete selection").shortcut_text("Del"),
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.delete_sel();
-                }
-                if ui
-                    .add_enabled(
-                        any,
-                        egui::Button::new("Turn selection 90°").shortcut_text("Ctrl+R"),
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.rotate_sel(90.0);
-                }
-                ui.add_enabled_ui(any, |ui| {
-                    ui.menu_button("Align", |ui| {
-                        for (k, how) in trace_core::select::Align::ALL.into_iter().enumerate() {
-                            if k == 4 || k == 6 {
-                                ui.separator();
-                            }
-                            if ui.button(how.label()).clicked() {
-                                ui.close_menu();
-                                self.align_sel(how);
-                            }
-                        }
-                    });
-                });
-                ui.separator();
-                if ui
-                    .add_enabled(has, egui::Button::new("Place text"))
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.set_tool(Tool::Text);
-                }
-                if ui
-                    .add_enabled(has, egui::Button::new("Place dimension"))
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.set_tool(Tool::Dimension);
-                }
-                if ui
-                    .add_enabled(has, egui::Button::new("Draw and edit shapes"))
-                    .on_hover_text("Pours, copper regions, keepouts, pour cutouts and the board outline; a pour's thermal relief style")
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.set_tool(Tool::Shape);
-                }
-                ui.separator();
-                if ui
-                    .add_enabled(has, egui::Button::new("Fanout…"))
-                    .on_hover_text(
-                        "Fan out BGA parts: a dogbone track to a via between the balls, or a \
-                         via in each pad, for the selected parts or a part you pick",
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.fan.open = true;
-                }
-                if ui
-                    .add_enabled(has, egui::Button::new("Pin and gate swap…"))
-                    .on_hover_text(
-                        "Two pins of a part trade nets, with the routing leaving each pad; or \
-                         two gates of a part (from the schematic) trade every pin. The open \
-                         schematic changes to match",
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.swap.open = true;
-                }
-                if ui
-                    .add_enabled(has, egui::Button::new("Via stitching and fences…"))
-                    .on_hover_text(
-                        "Fill a ground net's pours and planes with stitching vias, or line the \
-                         selected net's tracks (an RF line, a pair) with a via fence",
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.stitch.open = true;
-                }
-                if ui
-                    .add_enabled(has, egui::Button::new("Teardrops and gloss…"))
-                    .on_hover_text(
-                        "Teardrops where tracks meet vias and pads; tidy routing: merge \
-                         straight joins, cut dangling tracks, chamfer square corners",
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.tidy.open = true;
-                }
-                if ui
-                    .add_enabled(has, egui::Button::new("Test points…"))
-                    .on_hover_text(
-                        "One probe point per net for bed-of-nails or flying-probe test, \
-                         clear of parts, the edge and other probes",
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.tests.open = true;
-                }
-                if ui
-                    .add_enabled(has, egui::Button::new("Assembly variants…"))
-                    .on_hover_text("Parts left off or changed in each build of the board")
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.variants.open = true;
-                }
-                if ui
-                    .add_enabled(has, egui::Button::new("Copy block layout…"))
-                    .on_hover_text(
-                        "Design reuse: place and route another instance of a block (a channel, \
-                         a supply) as one already laid out",
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.reuse.open = true;
-                }
-                if ui
-                    .add_enabled(has, egui::Button::new("3D clearance…"))
-                    .on_hover_text(
-                        "Part bodies (3D models, or boxes from the pads) that run into each \
-                         other or come too close, parts taller than the Height rules, bodies \
-                         over the board edge",
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.clear3d.open = true;
-                }
-                let sel_n = self.edit.sel.parts.len();
-                if ui
-                    .add_enabled(has && sel_n > 0, egui::Button::new("Net tie: mark selected parts"))
-                    .on_hover_text(
-                        "Their own copper may join their nets (a star point, a Kelvin joint): \
-                         the rule check does not call it a short. Click again to unmark.",
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.toggle_net_ties();
-                }
-                if ui
-                    .add_enabled(has, egui::Button::new("Backdrill long via stubs"))
-                    .on_hover_text(
-                        "Backdrill every via whose stub is longer than its rule allows \
-                         (the board's back drilling rule, or 10 mil on pair nets)",
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    if let Some(scene) = &self.scene {
-                        let edits = trace_core::backdrill::plan(&scene.board);
-                        if edits.is_empty() {
-                            self.message =
-                                Some(("No via stub is longer than its rule allows".into(), false));
-                        } else {
-                            let n = edits.len() / 2;
-                            self.apply_edits(&format!("Backdrilled {n} vias"), edits);
-                        }
-                    }
-                }
-                let drilled = self.scene.as_ref().is_some_and(|s| {
-                    s.board
-                        .geometry
-                        .vias
-                        .iter()
-                        .any(|v| v.fab.back_top.is_some() || v.fab.back_bottom.is_some())
-                });
-                if ui
-                    .add_enabled(drilled, egui::Button::new("Remove backdrills"))
-                    .clicked()
-                {
-                    ui.close_menu();
-                    if let Some(scene) = &self.scene {
-                        let edits = trace_core::backdrill::clear(&scene.board);
-                        let n = edits.len() / 2;
-                        self.apply_edits(&format!("Removed {n} backdrills"), edits);
-                    }
-                }
-            });
-            ui.menu_button("View", |ui| {
-                if ui
-                    .add_enabled(
-                        self.scene.is_some(),
-                        egui::Button::new(if self.mode3d { "2D view" } else { "3D view" })
-                            .shortcut_text("3"),
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.mode3d = !self.mode3d;
-                }
-                if ui
-                    .add(egui::Button::new("Fit board").shortcut_text("F"))
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.needs_fit = true;
-                }
-                if ui
-                    .add(
-                        egui::Button::new(if self.view.flip {
-                            "View from top"
-                        } else {
-                            "View from bottom"
-                        })
-                        .shortcut_text("B"),
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.view.flip = !self.view.flip;
-                    self.needs_fit = true;
-                }
-                ui.checkbox(&mut self.show_pairs, "Differential pairs panel");
-                if ui
-                    .add_enabled(
-                        self.scene.is_some(),
-                        egui::Button::new("Constraint Manager…").shortcut_text("C"),
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.cm.open = true;
-                }
-                if ui
-                    .add_enabled(
-                        self.scene.is_some(),
-                        egui::Button::new("Impedance and stack-up…").shortcut_text("I"),
-                    )
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.imp.open = true;
-                }
-                if ui
-                    .add_enabled(
-                        self.scene.is_some(),
-                        egui::Button::new("Signal simulation (IBIS)…"),
-                    )
-                    .on_hover_text("Waveforms and the eye of the selected net, driven and received by IBIS models")
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.sim.open = true;
-                }
-                if ui
-                    .add_enabled(
-                        self.scene.is_some(),
-                        egui::Button::new("Power integrity (IR drop)…"),
-                    )
-                    .on_hover_text("DC voltage drop over a supply net's pours, tracks and vias, from its source to the loads")
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.power.open = true;
-                }
-                if ui
-                    .add_enabled(
-                        self.scene.is_some(),
-                        egui::Button::new("PDN impedance and decaps…"),
-                    )
-                    .on_hover_text("Supply impedance from 100 kHz to 1 GHz from the planes, decaps and VRM, against a target, with a decap optimiser")
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.pdn.open = true;
-                }
-                if ui
-                    .add_enabled(
-                        self.scene.is_some(),
-                        egui::Button::new("Via S-parameters (3D)…"),
-                    )
-                    .on_hover_text("3D full-wave solve of a via or via pair between two layers: return and insertion loss, stub resonance, Touchstone")
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.via.open = true;
-                }
-                if ui
-                    .add_enabled(
-                        self.scene.is_some(),
-                        egui::Button::new("Pair cross-sections…"),
-                    )
-                    .on_hover_text("Every track width and gap on a layer that gives the target Zdiff, ranked by loss, with crosstalk and etch sensitivity")
-                    .clicked()
-                {
-                    ui.close_menu();
-                    self.pairs.open = true;
-                }
-            });
-            ui.menu_button("Help", |ui| {
-                ui.label(concat!("Trace ", env!("CARGO_PKG_VERSION"), ", open-source PCB design"));
-                ui.label("Opens Altium .PcbDoc and Allegro .brd (16.0 and newer) boards,\nGerber and drill files and ODB++ jobs. Saves KiCad and Altium\nboards. 3D view (3) and Constraint Manager (C).");
-                ui.label(RichText::new("Scroll to zoom, drag to pan, click to select a net.\nM measures: click two points (they snap to pads, vias and track ends).\nF fits the board, B flips to the bottom, Esc clears.").weak());
-            });
-        });
-    }
-
     fn set_tool(&mut self, tool: Tool) {
         self.tool = tool;
         self.measure = None;
@@ -2195,6 +1643,15 @@ impl App {
                 return;
             }
             // Options of the current tool, as Altium's Properties panel shows them.
+            if self.props_visible()
+                && matches!(
+                    self.tool,
+                    Tool::Route | Tool::Tune | Tool::Text | Tool::Dimension | Tool::Shape
+                )
+            {
+                ui.label(RichText::new("The tool's options are in the Properties panel.").weak());
+                return;
+            }
             if self.tool == Tool::Route {
                 self.route_bar(ui);
                 return;
@@ -2943,56 +2400,6 @@ impl App {
         }
         ui.separator();
         self.net_info(ui);
-        ui.separator();
-        ui.label(RichText::new("LAYERS").small().weak());
-        let Some(scene) = &mut self.scene else { return };
-        let mut new_active = None;
-        egui::ScrollArea::vertical()
-            .id_salt("layers")
-            .show(ui, |ui| {
-                for l in scene.layers.iter_mut() {
-                    ui.horizontal(|ui| {
-                        ui.checkbox(&mut l.visible, "");
-                        let (rect, _) =
-                            ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                        ui.painter().rect_filled(
-                            rect,
-                            3.0,
-                            Color32::from_rgb(l.color[0], l.color[1], l.color[2]),
-                        );
-                        let active = l.slot == self.active;
-                        let text = if active {
-                            RichText::new(&l.name).strong()
-                        } else {
-                            RichText::new(&l.name)
-                        };
-                        let r = ui.selectable_label(active, text).on_hover_text(
-                            "Click to make active. Double-click to show only this layer.",
-                        );
-                        if r.clicked() && matches!(l.slot, Slot::Copper(_)) {
-                            new_active = Some((l.slot, false));
-                        }
-                        if r.double_clicked() {
-                            new_active = Some((l.slot, true));
-                        }
-                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                            ui.label(RichText::new(l.count.to_string()).small().weak());
-                        });
-                    });
-                }
-            });
-        if let Some((slot, solo)) = new_active {
-            if matches!(slot, Slot::Copper(_)) {
-                self.active = slot;
-            }
-            for l in scene.layers.iter_mut() {
-                if solo {
-                    l.visible = l.slot == slot || l.slot == Slot::Vias || l.slot == Slot::Pours;
-                } else if l.slot == slot {
-                    l.visible = true;
-                }
-            }
-        }
     }
 
     fn net_info(&mut self, ui: &mut egui::Ui) {
@@ -3250,6 +2657,7 @@ fn pair_rows(scene: &Scene) -> Vec<PairRow> {
 
 impl eframe::App for App {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        self.studio_tick();
         self.poll_repour();
         // The design rule check follows the board in the background; not
         // while a re-pour is still to come, which would change it again.
@@ -3281,9 +2689,9 @@ impl eframe::App for App {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(if self.dirty {
-                format!("● {name} (edited) - Trace {}", env!("CARGO_PKG_VERSION"))
+                format!("● {name} (edited) - Trace Studio {}", env!("CARGO_PKG_VERSION"))
             } else {
-                concat!("Trace ", env!("CARGO_PKG_VERSION")).to_string()
+                concat!("Trace Studio ", env!("CARGO_PKG_VERSION")).to_string()
             }));
         }
         if ctx.input(|i| i.viewport().close_requested()) && self.dirty && !self.allow_close {
@@ -3313,7 +2721,36 @@ impl eframe::App for App {
                 });
         }
         let typing = ctx.wants_keyboard_input();
-        let board2d = !self.mode3d && !self.mode_sch && !self.mode_fp;
+        let board2d = !self.mode3d && !self.mode_sch && !self.mode_fp && !self.studio.home;
+        // Altium's keys: P and U open the Place and Route key menus,
+        // Ctrl+W routes, Ctrl+M measures, Q switches mil and mm.
+        self.accel_keys(ctx, board2d && self.scene.is_some(), typing);
+        if !typing {
+            let (route_w, measure_m, units_q) = ctx.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::W),
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::M),
+                    plain_key(i, egui::Key::Q),
+                )
+            });
+            if route_w && self.scene.is_some() {
+                self.go_board();
+                self.mode3d = false;
+                self.run_command("Interactive routing");
+            }
+            if measure_m && self.scene.is_some() {
+                self.go_board();
+                self.mode3d = false;
+                self.set_tool(Tool::Measure);
+            }
+            if units_q {
+                self.studio.mm = !self.studio.mm;
+                self.message = Some((
+                    format!("Units: {}", if self.studio.mm { "mm" } else { "mil" }),
+                    false,
+                ));
+            }
+        }
         // Layer keys, as in Altium: Shift+S single layer mode, + and - the
         // next and previous copper layer.
         if board2d && self.scene.is_some() && !typing {
@@ -3650,15 +3087,32 @@ impl eframe::App for App {
         egui::TopBottomPanel::bottom("status").show(ctx, |ui| {
             ui.horizontal(|ui| {
                 if let Some([x, y]) = self.cursor {
+                    let (x, y, u) = if self.studio.mm {
+                        (x * 0.0254, y * 0.0254, "mm")
+                    } else {
+                        (x, y, "mil")
+                    };
+                    let d = if self.studio.mm { 3 } else { 1 };
                     ui.label(
-                        RichText::new(format!(
-                            "x {x:.1}  y {y:.1} mil   ·   {:.3}, {:.3} mm",
-                            x * 0.0254,
-                            y * 0.0254
-                        ))
-                        .monospace()
-                        .weak(),
+                        RichText::new(format!("X: {x:.d$} {u}   Y: {y:.d$} {u}"))
+                            .monospace()
+                            .weak(),
                     );
+                }
+                if ui
+                    .small_button(if self.studio.mm { "mm" } else { "mil" })
+                    .on_hover_text("Units (Q)")
+                    .clicked()
+                {
+                    self.studio.mm = !self.studio.mm;
+                }
+                if let (Some(scene), false) = (&self.scene, self.mode_sch || self.mode_fp || self.studio.home) {
+                    if let Some(l) = scene.layers.iter().find(|l| l.slot == self.active) {
+                        let c = Color32::from_rgb(l.color[0], l.color[1], l.color[2]);
+                        let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                        ui.painter().rect_filled(r, 2.0, c);
+                        ui.label(RichText::new(&l.name).weak());
+                    }
                 }
                 if self.mode_sch {
                     if let Some(h) = &self.schem.hover {
@@ -3670,6 +3124,7 @@ impl eframe::App for App {
                     ui.label(RichText::new(h).strong());
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.menu_button(RichText::new("Panels").strong(), |ui| self.panels_menu(ui));
                     if let Some(scene) = &self.scene {
                         let off = self.imp.failing(&scene.board);
                         if off > 0
@@ -3732,10 +3187,8 @@ impl eframe::App for App {
                 });
             });
         });
-        egui::SidePanel::left("side")
-            .resizable(true)
-            .default_width(270.0)
-            .show(ctx, |ui| self.side_panel(ui));
+        self.show_docks(ctx);
+        self.doc_tabs(ctx);
         if self.show_pairs
             && !self.mode_sch
             && !self.mode_fp
@@ -3781,7 +3234,7 @@ impl eframe::App for App {
                 None => {}
             }
         }
-        let board2d = self.scene.is_some() && !self.mode3d && !self.mode_sch && !self.mode_fp;
+        let board2d = self.scene.is_some() && !self.mode3d && !self.mode_sch && !self.mode_fp && !self.studio.home;
         if board2d {
             egui::TopBottomPanel::bottom("layer_tabs")
                 .frame(
@@ -3792,6 +3245,10 @@ impl eframe::App for App {
                 .show(ctx, |ui| self.layer_tabs(ui));
         }
         egui::CentralPanel::default().frame(egui::Frame::none().fill(Color32::from_rgb(15, 17, 21))).show(ctx, |ui| {
+            if self.studio.home {
+                self.home_page(ui);
+                return;
+            }
             if self.mode_fp {
                 let pick = self.fped.show(ui);
                 self.footprint_pick(pick);
@@ -3835,9 +3292,10 @@ impl eframe::App for App {
                 canvas::show(self, ui);
             }
         });
-        if self.scene.is_some() && !self.mode3d && !self.mode_sch && !self.mode_fp {
+        if self.scene.is_some() && !self.mode3d && !self.mode_sch && !self.mode_fp && !self.studio.home {
             self.active_bar(ctx);
         }
+        self.keys_window(ctx);
         let pick = match &self.scene {
             Some(scene) => self
                 .cm
@@ -3983,6 +3441,7 @@ impl eframe::App for App {
         storage.set_string(cm::STORE_KEY, self.cm.to_store());
         storage.set_string(imp::STORE_KEY, self.imp.to_store());
         storage.set_string(symlib::STORE_KEY, self.schem.libs.to_store());
+        storage.set_string(studio::STORE_KEY, self.studio.to_store());
     }
 }
 

@@ -30,6 +30,12 @@ pub struct Board {
     /// Parts marked as net ties (designators), besides those named as one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub net_ties: Vec<String>,
+    /// Rigid-flex: areas with their own layers.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub zones: Vec<crate::flex::Zone>,
+    /// Rigid-flex: where the flex folds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bends: Vec<crate::flex::Bend>,
 }
 
 /// How a panel's nets and parts follow from its board: `nets` nets and

@@ -89,6 +89,12 @@ USAGE:
                                                 widest worst case eye. --xtalk: nets beside the path's traces
                                                 switch too (near or far end, whichever is worse), in the eye and
                                                 as each one's worst case closure.
+    trace flex <board> [--radius [B1=]MIL] [--dynamic] [--keepout 30] [--angle 10] [report.txt]
+                                                rigid-flex: zones with their layers and thickness, bends with
+                                                their least radius (IPC-2223: 6/12/24x the flex, 100x dynamic),
+                                                and the flex checks: vias and parts in flex or near its edge,
+                                                tracks off square across a bend or turning in it, copper on
+                                                layers a zone lacks, stacked tracks or pours in a bend
     trace compare <first> <second> [--tol 1] [--length-tol 10] [--no-routing] [report.txt|report.csv]
                                                 design compare: parts added, removed, moved, rotated, flipped or
                                                 changed (footprint, value, part number), nets added, removed,
@@ -279,6 +285,7 @@ fn main() -> ExitCode {
         ["zcheck", file, rest @ ..] => zcheck_cmd(file, rest),
         ["path" | "pathloss", file, rest @ ..] => path_cmd(file, rest),
         ["compare" | "diff", a, b, rest @ ..] => compare_cmd(a, b, rest),
+        ["flex", file, rest @ ..] => flex_cmd(file, rest),
         ["pairsize", file, layer, rest @ ..] => pairsize(file, layer, rest),
         ["validate", rest @ ..] => validate(rest),
         ["stitch", file, net, out, rest @ ..] => stitch_cmd(file, net, out, rest),
@@ -2509,6 +2516,55 @@ fn path_cmd(file: &str, rest: &[&str]) -> Res {
             rep.touchstone()
         };
         std::fs::write(o, text)?;
+        println!("Wrote {o}");
+    }
+    Ok(())
+}
+
+fn flex_cmd(file: &str, rest: &[&str]) -> Res {
+    use trace_core::flex;
+    let mut b = board(file)?;
+    let mut lim = flex::Limits::default();
+    let mut out: Option<&str> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        let next = |i: usize| -> Result<&str, String> {
+            rest.get(i + 1)
+                .copied()
+                .ok_or_else(|| format!("{} needs a value", rest[i]))
+        };
+        match rest[i] {
+            "--keepout" => {
+                lim.edge_keepout = next(i)?.parse()?;
+                i += 1;
+            }
+            "--angle" => {
+                lim.cross_angle = next(i)?.parse()?;
+                i += 1;
+            }
+            // Give every bend (or one: B1=radius) a radius, mil.
+            "--radius" => {
+                let v = next(i)?;
+                let (name, r) = v.split_once('=').map_or((None, v), |(n, r)| (Some(n), r));
+                let r: f64 = r.trim_end_matches("mil").parse()?;
+                for bd in b.bends.iter_mut() {
+                    if name.is_none_or(|n| n.eq_ignore_ascii_case(&bd.name)) {
+                        bd.radius = trace_core::Length::from_mil(r);
+                    }
+                }
+                i += 1;
+            }
+            "--dynamic" => b.bends.iter_mut().for_each(|bd| bd.dynamic = true),
+            x if x.starts_with("--") => return Err(format!("unknown option {x}").into()),
+            x => out = Some(x),
+        }
+        i += 1;
+    }
+    let issues = flex::check(&b, &lim);
+    let text = flex::report(&b, &issues);
+    print!("{text}");
+    if let Some(o) = out {
+        std::fs::write(o, &text)?;
         println!("Wrote {o}");
     }
     Ok(())

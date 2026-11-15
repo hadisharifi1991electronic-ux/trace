@@ -47,6 +47,10 @@ checker and simulator all read.
   part (U1B) joins the first placed part still missing it. Update PCB adds
   it to the board when its footprint is on the board, in the open
   footprint library or in an open `.IntLib`
+- lay out rigid-flex boards (Design → Rigid-flex zones and bends…): zones
+  with their own layers (flex, rigid, stiffened), bends with radius,
+  angle and fold line, read from ODB++ too, and the IPC-2223 flex checks
+  (vias and parts in flex, bend radius, tracks across bends)
 - open fabrication data: a folder or `.zip` of Gerber and drill files, several
   files at once, or an ODB++ job (`.tgz`, `.zip` or folder). Each file's layer
   is recognised automatically and the board is rebuilt with copper, holes,
@@ -307,6 +311,7 @@ trace path board.brd U5.A3 J2.1 --eye 10 --amp 0.8 --eye-svg eye.svg   PRBS eye 
 trace path board.brd U5.A3 J2.1 --eye 16 --eq auto --eye-svg eye.svg   the same with transmit FFE and receive CTLE picked for the widest worst case eye
 trace path board.brd HDMI_D1_P --eye 3.4 --xtalk   the eye with the nets beside the path switching too (NEXT/FEXT closure per net)
 trace compare old.PcbDoc new.PcbDoc changes.csv   design compare: parts, nets (renamed, pins joined or left), routing per net, classes, pairs, rules, stack-up
+trace flex board.tgz --radius B1=120 flex.txt   rigid-flex: zones and their layers, bend radius (IPC-2223), vias, parts, corners and stacked tracks in bends
 trace via board.PcbDoc 1 7 --target 50 --fab drill=8-16,ring=4,antipad=20-70   size the via to 50 ohm within the fab limits (add --optimise 10 for best RL+IL)
 trace pairsize board.PcbDoc 3 --zdiff 100 --ghz 8   every width and gap for 100 ohm on a layer, ranked by loss
 trace cascade chip.s1p via.s2p --line 50@500@3.4   return loss into vias and lines ending in a chip's port model

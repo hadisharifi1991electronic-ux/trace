@@ -3,6 +3,31 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.71.0 (2026-11-15)
+
+- Rigid-flex stack-ups (Design > Rigid-flex zones and bends…, `trace
+  flex board [--radius [B1=]MIL] [--dynamic] [report.txt]`). A board
+  can have zones, each an area with only some of the stack-up's layers
+  (a flex zone keeps its polyimide and copper, a rigid zone has them
+  all, a stiffened flex zone may carry parts), and bends inside flex
+  zones with an inner radius, an angle, static or dynamic use and a
+  fold line (set, or square to the tracks crossing the bend). ODB++
+  jobs bring their zones (the step's `zones` file: each zone's outline
+  and layer rows) and BEND_AREA and STIFFENER layers in. The check
+  follows IPC-2223: vias in flex and within `--keepout` (30 mil) of a
+  rigid-flex edge, parts on flex that is not stiffened and in bends,
+  copper on a layer the zone does not have, tracks not crossing the
+  fold line square to it (within `--angle`, 10 degrees), corners in a
+  bend, tracks stacked on two layers in a bend, solid copper in a bend,
+  bends outside flex, and the bend radius against IPC-2223's minimum
+  (6, 12 or 24 times the flex's thickness by its copper layers, 100
+  times for dynamic flex). The window edits zones (flex, stiffened,
+  layers) and bends, adds them by box, applies them as one undoable
+  step, draws them on the board with the fold lines, and lists the
+  issues to click through. On the ODB++ rigid-flex sample the flex is
+  7.7 mil with 2 copper layers (rigid 53.2 mil, 10), so its bend needs
+  at least 93 mil.
+
 ## 0.70.0 (2026-11-15)
 
 - Design compare (Project > Compare with another version…, `trace

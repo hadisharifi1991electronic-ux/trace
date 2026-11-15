@@ -900,6 +900,83 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ));
     }
 
+    // Rigid-flex zones (flex teal, rigid grey), bends (orange, with the
+    // fold line) and the flex issues found, while that window is open.
+    if app.flex.open && app.flex.overlay {
+        let b = &scene.board;
+        let ring_pts = |r: &[trace_core::Point]| -> Vec<Pos2> {
+            let mut v: Vec<Pos2> = r
+                .iter()
+                .map(|p| view.to_screen(p.x.mil() as f32, p.y.mil() as f32))
+                .collect();
+            if let Some(&f) = v.first() {
+                v.push(f);
+            }
+            v
+        };
+        for z in &b.zones {
+            let c = if z.flex {
+                Color32::from_rgba_unmultiplied(60, 210, 200, 200)
+            } else {
+                Color32::from_rgba_unmultiplied(170, 170, 170, 150)
+            };
+            let pts = ring_pts(&z.outline);
+            if pts.len() < 4 {
+                continue;
+            }
+            shapes.extend(Shape::dashed_line(&pts, Stroke::new(1.5_f32, c), 10.0, 4.0));
+            let top = pts
+                .iter()
+                .fold(Pos2::new(f32::MAX, f32::MAX), |a, p| a.min(*p));
+            shapes.push(Shape::text(
+                &ui.fonts(|f| f.clone()),
+                top + egui::vec2(4.0, 3.0),
+                egui::Align2::LEFT_TOP,
+                &z.name,
+                egui::FontId::proportional(12.0),
+                c,
+            ));
+        }
+        let bend_c = Color32::from_rgba_unmultiplied(255, 150, 60, 220);
+        for (k, bd) in b.bends.iter().enumerate() {
+            let pts = ring_pts(&bd.area);
+            if pts.len() < 4 {
+                continue;
+            }
+            shapes.extend(Shape::dashed_line(
+                &pts,
+                Stroke::new(1.5_f32, bend_c),
+                6.0,
+                4.0,
+            ));
+            let c = trace_core::flex::centroid(&bd.area);
+            if let Some(d) = app.flex.axes.get(k).copied().flatten() {
+                let r = bd.area.iter().fold(0.0_f64, |m, p| {
+                    m.max(((p.x.mil() - c[0]).powi(2) + (p.y.mil() - c[1]).powi(2)).sqrt())
+                });
+                let a = view.to_screen((c[0] - d[0] * r) as f32, (c[1] - d[1] * r) as f32);
+                let e = view.to_screen((c[0] + d[0] * r) as f32, (c[1] + d[1] * r) as f32);
+                shapes.push(Shape::line_segment([a, e], Stroke::new(1.0_f32, bend_c)));
+            }
+            shapes.push(Shape::text(
+                &ui.fonts(|f| f.clone()),
+                view.to_screen(c[0] as f32, c[1] as f32),
+                egui::Align2::CENTER_CENTER,
+                format!("{} R{:.0} {:.0}°", bd.name, bd.radius.mil(), bd.angle_deg),
+                egui::FontId::proportional(12.0),
+                bend_c,
+            ));
+        }
+        let st = Stroke::new(1.6_f32, Color32::from_rgb(230, 180, 70));
+        for i in &app.flex.issues {
+            let p = view.to_screen(i.at[0] as f32, i.at[1] as f32);
+            if !rect.expand(10.0).contains(p) {
+                continue;
+            }
+            shapes.push(Shape::circle_stroke(p, 5.0, st));
+        }
+    }
+
     // Design rule violations on the layers shown: an X in the colour of
     // its kind, the one picked in the list larger.
     if app.drc.markers {

@@ -468,6 +468,15 @@ impl App {
         ) {
             self.imp.open = true;
         }
+        if item(
+            ui,
+            has,
+            "Rigid-flex zones and bends…",
+            "",
+            "Areas with their own layers, where the flex bends, and the IPC-2223 flex checks",
+        ) {
+            self.flex.open = true;
+        }
         ui.separator();
         if item(
             ui,

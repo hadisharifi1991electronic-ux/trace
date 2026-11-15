@@ -11,6 +11,7 @@ mod comparewin;
 mod drc;
 mod editing;
 mod fanwin;
+mod flexwin;
 mod fpview;
 mod imp;
 mod menus;
@@ -142,6 +143,7 @@ pub struct App {
     zcheck: zwin::ZWindow,
     pathloss: pathwin::PathWindow,
     compare: comparewin::CompareWindow,
+    pub(crate) flex: flexwin::FlexWindow,
     pairs: pairwin::PairWindow,
     stitch: stitchwin::StitchWindow,
     tidy: tidywin::TidyWindow,
@@ -239,6 +241,7 @@ impl App {
             zcheck: zwin::ZWindow::default(),
             pathloss: pathwin::PathWindow::default(),
             compare: comparewin::CompareWindow::default(),
+            flex: flexwin::FlexWindow::default(),
             pairs: pairwin::PairWindow::default(),
             stitch: stitchwin::StitchWindow::default(),
             tidy: tidywin::TidyWindow::default(),
@@ -3405,6 +3408,21 @@ impl eframe::App for App {
             .and_then(|scene| self.tidy.show(ctx, &scene.board, self.selected));
         if let Some((label, edits)) = tidied {
             self.apply_edits(&label, edits);
+        }
+        let flexed = self
+            .scene
+            .as_ref()
+            .and_then(|scene| self.flex.show(ctx, &scene.board));
+        match flexed {
+            Some(flexwin::FlexAct::Edit(label, edits)) => self.apply_edits(&label, edits),
+            Some(flexwin::FlexAct::Show(at, text)) => {
+                let p = [at[0] as f32, at[1] as f32];
+                self.focus = Some(Focus::Point(p, 3.0));
+                self.needs_fit = false;
+                self.marker = Some(p);
+                self.message = Some((text, false));
+            }
+            None => {}
         }
         let tested = self
             .scene

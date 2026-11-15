@@ -899,9 +899,15 @@ pub fn read(job: &Job) -> Result<Import> {
         )));
     }
     let mut imp = crate::build::build_with(layers, "the ODB++ netlist", parts);
-    if let Some(st) = stackup(job, &dir, &board_layers) {
+    if let Some((st, rows)) = stackup(job, &dir, &board_layers) {
         if st.copper_layers().count() == imp.board.stackup.copper_layers().count() {
             imp.board.stackup = st;
+            // Rigid-flex zones name their layers by matrix row.
+            if let Some(t) = job.text(&format!("{dir}/zones")) {
+                imp.board.zones = zones(&t, &rows);
+                imp.board.bends = bends(job, &dir, &board_layers);
+                mark_stiffeners(job, &dir, &board_layers, &mut imp.board.zones);
+            }
         }
     }
     Ok(imp)
@@ -931,12 +937,17 @@ fn attrlist(t: &str) -> (HashMap<String, String>, f64) {
 /// The stack-up from the matrix's copper and dielectric layers and their
 /// attribute lists (copper weight, dielectric thickness, permittivity,
 /// material), when the job has dielectric layers.
-fn stackup(job: &Job, dir: &str, layers: &[&MatrixLayer]) -> Option<trace_core::Stackup> {
+fn stackup(
+    job: &Job,
+    dir: &str,
+    layers: &[&MatrixLayer],
+) -> Option<(trace_core::Stackup, Vec<(u32, String)>)> {
     use trace_core::{LayerKind, Length, StackLayer};
     if !layers.iter().any(|l| l.kind == "DIELECTRIC") {
         return None;
     }
     let mut st = trace_core::Stackup::default();
+    let mut rows = Vec::new();
     for l in layers {
         let copper = matches!(l.kind.as_str(), "SIGNAL" | "POWER_GROUND" | "MIXED");
         if !copper && l.kind != "DIELECTRIC" {
@@ -967,6 +978,7 @@ fn stackup(job: &Job, dir: &str, layers: &[&MatrixLayer]) -> Option<trace_core::
             )
         };
         let df = if copper { None } else { num(".loss_tangent") };
+        rows.push((l.row, name.clone()));
         st.layers.push(StackLayer {
             name,
             altium_id: None,
@@ -982,7 +994,151 @@ fn stackup(job: &Job, dir: &str, layers: &[&MatrixLayer]) -> Option<trace_core::
             material,
         });
     }
-    Some(st)
+    Some((st, rows))
+}
+
+/// Closed rings of a features text's surfaces, board points.
+fn rings(t: &str) -> Vec<Vec<trace_core::Point>> {
+    let f = parse_features(t);
+    let mut out = Vec::new();
+    for feat in &f.features {
+        if let Feature::Surface {
+            dark: true,
+            contours,
+        } = feat
+        {
+            for (island, c) in contours {
+                if *island && c.len() >= 3 {
+                    out.push(
+                        c.iter()
+                            .map(|p| trace_core::Point {
+                                x: trace_core::Length::from_mm(p[0]),
+                                y: trace_core::Length::from_mm(p[1]),
+                            })
+                            .collect(),
+                    );
+                }
+            }
+        }
+    }
+    out
+}
+
+/// The step's rigid-flex zones (`zones` file): each `ZONE name` with the
+/// matrix rows it has (`LYR`) and its outline surfaces.
+fn zones(t: &str, rows: &[(u32, String)]) -> Vec<trace_core::flex::Zone> {
+    let units = t
+        .lines()
+        .find(|l| l.trim().starts_with("UNITS="))
+        .unwrap_or("UNITS=INCH")
+        .to_string();
+    let mut out = Vec::new();
+    let mut cur: Option<(String, Vec<String>, String)> = None;
+    let finish = |c: Option<(String, Vec<String>, String)>,
+                  out: &mut Vec<trace_core::flex::Zone>| {
+        if let Some((name, layers, body)) = c {
+            let text = format!("{units}\n{body}");
+            let lname = name.to_ascii_lowercase();
+            for (i, r) in rings(&text).into_iter().enumerate() {
+                out.push(trace_core::flex::Zone {
+                    name: if i == 0 {
+                        name.clone()
+                    } else {
+                        format!("{name}_{}", i + 1)
+                    },
+                    flex: lname.contains("flex") && !lname.contains("rigid"),
+                    outline: r,
+                    layers: layers.clone(),
+                    stiffener: false,
+                });
+            }
+        }
+    };
+    for line in t.lines() {
+        let l = line.trim();
+        if let Some(rest) = l.strip_prefix("ZONE ") {
+            finish(cur.take(), &mut out);
+            let name = rest.split(';').next().unwrap_or("").trim().to_string();
+            cur = Some((name, Vec::new(), String::new()));
+        } else if let Some(rest) = l.strip_prefix("LYR") {
+            if let Some(c) = cur.as_mut() {
+                c.1 = rest
+                    .split_whitespace()
+                    .filter_map(|n| n.parse::<u32>().ok())
+                    .filter_map(|r| rows.iter().find(|x| x.0 == r).map(|x| x.1.clone()))
+                    .collect();
+            }
+        } else if let Some(c) = cur.as_mut() {
+            c.2.push_str(l);
+            c.2.push('\n');
+        }
+    }
+    finish(cur.take(), &mut out);
+    // A zone with fewer layers than another is the flex one when the
+    // names do not say.
+    if !out.iter().any(|z| z.flex) && out.len() > 1 {
+        let most = out.iter().map(|z| z.layers.len()).max().unwrap_or(0);
+        for z in out.iter_mut() {
+            z.flex = z.layers.len() < most;
+        }
+    }
+    out
+}
+
+/// Bend areas: the surfaces of a `BEND_AREA` mask layer (a static bend of
+/// 90 degrees and no radius until the user sets them).
+fn bends(job: &Job, dir: &str, layers: &[&MatrixLayer]) -> Vec<trace_core::flex::Bend> {
+    let mut out = Vec::new();
+    for l in layers
+        .iter()
+        .filter(|l| l.name.to_ascii_uppercase().contains("BEND"))
+    {
+        let Some(t) = job.text(&format!(
+            "{dir}/layers/{}/features",
+            l.name.to_ascii_lowercase()
+        )) else {
+            continue;
+        };
+        for r in rings(&t) {
+            out.push(trace_core::flex::Bend {
+                name: format!("B{}", out.len() + 1),
+                area: r,
+                radius: trace_core::Length::from_mil(0.0),
+                angle_deg: 90.0,
+                dynamic: false,
+                axis_deg: None,
+            });
+        }
+    }
+    out
+}
+
+/// Flex zones covered by a stiffener layer's shapes count as stiffened.
+fn mark_stiffeners(
+    job: &Job,
+    dir: &str,
+    layers: &[&MatrixLayer],
+    zones: &mut [trace_core::flex::Zone],
+) {
+    for l in layers
+        .iter()
+        .filter(|l| l.name.to_ascii_uppercase().contains("STIFF"))
+    {
+        let Some(t) = job.text(&format!(
+            "{dir}/layers/{}/features",
+            l.name.to_ascii_lowercase()
+        )) else {
+            continue;
+        };
+        for r in rings(&t) {
+            let c = trace_core::flex::centroid(&r);
+            for z in zones.iter_mut().filter(|z| z.flex) {
+                if trace_core::flex::inside(&z.outline, c) {
+                    z.stiffener = true;
+                }
+            }
+        }
+    }
 }
 
 fn to_gerber(f: &Features, syms: &mut Symbols, names: Option<&HashMap<usize, ObjAttrs>>) -> Gerber {

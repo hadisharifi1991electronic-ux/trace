@@ -22,6 +22,7 @@ pub mod fanout;
 pub mod fdtd;
 pub mod field;
 pub mod file;
+pub mod flex;
 pub mod font;
 pub mod footprint;
 pub mod geometry;

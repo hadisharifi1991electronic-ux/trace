@@ -153,6 +153,11 @@ pub enum Edit {
         after: Box<Prims>,
         area: Option<[f64; 4]>,
     },
+    /// Replaces the rigid-flex zones and bends.
+    Flex {
+        before: Box<(Vec<crate::flex::Zone>, Vec<crate::flex::Bend>)>,
+        after: Box<(Vec<crate::flex::Zone>, Vec<crate::flex::Bend>)>,
+    },
 }
 
 fn insert<T: Clone>(list: &mut Vec<T>, index: usize, item: &T) {
@@ -194,6 +199,10 @@ impl Edit {
             Edit::RemoveVia { index, .. } => remove(&mut board.geometry.vias, *index),
             Edit::SetPolygons { after, .. } => board.geometry.polygons = after.clone(),
             Edit::Parts { after, .. } => after.put(board),
+            Edit::Flex { after, .. } => {
+                board.zones = after.0.clone();
+                board.bends = after.1.clone();
+            }
             Edit::Fab { pads, vias } => {
                 for &(i, _, f) in pads {
                     if let Some(p) = board.geometry.pads.get_mut(i) {
@@ -294,6 +303,10 @@ impl Edit {
                 before: after.clone(),
                 after: before.clone(),
                 area: *area,
+            },
+            Edit::Flex { before, after } => Edit::Flex {
+                before: after.clone(),
+                after: before.clone(),
             },
             Edit::Fab { pads, vias } => Edit::Fab {
                 pads: pads.iter().map(|&(i, a, b)| (i, b, a)).collect(),

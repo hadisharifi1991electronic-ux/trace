@@ -3,6 +3,26 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.65.1 (2026-11-15)
+
+- Path loss, from the ADRV0926 RX1 test (J301 to U101.H17):
+  - Parts valued TBD, DNI, DNP, NC or N/A, or not fitted in the variant,
+    are left out (a shunt site stays open) and listed in a note, instead
+    of taking 100 nF or 10 nH. A capacitor, inductor or resistor whose
+    value gives no farads, henries or ohms is treated the same way.
+  - Parts on the same two nets combine side by side, so a fitted 18 pF
+    DC block beside an unfitted TBD inductor footprint counts (before,
+    the path took one of them at random). A series site with nothing
+    fitted is a 0 Ω link, with a note.
+  - An ideal open as a vendor model (Γ = 1) is an open, not a short.
+  - `--fmin` (RL from, in the window): the worst return loss is taken
+    from there up, so a DC block's corner below the band does not hide
+    the in-band match.
+  - With `--load`, the worst return loss with the chip at the end is
+    taken inside the load model's valid range (its "Valid Frequency
+    Range" comment, else its points), with a note when the sweep runs
+    outside it, and is printed at 1, 3 and 6 GHz.
+
 ## 0.65.0 (2026-11-15)
 
 - Whole-path loss (Tools > Signal and power integrity > Path loss…,

@@ -61,7 +61,7 @@ USAGE:
                                                 vias from the source part to the loads (no --load: the total,
                                                 default 1 A, shared by pad count); with out, a drop map per layer
     trace path <board> <from> [<to>] [--ghz 6] [--points 200] [--quick-vias] [--model PATTERN=file.sNp]
-               [--load chip.s1p] [--df 0.02] [out.s2p] [out.svg] [out.csv]
+               [--load chip.s1p] [--df 0.02] [--fmin GHz] [out.s2p] [out.svg] [out.csv]
                                                 whole-path loss: the routed path from a pin (J503.1, or a part
                                                 with one signal pin, or a net) to another (default: the farthest
                                                 chip pin), through series parts and baluns, with shunt parts off
@@ -69,7 +69,9 @@ USAGE:
                                                 coaxial estimate), parts from --model files (by designator,
                                                 value or part number; .s2p, .s1p shunt, .s3p balun with port 1
                                                 unbalanced) or from their value and case. Cascaded insertion and
-                                                return loss to --ghz; --load ends it in a chip's port model.
+                                                return loss to --ghz (worst RL from --fmin); --load ends it in
+                                                a chip's port model. Parts valued TBD/DNI/DNP (or not fitted in
+                                                the variant) are left out; parts on the same two nets combine.
     trace zcheck <board> [--tol 10] [--rule PATTERN=Z] [--diff PATTERN=Z] [--no-pairs] [--no-rf]
                  [--no-vias] [--via-kinds 6] [--min-length 30] [--ghz 6] [--no-name-pairs] [report.csv]
                                                 board-wide impedance check: every controlled trace run (field
@@ -2177,6 +2179,10 @@ fn path_cmd(file: &str, rest: &[&str]) -> Res {
                 opt.tan_d = next(i)?.parse()?;
                 i += 1;
             }
+            "--fmin" => {
+                opt.fmin = next(i)?.trim_end_matches("GHz").parse()?;
+                i += 1;
+            }
             "--model" => {
                 let a = next(i)?;
                 let (pat, f) = a
@@ -2265,14 +2271,17 @@ fn path_cmd(file: &str, rest: &[&str]) -> Res {
         println!("Return loss: worst {rl:.1} dB at {f:.2} GHz");
     }
     if !rep.s11_loaded.is_empty() {
-        let w = rep
-            .f
-            .iter()
-            .zip(&rep.s11_loaded)
-            .map(|(f, s)| (s.db(), *f))
-            .max_by(|a, b| a.0.total_cmp(&b.0));
+        let w = rep.worst_loaded();
         if let Some((d, f)) = w {
             println!("Into the path with the load at the end: worst {d:.1} dB at {f:.2} GHz");
+            let at: Vec<String> = [1.0, 3.0, 6.0]
+                .into_iter()
+                .filter_map(|g| {
+                    let k = rep.f.iter().position(|x| *x >= g - 1e-9)?;
+                    Some(format!("{g} GHz {:.1}", rep.s11_loaded[k].db()))
+                })
+                .collect();
+            println!("  with the load, dB: {}", at.join(", "));
         }
     }
     for n in &rep.notes {

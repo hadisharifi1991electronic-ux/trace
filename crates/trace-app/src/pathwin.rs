@@ -20,6 +20,7 @@ pub struct PathWindow {
     points: usize,
     vias_3d: bool,
     tan_d: f64,
+    fmin: f64,
     /// Vendor models: pattern, file, the file read.
     models: Vec<(String, String, Result<Network, String>)>,
     new_pattern: String,
@@ -38,6 +39,7 @@ impl Default for PathWindow {
             points: 200,
             vias_3d: true,
             tan_d: 0.02,
+            fmin: 0.0,
             models: Vec::new(),
             new_pattern: String::new(),
             load: None,
@@ -122,6 +124,14 @@ impl PathWindow {
                     );
                     ui.label("points");
                     ui.add(egui::DragValue::new(&mut self.points).range(20..=2000));
+                    ui.label("RL from");
+                    ui.add(
+                        egui::DragValue::new(&mut self.fmin)
+                            .speed(0.05)
+                            .range(0.0..=100.0)
+                            .suffix(" GHz"),
+                    )
+                    .on_hover_text("The worst return loss is taken from here up (a DC block's corner lies below the band)");
                     ui.checkbox(&mut self.vias_3d, "Vias in 3D")
                         .on_hover_text("A minute or so per kind of via; off: a coaxial estimate from drill, antipad and barrel");
                     ui.label("Df where the stack-up gives none");
@@ -237,6 +247,7 @@ impl PathWindow {
                                 .collect(),
                             load: self.load.as_ref().and_then(|l| l.1.as_ref().ok().cloned()),
                             tan_d: self.tan_d,
+                            fmin: self.fmin,
                         };
                         let b = board.clone();
                         let st = stackup.clone();
@@ -281,6 +292,11 @@ impl PathWindow {
                             .filter_map(|f| r.il_at(f).map(|d| format!("{f} GHz {d:.3} dB")))
                             .collect();
                         ui.label(format!("Insertion loss: {}", marks.join(", ")));
+                        if let Some((d, f)) = r.worst_loaded() {
+                            ui.label(format!(
+                                "Into the path with the load at the end: worst {d:.1} dB at {f:.2} GHz"
+                            ));
+                        }
                         plot(ui, r);
                         for n in &r.notes {
                             ui.label(RichText::new(n).small().weak());

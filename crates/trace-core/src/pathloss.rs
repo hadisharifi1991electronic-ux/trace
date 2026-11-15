@@ -23,6 +23,8 @@ const TAU: f64 = 2.0 * std::f64::consts::PI;
 /// Nets with more pads than this are rails or grounds: AC ground for the
 /// path, never followed.
 const MAX_PADS: usize = 40;
+/// An open end's impedance, Ω.
+const OPEN_Z: f64 = 1e12;
 
 /// What to analyse.
 #[derive(Clone, Debug)]
@@ -48,6 +50,9 @@ pub struct Options {
     pub load: Option<Network>,
     /// Loss tangent where the stack-up gives none.
     pub tan_d: f64,
+    /// Lowest frequency of interest, GHz: the worst return loss is taken
+    /// from here up (a DC block's corner lies below the band).
+    pub fmin: f64,
 }
 
 impl Default for Options {
@@ -61,6 +66,7 @@ impl Default for Options {
             models: Vec::new(),
             load: None,
             tan_d: 0.02,
+            fmin: 0.0,
         }
     }
 }
@@ -106,6 +112,11 @@ pub struct Report {
     /// Trace length along the path, mil.
     pub length: f64,
     pub notes: Vec<String>,
+    /// Lowest frequency of interest, GHz (for the worst return loss).
+    pub fmin: f64,
+    /// Where the load's model is valid, GHz (its stated range, else its
+    /// points).
+    pub load_band: Option<(f64, f64)>,
 }
 
 impl Report {
@@ -121,12 +132,26 @@ impl Report {
         Some(-self.s[k][2].db())
     }
 
-    /// The worst (highest) return loss in the band, dB, and where.
+    /// The worst (highest) return loss in the band of interest, dB, and
+    /// where.
     pub fn worst_rl(&self) -> Option<(f64, f64)> {
         self.f
             .iter()
             .zip(&self.s)
+            .filter(|(f, _)| **f >= self.fmin - 1e-12)
             .map(|(f, s)| (s[0].db(), *f))
+            .max_by(|a, b| a.0.total_cmp(&b.0))
+    }
+
+    /// The worst return loss into the path with the load at the end,
+    /// within the band of interest and the load's valid range.
+    pub fn worst_loaded(&self) -> Option<(f64, f64)> {
+        let (lo, hi) = self.load_band.unwrap_or((0.0, f64::MAX));
+        self.f
+            .iter()
+            .zip(&self.s11_loaded)
+            .filter(|(f, _)| **f >= self.fmin.max(lo) - 1e-12 && **f <= hi + 1e-12)
+            .map(|(f, s)| (s.db(), *f))
             .max_by(|a, b| a.0.total_cmp(&b.0))
     }
 
@@ -142,6 +167,9 @@ impl Report {
         );
         if let Some((rl, f)) = self.worst_rl() {
             let _ = write!(o, ", return loss worst {rl:.1} dB at {f:.2} GHz");
+            if self.fmin > 0.0 {
+                let _ = write!(o, " (from {} GHz)", trim_num(self.fmin));
+            }
         }
         o
     }
@@ -451,6 +479,38 @@ fn z_in(m: &Abcd, zl: Cx) -> Cx {
     m[0].mul(zl).add(m[1]).div(m[2].mul(zl).add(m[3]))
 }
 
+/// Where a model is valid, GHz: its "Valid Frequency Range: 1 GHz to
+/// 6 GHz" comment, else the span of its points.
+fn valid_band(n: &Network) -> Option<(f64, f64)> {
+    for c in &n.comments {
+        let low = c.to_ascii_lowercase();
+        let Some(i) = low.find("valid frequency range") else {
+            continue;
+        };
+        let rest = &low[i..];
+        let nums: Vec<(f64, f64)> = rest
+            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '.'))
+            .collect::<Vec<_>>()
+            .windows(2)
+            .filter_map(|w| {
+                let v: f64 = w[0].parse().ok()?;
+                let mul = match w[1] {
+                    "ghz" => 1.0,
+                    "mhz" => 1e-3,
+                    "khz" => 1e-6,
+                    "hz" => 1e-9,
+                    _ => return None,
+                };
+                Some((v * mul, mul))
+            })
+            .collect();
+        if nums.len() >= 2 {
+            return Some((nums[0].0, nums[1].0));
+        }
+    }
+    Some((*n.f.first()?, *n.f.last()?))
+}
+
 /// A network's S at `f`, held at its first or last point outside its band.
 fn at_clamped(n: &Network, f: f64) -> Option<Vec<Cx>> {
     let lo = *n.f.first()?;
@@ -653,15 +713,36 @@ fn is_balun(board: &Board, comp: usize) -> bool {
         || text.contains("TRANSFORMER")
 }
 
+/// A value that says the part is not chosen or not fitted: TBD, DNI,
+/// DNP, NC, N/A, empty.
+fn placeholder(value: &str) -> bool {
+    let v = value.trim().to_ascii_uppercase();
+    v.is_empty()
+        || [
+            "TBD", "DNI", "DNP", "DNF", "NC", "N/C", "N/A", "NF", "NOPOP", "NO POP", "OPEN", "NP",
+            "?",
+        ]
+        .iter()
+        .any(|k| {
+            v == *k
+                || v.starts_with(k) && !v[k.len()..].starts_with(|c: char| c.is_ascii_alphabetic())
+        })
+}
+
 /// The model of a part: a vendor file whose pattern matches its
-/// designator or value, else one from its value and case.
+/// designator or value, else one from its value and case; None for a
+/// part not fitted (in the variant, or valued TBD/DNI) or whose value
+/// says nothing (a capacitor without farads).
 fn part_model(
     board: &Board,
     comp: usize,
     pads: &[usize],
     opt: &Options,
     want_ports: usize,
-) -> PartModel {
+) -> Option<PartModel> {
+    if !crate::variant::fitted(board, comp) {
+        return None;
+    }
     let p = &board.components[comp];
     let value = p
         .param(&["Value", "Comment", "Device Type"])
@@ -682,13 +763,16 @@ fn part_model(
             .iter()
             .any(|t| !t.is_empty() && crate::constraints::glob(&pu, &t.to_ascii_uppercase()));
         if hit && net.ports == want_ports {
-            return PartModel::File(net.clone());
+            return Some(PartModel::File(net.clone()));
         }
     }
     if want_ports == 3 {
-        return PartModel::Ideal {
+        return Some(PartModel::Ideal {
             ratio: balun_ratio(&format!("{value} {pn} {}", p.footprint)),
-        };
+        });
+    }
+    if placeholder(&value) {
+        return None;
     }
     let g = &board.geometry;
     let pitch = if pads.len() >= 2 {
@@ -717,46 +801,51 @@ fn part_model(
             pdn::BeadModel::Bead { z100, .. } => z100,
             pdn::BeadModel::Inductor(_) => 220.0,
         };
-        return PartModel::Bead { z100 };
+        return Some(PartModel::Bead { z100 });
     }
     if pre == "C" || (pre != "R" && pre != "L" && pdn::parse_farads(&value).is_some()) {
-        let farads = pdn::parse_farads(&value).unwrap_or(100e-9);
+        let farads = pdn::parse_farads(&value)?;
         let m = pdn::CapModel::mlcc(farads, pack);
         // Small RF values have a far lower ESR than the decoupling rule.
         let esr = if farads < 1e-9 { 0.15 } else { m.esr };
-        return PartModel::Rlc {
+        return Some(PartModel::Rlc {
             r: esr,
             l: m.esl,
             c: Some(farads),
             cp: 0.0,
-        };
+        });
     }
     if pre == "L" {
-        let h = parse_henries(&value).unwrap_or(10e-9);
-        return PartModel::Rlc {
-            r: 0.2,
-            l: h,
-            c: None,
-            cp: 0.1e-12,
+        // A 0 Ω link on an inductor footprint is common.
+        let h = match parse_henries(&value) {
+            Some(h) => h,
+            None if pdn::parse_ohms(&value).is_some_and(|r| r < 1.0) => 0.0,
+            None => return None,
         };
+        return Some(PartModel::Rlc {
+            r: if h > 0.0 { 0.2 } else { 0.01 },
+            l: if h > 0.0 { h } else { pack.esl() * 0.8 },
+            c: None,
+            cp: if h > 0.0 { 0.1e-12 } else { 0.0 },
+        });
     }
     if pre == "D" {
         // An ESD diode or similar off the line: its capacitance.
-        return PartModel::Rlc {
+        return Some(PartModel::Rlc {
             r: 0.5,
             l: 0.3e-9,
             c: Some(0.5e-12),
             cp: 0.0,
-        };
+        });
     }
     // A resistor (0 Ω links too).
-    let r = pdn::parse_ohms(&value).unwrap_or(0.0);
-    PartModel::Rlc {
+    let r = pdn::parse_ohms(&value)?;
+    Some(PartModel::Rlc {
         r,
         l: pack.esl() * 0.8,
         c: None,
         cp: if r > 10.0 { 0.03e-12 } else { 0.0 },
-    }
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -1718,7 +1807,8 @@ impl Ctx<'_> {
             [(at[0] + b[0]) / 2.0, (at[1] + b[1]) / 2.0]
         };
         if *balun && diff != next_diff {
-            let pm = part_model(board, *comp, &[*pa, *pb], self.opt, 3);
+            let pm = part_model(board, *comp, &[*pa, *pb], self.opt, 3)
+                .unwrap_or(PartModel::Ideal { ratio: 2.0 });
             // From the unbalanced side (SE) to the balanced one, or back.
             let se_first = !diff;
             let m: Vec<Abcd> = self
@@ -1784,51 +1874,140 @@ impl Ctx<'_> {
                 mode_after: Some(next_diff),
             });
         }
-        // A series part (in each line of a pair).
-        let pm = part_model(board, *comp, &[*pa, *pb], self.opt, 2);
-        let pm = match pm {
-            PartModel::File(n) if n.ports != 2 => {
-                part_model(board, *comp, &[*pa, *pb], &Options::default(), 2)
+        // A series part (in each line of a pair), with any other part on
+        // the same two nets beside it (alternate footprints: a DC block
+        // beside a TBD inductor).
+        let (na, nb) = (g.pads[*pa].net, g.pads[*pb].net);
+        let mut group: Vec<(usize, usize, usize)> = vec![(*comp, *pa, *pb)];
+        for (ci, _) in board.components.iter().enumerate() {
+            if ci == *comp {
+                continue;
             }
-            other => other,
-        };
-        // Port 1 of a vendor file is the part's pad "1".
-        let flip = g.pads[*pa].name != "1" && g.pads[*pb].name == "1";
+            let pads: Vec<usize> = (0..g.pads.len())
+                .filter(|&i| g.pads[i].component == Some(ci as u32))
+                .collect();
+            if pads.len() != 2 {
+                continue;
+            }
+            let (x, y) = (pads[0], pads[1]);
+            if g.pads[x].net == na && g.pads[y].net == nb {
+                group.push((ci, x, y));
+            } else if g.pads[x].net == nb && g.pads[y].net == na {
+                group.push((ci, y, x));
+            }
+        }
+        let mut used: Vec<(usize, usize, usize, PartModel)> = Vec::new();
+        let mut unfitted: Vec<String> = Vec::new();
+        for &(ci, x, y) in &group {
+            let pm = part_model(board, ci, &[x, y], self.opt, 2);
+            let pm = match pm {
+                Some(PartModel::File(n)) if n.ports != 2 => None,
+                other => other,
+            };
+            let pc = &board.components[ci];
+            match pm {
+                Some(pm) => used.push((ci, x, y, pm)),
+                None => unfitted.push(format!(
+                    "{} {}",
+                    pc.designator,
+                    pc.param(&["Value", "Comment", "Device Type"])
+                        .unwrap_or("(no value)")
+                )),
+            }
+        }
+        if !unfitted.is_empty() {
+            self.notes.push(format!(
+                "not fitted or no value, left out: {}{}",
+                unfitted.join(", "),
+                if used.is_empty() {
+                    "; nothing else joins these nets, so taken as a 0 Ω link"
+                } else {
+                    ""
+                }
+            ));
+        }
         let m: Vec<Abcd> = self
             .f
             .iter()
             .map(|&f| {
-                let m = match &pm {
-                    PartModel::File(n) => {
-                        let s = at_clamped(n, f).unwrap_or_default();
-                        if s.len() < 4 {
-                            IDENT
-                        } else if flip {
-                            abcd_from_s(&[s[3], s[2], s[1], s[0]], n.z_ref, n.z_ref)
-                        } else {
-                            abcd_from_s(&[s[0], s[1], s[2], s[3]], n.z_ref, n.z_ref)
+                // Parts side by side: their Y matrices add.
+                let mut y = [c(0.0); 4];
+                for (_, x, _, pm) in &used {
+                    let m = match pm {
+                        PartModel::File(n) => {
+                            let s = at_clamped(n, f).unwrap_or_default();
+                            // Port 1 of a vendor file is the part's pad "1".
+                            let flip = g.pads[*x].name != "1";
+                            if s.len() < 4 {
+                                IDENT
+                            } else if flip {
+                                abcd_from_s(&[s[3], s[2], s[1], s[0]], n.z_ref, n.z_ref)
+                            } else {
+                                abcd_from_s(&[s[0], s[1], s[2], s[3]], n.z_ref, n.z_ref)
+                            }
                         }
+                        other => series(other.z(f).unwrap_or(c(0.0))),
+                    };
+                    if used.len() == 1 {
+                        return m;
                     }
-                    other => series(other.z(f).unwrap_or(c(0.0))),
-                };
-                if diff {
-                    to_diff(&m)
-                } else {
-                    m
+                    let yb = c(1.0).div(m[1]);
+                    let det = sub(m[0].mul(m[3]), m[1].mul(m[2]));
+                    let my = [
+                        m[3].mul(yb),
+                        det.mul(yb).scale(-1.0),
+                        yb.scale(-1.0),
+                        m[0].mul(yb),
+                    ];
+                    for k in 0..4 {
+                        y[k] = y[k].add(my[k]);
+                    }
                 }
+                if used.is_empty() {
+                    return series(c(0.0));
+                }
+                // Back to ABCD.
+                let inv = c(-1.0).div(y[2]);
+                let dy = sub(y[0].mul(y[3]), y[1].mul(y[2]));
+                [y[3].mul(inv), inv, dy.mul(inv), y[0].mul(inv)]
             })
+            .map(|m| if diff { to_diff(&m) } else { m })
             .collect();
         let zr = Self::z_ref(diff);
         let top = m.last().copied().unwrap_or(IDENT);
         let own = -s_from_abcd(&top, zr, zr)[2].db();
+        let name = |ci: usize| {
+            let pc = &board.components[ci];
+            format!(
+                "{} {}",
+                pc.designator,
+                pc.param(&["Value", "Comment", "Device Type"]).unwrap_or("")
+            )
+        };
+        let what = if used.is_empty() {
+            format!("{des} {value} (no value: 0 Ω link)")
+        } else {
+            used.iter()
+                .map(|u| name(u.0))
+                .collect::<Vec<_>>()
+                .join(" ‖ ")
+        };
+        let model = if used.is_empty() {
+            "not fitted or no value".to_string()
+        } else {
+            used.iter()
+                .map(|u| u.3.describe())
+                .collect::<Vec<_>>()
+                .join(" ‖ ")
+        };
         Some(Built {
             sec: Section {
-                what: format!("{des} {value}"),
+                what,
                 kind: "part",
                 net: format!(
                     "{} > {}",
-                    net_name(board, g.pads[*pa].net.unwrap_or(0)),
-                    net_name(board, g.pads[*pb].net.unwrap_or(0))
+                    net_name(board, na.unwrap_or(0)),
+                    net_name(board, nb.unwrap_or(0))
                 ),
                 length: 0.0,
                 z: None,
@@ -1836,7 +2015,7 @@ impl Ctx<'_> {
                 loss_db: own,
                 total_db: 0.0,
                 at: mid,
-                model: pm.describe(),
+                model,
             },
             m,
             mode_after: None,
@@ -1867,13 +2046,24 @@ impl Ctx<'_> {
             .filter(|(_, p)| p.component == Some(*comp as u32))
             .map(|(i, _)| i)
             .collect();
-        let pm = {
-            let one = part_model(board, *comp, &pads, self.opt, 1);
-            if matches!(one, PartModel::File(_)) {
-                one
-            } else {
-                part_model(board, *comp, &pads, self.opt, 2)
-            }
+        let pm = match part_model(board, *comp, &pads, self.opt, 1) {
+            Some(PartModel::File(n)) => PartModel::File(n),
+            _ => match part_model(board, *comp, &pads, self.opt, 2) {
+                Some(PartModel::File(n)) if n.ports != 1 => return None,
+                Some(pm) => pm,
+                None => {
+                    self.notes.push(format!(
+                        "{des} {} to {}: not fitted or no value, left off",
+                        if value.is_empty() {
+                            "(no value)"
+                        } else {
+                            value.as_str()
+                        },
+                        if *across { "the other line" } else { "ground" }
+                    ));
+                    return None;
+                }
+            },
         };
         let mut built: Vec<Built> = Vec::new();
         let mut stub_len = 0.0;
@@ -1898,7 +2088,10 @@ impl Ctx<'_> {
                 for b in &built {
                     chain = mul(&chain, &b.m[k]);
                 }
-                let zl = pm.z(f).unwrap_or(Cx::new(1e9, 0.0));
+                let zl = pm
+                    .z(f)
+                    .filter(|z| z.re.is_finite() && z.im.is_finite())
+                    .unwrap_or(Cx::new(OPEN_Z, 0.0));
                 // To ground from one line of a pair: twice its impedance
                 // for the differential mode; across the pair: itself.
                 let zl = if diff && !*across { zl.scale(2.0) } else { zl };
@@ -2718,7 +2911,22 @@ pub fn run(
             })
             .collect();
     }
+    if let Some(load) = &opt.load {
+        let band = valid_band(load);
+        if let Some((lo, hi)) = band {
+            let top = f.last().copied().unwrap_or(0.0);
+            if lo > f[0] + 1e-9 || hi < top - 1e-9 {
+                rep.notes.push(format!(
+                    "the load model is valid from {} to {} GHz; outside that it is held at its nearest point, and the worst return loss with it is taken inside",
+                    trim_num(lo),
+                    trim_num(hi)
+                ));
+            }
+        }
+        rep.load_band = band;
+    }
     rep.f = f;
+    rep.fmin = opt.fmin;
     rep.length = built
         .iter()
         .filter(|b| b.sec.kind == "trace")
@@ -2901,5 +3109,101 @@ mod tests {
         assert!(il > 0.05 && il < 3.0, "{il}");
         // A 100 pF block stops the lowest frequencies a little more.
         assert!(r.s[0][2].abs() <= 1.0 + 1e-9);
+    }
+
+    #[test]
+    fn leaves_out_tbd_parts_and_keeps_the_fitted_one_beside_them() {
+        use crate::{Length, Pad, PadShape, Point};
+        let base = board();
+        let opt = Options {
+            from: "J1".into(),
+            ghz: 6.0,
+            points: 30,
+            vias_3d: false,
+            ..Default::default()
+        };
+        let want = run(&base, &base.stackup, &opt, &|_, _| {}).expect("path");
+        let mut b = base.clone();
+        let mut add = |d: &str, v: &str, pads: [(f64, f64, u32); 2]| {
+            let mut c = b.components[1].clone();
+            c.designator = d.into();
+            c.params.insert("Value".into(), v.into());
+            b.components.push(c);
+            let ci = (b.components.len() - 1) as u32;
+            for (k, (x, y, net)) in pads.into_iter().enumerate() {
+                b.geometry.pads.push(Pad {
+                    layer: LayerRef::Copper(0),
+                    net: Some(net),
+                    component: Some(ci),
+                    name: format!("{}", k + 1),
+                    at: Point::mil(x, y),
+                    size_x: Length::from_mil(12.0),
+                    size_y: Length::from_mil(12.0),
+                    hole: Length(0),
+                    shape: PadShape::Rect,
+                    rotation_deg: 0.0,
+                    outline: Vec::new(),
+                    stack: Vec::new(),
+                    fab: Default::default(),
+                });
+            }
+        };
+        // An alternate inductor footprint beside C1, not chosen.
+        add("L1", "TBD0201", [(1000.0, 60.0, 0), (1040.0, 60.0, 1)]);
+        // A shunt site on the line, not fitted.
+        add("C2", "DNI", [(300.0, 4.0, 0), (300.0, 40.0, 2)]);
+        let r = run(&b, &b.stackup, &opt, &|_, _| {}).expect("path");
+        assert!(
+            (r.il_db() - want.il_db()).abs() < 1e-6,
+            "{} vs {}",
+            r.il_db(),
+            want.il_db()
+        );
+        let notes = r.notes.join(" | ");
+        assert!(notes.contains("L1") && notes.contains("C2"), "{notes}");
+        // A 1 pF shunt there is seen.
+        let mut b2 = b.clone();
+        let c2 = b2.components.len() - 1;
+        b2.components[c2]
+            .params
+            .insert("Value".into(), "1pF".into());
+        let r2 = run(&b2, &b2.stackup, &opt, &|_, _| {}).expect("path");
+        assert!(r2.sections.iter().any(|s| s.kind == "shunt"));
+        assert!(r2.il_db() > want.il_db() + 0.05, "{}", r2.il_db());
+        // An ideal open as its vendor model is no load at all.
+        let open = crate::touchstone::parse("# GHz S MA R 50\n0 1 0\n10 1 0\n", 1).unwrap();
+        let opt3 = Options {
+            models: vec![("C2".into(), open)],
+            ..opt.clone()
+        };
+        let r3 = run(&b2, &b2.stackup, &opt3, &|_, _| {}).expect("path");
+        assert!(
+            (r3.il_db() - want.il_db()).abs() < 1e-3,
+            "{} vs {}",
+            r3.il_db(),
+            want.il_db()
+        );
+    }
+
+    #[test]
+    fn reads_a_models_valid_range() {
+        let n = crate::touchstone::parse(
+            "! Valid Frequency Range: 1 GHz to 6 GHz\n# hz S ma R 50\n5e8 0.3 10\n6e9 0.4 20\n",
+            1,
+        )
+        .unwrap();
+        assert_eq!(valid_band(&n), Some((1.0, 6.0)));
+        let m = crate::touchstone::parse("# GHz S MA R 50\n0.5 0.3 10\n6 0.4 20\n", 1).unwrap();
+        assert_eq!(valid_band(&m), Some((0.5, 6.0)));
+    }
+
+    #[test]
+    fn placeholders() {
+        for v in ["TBD", "TBD0201", "DNI", "dnp", "", "NC", "N/A"] {
+            assert!(placeholder(v), "{v}");
+        }
+        assert!(!placeholder("18pF"));
+        assert!(!placeholder("0R"));
+        assert!(!placeholder("NCP18XH103"));
     }
 }

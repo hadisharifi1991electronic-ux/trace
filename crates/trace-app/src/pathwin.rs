@@ -40,6 +40,8 @@ pub struct PathWindow {
     pick_ffe: bool,
     pick_ctle: bool,
     picked: Option<trace_core::eye::EqChoice>,
+    /// Nets beside the path switch too.
+    xtalk: bool,
 }
 
 impl Default for PathWindow {
@@ -68,6 +70,7 @@ impl Default for PathWindow {
             pick_ffe: true,
             pick_ctle: true,
             picked: None,
+            xtalk: false,
         }
     }
 }
@@ -95,7 +98,14 @@ impl PathWindow {
                 // An eye shown before is drawn again for the new path.
                 if self.eye_result.is_some() {
                     self.eye_result = match &r {
-                        Ok((rep, _)) => Some(trace_core::eye::eye(rep, &self.eye)),
+                        Ok((rep, _)) => {
+                            self.eye.aggressors = if self.xtalk {
+                                trace_core::eye::aggressors(board, rep, self.eye.amplitude)
+                            } else {
+                                Vec::new()
+                            };
+                            Some(trace_core::eye::eye(rep, &self.eye))
+                        }
                         Err(_) => None,
                     };
                 }
@@ -360,6 +370,11 @@ impl PathWindow {
                                 .clicked()
                             {
                                 if let Some(r) = rep {
+                                    self.eye.aggressors = if self.xtalk {
+                                        trace_core::eye::aggressors(board, r, self.eye.amplitude)
+                                    } else {
+                                        Vec::new()
+                                    };
                                     match trace_core::eye::optimise(r, &self.eye, self.pick_ffe, self.pick_ctle) {
                                         Ok(c) => {
                                             self.eye.eq = c.eq;
@@ -370,6 +385,8 @@ impl PathWindow {
                                     }
                                 }
                             }
+                            ui.checkbox(&mut self.xtalk, "crosstalk")
+                                .on_hover_text("Nets beside the path's traces switch too (at the same rate, their own pattern, near or far end whichever is worse)");
                             if ui.small_button("None").on_hover_text("No equalisation").clicked() {
                                 self.eye.eq = Default::default();
                                 self.picked = None;
@@ -405,6 +422,11 @@ impl PathWindow {
                                 .clicked()
                             {
                                 if let Some(r) = rep {
+                                    self.eye.aggressors = if self.xtalk {
+                                        trace_core::eye::aggressors(board, r, self.eye.amplitude)
+                                    } else {
+                                        Vec::new()
+                                    };
                                     self.eye_result = Some(trace_core::eye::eye(r, &self.eye));
                                 }
                             }
@@ -548,6 +570,27 @@ impl PathWindow {
                                     ui.label(RichText::new(format!("With {}", e.eq.describe(e.gbps))).small());
                                 }
                                 eye_plot(ui, e);
+                                if !e.xtalk.is_empty() {
+                                    let total: f64 = e.xtalk.iter().map(|x| x.closure).sum();
+                                    ui.label(format!(
+                                        "Crosstalk from {} net(s): worst case {:.1} mV less, to {:.1} mV",
+                                        e.xtalk.len(),
+                                        total * 1e3,
+                                        e.worst_with_xtalk * 1e3
+                                    ));
+                                    egui::Grid::new("eye_xtalk").striped(true).show(ui, |ui| {
+                                        for x in e.xtalk.iter().take(12) {
+                                            if ui.link(&x.name).on_hover_text("Show where it runs beside the path").clicked() {
+                                                out = Some((x.at, format!("{}: {:.1} mV {}", x.name, x.closure * 1e3, x.kind)));
+                                            }
+                                            ui.label(x.kind);
+                                            ui.label(format!("{:.0} mil beside", x.length));
+                                            ui.label(format!("closure {:.1} mV", x.closure * 1e3));
+                                            ui.label(format!("peak {:.1} mV", x.peak * 1e3));
+                                            ui.end_row();
+                                        }
+                                    });
+                                }
                                 for n in &e.notes {
                                     ui.label(RichText::new(n).small().color(Color32::from_rgb(230, 170, 60)));
                                 }

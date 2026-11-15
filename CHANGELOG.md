@@ -3,6 +3,24 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.69.0 (2026-11-15)
+
+- Crosstalk in the eye (Eye diagram > crosstalk, `trace path --eye 5
+  --xtalk`): the tracks running beside the path's traces on the same
+  layer (within four dielectric heights) are found, grouped by net or
+  pair (pairs from the board or by name, P/N), and coupled in with
+  their backward (NEXT, Kb (1 - e^-j2wt)) and forward (FEXT, Kf jwt)
+  coupling from the coupled-line modes. Each aggressor switches at the
+  same rate with its own part of the pattern, at its worst phase and in
+  its worse direction (driven from the receiver's end or alongside); the
+  eye's traces, height, width and jitter include it, and each one's
+  worst case closure and peak are listed (click to show it on the
+  board). A pair victim takes its lines' difference, so noise both
+  lines pick up alike cancels. The noise is taken where it couples,
+  without the loss on its way to the receiver, so it is a bound.
+- The path report keeps the nets its traces run on (and their pair's
+  other line), for the crosstalk.
+
 ## 0.68.0 (2026-11-15)
 
 - Equalisation in the eye (Path loss window > Eye diagram, `trace path

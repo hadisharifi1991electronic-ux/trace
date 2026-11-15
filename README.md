@@ -305,6 +305,7 @@ trace path board.brd J401.1 U101.A5 --model "C3?=cap.s2p" --model T301=balun.s3p
 trace path board.brd J301 --load chip.s1p --tune 1-6 --fit "C30?" tuned.s2p   choose E12 L/C for the empty (TBD/DNI) match sites for the best return loss into the chip
 trace path board.brd U5.A3 J2.1 --eye 10 --amp 0.8 --eye-svg eye.svg   PRBS eye at the far end from the path's pulse response: height, width, jitter, worst case
 trace path board.brd U5.A3 J2.1 --eye 16 --eq auto --eye-svg eye.svg   the same with transmit FFE and receive CTLE picked for the widest worst case eye
+trace path board.brd HDMI_D1_P --eye 3.4 --xtalk   the eye with the nets beside the path switching too (NEXT/FEXT closure per net)
 trace via board.PcbDoc 1 7 --target 50 --fab drill=8-16,ring=4,antipad=20-70   size the via to 50 ohm within the fab limits (add --optimise 10 for best RL+IL)
 trace pairsize board.PcbDoc 3 --zdiff 100 --ghz 8   every width and gap for 100 ohm on a layer, ranked by loss
 trace cascade chip.s1p via.s2p --line 50@500@3.4   return loss into vias and lines ending in a chip's port model

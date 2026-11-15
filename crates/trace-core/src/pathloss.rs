@@ -122,6 +122,9 @@ pub struct Report {
     pub s11_loaded: Vec<Cx>,
     /// The load's impedance per frequency, when one was given.
     pub load_z: Vec<Cx>,
+    /// Nets the path's traces run on, in order, each with its pair's
+    /// negative line where the run is differential.
+    pub victims: Vec<(u32, Option<u32>)>,
     pub sections: Vec<Section>,
     /// Trace length along the path, mil.
     pub length: f64,
@@ -3040,6 +3043,14 @@ fn prepare(
         }
     }
     rep.notes.append(&mut ctx.notes);
+    for (el, d) in &merged {
+        if let El::Line { net, .. } = el {
+            let v = (*net, if *d { partner.get(net).copied() } else { None });
+            if !rep.victims.contains(&v) {
+                rep.victims.push(v);
+            }
+        }
+    }
     let start_diff = merged.first().is_some_and(|x| x.1);
     rep.f = f;
     rep.fmin = opt.fmin;

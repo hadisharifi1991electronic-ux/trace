@@ -63,7 +63,7 @@ USAGE:
     trace path <board> <from> [<to>] [--ghz 6] [--points 200] [--quick-vias] [--model PATTERN=file.sNp]
                [--load chip.s1p] [--df 0.02] [--fmin GHz] [--fit PATTERN] [--tune [1-6] [--il-weight 1]
                [--any] [--free PATTERN]] [--eye GBPS [--amp 0.8] [--rise PS] [--prbs 7] [--eye-svg eye.svg]
-               [--ffe PRE,POST] [--ctle DB[@GHZ]] [--eq auto|ffe|ctle]]
+               [--ffe PRE,POST] [--ctle DB[@GHZ]] [--eq auto|ffe|ctle] [--xtalk]]
                [out.s2p] [out.svg] [out.csv]
                                                 whole-path loss: the routed path from a pin (J503.1, or a part
                                                 with one signal pin, or a net) to another (default: the farthest
@@ -86,7 +86,9 @@ USAGE:
                                                 ps (default 0.3 bit); sweeps to 2.5 x the bit rate by default.
                                                 --ffe: transmit pre and post taps; --ctle: receiver peaking, dB
                                                 at GHz (default half the bit rate); --eq picks them for the
-                                                widest worst case eye.
+                                                widest worst case eye. --xtalk: nets beside the path's traces
+                                                switch too (near or far end, whichever is worse), in the eye and
+                                                as each one's worst case closure.
     trace zcheck <board> [--tol 10] [--rule PATTERN=Z] [--diff PATTERN=Z] [--no-pairs] [--no-rf]
                  [--no-vias] [--via-kinds 6] [--min-length 30] [--ghz 6] [--no-name-pairs] [report.csv]
                                                 board-wide impedance check: every controlled trace run (field
@@ -2175,6 +2177,7 @@ fn path_cmd(file: &str, rest: &[&str]) -> Res {
     let mut eye: Option<trace_core::eye::EyeSetup> = None;
     let mut eye_svg: Option<&str> = None;
     let mut eq_auto: Option<(bool, bool)> = None;
+    let mut xtalk = false;
     let (mut ghz_set, mut points_set) = (false, false);
     let mut pins: Vec<&str> = Vec::new();
     let mut outs: Vec<&str> = Vec::new();
@@ -2251,6 +2254,12 @@ fn path_cmd(file: &str, rest: &[&str]) -> Res {
                     eye = Some(Default::default());
                 }
                 i += 1;
+            }
+            "--xtalk" => {
+                xtalk = true;
+                if eye.is_none() {
+                    eye = Some(Default::default());
+                }
             }
             "--eye-svg" => {
                 eye_svg = Some(next(i)?);
@@ -2446,6 +2455,13 @@ fn path_cmd(file: &str, rest: &[&str]) -> Res {
         println!("Note: {n}");
     }
     if let Some(e) = &mut eye {
+        if xtalk {
+            e.aggressors = trace_core::eye::aggressors(&b, &rep, e.amplitude);
+            println!(
+                "Crosstalk: {} net(s) run beside the path",
+                e.aggressors.len()
+            );
+        }
         if let Some((ffe, ctle)) = eq_auto {
             let plain = trace_core::eye::EyeSetup {
                 eq: Default::default(),

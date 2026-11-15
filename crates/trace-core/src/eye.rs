@@ -37,6 +37,45 @@ pub struct EyeSetup {
     pub bits: usize,
     /// Transmitter taps and receiver CTLE.
     pub eq: Equaliser,
+    /// Nets coupling into the path (from [`aggressors`]); each switches
+    /// at the same rate with its own pattern.
+    pub aggressors: Vec<Aggressor>,
+}
+
+/// A net (or pair) running beside the path, and how it couples in.
+#[derive(Clone, Debug)]
+pub struct Aggressor {
+    /// Net name, or "P / N" for a pair.
+    pub name: String,
+    /// Length run beside the path, mil.
+    pub length: f64,
+    /// Strongest backward and forward coupling along it.
+    pub kb: f64,
+    pub kf: f64,
+    /// Near-end (driven from the receiver's end) and far-end (driven
+    /// from the source's end) coupling per frequency of the report,
+    /// relative to the aggressor line's voltage.
+    pub next: Vec<Cx>,
+    pub fext: Vec<Cx>,
+    /// Swing of each aggressor line, volts peak to peak.
+    pub swing: f64,
+    /// A spot where it couples, mil.
+    pub at: [f64; 2],
+}
+
+/// What one aggressor does to the eye.
+#[derive(Clone, Debug, Default)]
+pub struct XtalkHit {
+    pub name: String,
+    /// "NEXT" (driven from the receiver's end) or "FEXT" (driven
+    /// alongside), whichever is worse.
+    pub kind: &'static str,
+    pub length: f64,
+    /// Worst case closure of the eye height, volts.
+    pub closure: f64,
+    /// Its noise's peak at the receiver, volts.
+    pub peak: f64,
+    pub at: [f64; 2],
 }
 
 /// Equalisation: a 3-tap transmit FFE and a receive CTLE.
@@ -141,6 +180,7 @@ impl Default for EyeSetup {
             prbs: 7,
             bits: 2047,
             eq: Equaliser::default(),
+            aggressors: Vec::new(),
         }
     }
 }
@@ -182,6 +222,11 @@ pub struct EyeResult {
     pub notes: Vec<String>,
     /// The equalisation used.
     pub eq: Equaliser,
+    /// Crosstalk, worst first; the traces and the measured height, width
+    /// and jitter include it.
+    pub xtalk: Vec<XtalkHit>,
+    /// Worst case height with every aggressor at its worst, volts.
+    pub worst_with_xtalk: f64,
 }
 
 impl EyeResult {
@@ -251,6 +296,27 @@ impl EyeResult {
         }
         if !self.eq.is_none() {
             let _ = writeln!(o, "  with {}", self.eq.describe(self.gbps));
+        }
+        if !self.xtalk.is_empty() {
+            let total: f64 = self.xtalk.iter().map(|x| x.closure).sum();
+            let _ = writeln!(
+                o,
+                "  crosstalk from {} net(s): closes the worst case by {:.1} mV to {:.1} mV",
+                self.xtalk.len(),
+                total * 1e3,
+                self.worst_with_xtalk * 1e3
+            );
+            for x in self.xtalk.iter().take(8) {
+                let _ = writeln!(
+                    o,
+                    "    {:<28} {} {:>6.0} mil beside, closure {:>6.1} mV, peak {:>6.1} mV",
+                    x.name,
+                    x.kind,
+                    x.length,
+                    x.closure * 1e3,
+                    x.peak * 1e3
+                );
+            }
         }
         for n in &self.notes {
             let _ = writeln!(o, "  note: {n}");
@@ -684,10 +750,39 @@ fn spectrum(rep: &Report, setup: &EyeSetup) -> Result<(Pulse, f64, Vec<String>),
     if !even {
         return Err("the sweep is not evenly spaced from zero".into());
     }
+    let pulse = shape(setup, df, fmax, &h, true);
+    // Content cut by the top of the sweep.
+    let g_top = (-2.0 * PI * PI * sigma * sigma * fmax * fmax).exp();
+    if g_top > 0.05 {
+        let need = ((100f64).ln() / (2.0 * PI * PI * sigma * sigma)).sqrt();
+        notes.push(format!(
+            "the sweep stops at {} GHz, where the edge still has {:.0} % of its content: sweep to {} GHz or more for this edge",
+            trim(fmax * 1e-9),
+            100.0 * g_top,
+            trim((need * 1e-9 * 2.0).ceil() / 2.0)
+        ));
+    }
+    Ok((pulse, rise, notes))
+}
+
+/// One bit with the edge, through `h` (per frequency, `df` apart) and
+/// the receiver's CTLE, and the transmit taps when `ffe`.
+fn shape(setup: &EyeSetup, df: f64, fmax: f64, h: &[Cx], ffe: bool) -> Pulse {
+    let ui = 1e-9 / setup.gbps;
+    let rise = if setup.rise_ps > 0.0 {
+        setup.rise_ps * 1e-12
+    } else {
+        0.3 * ui
+    };
+    let sigma = rise / 1.683;
     let eq = setup.eq;
+    let taps = if ffe {
+        eq.main() + eq.pre + eq.post
+    } else {
+        1.0
+    };
     // The zero term from the first two points.
-    let h0 =
-        (2.0 * h[0].re - h[1].re) * (eq.main() + eq.pre + eq.post) * eq.ctle(0.0, setup.gbps).re;
+    let h0 = (2.0 * h[0].re - h[1].re) * taps * eq.ctle(0.0, setup.gbps).re;
     let taper_from = 0.8 * fmax;
     let mut spec = Vec::with_capacity(h.len());
     for (k, hk) in h.iter().enumerate() {
@@ -701,30 +796,212 @@ fn spectrum(rep: &Report, setup: &EyeSetup) -> Result<(Pulse, f64, Vec<String>),
             1.0
         };
         let p = Cx::expj(-PI * f * ui).scale(ui * sinc * g * taper);
-        let mut v = hk.mul(p);
-        if !eq.is_none() {
-            v = v.mul(eq.ffe(f, ui)).mul(eq.ctle(f, setup.gbps));
+        let mut v = hk.mul(p).mul(eq.ctle(f, setup.gbps));
+        if ffe {
+            v = v.mul(eq.ffe(f, ui));
         }
         spec.push(v);
     }
-    let pulse = Pulse {
+    Pulse {
         f: (1..=h.len()).map(|k| df * k as f64).collect(),
         spec,
         dc: h0 * ui,
         df,
-    };
-    // Content cut by the top of the sweep.
-    let g_top = (-2.0 * PI * PI * sigma * sigma * fmax * fmax).exp();
-    if g_top > 0.05 {
-        let need = ((100f64).ln() / (2.0 * PI * PI * sigma * sigma)).sqrt();
-        notes.push(format!(
-            "the sweep stops at {} GHz, where the edge still has {:.0} % of its content: sweep to {} GHz or more for this edge",
-            trim(fmax * 1e-9),
-            100.0 * g_top,
-            trim((need * 1e-9 * 2.0).ceil() / 2.0)
-        ));
     }
-    Ok((pulse, rise, notes))
+}
+
+/// Nets running beside the path's traces on the same layer (within four
+/// dielectric heights), grouped by net or pair, with their near- and
+/// far-end coupling into the path's receiver. The noise is taken where
+/// it couples, without the loss on its way to the receiver (a bound).
+pub fn aggressors(board: &crate::Board, rep: &Report, amplitude: f64) -> Vec<Aggressor> {
+    use std::collections::{HashMap, HashSet};
+    const C0: f64 = 2.998e8;
+    let mut victims: Vec<u32> = Vec::new();
+    let mut sign: HashMap<u32, f64> = HashMap::new();
+    let mut diff = false;
+    for &(p, n) in &rep.victims {
+        victims.push(p);
+        sign.insert(p, 1.0);
+        if let Some(n) = n {
+            victims.push(n);
+            sign.insert(n, -1.0);
+            diff = true;
+        }
+    }
+    if victims.is_empty() || rep.f.is_empty() {
+        return Vec::new();
+    }
+    // Aggressor pairs on the board (and by name, P/N): their negative
+    // lines count opposite.
+    let mut pairs = board.diff_pairs.clone();
+    pairs.extend(crate::zcheck::name_pairs(board));
+    let id = |s: &str| {
+        board
+            .nets
+            .iter()
+            .position(|n| n.name == s)
+            .map(|i| i as u32)
+    };
+    let mut partner: HashMap<u32, u32> = HashMap::new();
+    for p in &pairs {
+        if let (Some(a), Some(b)) = (id(&p.positive), id(&p.negative)) {
+            partner.insert(a, b);
+            partner.insert(b, a);
+        }
+    }
+    let positive: HashSet<u32> = pairs
+        .iter()
+        .filter_map(|p| {
+            board
+                .nets
+                .iter()
+                .position(|n| n.name == p.positive)
+                .map(|i| i as u32)
+        })
+        .collect();
+    let name = |n: u32| {
+        board
+            .nets
+            .get(n as usize)
+            .map_or(format!("net {n}"), |x| x.name.clone())
+    };
+    let geo = board.layer_geometry();
+    let raws = crate::sim::xtalk::find(board, &victims, false);
+    let f: Vec<f64> = rep.f.iter().map(|g| g * 1e9).collect();
+    let mut groups: HashMap<u32, Aggressor> = HashMap::new();
+    let mut runs: HashMap<(u32, u32, u32), f64> = HashMap::new();
+    for r in &raws {
+        let (key, asign) = match partner.get(&r.aggressor) {
+            Some(&o) if positive.contains(&o) => (o, -1.0),
+            _ => (r.aggressor, 1.0),
+        };
+        let vs = sign.get(&r.victim).copied().unwrap_or(1.0);
+        let t = &board.geometry.tracks[r.vtrack];
+        let er = match &t.layer {
+            crate::LayerRef::Copper(l) => geo.get(*l as usize).map_or(4.0, |lg| {
+                if lg.above.is_some() && lg.below.is_some() {
+                    lg.er
+                } else {
+                    // Microstrip: about halfway between air and board.
+                    (lg.er + 1.0) / 2.0 + 0.1 * lg.er
+                }
+            }),
+            _ => 4.0,
+        };
+        let tau = r.len * 25.4e-6 * er.sqrt() / C0;
+        let k = vs * asign;
+        let a = groups.entry(key).or_insert_with(|| Aggressor {
+            name: match partner.get(&key) {
+                Some(&o) if positive.contains(&key) => format!("{} / {}", name(key), name(o)),
+                _ => name(key),
+            },
+            length: 0.0,
+            kb: 0.0,
+            kf: 0.0,
+            next: vec![Cx::default(); f.len()],
+            fext: vec![Cx::default(); f.len()],
+            swing: if diff { amplitude / 2.0 } else { amplitude },
+            at: [
+                (t.start.x.mil() + t.end.x.mil()) / 2.0,
+                (t.start.y.mil() + t.end.y.mil()) / 2.0,
+            ],
+        });
+        // Length beside the path: the longest of the runs beside each
+        // victim line by each aggressor line (a pair's lines run together).
+        *runs.entry((key, r.victim, r.aggressor)).or_insert(0.0) += r.len;
+        a.length = a.length.max(runs[&(key, r.victim, r.aggressor)]);
+        a.kb = a.kb.max(r.kb.abs());
+        a.kf = a.kf.max(r.kf.abs());
+        for (i, &fq) in f.iter().enumerate() {
+            let w = 2.0 * PI * fq * tau;
+            // NEXT: Kb (1 - e^(-j2wt)); FEXT: Kf jwt e^(-jwt).
+            let next = Cx::new(1.0, 0.0)
+                .add(Cx::expj(-2.0 * w).scale(-1.0))
+                .scale(r.kb * k);
+            let fext = Cx::new(0.0, w).mul(Cx::expj(-w)).scale(r.kf * k);
+            a.next[i] = a.next[i].add(next);
+            a.fext[i] = a.fext[i].add(fext);
+        }
+    }
+    let mut out: Vec<Aggressor> = groups.into_values().collect();
+    out.sort_by(|a, b| (b.kb * b.length).total_cmp(&(a.kb * a.length)));
+    out
+}
+
+/// An aggressor's noise at the receiver for one of its bits: per cursor,
+/// samples over the 2 UI window around the victim's sampling point
+/// (lined up at its worst phase), with its worst case closure and peak.
+struct Noise {
+    rows: Vec<(isize, Vec<f64>)>,
+    hit: XtalkHit,
+    /// Volts per symbol (half the line's swing).
+    half: f64,
+}
+
+fn noise(setup: &EyeSetup, df: f64, fmax: f64, a: &Aggressor, t_sample: f64) -> Noise {
+    let ui = 1e-9 / setup.gbps;
+    let dt = ui / PER_UI as f64;
+    let period = 1.0 / df;
+    let total = (period / dt) as usize / PER_UI * PER_UI;
+    let mut best: Option<(f64, &'static str, Vec<f64>)> = None;
+    for (kind, c) in [("NEXT", &a.next), ("FEXT", &a.fext)] {
+        let pulse = shape(setup, df, fmax, c, false);
+        let x = pulse.grid(0.0, dt, total);
+        // Worst phase: the most summed noise over the bits.
+        let bits = total / PER_UI;
+        let (mut worst, mut phase) = (0.0, 0);
+        for ph in 0..PER_UI {
+            let sum: f64 = (0..bits).map(|k| x[ph + k * PER_UI].abs()).sum();
+            if sum > worst {
+                worst = sum;
+                phase = ph;
+            }
+        }
+        if best.as_ref().is_none_or(|b| worst > b.0) {
+            // Rotate so the worst phase sits at index 0.
+            let mut r = x.clone();
+            r.rotate_left(phase);
+            best = Some((worst, kind, r));
+        }
+    }
+    let half = a.swing / 2.0;
+    let Some((sum, kind, x)) = best else {
+        return Noise {
+            rows: Vec::new(),
+            hit: XtalkHit::default(),
+            half,
+        };
+    };
+    let peak = x.iter().fold(0.0f64, |m, v| m.max(v.abs())) * half;
+    // Rows over the window: x(worst + k UI + (s - PER_UI) dt), kept while
+    // they matter.
+    let n = x.len();
+    let bits = n / PER_UI;
+    let top = x.iter().fold(0.0f64, |m, v| m.max(v.abs()));
+    let mut rows = Vec::new();
+    for k in 0..bits {
+        let row: Vec<f64> = (0..SAMPLES)
+            .map(|s| x[(k * PER_UI + n + s - PER_UI) % n])
+            .collect();
+        if row.iter().any(|v| v.abs() > 1e-3 * top) {
+            rows.push((k as isize, row));
+        }
+    }
+    let _ = t_sample;
+    Noise {
+        rows,
+        hit: XtalkHit {
+            name: a.name.clone(),
+            kind,
+            length: a.length,
+            // Both rails move in: 2 × half × sum.
+            closure: 2.0 * half * sum,
+            peak,
+            at: a.at,
+        },
+        half,
+    }
 }
 
 /// Builds the eye of a path.
@@ -803,6 +1080,22 @@ pub fn eye(rep: &Report, setup: &EyeSetup) -> Result<EyeResult, String> {
         .map(|(_, v)| v.abs())
         .sum();
     let worst_height = (p0 - isi).max(0.0);
+    // Crosstalk: each aggressor at its worst phase on the sampling point.
+    let fmax = rep.f.last().copied().unwrap_or(0.0) * 1e9;
+    let noises: Vec<Noise> = setup
+        .aggressors
+        .iter()
+        .take(12)
+        .map(|a| noise(setup, df, fmax, a, t_peak))
+        .filter(|n| n.hit.closure > 1e-5)
+        .collect();
+    let closure: f64 = noises.iter().map(|n| n.hit.closure).sum();
+    if setup.aggressors.len() > 12 {
+        notes.push(format!(
+            "crosstalk from the 12 most coupled of {} nets beside the path",
+            setup.aggressors.len()
+        ));
+    }
     // The pattern by superposition, periodic over its length.
     let bits = prbs(setup.prbs, setup.bits);
     let nb = bits.len() as isize;
@@ -823,6 +1116,16 @@ pub fn eye(rep: &Report, setup: &EyeSetup) -> Result<EyeResult, String> {
             }
         }
         wave.iter_mut().for_each(|v| *v *= half);
+        // Each aggressor sends the pattern from its own starting point.
+        for (i, nz) in noises.iter().enumerate() {
+            let shift = 1 + 37 * (i as isize + 1);
+            for (k, row) in &nz.rows {
+                let a = sym[(n - k + shift).rem_euclid(nb) as usize] * nz.half;
+                for (w, r) in wave.iter_mut().zip(row) {
+                    *w += a * r;
+                }
+            }
+        }
         let one = bits[n as usize];
         for (s, v) in wave.iter().enumerate() {
             if one {
@@ -916,6 +1219,12 @@ pub fn eye(rep: &Report, setup: &EyeSetup) -> Result<EyeResult, String> {
         peak_ns: (t_peak - ui / 2.0) * 1e9,
         notes,
         eq: setup.eq,
+        worst_with_xtalk: (worst_height - closure).max(0.0),
+        xtalk: {
+            let mut x: Vec<XtalkHit> = noises.into_iter().map(|n| n.hit).collect();
+            x.sort_by(|a, b| b.closure.total_cmp(&a.closure));
+            x
+        },
     })
 }
 
@@ -988,6 +1297,49 @@ mod tests {
         assert!(lossy.jitter_ps > clean.jitter_ps);
         // The worst case bounds the pattern's eye from below.
         assert!(lossy.worst_height <= lossy.height + 1e-6);
+    }
+
+    #[test]
+    fn near_end_crosstalk_of_a_long_run_closes_by_twice_kb() {
+        let rep = line_report(50.0, 1.0, 0.0, 20.0, 400);
+        let tau = 1e-9;
+        let kb = 0.05;
+        let next: Vec<Cx> = rep
+            .f
+            .iter()
+            .map(|g| {
+                let w = 2.0 * PI * g * 1e9 * tau;
+                Cx::new(1.0, 0.0)
+                    .add(Cx::expj(-2.0 * w).scale(-1.0))
+                    .scale(kb)
+            })
+            .collect();
+        let a = Aggressor {
+            name: "A".into(),
+            length: 6000.0,
+            kb,
+            kf: 0.0,
+            fext: vec![Cx::default(); next.len()],
+            next,
+            swing: 0.8,
+            at: [0.0, 0.0],
+        };
+        let setup = EyeSetup {
+            aggressors: vec![a],
+            ..Default::default()
+        };
+        let e = eye(&rep, &setup).unwrap();
+        let x = &e.xtalk[0];
+        // A pulse in, +Kb then -Kb 2 tau later: summed |cursors| 2 Kb,
+        // both rails: 2 x 0.4 V x 2 Kb.
+        assert_eq!(x.kind, "NEXT");
+        assert!((x.closure - 0.08).abs() < 0.012, "{x:?}");
+        assert!((x.peak - 0.02).abs() < 0.004, "{x:?}");
+        assert!(
+            e.height < 0.8 - 0.05 && e.height > 0.8 - 0.1,
+            "{}",
+            e.summary()
+        );
     }
 
     #[test]

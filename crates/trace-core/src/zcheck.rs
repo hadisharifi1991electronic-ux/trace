@@ -873,13 +873,38 @@ fn vias(
             .max(1.0);
         let slope = 60.0 / er.sqrt() * if b.setup.pair.is_some() { 2.0 } else { 1.0 };
         let want = b.setup.antipad * ((target - z) / slope).exp();
-        let hint = Some(format!(
-            "antipad about {want:.0} mil (Via window: Solve sizes it exactly)"
-        ));
+        // A barrel shorter than a twentieth of a wavelength (microvias,
+        // short blind vias) is mostly pad capacitance: its impedance
+        // matters little and an antipad will not set it.
+        let barrel = fdtd::barrel_mil(stackup, b.setup.from, b.setup.to).unwrap_or(0.0);
+        let er_v = fdtd::materials_between(stackup, b.setup.from, b.setup.to).map_or(4.0, |m| m.0);
+        let short = goal.ghz > 0.0
+            && barrel < 299_792_458.0 / (goal.ghz * 1e9 * er_v.sqrt()) / 20.0 / 25.4e-6;
+        // The largest antipad that leaves room between a pair's vias or
+        // round the pad (the copper gap at 4 mil).
+        let room = b
+            .setup
+            .pair
+            .map_or(b.setup.pad * 4.0, |p| 2.0 * p - b.setup.pad - 8.0)
+            .max(b.setup.pad);
+        let hint = if short {
+            Some(format!(
+                "barrel {barrel:.0} mil, short at {} GHz: mostly pad capacitance (a smaller pad helps more than the antipad)",
+                goal.ghz
+            ))
+        } else if want > room {
+            Some(format!(
+                "the antipad alone cannot reach it (it would need about {want:.0} mil); a smaller pad or drill, or other return vias (Via window)"
+            ))
+        } else {
+            Some(format!(
+                "antipad about {want:.0} mil (Via window: Solve sizes it exactly)"
+            ))
+        };
         // Only the positive net's vias are listed, so a pair counts once.
         let count = members.len();
         rep.findings.push(Finding {
-            short: false,
+            short,
             net: b.net,
             name: c.name.clone(),
             kind: Kind::Via {

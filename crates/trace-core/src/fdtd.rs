@@ -527,6 +527,13 @@ pub fn materials(stackup: &Stackup, er: Option<f64>, df: Option<f64>) -> Stackup
     s
 }
 
+/// Length of the barrel between two copper layers, mil.
+pub fn barrel_mil(stackup: &Stackup, from: u8, to: u8) -> Option<f64> {
+    let st = stack(stackup);
+    let (a, b) = (*st.sheet.get(from as usize)?, *st.sheet.get(to as usize)?);
+    Some((a - b).abs())
+}
+
 /// The stack-up's Er and Df between two copper layers (thickness
 /// weighted; Df 0.02 where none is given), as the via sees them.
 pub fn materials_between(stackup: &Stackup, from: u8, to: u8) -> Option<(f64, f64)> {

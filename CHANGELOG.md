@@ -3,6 +3,15 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.64.2 (2026-11-15)
+
+- Impedance check: vias whose barrel is shorter than a twentieth of a
+  wavelength at the frequency of interest (microvias, short blind vias)
+  are electrically short: listed apart, not failed, with a note that the
+  pad capacitance rules them (an ADRV TOP to L2 microvia read 9.7 Ω and
+  asked for a 140 mil antipad). The antipad hint says so when no antipad
+  that fits beside the pad or pair could reach the target.
+
 ## 0.64.1 (2026-11-15)
 
 - Impedance check:

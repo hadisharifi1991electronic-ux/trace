@@ -62,14 +62,16 @@ USAGE:
                                                 default 1 A, shared by pad count); with out, a drop map per layer
     trace via <board> <layer> <layer> [--drill D] [--pad P] [--antipad A] [--width W] [--width2 W]
               [--pair PITCH] [--oval] [--returns N@D] [--backdrill] [--fmax 40] [--cell C]
-              [--optimise GHz [--free-pitch]] [out.s2p] [out.svg]
+              [--optimise GHz [--free-pitch] [--try-backdrill] [--keep-pad]] [--check] [out.s2p] [out.svg]
                                                 3D full-wave (FDTD) solve of a via from one layer to another
                                                 with the board's stack-up (default drill, pad and antipad from
                                                 its commonest via): S11/S21, or Sdd for a pair, as Touchstone
                                                 and a plot; the stub resonance when the barrel runs on.
                                                 --optimise GHz sweeps the antipad (--oval for a pair) and the
                                                 return vias for the best return loss to GHz, keeping the pair's
-                                                pitch unless --free-pitch
+                                                pitch unless --free-pitch; it also tries smaller pads (unless
+                                                --keep-pad) and, with --try-backdrill, removing the stub.
+                                                --check solves again on a finer grid and says if it converged
     trace pairsize <board> <layer> [--zdiff 100] [--wmin W] [--wmax W] [--gap S] [--ghz 8] [--next D] [--xtalk 2]
                                                 Every track width and gap on a layer that gives the target Zdiff
                                                 (2D field solver), ranked by loss, with crosstalk and etch
@@ -2145,6 +2147,7 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     let mut outs: Vec<&str> = Vec::new();
     let mut optimise: Option<f64> = None;
     let mut free_pitch = false;
+    let (mut try_backdrill, mut keep_pad, mut check) = (false, false, false);
     let mut it = rest.iter();
     let len = |x: Option<&&str>, what: &str| -> Result<f64, Box<dyn std::error::Error>> {
         let x = x.ok_or(format!("{what} needs a length"))?;
@@ -2162,6 +2165,9 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
             "--backdrill" => v.backdrill = true,
             "--oval" => v.antipad_oval = true,
             "--free-pitch" => free_pitch = true,
+            "--try-backdrill" => try_backdrill = true,
+            "--keep-pad" => keep_pad = true,
+            "--check" => check = true,
             "--optimise" | "--optimize" => {
                 let x = it.next().ok_or("--optimise needs GHz")?;
                 optimise = Some(
@@ -2205,6 +2211,10 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     if let Some(fg) = optimise {
         use trace_core::viaopt;
         let mut goal = viaopt::ViaGoal::around(&v, fg);
+        goal.try_backdrill = try_backdrill;
+        if keep_pad {
+            goal.pad = (v.pad, v.pad);
+        }
         if free_pitch {
             if let Some(p) = v.pair {
                 let pad = v.pad.max(v.drill);
@@ -2256,13 +2266,21 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     }
     let t = std::time::Instant::now();
     let last = std::cell::Cell::new(-1i32);
-    let r = fdtd::solve_with(&b.stackup, &v, &|p| {
+    let progress = |p: f64| {
         let pc = (p * 100.0) as i32 / 10 * 10;
         if pc > last.get() {
             last.set(pc);
             eprint!("\r  solving… {pc}%");
         }
-    })?;
+    };
+    let r = if check {
+        let mc = fdtd::check_mesh(&b.stackup, &v, &progress)?;
+        eprintln!();
+        println!("Grid check: {}", mc.verdict());
+        mc.fine
+    } else {
+        fdtd::solve_with(&b.stackup, &v, &progress)?
+    };
     eprintln!(
         "\r  solved: {} cells, {} steps, {:.1} s",
         r.cells,

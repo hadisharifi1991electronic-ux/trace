@@ -150,6 +150,11 @@ pub struct ViaResult {
     pub stub: f64,
     pub cells: usize,
     pub steps: usize,
+    /// The smallest cell used, mil.
+    pub cell: f64,
+    /// The largest |S11|² + |S21|² before the result was made passive
+    /// (1 or less: it already was).
+    pub power: f64,
     pub notes: Vec<String>,
 }
 
@@ -1473,6 +1478,24 @@ pub fn solve_with(
     if std::env::var("FDTD_DEBUG").is_ok() {
         eprintln!("grid line impedance {zline:?}");
     }
+    // A lossless or lossy via cannot give out more power than it takes
+    // in: where the grid's small errors say otherwise, scale both back.
+    let mut power = 0.0f64;
+    for k in 0..s11.len() {
+        let p = s11[k].abs().powi(2) + s21[k].abs().powi(2);
+        power = power.max(p);
+        if p > 1.0 {
+            let g = 1.0 / p.sqrt();
+            s11[k] = s11[k].scale(g);
+            s21[k] = s21[k].scale(g);
+        }
+    }
+    if power > 1.005 {
+        notes.push(format!(
+            "the grid gave up to {:.1} % more power out than in; scaled back to passive (a finer cell would help)",
+            (power - 1.0) * 100.0
+        ));
+    }
     if ns == 2 {
         notes.push(format!(
             "the pair's traces enter the vias at the vias' pitch (uncoupled), {:.1} Ω each",
@@ -1490,7 +1513,65 @@ pub fn solve_with(
         stub,
         cells: nx * ny * nz,
         steps,
+        cell: d0,
+        power,
         notes,
+    })
+}
+
+/// How much a result moves when the grid is refined.
+#[derive(Clone, Debug)]
+pub struct MeshCheck {
+    pub coarse: ViaResult,
+    pub fine: ViaResult,
+    /// Largest change in |S11| where it is above −40 dB, and in |S21|, dB.
+    pub d_s11_db: f64,
+    pub d_s21_db: f64,
+}
+
+impl MeshCheck {
+    /// Plain words on whether the grid was fine enough.
+    pub fn verdict(&self) -> String {
+        let ok = self.d_s11_db < 2.0 && self.d_s21_db < 0.2;
+        format!(
+            "cell {:.2} -> {:.2} mil: |S11| moves up to {:.1} dB, |S21| up to {:.2} dB; {}",
+            self.coarse.cell,
+            self.fine.cell,
+            self.d_s11_db,
+            self.d_s21_db,
+            if ok {
+                "converged"
+            } else {
+                "not converged: use the finer cell (--cell) for this via"
+            }
+        )
+    }
+}
+
+/// Solves `setup` on its own grid and on one 0.7 times as fine, and
+/// compares them.
+pub fn check_mesh(
+    stackup: &Stackup,
+    setup: &ViaSetup,
+    progress: &dyn Fn(f64),
+) -> Result<MeshCheck, String> {
+    let coarse = solve_with(stackup, setup, &|p| progress(p * 0.3))?;
+    let mut f = setup.clone();
+    f.cell = coarse.cell * 0.7;
+    let fine = solve_with(stackup, &f, &|p| progress(0.3 + p * 0.7))?;
+    let (mut d11, mut d21) = (0.0f64, 0.0f64);
+    for k in 0..coarse.f.len().min(fine.f.len()) {
+        let (a, b) = (coarse.s11[k].db(), fine.s11[k].db());
+        if a.max(b) > -40.0 {
+            d11 = d11.max((a - b).abs());
+        }
+        d21 = d21.max((coarse.s21[k].db() - fine.s21[k].db()).abs());
+    }
+    Ok(MeshCheck {
+        coarse,
+        fine,
+        d_s11_db: d11,
+        d_s21_db: d21,
     })
 }
 

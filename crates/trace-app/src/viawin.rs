@@ -26,6 +26,9 @@ pub struct ViaWindow {
     opt_f: f64,
     /// Let the optimiser move a pair's pitch too.
     free_pitch: bool,
+    /// The optimiser may shrink the pads, and try backdrilling.
+    opt_pad: bool,
+    opt_backdrill: bool,
     opt_running: Option<OptRun>,
     opt: Option<Optimised>,
 }
@@ -43,6 +46,8 @@ impl Default for ViaWindow {
             result: None,
             opt_f: 10.0,
             free_pitch: false,
+            opt_pad: true,
+            opt_backdrill: false,
             opt_running: None,
             opt: None,
         }
@@ -297,15 +302,20 @@ impl ViaWindow {
             if ui
                 .add_enabled(ok, egui::Button::new("Optimise"))
                 .on_hover_text(
-                    "Sweeps the antipad (round or oval), the return vias and, if allowed, the \
-                     pair's pitch with quick 3D solves, for the best return loss up to the \
-                     frequency given. Every setup keeps the copper clearance buildable.",
+                    "Sweeps the antipad (round or oval), the return vias, the pad and, if allowed, \
+                     the pair's pitch and backdrilling with quick 3D solves, for the best return \
+                     loss up to the frequency given, in repeated passes with in-between values. \
+                     Every setup keeps the copper clearance buildable.",
                 )
                 .clicked()
             {
                 let st = stackup.clone();
                 let base = self.setup.clone();
                 let mut goal = viaopt::ViaGoal::around(&base, self.opt_f);
+                goal.try_backdrill = self.opt_backdrill && !base.backdrill;
+                if !self.opt_pad {
+                    goal.pad = (base.pad, base.pad);
+                }
                 if let (Some(p), true) = (base.pair, self.free_pitch) {
                     let pad = base.pad.max(base.drill);
                     goal.pitch = ((pad + goal.clearance).min(p), (2.5 * pad).max(p));
@@ -337,6 +347,11 @@ impl ViaWindow {
                 ui.checkbox(&mut self.free_pitch, "pitch too")
                     .on_hover_text("Off: the pair keeps its pitch (a part's pins usually set it)");
             }
+            ui.checkbox(&mut self.opt_pad, "pad").on_hover_text(
+                "Also try smaller pads, down to a 4 mil annular ring (less pad capacitance)",
+            );
+            ui.checkbox(&mut self.opt_backdrill, "backdrill")
+                .on_hover_text("Also try backdrilling the stub away (costs a fab step)");
             if let Some((_, p)) = &self.opt_running {
                 ui.spinner();
                 if let Ok(p) = p.lock() {

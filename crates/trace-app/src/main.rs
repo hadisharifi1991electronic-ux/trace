@@ -14,8 +14,8 @@ mod fpview;
 mod imp;
 mod menus;
 mod pairwin;
-mod panes;
 mod panelize;
+mod panes;
 mod pdnwin;
 mod placing;
 mod power;
@@ -173,7 +173,8 @@ const RECENT_KEY: &str = "recent_files";
 
 impl App {
     fn new(cc: &eframe::CreationContext<'_>, start_file: Option<PathBuf>) -> Self {
-        let studio = studio::Studio::from_store(cc.storage.and_then(|s| s.get_string(studio::STORE_KEY)));
+        let studio =
+            studio::Studio::from_store(cc.storage.and_then(|s| s.get_string(studio::STORE_KEY)));
         studio::apply_theme(&cc.egui_ctx, studio.dark);
         let recent = cc
             .storage
@@ -2689,7 +2690,10 @@ impl eframe::App for App {
                 .map(|n| n.to_string_lossy().into_owned())
                 .unwrap_or_default();
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(if self.dirty {
-                format!("● {name} (edited) - Trace Studio {}", env!("CARGO_PKG_VERSION"))
+                format!(
+                    "● {name} (edited) - Trace Studio {}",
+                    env!("CARGO_PKG_VERSION")
+                )
             } else {
                 concat!("Trace Studio ", env!("CARGO_PKG_VERSION")).to_string()
             }));
@@ -3106,10 +3110,14 @@ impl eframe::App for App {
                 {
                     self.studio.mm = !self.studio.mm;
                 }
-                if let (Some(scene), false) = (&self.scene, self.mode_sch || self.mode_fp || self.studio.home) {
+                if let (Some(scene), false) = (
+                    &self.scene,
+                    self.mode_sch || self.mode_fp || self.studio.home,
+                ) {
                     if let Some(l) = scene.layers.iter().find(|l| l.slot == self.active) {
                         let c = Color32::from_rgb(l.color[0], l.color[1], l.color[2]);
-                        let (r, _) = ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
+                        let (r, _) =
+                            ui.allocate_exact_size(egui::vec2(10.0, 10.0), egui::Sense::hover());
                         ui.painter().rect_filled(r, 2.0, c);
                         ui.label(RichText::new(&l.name).weak());
                     }
@@ -3234,7 +3242,11 @@ impl eframe::App for App {
                 None => {}
             }
         }
-        let board2d = self.scene.is_some() && !self.mode3d && !self.mode_sch && !self.mode_fp && !self.studio.home;
+        let board2d = self.scene.is_some()
+            && !self.mode3d
+            && !self.mode_sch
+            && !self.mode_fp
+            && !self.studio.home;
         if board2d {
             egui::TopBottomPanel::bottom("layer_tabs")
                 .frame(
@@ -3292,7 +3304,12 @@ impl eframe::App for App {
                 canvas::show(self, ui);
             }
         });
-        if self.scene.is_some() && !self.mode3d && !self.mode_sch && !self.mode_fp && !self.studio.home {
+        if self.scene.is_some()
+            && !self.mode3d
+            && !self.mode_sch
+            && !self.mode_fp
+            && !self.studio.home
+        {
             self.active_bar(ctx);
         }
         self.keys_window(ctx);

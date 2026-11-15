@@ -3,6 +3,25 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.61.0 (2026-11-15)
+
+- 3D via solver, stronger:
+  - Results are kept passive: where the grid's small errors give more
+    power out than in (|S11|² + |S21|² > 1), both are scaled back, with a
+    note when it was more than half a percent.
+  - Grid check (`trace via … --check`): solves again on a grid 0.7 times
+    as fine and says how far |S11| and |S21| moved, and whether the
+    result has converged.
+- Via optimiser, smarter:
+  - Repeated passes over all the settings while they still gain, and a
+    parabola through the best value and its neighbours to try the value
+    between them.
+  - It also tries smaller pads (down to a 4 mil annular ring; `--keep-pad`
+    or the "pad" box to keep them) and, when asked, backdrilling the stub
+    (`--try-backdrill`, or the "backdrill" box).
+  - It scores the worst return loss plus a tenth of the mean, and counts
+    anything below −45 dB (under the solver's accuracy) as equal, so it
+    stops chasing noise and keeps the simpler setup.
 ## 0.60.0 (2026-11-15)
 
 Trace Studio: the workspace now works the way Altium Designer users know,

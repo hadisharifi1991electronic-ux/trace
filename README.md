@@ -298,7 +298,8 @@ trace field board.PcbDoc 1 11 --ground 6 out.svg   One cross-section, with its f
 trace ir board.PcbDoc DVDD --source U19 --volts 1.0 --load U1=2A out.svg   IR drop over a supply net, drop maps per layer
 trace pdn board.brd VDD_SOC --amps 3 --optimise [--add 2] [--die-c 20n] [--csv z.csv] [z.svg]   PDN impedance vs target, decap optimiser
 trace via board.PcbDoc 1 7 --returns 2@30mil via.s2p via.svg   3D full-wave via solve: S-parameters, stub resonance
-trace via board.PcbDoc 1 7 --pair 40 --optimise 10 best.s2p   tune a pair's antipad (round or oval) and return vias (--free-pitch: the pitch too)
+trace via board.PcbDoc 1 7 --pair 40 --optimise 10 best.s2p   tune a pair's antipad (round or oval) and return vias and pads (--free-pitch: the pitch too; --try-backdrill)
+trace via board.PcbDoc 1 7 --check   solve on two grids and say whether the result converged
 trace pairsize board.PcbDoc 3 --zdiff 100 --ghz 8   every width and gap for 100 ohm on a layer, ranked by loss
 trace cascade chip.s1p via.s2p --line 50@500@3.4   return loss into vias and lines ending in a chip's port model
 trace stackup board.brd stack.txt   the board's stack-up as text; edit it, then any command takes --stackup stack.txt
@@ -473,7 +474,9 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   from the board get a typical one for their case; the regulator is a
   fixed R + L and a ferrite bead an inductance with its loss across it,
   from its rating.
-- Via solver (3D FDTD): metal is perfect and thin (copper thickness is
+- Via solver (3D FDTD): results are scaled back to passive where the
+  grid's errors give more power out than in, and `--check` compares two
+  grids. Metal is perfect and thin (copper thickness is
   folded into the dielectric), the dielectric lossless by default, round
   holes and barrels are built from the grid's cells, every copper layer
   named like a plane (GND, PWR, VCC, VDD, VSS, PLANE) is a full plane

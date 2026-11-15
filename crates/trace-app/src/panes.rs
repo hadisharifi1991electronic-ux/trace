@@ -47,7 +47,12 @@ fn icon_row(ui: &mut egui::Ui, icon: Icon, text: &str, on: bool) -> egui::Respon
 
 fn caption(ui: &mut egui::Ui, text: &str) {
     ui.add_space(4.0);
-    ui.label(RichText::new(text).small().strong().color(crate::studio::ACCENT));
+    ui.label(
+        RichText::new(text)
+            .small()
+            .strong()
+            .color(crate::studio::ACCENT),
+    );
 }
 
 fn row(ui: &mut egui::Ui, k: &str, v: impl Into<egui::WidgetText>) {
@@ -135,7 +140,9 @@ impl App {
                             } else {
                                 self.fped.source.clone()
                             };
-                            if icon_row(ui, Icon::Footprint, &label, !home && self.mode_fp).clicked() {
+                            if icon_row(ui, Icon::Footprint, &label, !home && self.mode_fp)
+                                .clicked()
+                            {
                                 self.studio.home = false;
                                 self.mode_fp = true;
                             }
@@ -159,8 +166,13 @@ impl App {
         for l in scene.layers.iter_mut() {
             ui.horizontal(|ui| {
                 ui.checkbox(&mut l.visible, "");
-                let (rect, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
-                ui.painter().rect_filled(rect, 3.0, Color32::from_rgb(l.color[0], l.color[1], l.color[2]));
+                let (rect, _) =
+                    ui.allocate_exact_size(egui::vec2(12.0, 12.0), egui::Sense::hover());
+                ui.painter().rect_filled(
+                    rect,
+                    3.0,
+                    Color32::from_rgb(l.color[0], l.color[1], l.color[2]),
+                );
                 let active = l.slot == self.active;
                 let text = if active {
                     RichText::new(&l.name).strong()
@@ -204,14 +216,21 @@ impl App {
         ui.horizontal(|ui| {
             let v = &mut self.panes.pcb_view;
             ui.selectable_value(v, PcbView::Nets, format!("Nets {}", b.nets.len()));
-            ui.selectable_value(v, PcbView::Components, format!("Parts {}", b.components.len()));
+            ui.selectable_value(
+                v,
+                PcbView::Components,
+                format!("Parts {}", b.components.len()),
+            );
         });
         ui.horizontal(|ui| {
             let v = &mut self.panes.pcb_view;
             ui.selectable_value(
                 v,
                 PcbView::Classes,
-                format!("Classes {}", b.net_classes.len() + b.component_classes.len()),
+                format!(
+                    "Classes {}",
+                    b.net_classes.len() + b.component_classes.len()
+                ),
             );
             ui.selectable_value(v, PcbView::Pairs, format!("Pairs {}", b.diff_pairs.len()));
         });
@@ -227,11 +246,22 @@ impl App {
         let row_h = ui.text_style_height(&egui::TextStyle::Body) + 4.0;
         match self.panes.pcb_view {
             PcbView::Nets => {
-                let rows: Vec<usize> = (0..b.nets.len()).filter(|&i| hit(&b.nets[i].name)).collect();
-                egui::Grid::new("pcb_nets_head").num_columns(2).show(ui, |ui| {
-                    ui.label(RichText::new("Net").small().weak());
-                    ui.label(RichText::new(format!("Length ({})", if self.studio.mm { "mm" } else { "mil" })).small().weak());
-                });
+                let rows: Vec<usize> = (0..b.nets.len())
+                    .filter(|&i| hit(&b.nets[i].name))
+                    .collect();
+                egui::Grid::new("pcb_nets_head")
+                    .num_columns(2)
+                    .show(ui, |ui| {
+                        ui.label(RichText::new("Net").small().weak());
+                        ui.label(
+                            RichText::new(format!(
+                                "Length ({})",
+                                if self.studio.mm { "mm" } else { "mil" }
+                            ))
+                            .small()
+                            .weak(),
+                        );
+                    });
                 egui::ScrollArea::vertical()
                     .id_salt("pcb_nets")
                     .auto_shrink([false, false])
@@ -245,14 +275,20 @@ impl App {
                                 } else {
                                     RichText::new(&n.name)
                                 };
-                                if ui.selectable_label(self.selected == Some(i as u32), text).clicked() {
+                                if ui
+                                    .selectable_label(self.selected == Some(i as u32), text)
+                                    .clicked()
+                                {
                                     pick_net = Some(i as u32);
                                 }
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    let mil = n.total_length().mil();
-                                    let v = if self.studio.mm { mil * 0.0254 } else { mil };
-                                    ui.label(RichText::new(format!("{v:.1}")).small().weak());
-                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let mil = n.total_length().mil();
+                                        let v = if self.studio.mm { mil * 0.0254 } else { mil };
+                                        ui.label(RichText::new(format!("{v:.1}")).small().weak());
+                                    },
+                                );
                             });
                         }
                     });
@@ -271,21 +307,25 @@ impl App {
                         for &i in &rows[range] {
                             let c = &b.components[i];
                             ui.horizontal(|ui| {
-                                let on = self.edit.sel.parts.len() == 1 && self.edit.sel.parts.contains(&i);
+                                let on = self.edit.sel.parts.len() == 1
+                                    && self.edit.sel.parts.contains(&i);
                                 if ui.selectable_label(on, &c.designator).clicked() {
                                     pick_part = Some(i);
                                 }
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    ui.label(
-                                        RichText::new(format!(
-                                            "{} · {}",
-                                            c.footprint,
-                                            if c.side == Side::Top { "top" } else { "bot" }
-                                        ))
-                                        .small()
-                                        .weak(),
-                                    );
-                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "{} · {}",
+                                                c.footprint,
+                                                if c.side == Side::Top { "top" } else { "bot" }
+                                            ))
+                                            .small()
+                                            .weak(),
+                                        );
+                                    },
+                                );
                             });
                         }
                     });
@@ -305,19 +345,25 @@ impl App {
                             }
                             caption(ui, kind);
                             for c in list.iter().filter(|c| hit(&c.name)) {
-                                egui::CollapsingHeader::new(format!("{} ({})", c.name, c.members.len()))
-                                    .id_salt(format!("{kind}{}", c.name))
-                                    .show(ui, |ui| {
-                                        for m in &c.members {
-                                            if ui.selectable_label(false, m).clicked() {
-                                                if let Some(&n) = scene.net_by_name.get(m) {
-                                                    pick_net = Some(n);
-                                                } else if let Some(i) = b.components.iter().position(|p| &p.designator == m) {
-                                                    pick_part = Some(i);
-                                                }
+                                egui::CollapsingHeader::new(format!(
+                                    "{} ({})",
+                                    c.name,
+                                    c.members.len()
+                                ))
+                                .id_salt(format!("{kind}{}", c.name))
+                                .show(ui, |ui| {
+                                    for m in &c.members {
+                                        if ui.selectable_label(false, m).clicked() {
+                                            if let Some(&n) = scene.net_by_name.get(m) {
+                                                pick_net = Some(n);
+                                            } else if let Some(i) =
+                                                b.components.iter().position(|p| &p.designator == m)
+                                            {
+                                                pick_part = Some(i);
                                             }
                                         }
-                                    });
+                                    }
+                                });
                             }
                         }
                     });
@@ -327,20 +373,36 @@ impl App {
                     .id_salt("pcb_pairs")
                     .auto_shrink([false, false])
                     .show(ui, |ui| {
-                        for p in b.diff_pairs.iter().filter(|p| hit(&p.name) || hit(&p.positive) || hit(&p.negative)) {
+                        for p in b
+                            .diff_pairs
+                            .iter()
+                            .filter(|p| hit(&p.name) || hit(&p.positive) || hit(&p.negative))
+                        {
                             ui.horizontal(|ui| {
                                 let pn = scene.net_by_name.get(&p.positive).copied();
                                 let on = pn.is_some() && self.selected == pn;
                                 if ui.selectable_label(on, &p.name).clicked() {
                                     pick_net = pn;
                                 }
-                                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                                    let skew = match (b.net(&p.positive), b.net(&p.negative)) {
-                                        (Some(a), Some(c)) => (a.total_length().mil() - c.total_length().mil()).abs(),
-                                        _ => 0.0,
-                                    };
-                                    ui.label(RichText::new(format!("skew {}", self.studio.len(skew))).small().weak());
-                                });
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        let skew = match (b.net(&p.positive), b.net(&p.negative)) {
+                                            (Some(a), Some(c)) => (a.total_length().mil()
+                                                - c.total_length().mil())
+                                            .abs(),
+                                            _ => 0.0,
+                                        };
+                                        ui.label(
+                                            RichText::new(format!(
+                                                "skew {}",
+                                                self.studio.len(skew)
+                                            ))
+                                            .small()
+                                            .weak(),
+                                        );
+                                    },
+                                );
                             });
                         }
                     });
@@ -352,7 +414,10 @@ impl App {
             self.select_net(n, true);
         }
         if let Some(i) = pick_part {
-            let d = self.scene.as_ref().map(|s| s.board.components[i].designator.clone());
+            let d = self
+                .scene
+                .as_ref()
+                .map(|s| s.board.components[i].designator.clone());
             if let Some(d) = d {
                 self.go_board();
                 self.select_part(&d, true);
@@ -394,8 +459,16 @@ impl App {
     /// value in mil once typed and committed with Enter or by leaving it.
     fn len_field(&mut self, ui: &mut egui::Ui, key: &'static str, mil: f64) -> Option<f64> {
         let mm = self.studio.mm;
-        let shown = if mm { format!("{:.4}", mil * 0.0254) } else { format!("{mil:.2}") };
-        let buf = self.panes.fields.entry(key).or_insert_with(|| shown.clone());
+        let shown = if mm {
+            format!("{:.4}", mil * 0.0254)
+        } else {
+            format!("{mil:.2}")
+        };
+        let buf = self
+            .panes
+            .fields
+            .entry(key)
+            .or_insert_with(|| shown.clone());
         let r = ui.add(egui::TextEdit::singleline(buf).desired_width(90.0));
         ui.label(RichText::new(if mm { "mm" } else { "mil" }).weak());
         if r.lost_focus() {
@@ -413,9 +486,19 @@ impl App {
     }
 
     /// A plain number field (degrees).
-    fn num_field(&mut self, ui: &mut egui::Ui, key: &'static str, v: f64, unit: &str) -> Option<f64> {
+    fn num_field(
+        &mut self,
+        ui: &mut egui::Ui,
+        key: &'static str,
+        v: f64,
+        unit: &str,
+    ) -> Option<f64> {
         let shown = format!("{v:.2}");
-        let buf = self.panes.fields.entry(key).or_insert_with(|| shown.clone());
+        let buf = self
+            .panes
+            .fields
+            .entry(key)
+            .or_insert_with(|| shown.clone());
         let r = ui.add(egui::TextEdit::singleline(buf).desired_width(90.0));
         ui.label(RichText::new(unit).weak());
         if r.lost_focus() {
@@ -436,7 +519,10 @@ impl App {
         [&self.studio.left, &self.studio.right].iter().any(|d| {
             d.open
                 && d.panes.contains(&Pane::Properties)
-                && d.on.filter(|p| d.panes.contains(p)).or(d.panes.first().copied()) == Some(Pane::Properties)
+                && d.on
+                    .filter(|p| d.panes.contains(p))
+                    .or(d.panes.first().copied())
+                    == Some(Pane::Properties)
         })
     }
 
@@ -498,7 +584,11 @@ impl App {
         }
         let sig = format!(
             "{:?}{:?}{:?}{:?}{}",
-            sel.parts, sel.tracks, sel.vias, sel.arcs, self.router.history.undo_label().unwrap_or_default()
+            sel.parts,
+            sel.tracks,
+            sel.vias,
+            sel.arcs,
+            self.router.history.undo_label().unwrap_or_default()
         );
         if sig != self.panes.fields_for {
             self.panes.fields.clear();
@@ -523,22 +613,33 @@ impl App {
                 let r = scene.bounds;
                 ((r[2] - r[0]) as f64, (r[3] - r[1]) as f64)
             };
-            let open = b.nets.iter().filter(|n| n.pads >= 2 && !n.has_pour && !n.is_complete()).count();
-            egui::Grid::new("prop_board").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
-                row(ui, "File", name);
-                row(ui, "Size", format!("{} × {}", self.studio.len(w), self.studio.len(h)));
-                row(ui, "Copper layers", scene.copper_count.to_string());
-                let t = b.stackup.total_thickness();
-                if t.0 > 0 {
-                    row(ui, "Thickness", self.studio.len(t.mil()));
-                }
-                row(ui, "Parts", b.components.len().to_string());
-                row(ui, "Nets", format!("{} ({} open)", b.nets.len(), open));
-                row(ui, "Pairs", b.diff_pairs.len().to_string());
-                row(ui, "Tracks", g.tracks.len().to_string());
-                row(ui, "Vias", g.vias.len().to_string());
-                row(ui, "Rules", b.rules.len().to_string());
-            });
+            let open = b
+                .nets
+                .iter()
+                .filter(|n| n.pads >= 2 && !n.has_pour && !n.is_complete())
+                .count();
+            egui::Grid::new("prop_board")
+                .num_columns(2)
+                .spacing([10.0, 4.0])
+                .show(ui, |ui| {
+                    row(ui, "File", name);
+                    row(
+                        ui,
+                        "Size",
+                        format!("{} × {}", self.studio.len(w), self.studio.len(h)),
+                    );
+                    row(ui, "Copper layers", scene.copper_count.to_string());
+                    let t = b.stackup.total_thickness();
+                    if t.0 > 0 {
+                        row(ui, "Thickness", self.studio.len(t.mil()));
+                    }
+                    row(ui, "Parts", b.components.len().to_string());
+                    row(ui, "Nets", format!("{} ({} open)", b.nets.len(), open));
+                    row(ui, "Pairs", b.diff_pairs.len().to_string());
+                    row(ui, "Tracks", g.tracks.len().to_string());
+                    row(ui, "Vias", g.vias.len().to_string());
+                    row(ui, "Rules", b.rules.len().to_string());
+                });
             ui.add_space(6.0);
             ui.horizontal_wrapped(|ui| {
                 if ui.button("Layer stack…").clicked() {
@@ -558,59 +659,76 @@ impl App {
         let one = sel.parts.len() + sel.tracks.len() + sel.vias.len() + sel.arcs.len() == 1;
         if one && sel.parts.len() == 1 {
             let i = *sel.parts.iter().next().unwrap();
-            let Some(c) = b.components.get(i).cloned() else { return };
+            let Some(c) = b.components.get(i).cloned() else {
+                return;
+            };
             caption(ui, "Component");
             let from = Placement::of(b, i);
             let mut to = from;
-            egui::Grid::new("prop_part").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
-                row(ui, "Designator", RichText::new(&c.designator).strong());
-                row(ui, "Footprint", c.footprint.clone());
-                if let Some(v) = c.param(&["Value", "Comment"]) {
-                    row(ui, "Value", v.to_string());
-                }
-                if let Some(v) = c.param(&["Manufacturer Part Number", "MPN", "Part Number", "PartNumber"]) {
-                    row(ui, "Part number", v.to_string());
-                }
-                if let Some(s) = &c.sheet {
-                    row(ui, "Sheet", s.clone());
-                }
-                ui.label(RichText::new("X").weak());
-                ui.horizontal(|ui| {
-                    if let (Some(v), Some(t)) = (self.len_field(ui, "part_x", c.x.mil()), to.as_mut()) {
-                        t.x = Length::from_mil(v);
+            egui::Grid::new("prop_part")
+                .num_columns(2)
+                .spacing([10.0, 4.0])
+                .show(ui, |ui| {
+                    row(ui, "Designator", RichText::new(&c.designator).strong());
+                    row(ui, "Footprint", c.footprint.clone());
+                    if let Some(v) = c.param(&["Value", "Comment"]) {
+                        row(ui, "Value", v.to_string());
                     }
-                });
-                ui.end_row();
-                ui.label(RichText::new("Y").weak());
-                ui.horizontal(|ui| {
-                    if let (Some(v), Some(t)) = (self.len_field(ui, "part_y", c.y.mil()), to.as_mut()) {
-                        t.y = Length::from_mil(v);
+                    if let Some(v) = c.param(&[
+                        "Manufacturer Part Number",
+                        "MPN",
+                        "Part Number",
+                        "PartNumber",
+                    ]) {
+                        row(ui, "Part number", v.to_string());
                     }
-                });
-                ui.end_row();
-                ui.label(RichText::new("Rotation").weak());
-                ui.horizontal(|ui| {
-                    if let (Some(v), Some(t)) = (self.num_field(ui, "part_rot", c.rotation_deg, "°"), to.as_mut()) {
-                        t.rotation_deg = v.rem_euclid(360.0);
+                    if let Some(s) = &c.sheet {
+                        row(ui, "Sheet", s.clone());
                     }
-                });
-                ui.end_row();
-                ui.label(RichText::new("Side").weak());
-                ui.horizontal(|ui| {
-                    let top = c.side == Side::Top;
-                    if ui.selectable_label(top, "Top").clicked() && !top {
-                        if let Some(t) = to.as_mut() {
-                            t.side = Side::Top;
+                    ui.label(RichText::new("X").weak());
+                    ui.horizontal(|ui| {
+                        if let (Some(v), Some(t)) =
+                            (self.len_field(ui, "part_x", c.x.mil()), to.as_mut())
+                        {
+                            t.x = Length::from_mil(v);
                         }
-                    }
-                    if ui.selectable_label(!top, "Bottom").clicked() && top {
-                        if let Some(t) = to.as_mut() {
-                            t.side = Side::Bottom;
+                    });
+                    ui.end_row();
+                    ui.label(RichText::new("Y").weak());
+                    ui.horizontal(|ui| {
+                        if let (Some(v), Some(t)) =
+                            (self.len_field(ui, "part_y", c.y.mil()), to.as_mut())
+                        {
+                            t.y = Length::from_mil(v);
                         }
-                    }
+                    });
+                    ui.end_row();
+                    ui.label(RichText::new("Rotation").weak());
+                    ui.horizontal(|ui| {
+                        if let (Some(v), Some(t)) = (
+                            self.num_field(ui, "part_rot", c.rotation_deg, "°"),
+                            to.as_mut(),
+                        ) {
+                            t.rotation_deg = v.rem_euclid(360.0);
+                        }
+                    });
+                    ui.end_row();
+                    ui.label(RichText::new("Side").weak());
+                    ui.horizontal(|ui| {
+                        let top = c.side == Side::Top;
+                        if ui.selectable_label(top, "Top").clicked() && !top {
+                            if let Some(t) = to.as_mut() {
+                                t.side = Side::Top;
+                            }
+                        }
+                        if ui.selectable_label(!top, "Bottom").clicked() && top {
+                            if let Some(t) = to.as_mut() {
+                                t.side = Side::Bottom;
+                            }
+                        }
+                    });
+                    ui.end_row();
                 });
-                ui.end_row();
-            });
             let others: Vec<(String, String)> = c
                 .params
                 .iter()
@@ -621,133 +739,219 @@ impl App {
                 egui::CollapsingHeader::new(format!("Parameters ({})", others.len()))
                     .id_salt("prop_params")
                     .show(ui, |ui| {
-                        egui::Grid::new("prop_params_g").num_columns(2).spacing([10.0, 2.0]).show(ui, |ui| {
-                            for (k, v) in others {
-                                row(ui, &k, v);
-                            }
-                        });
+                        egui::Grid::new("prop_params_g")
+                            .num_columns(2)
+                            .spacing([10.0, 2.0])
+                            .show(ui, |ui| {
+                                for (k, v) in others {
+                                    row(ui, &k, v);
+                                }
+                            });
                     });
             }
             if let (Some(f), Some(t)) = (from, to) {
                 if f != t {
-                    edits.push(Edit::PlaceComponent { index: i, from: f, to: t });
+                    edits.push(Edit::PlaceComponent {
+                        index: i,
+                        from: f,
+                        to: t,
+                    });
                     label = format!("Changed {}", c.designator);
                 }
             }
         } else if one && sel.tracks.len() == 1 {
             let i = *sel.tracks.iter().next().unwrap();
-            let Some(t) = g.tracks.get(i).cloned() else { return };
+            let Some(t) = g.tracks.get(i).cloned() else {
+                return;
+            };
             caption(ui, "Track");
-            let net = t.net.and_then(|n| b.nets.get(n as usize)).map(|n| n.name.clone());
-            let len = ((t.end.x.mil() - t.start.x.mil()).powi(2) + (t.end.y.mil() - t.start.y.mil()).powi(2)).sqrt();
-            egui::Grid::new("prop_track").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
-                row(ui, "Net", net.unwrap_or_else(|| "No net".into()));
-                row(ui, "Layer", self.layer_name(&t.layer));
-                row(ui, "Start", format!("{}, {}", self.studio.len(t.start.x.mil()), self.studio.len(t.start.y.mil())));
-                row(ui, "End", format!("{}, {}", self.studio.len(t.end.x.mil()), self.studio.len(t.end.y.mil())));
-                row(ui, "Length", self.studio.len(len));
-                ui.label(RichText::new("Width").weak());
-                ui.horizontal(|ui| {
-                    if let Some(w) = self.len_field(ui, "track_w", t.width.mil()) {
-                        if w > 0.0 {
-                            let mut n = t.clone();
-                            n.width = Length::from_mil(w);
-                            edits.push(Edit::RemoveTrack { index: i, track: t.clone() });
-                            edits.push(Edit::InsertTrack { index: i, track: n });
-                            label = "Changed a track's width".into();
+            let net = t
+                .net
+                .and_then(|n| b.nets.get(n as usize))
+                .map(|n| n.name.clone());
+            let len = ((t.end.x.mil() - t.start.x.mil()).powi(2)
+                + (t.end.y.mil() - t.start.y.mil()).powi(2))
+            .sqrt();
+            egui::Grid::new("prop_track")
+                .num_columns(2)
+                .spacing([10.0, 4.0])
+                .show(ui, |ui| {
+                    row(ui, "Net", net.unwrap_or_else(|| "No net".into()));
+                    row(ui, "Layer", self.layer_name(&t.layer));
+                    row(
+                        ui,
+                        "Start",
+                        format!(
+                            "{}, {}",
+                            self.studio.len(t.start.x.mil()),
+                            self.studio.len(t.start.y.mil())
+                        ),
+                    );
+                    row(
+                        ui,
+                        "End",
+                        format!(
+                            "{}, {}",
+                            self.studio.len(t.end.x.mil()),
+                            self.studio.len(t.end.y.mil())
+                        ),
+                    );
+                    row(ui, "Length", self.studio.len(len));
+                    ui.label(RichText::new("Width").weak());
+                    ui.horizontal(|ui| {
+                        if let Some(w) = self.len_field(ui, "track_w", t.width.mil()) {
+                            if w > 0.0 {
+                                let mut n = t.clone();
+                                n.width = Length::from_mil(w);
+                                edits.push(Edit::RemoveTrack {
+                                    index: i,
+                                    track: t.clone(),
+                                });
+                                edits.push(Edit::InsertTrack { index: i, track: n });
+                                label = "Changed a track's width".into();
+                            }
                         }
-                    }
+                    });
+                    ui.end_row();
                 });
-                ui.end_row();
-            });
         } else if one && sel.vias.len() == 1 {
             let i = *sel.vias.iter().next().unwrap();
-            let Some(v) = g.vias.get(i).cloned() else { return };
+            let Some(v) = g.vias.get(i).cloned() else {
+                return;
+            };
             caption(ui, "Via");
-            let net = v.net.and_then(|n| b.nets.get(n as usize)).map(|n| n.name.clone());
-            egui::Grid::new("prop_via").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
-                row(ui, "Net", net.unwrap_or_else(|| "No net".into()));
-                row(ui, "Location", format!("{}, {}", self.studio.len(v.at.x.mil()), self.studio.len(v.at.y.mil())));
-                row(
-                    ui,
-                    "Span",
-                    format!(
-                        "{} to {}",
-                        self.layer_name(&LayerRef::Copper(v.from_layer)),
-                        self.layer_name(&LayerRef::Copper(v.to_layer))
-                    ),
-                );
-                let mut n = v.clone();
-                let mut changed = false;
-                ui.label(RichText::new("Diameter").weak());
-                ui.horizontal(|ui| {
-                    if let Some(d) = self.len_field(ui, "via_d", v.diameter.mil()) {
-                        if d > v.hole.mil() {
-                            n.diameter = Length::from_mil(d);
-                            n.rings.clear();
-                            changed = true;
+            let net = v
+                .net
+                .and_then(|n| b.nets.get(n as usize))
+                .map(|n| n.name.clone());
+            egui::Grid::new("prop_via")
+                .num_columns(2)
+                .spacing([10.0, 4.0])
+                .show(ui, |ui| {
+                    row(ui, "Net", net.unwrap_or_else(|| "No net".into()));
+                    row(
+                        ui,
+                        "Location",
+                        format!(
+                            "{}, {}",
+                            self.studio.len(v.at.x.mil()),
+                            self.studio.len(v.at.y.mil())
+                        ),
+                    );
+                    row(
+                        ui,
+                        "Span",
+                        format!(
+                            "{} to {}",
+                            self.layer_name(&LayerRef::Copper(v.from_layer)),
+                            self.layer_name(&LayerRef::Copper(v.to_layer))
+                        ),
+                    );
+                    let mut n = v.clone();
+                    let mut changed = false;
+                    ui.label(RichText::new("Diameter").weak());
+                    ui.horizontal(|ui| {
+                        if let Some(d) = self.len_field(ui, "via_d", v.diameter.mil()) {
+                            if d > v.hole.mil() {
+                                n.diameter = Length::from_mil(d);
+                                n.rings.clear();
+                                changed = true;
+                            }
                         }
+                    });
+                    ui.end_row();
+                    ui.label(RichText::new("Hole").weak());
+                    ui.horizontal(|ui| {
+                        if let Some(h) = self.len_field(ui, "via_h", v.hole.mil()) {
+                            if h > 0.0 && h < n.diameter.mil() {
+                                n.hole = Length::from_mil(h);
+                                changed = true;
+                            }
+                        }
+                    });
+                    ui.end_row();
+                    if changed {
+                        edits.push(Edit::RemoveVia {
+                            index: i,
+                            via: v.clone(),
+                        });
+                        edits.push(Edit::InsertVia { index: i, via: n });
+                        label = "Changed a via".into();
                     }
                 });
-                ui.end_row();
-                ui.label(RichText::new("Hole").weak());
-                ui.horizontal(|ui| {
-                    if let Some(h) = self.len_field(ui, "via_h", v.hole.mil()) {
-                        if h > 0.0 && h < n.diameter.mil() {
-                            n.hole = Length::from_mil(h);
-                            changed = true;
-                        }
-                    }
-                });
-                ui.end_row();
-                if changed {
-                    edits.push(Edit::RemoveVia { index: i, via: v.clone() });
-                    edits.push(Edit::InsertVia { index: i, via: n });
-                    label = "Changed a via".into();
-                }
-            });
         } else if one && sel.arcs.len() == 1 {
             let i = *sel.arcs.iter().next().unwrap();
-            let Some(a) = g.arcs.get(i).cloned() else { return };
+            let Some(a) = g.arcs.get(i).cloned() else {
+                return;
+            };
             caption(ui, "Arc");
-            let net = a.net.and_then(|n| b.nets.get(n as usize)).map(|n| n.name.clone());
-            egui::Grid::new("prop_arc").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
-                row(ui, "Net", net.unwrap_or_else(|| "No net".into()));
-                row(ui, "Layer", self.layer_name(&a.layer));
-                row(ui, "Radius", self.studio.len(a.radius.mil()));
-                row(ui, "Angles", format!("{:.1}° to {:.1}°", a.start_deg, a.end_deg));
-                row(ui, "Width", self.studio.len(a.width.mil()));
-            });
+            let net = a
+                .net
+                .and_then(|n| b.nets.get(n as usize))
+                .map(|n| n.name.clone());
+            egui::Grid::new("prop_arc")
+                .num_columns(2)
+                .spacing([10.0, 4.0])
+                .show(ui, |ui| {
+                    row(ui, "Net", net.unwrap_or_else(|| "No net".into()));
+                    row(ui, "Layer", self.layer_name(&a.layer));
+                    row(ui, "Radius", self.studio.len(a.radius.mil()));
+                    row(
+                        ui,
+                        "Angles",
+                        format!("{:.1}° to {:.1}°", a.start_deg, a.end_deg),
+                    );
+                    row(ui, "Width", self.studio.len(a.width.mil()));
+                });
         } else {
             caption(ui, "Selection");
-            egui::Grid::new("prop_many").num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
-                for (k, n) in [
-                    ("Parts", sel.parts.len()),
-                    ("Tracks", sel.tracks.len()),
-                    ("Arcs", sel.arcs.len()),
-                    ("Vias", sel.vias.len()),
-                ] {
-                    if n > 0 {
-                        row(ui, k, n.to_string());
+            egui::Grid::new("prop_many")
+                .num_columns(2)
+                .spacing([10.0, 4.0])
+                .show(ui, |ui| {
+                    for (k, n) in [
+                        ("Parts", sel.parts.len()),
+                        ("Tracks", sel.tracks.len()),
+                        ("Arcs", sel.arcs.len()),
+                        ("Vias", sel.vias.len()),
+                    ] {
+                        if n > 0 {
+                            row(ui, k, n.to_string());
+                        }
                     }
-                }
-            });
+                });
             if !sel.tracks.is_empty() {
-                let tracks: Vec<(usize, trace_core::Track)> =
-                    sel.tracks.iter().filter_map(|&i| g.tracks.get(i).map(|t| (i, t.clone()))).collect();
+                let tracks: Vec<(usize, trace_core::Track)> = sel
+                    .tracks
+                    .iter()
+                    .filter_map(|&i| g.tracks.get(i).map(|t| (i, t.clone())))
+                    .collect();
                 let widths: Vec<f64> = tracks.iter().map(|(_, t)| t.width.mil()).collect();
                 let w0 = widths.first().copied().unwrap_or(0.0);
                 let same = widths.iter().all(|w| (w - w0).abs() < 1e-6);
                 ui.add_space(4.0);
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new(if same { "Track width" } else { "Track width (mixed)" }).weak());
+                    ui.label(
+                        RichText::new(if same {
+                            "Track width"
+                        } else {
+                            "Track width (mixed)"
+                        })
+                        .weak(),
+                    );
                     if let Some(w) = self.len_field(ui, "many_w", w0) {
                         if w > 0.0 {
                             for (i, t) in &tracks {
                                 let mut n = t.clone();
                                 n.width = Length::from_mil(w);
-                                edits.push(Edit::RemoveTrack { index: *i, track: t.clone() });
-                                edits.push(Edit::InsertTrack { index: *i, track: n });
+                                edits.push(Edit::RemoveTrack {
+                                    index: *i,
+                                    track: t.clone(),
+                                });
+                                edits.push(Edit::InsertTrack {
+                                    index: *i,
+                                    track: n,
+                                });
                             }
                             label = format!("Changed the width of {} tracks", sel.tracks.len());
                         }

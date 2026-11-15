@@ -3,8 +3,12 @@
 //! chosen frequency.
 //!
 //! It is a coordinate search: each setting in turn is swept with the
-//! others held, keeping the best, on a coarse quick solve; the winner is
-//! then solved again in full.
+//! others held, keeping the best, on a coarse quick solve; a parabola
+//! through the best value and its neighbours then tries the point between
+//! them, and the passes repeat while they still gain. The winner is then
+//! solved again in full. Return loss below the solver's accuracy (about
+//! −45 dB) counts as equal, so the search stops chasing noise there and
+//! keeps the simpler setup.
 
 use crate::fdtd::{self, ViaResult, ViaSetup};
 use crate::Stackup;
@@ -29,9 +33,18 @@ pub struct ViaGoal {
     /// plane around it, between a pair's pads, and from a return via's pad
     /// to the antipad).
     pub clearance: f64,
+    /// Pad diameters to try (from, to); equal ends keep the pad.
+    pub pad: (f64, f64),
+    /// Try backdrilling the stub away.
+    pub try_backdrill: bool,
+    /// Passes over all the settings, at most.
+    pub passes: usize,
     /// Values per setting.
     pub steps: usize,
 }
+
+/// Return loss better than this is under the 3D solver's accuracy, dB.
+pub const FLOOR_DB: f64 = -45.0;
 
 impl ViaGoal {
     /// Sensible limits around a via.
@@ -56,6 +69,13 @@ impl ViaGoal {
             },
             try_oval: v.pair.is_some(),
             clearance,
+            // Down to a 4 mil annular ring (or the pad's own, if smaller).
+            pad: (
+                (v.drill + 2.0 * ((pad - v.drill) / 2.0).min(4.0)).min(pad),
+                pad,
+            ),
+            try_backdrill: false,
+            passes: 3,
             steps: 4,
         }
     }
@@ -70,6 +90,9 @@ pub struct ViaTrial {
     pub worst_rl: f64,
     /// Insertion loss at the goal frequency, dB.
     pub il: f64,
+    /// What the search minimises: the worst return loss, plus a tenth of
+    /// the mean, each no better than the solver's accuracy.
+    pub score: f64,
     /// Why the setup could not be built or solved, if so (not scored).
     pub error: Option<String>,
 }
@@ -98,6 +121,19 @@ pub fn judge(r: &ViaResult, f: f64) -> (f64, f64) {
     (worst, il)
 }
 
+/// The search's measure of a result (lower is better).
+pub fn score(r: &ViaResult, f: f64) -> f64 {
+    let (worst, _) = judge(r, f);
+    let band: Vec<f64> =
+        r.f.iter()
+            .zip(&r.s11)
+            .filter(|(x, _)| **x <= f * 1.0001)
+            .map(|(_, s)| s.db().max(FLOOR_DB))
+            .collect();
+    let mean = band.iter().sum::<f64>() / band.len().max(1) as f64;
+    worst.max(FLOOR_DB) + 0.1 * mean
+}
+
 fn span(a: f64, b: f64, n: usize) -> Vec<f64> {
     let (a, b) = (a.min(b), a.max(b));
     if n < 2 || b - a < 0.5 {
@@ -111,6 +147,7 @@ fn span(a: f64, b: f64, n: usize) -> Vec<f64> {
 /// The setup made legal: return vias clear of the antipad, a pair's pads
 /// apart.
 fn legal(mut v: ViaSetup, g: &ViaGoal) -> ViaSetup {
+    v.pad = v.pad.max(g.pad.0.min(g.pad.1)).max(v.drill);
     let pad = v.pad.max(v.drill);
     v.antipad = v.antipad.max(pad + 2.0 * g.clearance);
     if let Some(p) = v.pair {
@@ -122,12 +159,14 @@ fn legal(mut v: ViaSetup, g: &ViaGoal) -> ViaSetup {
 
 fn key(v: &ViaSetup) -> String {
     format!(
-        "{:.1}|{}|{:.1}|{}|{:.1}",
+        "{:.1}|{}|{:.1}|{}|{:.1}|{:.1}|{}",
         v.antipad,
         v.antipad_oval,
         v.pair.unwrap_or(0.0),
         v.returns,
-        v.return_dist
+        v.return_dist,
+        v.pad,
+        v.backdrill
     )
 }
 
@@ -148,21 +187,37 @@ pub fn optimise(
         q
     };
     let pair = base.pair.is_some();
-    // Each setting: its values and how to apply one.
+    // Each setting: its values, how to apply one, and whether values
+    // between them mean anything (for the parabola step).
     type Apply = fn(&mut ViaSetup, f64);
-    let mut axes: Vec<(&str, Vec<f64>, Apply)> = vec![(
+    let mut axes: Vec<(&str, Vec<f64>, Apply, bool)> = vec![(
         "antipad",
         span(goal.antipad.0, goal.antipad.1, goal.steps + 1),
         |v, x| v.antipad = x,
+        true,
     )];
+    if goal.pad.1 - goal.pad.0 > 0.5 {
+        axes.push((
+            "pad",
+            span(goal.pad.0, goal.pad.1, goal.steps.min(3)),
+            |v, x| v.pad = x,
+            true,
+        ));
+    }
     if pair && goal.try_oval {
-        axes.push(("oval", vec![0.0, 1.0], |v, x| v.antipad_oval = x > 0.5));
+        axes.push((
+            "oval",
+            vec![0.0, 1.0],
+            |v, x| v.antipad_oval = x > 0.5,
+            false,
+        ));
     }
     if pair && goal.pitch.1 - goal.pitch.0 > 0.5 {
         axes.push((
             "pitch",
             span(goal.pitch.0, goal.pitch.1, goal.steps),
             |v, x| v.pair = Some(x),
+            true,
         ));
     }
     if !goal.returns.is_empty() {
@@ -170,15 +225,25 @@ pub fn optimise(
             "returns",
             goal.returns.iter().map(|&n| n as f64).collect(),
             |v, x| v.returns = x as usize,
+            false,
         ));
     }
     axes.push((
         "return distance",
         span(goal.return_dist.0, goal.return_dist.1, goal.steps - 1),
         |v, x| v.return_dist = x,
+        true,
     ));
-    // The antipad again, finer, once the rest has moved.
-    let total_guess: usize = axes.iter().map(|a| a.1.len()).sum::<usize>() + goal.steps + 2;
+    if goal.try_backdrill && !base.backdrill {
+        axes.push((
+            "backdrill",
+            vec![0.0, 1.0],
+            |v, x| v.backdrill = x > 0.5,
+            false,
+        ));
+    }
+    let per_pass: usize = axes.iter().map(|a| a.1.len() + 1).sum();
+    let total_guess = 1 + per_pass * goal.passes.clamp(1, 2) + 2;
     let mut trials: Vec<ViaTrial> = Vec::new();
     let mut seen: std::collections::HashMap<String, usize> = Default::default();
     let done = std::cell::Cell::new(0usize);
@@ -189,10 +254,10 @@ pub fn optimise(
             return Ok(i);
         }
         let n0 = done.get() as f64;
-        let tg = total_guess as f64;
-        progress(n0 / tg, what);
+        let tg = (total_guess as f64).max(n0 + 1.0);
+        progress((n0 / tg).min(0.95), what);
         let r = fdtd::solve_with(stackup, &quick(&v), &|p| {
-            progress((n0 + p * 0.95) / tg, what)
+            progress(((n0 + p * 0.95) / tg).min(0.95), what)
         });
         done.set(done.get() + 1);
         match r {
@@ -202,6 +267,7 @@ pub fn optimise(
                     setup: v,
                     worst_rl,
                     il,
+                    score: score(&r, f),
                     error: None,
                 });
             }
@@ -211,34 +277,59 @@ pub fn optimise(
                 setup: v,
                 worst_rl: f64::INFINITY,
                 il: f64::NAN,
+                score: f64::INFINITY,
                 error: Some(e),
             }),
         }
         seen.insert(k, trials.len() - 1);
         Ok(trials.len() - 1)
     };
+    // Better by a clear margin (equal within it keeps the earlier, which
+    // is the simpler or the one already chosen).
+    let gain = 0.05;
     let mut best = run(base.clone(), "the starting setup", &mut trials)?;
-    for (name, values, apply) in axes.iter() {
-        for &x in values {
-            let mut v = trials[best].setup.clone();
-            apply(&mut v, x);
-            let i = run(v, &format!("{name} {x}"), &mut trials)?;
-            if trials[i].worst_rl < trials[best].worst_rl - 0.05 {
-                best = i;
+    for pass in 0..goal.passes.max(1) {
+        let before = trials[best].score;
+        for (name, values, apply, smooth) in axes.iter() {
+            let mut tried: Vec<(f64, f64)> = Vec::new();
+            for &x in values {
+                let mut v = trials[best].setup.clone();
+                apply(&mut v, x);
+                let i = run(v, &format!("{name} {x}"), &mut trials)?;
+                tried.push((x, trials[i].score));
+                if trials[i].score < trials[best].score - gain {
+                    best = i;
+                }
+            }
+            // The parabola through the best value and its neighbours.
+            if *smooth && tried.len() >= 3 {
+                tried.sort_by(|a, b| a.0.total_cmp(&b.0));
+                let m = (0..tried.len())
+                    .min_by(|&a, &b| tried[a].1.total_cmp(&tried[b].1))
+                    .unwrap_or(0);
+                if m > 0 && m + 1 < tried.len() {
+                    let ((x0, y0), (x1, y1), (x2, y2)) = (tried[m - 1], tried[m], tried[m + 1]);
+                    let den = (x1 - x0) * (y1 - y2) - (x1 - x2) * (y1 - y0);
+                    if den.abs() > 1e-12 && y0.is_finite() && y2.is_finite() {
+                        let num = (x1 - x0).powi(2) * (y1 - y2) - (x1 - x2).powi(2) * (y1 - y0);
+                        let x = ((x1 - 0.5 * num / den).clamp(x0, x2) * 2.0).round() / 2.0;
+                        if (x - x1).abs() >= 0.5 {
+                            let mut v = trials[best].setup.clone();
+                            apply(&mut v, x);
+                            let i = run(v, &format!("{name} {x} (between)"), &mut trials)?;
+                            if trials[i].score < trials[best].score - gain {
+                                best = i;
+                            }
+                        }
+                    }
+                }
             }
         }
-    }
-    // Refine the antipad about the best.
-    let a = trials[best].setup.antipad;
-    let step = ((goal.antipad.1 - goal.antipad.0) / goal.steps.max(1) as f64 / 2.0).max(1.0);
-    for x in [a - step, a + step] {
-        if x >= goal.antipad.0 - 1e-9 && x <= goal.antipad.1 + 1e-9 {
-            let mut v = trials[best].setup.clone();
-            v.antipad = x;
-            let i = run(v, &format!("antipad {x}"), &mut trials)?;
-            if trials[i].worst_rl < trials[best].worst_rl - 0.05 {
-                best = i;
-            }
+        if pass > 0 && trials[best].score > before - gain {
+            break;
+        }
+        if trials[best].score >= before - gain && pass == 0 && best == 0 {
+            break;
         }
     }
     if let Some(e) = &trials[best].error {
@@ -260,7 +351,8 @@ pub fn optimise(
 /// A one-line description of a setup.
 pub fn describe(v: &ViaSetup) -> String {
     let mut s = format!(
-        "antipad {:.1} mil{}",
+        "pad {:.1}, antipad {:.1} mil{}",
+        v.pad,
         v.antipad,
         if v.antipad_oval && v.pair.is_some() {
             " (oval)"
@@ -281,6 +373,9 @@ pub fn describe(v: &ViaSetup) -> String {
             "the via"
         }
     );
+    if v.backdrill {
+        s += ", backdrilled";
+    }
     s
 }
 

@@ -157,7 +157,9 @@ impl Studio {
         let mut st = Studio::default();
         let Some(s) = s else { return st };
         for part in s.split(';') {
-            let Some((k, v)) = part.split_once('=') else { continue };
+            let Some((k, v)) = part.split_once('=') else {
+                continue;
+            };
             let panes = || -> Vec<Pane> { v.split(',').filter_map(Pane::from_key).collect() };
             match k {
                 "L" => st.left.panes = panes(),
@@ -175,7 +177,13 @@ impl Studio {
     }
 
     pub fn to_store(&self) -> String {
-        let list = |d: &Dock| d.panes.iter().map(|p| p.key()).collect::<Vec<_>>().join(",");
+        let list = |d: &Dock| {
+            d.panes
+                .iter()
+                .map(|p| p.key())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
         let on = |d: &Dock| d.on.map(|p| p.key()).unwrap_or("");
         format!(
             "L={};R={};l={};r={};lo={};ro={};mm={};dark={}",
@@ -330,7 +338,11 @@ fn flat(ui: &mut egui::Ui, g: Glyph, tip: &str) -> bool {
                 (k.right_center(), k.left_center())
             };
             p.line_segment([a, b], s);
-            let d = if matches!(g, Glyph::ToRight) { -3.5 } else { 3.5 };
+            let d = if matches!(g, Glyph::ToRight) {
+                -3.5
+            } else {
+                3.5
+            };
             p.line_segment([b, b + Vec2::new(d, -3.5)], s);
             p.line_segment([b, b + Vec2::new(d, 3.5)], s);
         }
@@ -345,10 +357,19 @@ fn header(ui: &mut egui::Ui, title: &str, side: DockSide) -> Option<HeaderAct> {
         .inner_margin(egui::Margin::symmetric(8.0, 4.0))
         .show(ui, |ui| {
             ui.horizontal(|ui| {
-                ui.label(RichText::new(title).strong().color(Color32::WHITE).size(14.0));
+                ui.label(
+                    RichText::new(title)
+                        .strong()
+                        .color(Color32::WHITE)
+                        .size(14.0),
+                );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     ui.spacing_mut().item_spacing.x = 2.0;
-                    if flat(ui, Glyph::Close, "Close this panel (the Panels button brings it back)") {
+                    if flat(
+                        ui,
+                        Glyph::Close,
+                        "Close this panel (the Panels button brings it back)",
+                    ) {
                         act = Some(HeaderAct::Close);
                     }
                     if flat(ui, Glyph::Collapse, "Collapse the dock to a strip of tabs") {
@@ -382,7 +403,10 @@ fn pane_tab(ui: &mut egui::Ui, text: &str, on: bool, tip: &str) -> egui::Respons
     if on {
         p.rect_filled(rect, 0.0, ui.visuals().window_fill);
         p.rect_filled(
-            Rect::from_min_size(Pos2::new(rect.left(), rect.bottom() - 2.5), Vec2::new(rect.width(), 2.5)),
+            Rect::from_min_size(
+                Pos2::new(rect.left(), rect.bottom() - 2.5),
+                Vec2::new(rect.width(), 2.5),
+            ),
             0.0,
             ACCENT,
         );
@@ -422,13 +446,7 @@ fn strip_tab(ui: &mut egui::Ui, text: &str, tip: &str) -> egui::Response {
 }
 
 /// A document tab over the canvas.
-fn doc_tab(
-    ui: &mut egui::Ui,
-    icon: Icon,
-    text: &str,
-    on: bool,
-    closable: bool,
-) -> (bool, bool) {
+fn doc_tab(ui: &mut egui::Ui, icon: Icon, text: &str, on: bool, closable: bool) -> (bool, bool) {
     let font = FontId::proportional(13.0);
     let fg = if on {
         ui.visuals().strong_text_color()
@@ -457,9 +475,16 @@ fn doc_tab(
         bg,
     );
     if on {
-        p.rect_filled(Rect::from_min_size(rect.min, Vec2::new(rect.width(), 2.5)), 0.0, ACCENT);
+        p.rect_filled(
+            Rect::from_min_size(rect.min, Vec2::new(rect.width(), 2.5)),
+            0.0,
+            ACCENT,
+        );
     }
-    let ir = Rect::from_min_size(Pos2::new(rect.left() + 8.0, rect.center().y - 8.0), Vec2::splat(16.0));
+    let ir = Rect::from_min_size(
+        Pos2::new(rect.left() + 8.0, rect.center().y - 8.0),
+        Vec2::splat(16.0),
+    );
     toolbar::draw(&p, icon, ir, Color32::from_gray(214), true);
     let text_fg = if on { Color32::WHITE } else { fg };
     p.galley_with_override_text_color(
@@ -469,12 +494,19 @@ fn doc_tab(
     );
     let mut closed = false;
     if closable {
-        let cr = Rect::from_center_size(Pos2::new(rect.right() - 12.0, rect.center().y), Vec2::splat(14.0));
+        let cr = Rect::from_center_size(
+            Pos2::new(rect.right() - 12.0, rect.center().y),
+            Vec2::splat(14.0),
+        );
         let hot = resp.hover_pos().is_some_and(|h| cr.contains(h));
         if hot {
             p.rect_filled(cr, 2.0, Color32::from_gray(80));
         }
-        let c = if hot || on { Color32::from_gray(230) } else { Color32::from_gray(140) };
+        let c = if hot || on {
+            Color32::from_gray(230)
+        } else {
+            Color32::from_gray(140)
+        };
         let s = Stroke::new(1.3f32, c);
         let k = cr.shrink(3.5);
         p.line_segment([k.left_top(), k.right_bottom()], s);
@@ -626,7 +658,11 @@ impl App {
     pub(crate) fn panels_menu(&mut self, ui: &mut egui::Ui) {
         for p in Pane::ALL {
             let mut on = self.studio.is_open(p);
-            if ui.checkbox(&mut on, p.label()).on_hover_text(p.tip()).changed() {
+            if ui
+                .checkbox(&mut on, p.label())
+                .on_hover_text(p.tip())
+                .changed()
+            {
                 if on {
                     self.studio.show(p);
                 } else {
@@ -703,7 +739,11 @@ impl App {
                         } else {
                             (Icon::Board, name)
                         };
-                        let label = if self.dirty { format!("{label} *") } else { label };
+                        let label = if self.dirty {
+                            format!("{label} *")
+                        } else {
+                            label
+                        };
                         if doc_tab(ui, icon, &label, on, false).0 {
                             self.go_board();
                         }
@@ -716,9 +756,18 @@ impl App {
                             .as_ref()
                             .and_then(|p| p.file_stem())
                             .map(|s| format!("{} (schematic)", s.to_string_lossy()))
-                            .or_else(|| self.schem.slots.get(self.schem.current).map(|s| s.name.clone()))
+                            .or_else(|| {
+                                self.schem
+                                    .slots
+                                    .get(self.schem.current)
+                                    .map(|s| s.name.clone())
+                            })
                             .unwrap_or_else(|| "Schematic".into());
-                        let label = if self.schem.dirty { format!("{label} *") } else { label };
+                        let label = if self.schem.dirty {
+                            format!("{label} *")
+                        } else {
+                            label
+                        };
                         if doc_tab(ui, Icon::Schematic, &label, on, false).0 {
                             self.go_schematic();
                         }
@@ -730,7 +779,11 @@ impl App {
                         } else {
                             self.fped.source.clone()
                         };
-                        let label = if self.fped.dirty { format!("{label} *") } else { label };
+                        let label = if self.fped.dirty {
+                            format!("{label} *")
+                        } else {
+                            label
+                        };
                         let (click, close) = doc_tab(ui, Icon::Footprint, &label, on, true);
                         if click {
                             self.studio.home = false;
@@ -890,7 +943,9 @@ impl App {
             None
         });
         let mut pick = hit;
-        let pos = ctx.input(|i| i.pointer.hover_pos()).unwrap_or(self.view.rect.center());
+        let pos = ctx
+            .input(|i| i.pointer.hover_pos())
+            .unwrap_or(self.view.rect.center());
         egui::Area::new(egui::Id::new("accel"))
             .order(egui::Order::Foreground)
             .fixed_pos(pos + Vec2::new(12.0, 12.0))
@@ -898,9 +953,7 @@ impl App {
                 egui::Frame::popup(ui.style()).show(ui, |ui| {
                     ui.label(RichText::new(a.title()).strong().color(ACCENT));
                     for (_, key, label) in a.items() {
-                        let r = ui.add(
-                            egui::Button::new(format!("{key}   {label}")).frame(false),
-                        );
+                        let r = ui.add(egui::Button::new(format!("{key}   {label}")).frame(false));
                         if r.clicked() {
                             pick = Some(Some(*label));
                         }
@@ -982,13 +1035,17 @@ impl App {
             .open(&mut open)
             .default_width(420.0)
             .show(ctx, |ui| {
-                egui::Grid::new("keys_win").num_columns(2).striped(true).spacing([16.0, 4.0]).show(ui, |ui| {
-                    for (k, what) in KEYS {
-                        ui.label(RichText::new(*k).monospace().color(ACCENT));
-                        ui.label(*what);
-                        ui.end_row();
-                    }
-                });
+                egui::Grid::new("keys_win")
+                    .num_columns(2)
+                    .striped(true)
+                    .spacing([16.0, 4.0])
+                    .show(ui, |ui| {
+                        for (k, what) in KEYS {
+                            ui.label(RichText::new(*k).monospace().color(ACCENT));
+                            ui.label(*what);
+                            ui.end_row();
+                        }
+                    });
             });
         self.studio.keys_open = open;
     }
@@ -1020,10 +1077,18 @@ pub const KEYS: &[(&str, &str)] = &[
 ];
 
 fn section(ui: &mut egui::Ui, title: &str) {
-    ui.label(RichText::new(title).size(17.0).strong().color(Color32::from_gray(230)));
+    ui.label(
+        RichText::new(title)
+            .size(17.0)
+            .strong()
+            .color(Color32::from_gray(230)),
+    );
     let r = ui.available_rect_before_wrap();
     ui.painter().line_segment(
-        [Pos2::new(r.left(), r.top()), Pos2::new(r.left() + 280.0, r.top())],
+        [
+            Pos2::new(r.left(), r.top()),
+            Pos2::new(r.left() + 280.0, r.top()),
+        ],
         Stroke::new(1.5f32, ACCENT),
     );
     ui.add_space(8.0);
@@ -1036,7 +1101,19 @@ pub fn logo(p: &egui::Painter, r: Rect) {
     let s = Stroke::new(r.width() * 0.11, ACCENT);
     p.line_segment([at(0.2, 0.28), at(0.8, 0.28)], s);
     p.line_segment([at(0.5, 0.28), at(0.5, 0.8)], s);
-    p.circle_filled(at(0.2, 0.28), r.width() * 0.08, Color32::from_rgb(222, 184, 74));
-    p.circle_filled(at(0.8, 0.28), r.width() * 0.08, Color32::from_rgb(222, 184, 74));
-    p.circle_filled(at(0.5, 0.8), r.width() * 0.09, Color32::from_rgb(222, 184, 74));
+    p.circle_filled(
+        at(0.2, 0.28),
+        r.width() * 0.08,
+        Color32::from_rgb(222, 184, 74),
+    );
+    p.circle_filled(
+        at(0.8, 0.28),
+        r.width() * 0.08,
+        Color32::from_rgb(222, 184, 74),
+    );
+    p.circle_filled(
+        at(0.5, 0.8),
+        r.width() * 0.09,
+        Color32::from_rgb(222, 184, 74),
+    );
 }

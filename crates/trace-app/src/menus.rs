@@ -53,7 +53,13 @@ impl App {
     }
 
     fn file_menu(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, has: bool) {
-        if item(ui, true, "Open…", "Ctrl+O", "A project, board, schematic or library") {
+        if item(
+            ui,
+            true,
+            "Open…",
+            "Ctrl+O",
+            "A project, board, schematic or library",
+        ) {
             self.open_dialog();
         }
         if item(ui, true, "Open Gerber or ODB++ folder…", "", "") {
@@ -68,7 +74,11 @@ impl App {
                     .file_name()
                     .map(|n| n.to_string_lossy().into_owned())
                     .unwrap_or_default();
-                if ui.button(name).on_hover_text(p.display().to_string()).clicked() {
+                if ui
+                    .button(name)
+                    .on_hover_text(p.display().to_string())
+                    .clicked()
+                {
                     ui.close_menu();
                     self.open(p);
                 }
@@ -121,12 +131,32 @@ impl App {
     }
 
     fn edit_menu(&mut self, ui: &mut egui::Ui, has: bool) {
-        let undo = self.router.history.undo_label().map(|l| format!("Undo {l}"));
-        if item(ui, undo.is_some(), undo.as_deref().unwrap_or("Undo"), "Ctrl+Z", "") {
+        let undo = self
+            .router
+            .history
+            .undo_label()
+            .map(|l| format!("Undo {l}"));
+        if item(
+            ui,
+            undo.is_some(),
+            undo.as_deref().unwrap_or("Undo"),
+            "Ctrl+Z",
+            "",
+        ) {
             self.undo();
         }
-        let redo = self.router.history.redo_label().map(|l| format!("Redo {l}"));
-        if item(ui, redo.is_some(), redo.as_deref().unwrap_or("Redo"), "Ctrl+Y", "") {
+        let redo = self
+            .router
+            .history
+            .redo_label()
+            .map(|l| format!("Redo {l}"));
+        if item(
+            ui,
+            redo.is_some(),
+            redo.as_deref().unwrap_or("Redo"),
+            "Ctrl+Y",
+            "",
+        ) {
             self.redo();
         }
         ui.separator();
@@ -137,13 +167,25 @@ impl App {
         if item(ui, any, "Copy", "Ctrl+C", "") {
             self.copy_sel(false);
         }
-        if item(ui, has && self.edit.clip.is_some(), "Paste", "Ctrl+V", "Pasted parts get new designators and no nets") {
+        if item(
+            ui,
+            has && self.edit.clip.is_some(),
+            "Paste",
+            "Ctrl+V",
+            "Pasted parts get new designators and no nets",
+        ) {
             self.paste_clip();
         }
         if item(ui, any, "Delete", "Del", "") {
             self.delete_sel();
         }
-        if item(ui, self.picked.is_some() && !any, "Delete clicked track", "Del", "") {
+        if item(
+            ui,
+            self.picked.is_some() && !any,
+            "Delete clicked track",
+            "Del",
+            "",
+        ) {
             self.delete_picked();
         }
         ui.separator();
@@ -168,7 +210,13 @@ impl App {
             });
         });
         ui.separator();
-        if item(ui, has, "Find a net or part", "", "Type in the Navigator panel's search box") {
+        if item(
+            ui,
+            has,
+            "Find a net or part",
+            "",
+            "Type in the Navigator panel's search box",
+        ) {
             self.studio.show(crate::studio::Pane::Navigator);
         }
     }
@@ -185,7 +233,17 @@ impl App {
         if item(ui, board, "Zoom out", "", "") {
             self.zoom_by(1.0 / 1.5);
         }
-        if item(ui, board, if self.view.flip { "View from top" } else { "View from bottom" }, "B", "") {
+        if item(
+            ui,
+            board,
+            if self.view.flip {
+                "View from top"
+            } else {
+                "View from bottom"
+            },
+            "B",
+            "",
+        ) {
             self.view.flip = !self.view.flip;
             self.needs_fit = true;
         }
@@ -194,11 +252,27 @@ impl App {
             self.go_board();
             self.mode3d = false;
         }
-        if item(ui, has, "3D layout", "3", "The assembled board with its part models") {
+        if item(
+            ui,
+            has,
+            "3D layout",
+            "3",
+            "The assembled board with its part models",
+        ) {
             self.go_board();
             self.mode3d = true;
         }
-        if item(ui, board, if self.single.is_some() { "All layers" } else { "Single layer mode" }, "Shift+S", "") {
+        if item(
+            ui,
+            board,
+            if self.single.is_some() {
+                "All layers"
+            } else {
+                "Single layer mode"
+            },
+            "Shift+S",
+            "",
+        ) {
             let on = self.single.is_none();
             self.set_single(on);
         }
@@ -206,7 +280,17 @@ impl App {
         ui.menu_button("Panels", |ui| self.panels_menu(ui));
         ui.checkbox(&mut self.show_pairs, "Differential pairs table");
         ui.separator();
-        if item(ui, true, if self.studio.mm { "Units: switch to mil" } else { "Units: switch to mm" }, "Q", "") {
+        if item(
+            ui,
+            true,
+            if self.studio.mm {
+                "Units: switch to mil"
+            } else {
+                "Units: switch to mm"
+            },
+            "Q",
+            "",
+        ) {
             self.studio.mm = !self.studio.mm;
         }
         ui.menu_button("Theme", |ui| {
@@ -224,13 +308,25 @@ impl App {
         if item(ui, !self.schem.is_empty(), "Schematic sheets", "S", "Annotate, check (ERC), wire and Update PCB are in the Navigator panel while a sheet shows") {
             self.go_schematic();
         }
-        if item(ui, has || !self.fped.is_empty(), "Footprint library", "", "The board's footprints, or open a .PcbLib or .tracelib") {
+        if item(
+            ui,
+            has || !self.fped.is_empty(),
+            "Footprint library",
+            "",
+            "The board's footprints, or open a .PcbLib or .tracelib",
+        ) {
             self.studio.home = false;
             if !self.mode_fp {
                 self.open_footprints();
             }
         }
-        if item(ui, has, "Assembly variants…", "", "Parts left off or changed in each build of the board") {
+        if item(
+            ui,
+            has,
+            "Assembly variants…",
+            "",
+            "Parts left off or changed in each build of the board",
+        ) {
             self.variants.open = true;
         }
         ui.separator();
@@ -243,10 +339,22 @@ impl App {
         if item(ui, has, "Track (interactive routing)", "P, T", "") {
             self.run_command("Track (interactive routing)");
         }
-        if item(ui, has, "Differential pair", "P, I", "Route both nets of a pair together") {
+        if item(
+            ui,
+            has,
+            "Differential pair",
+            "P, I",
+            "Route both nets of a pair together",
+        ) {
             self.run_command("Differential pair routing");
         }
-        if item(ui, self.router.active.is_some(), "Via", "V", "While routing: a via, carrying on one layer down (Shift+V up)") {
+        if item(
+            ui,
+            self.router.active.is_some(),
+            "Via",
+            "V",
+            "While routing: a via, carrying on one layer down (Shift+V up)",
+        ) {
             self.place_via(false);
         }
         ui.separator();
@@ -256,40 +364,88 @@ impl App {
         if item(ui, has, "Dimension", "P, D", "") {
             self.set_tool(Tool::Dimension);
         }
-        if item(ui, has, "Polygon pour, region, keepout, cutout", "P, G", "Draw and edit shapes; a pour's thermal relief style") {
+        if item(
+            ui,
+            has,
+            "Polygon pour, region, keepout, cutout",
+            "P, G",
+            "Draw and edit shapes; a pour's thermal relief style",
+        ) {
             self.set_tool(Tool::Shape);
         }
         ui.separator();
-        if item(ui, has, "Component from a footprint library…", "P, C", "Open the footprint editor and place a footprint") {
+        if item(
+            ui,
+            has,
+            "Component from a footprint library…",
+            "P, C",
+            "Open the footprint editor and place a footprint",
+        ) {
             self.run_command("Component from a footprint library");
         }
         if item(ui, has, "Via stitching and fences…", "", "Fill a ground net's pours with stitching vias, or line a net's tracks with a via fence") {
             self.stitch.open = true;
         }
-        if item(ui, has, "Test points…", "", "One probe point per net for bed-of-nails or flying-probe test") {
+        if item(
+            ui,
+            has,
+            "Test points…",
+            "",
+            "One probe point per net for bed-of-nails or flying-probe test",
+        ) {
             self.tests.open = true;
         }
-        if item(ui, has, "Teardrops…", "", "Teardrops where tracks meet vias and pads") {
+        if item(
+            ui,
+            has,
+            "Teardrops…",
+            "",
+            "Teardrops where tracks meet vias and pads",
+        ) {
             self.tidy.open = true;
         }
     }
 
     fn design_menu(&mut self, ui: &mut egui::Ui, has: bool) {
-        if item(ui, has, "Rules and constraints (Constraint Manager)…", "C", "Length, match, skew and via limits, by net, class and pair") {
+        if item(
+            ui,
+            has,
+            "Rules and constraints (Constraint Manager)…",
+            "C",
+            "Length, match, skew and via limits, by net, class and pair",
+        ) {
             self.cm.open = true;
         }
-        if item(ui, has, "Layer stack and impedance…", "I", "Stack-up, widths for target impedance, and each pair's impedance") {
+        if item(
+            ui,
+            has,
+            "Layer stack and impedance…",
+            "I",
+            "Stack-up, widths for target impedance, and each pair's impedance",
+        ) {
             self.imp.open = true;
         }
         ui.separator();
-        if item(ui, has, "Copy block layout (reuse)…", "", "Place and route another instance of a block as one already laid out") {
+        if item(
+            ui,
+            has,
+            "Copy block layout (reuse)…",
+            "",
+            "Place and route another instance of a block as one already laid out",
+        ) {
             self.reuse.open = true;
         }
         let sel_n = self.edit.sel.parts.len();
         if item(ui, has && sel_n > 0, "Net tie: mark selected parts", "", "Their own copper may join their nets: the rule check does not call it a short. Click again to unmark") {
             self.toggle_net_ties();
         }
-        if item(ui, has, "Pin and gate swap…", "", "Two pins or two gates of a part trade nets; the schematic changes to match") {
+        if item(
+            ui,
+            has,
+            "Pin and gate swap…",
+            "",
+            "Two pins or two gates of a part trade nets; the schematic changes to match",
+        ) {
             self.swap.open = true;
         }
         ui.separator();
@@ -319,7 +475,13 @@ impl App {
             }
         }
         ui.separator();
-        if item(ui, has, "Make a panel…", "", "Copies of the board in a panel, with rails, tabs and mouse bites or V-score") {
+        if item(
+            ui,
+            has,
+            "Make a panel…",
+            "",
+            "Copies of the board in a panel, with rails, tabs and mouse bites or V-score",
+        ) {
             self.panel.open = true;
         }
     }
@@ -328,11 +490,23 @@ impl App {
         if item(ui, has, "Design Rule Check…", "D", "Clearance, shorts, width, unrouted nets, manufacturing and SI checks, live as you edit") {
             self.drc.open = true;
         }
-        if item(ui, has, "3D clearance…", "", "Part bodies that touch or come too close, Height rules, bodies over the board edge") {
+        if item(
+            ui,
+            has,
+            "3D clearance…",
+            "",
+            "Part bodies that touch or come too close, Height rules, bodies over the board edge",
+        ) {
             self.clear3d.open = true;
         }
         ui.separator();
-        if item(ui, has, "Teardrops and gloss…", "", "Teardrops; tidy routing: merge straight joins, cut dangling tracks, chamfer corners") {
+        if item(
+            ui,
+            has,
+            "Teardrops and gloss…",
+            "",
+            "Teardrops; tidy routing: merge straight joins, cut dangling tracks, chamfer corners",
+        ) {
             self.tidy.open = true;
         }
         if item(ui, has, "Test points…", "", "") {
@@ -365,7 +539,13 @@ impl App {
                 self.open_footprints();
             }
         }
-        if item(ui, has, "Measure distance", "Ctrl+M", "Click two points; they snap to pads, vias and track ends") {
+        if item(
+            ui,
+            has,
+            "Measure distance",
+            "Ctrl+M",
+            "Click two points; they snap to pads, vias and track ends",
+        ) {
             self.go_board();
             self.set_tool(Tool::Measure);
         }
@@ -378,21 +558,51 @@ impl App {
         if item(ui, has, "Interactive differential pair routing", "U, I", "") {
             self.run_command("Differential pair routing");
         }
-        if item(ui, has, "Interactive length tuning", "T", "Meanders to the target length") {
+        if item(
+            ui,
+            has,
+            "Interactive length tuning",
+            "T",
+            "Meanders to the target length",
+        ) {
             self.set_tool(Tool::Tune);
         }
         ui.separator();
-        if item(ui, has, "Auto route…", "U, A", "Route the open connections with tracks and vias, around what is already on the board") {
+        if item(
+            ui,
+            has,
+            "Auto route…",
+            "U, A",
+            "Route the open connections with tracks and vias, around what is already on the board",
+        ) {
             self.autoroute.open = true;
         }
-        if item(ui, has, "Fanout…", "U, F", "Fan out BGA parts: a dogbone to a via between the balls, or a via in each pad") {
+        if item(
+            ui,
+            has,
+            "Fanout…",
+            "U, F",
+            "Fan out BGA parts: a dogbone to a via between the balls, or a via in each pad",
+        ) {
             self.fan.open = true;
         }
-        if item(ui, has, "Gloss…", "", "Tidy routing: merge straight joins, cut dangling tracks, chamfer square corners") {
+        if item(
+            ui,
+            has,
+            "Gloss…",
+            "",
+            "Tidy routing: merge straight joins, cut dangling tracks, chamfer square corners",
+        ) {
             self.tidy.open = true;
         }
         ui.separator();
-        if item(ui, self.selected.is_some() && has, "Unroute selected net", "Shift+Del", "") {
+        if item(
+            ui,
+            self.selected.is_some() && has,
+            "Unroute selected net",
+            "Shift+Del",
+            "",
+        ) {
             if let (Some(n), Some(scene)) = (self.selected, &self.scene) {
                 let edits = router::unroute(&scene.board, n);
                 let name = scene.board.nets[n as usize].name.clone();
@@ -402,14 +612,26 @@ impl App {
     }
 
     fn reports_menu(&mut self, ui: &mut egui::Ui, has: bool) {
-        if item(ui, has, "Board information", "", "Size, layers, parts, nets, tracks and vias in the Properties panel") {
+        if item(
+            ui,
+            has,
+            "Board information",
+            "",
+            "Size, layers, parts, nets, tracks and vias in the Properties panel",
+        ) {
             self.edit.sel.clear();
             self.picked = None;
             self.selected = None;
             self.go_board();
             self.studio.show(crate::studio::Pane::Properties);
         }
-        if item(ui, has, "Differential pair report…", "", "Every pair's lengths, skew and impedance, as text") {
+        if item(
+            ui,
+            has,
+            "Differential pair report…",
+            "",
+            "Every pair's lengths, skew and impedance, as text",
+        ) {
             self.export_pairs();
         }
         if item(ui, has, "Design rule violations", "", "") {

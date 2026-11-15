@@ -53,6 +53,7 @@ pub mod validate;
 pub mod variant;
 pub mod viaopt;
 pub mod walk;
+pub mod zcheck;
 
 pub use board::*;
 pub use geometry::*;

@@ -35,6 +35,7 @@ mod toolbar;
 mod varwin;
 mod viawin;
 mod view3d;
+mod zwin;
 
 use eframe::egui::{self, Color32, RichText, Stroke};
 use scene::{Scene, Slot};
@@ -136,6 +137,7 @@ pub struct App {
     power: power::PowerWindow,
     pdn: pdnwin::PdnWindow,
     via: viawin::ViaWindow,
+    zcheck: zwin::ZWindow,
     pairs: pairwin::PairWindow,
     stitch: stitchwin::StitchWindow,
     tidy: tidywin::TidyWindow,
@@ -230,6 +232,7 @@ impl App {
             power: power::PowerWindow::default(),
             pdn: pdnwin::PdnWindow::default(),
             via: viawin::ViaWindow::default(),
+            zcheck: zwin::ZWindow::default(),
             pairs: pairwin::PairWindow::default(),
             stitch: stitchwin::StitchWindow::default(),
             tidy: tidywin::TidyWindow::default(),
@@ -3338,6 +3341,26 @@ impl eframe::App for App {
             self.pdn.show(ctx, &scene.board, self.selected);
             self.via.show(ctx, &scene.board, self.imp.stackup());
             self.pairs.show(ctx, &scene.board, self.imp.stackup());
+        }
+        let z_act = match &self.scene {
+            Some(scene) => self.zcheck.show(ctx, &scene.board, self.imp.stackup()),
+            None => None,
+        };
+        match z_act {
+            Some(zwin::ZAct::Show(net, at, text)) => {
+                let p = [at[0] as f32, at[1] as f32];
+                self.select_net(net, false);
+                self.focus = Some(Focus::Point(p, 3.0));
+                self.needs_fit = false;
+                self.marker = Some(p);
+                self.message = Some((text, false));
+            }
+            Some(zwin::ZAct::Via(setup, target)) => {
+                if let Some(scene) = &self.scene {
+                    self.via.load(&scene.board, setup, target);
+                }
+            }
+            None => {}
         }
         let placed = self
             .scene

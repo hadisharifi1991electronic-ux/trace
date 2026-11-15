@@ -104,6 +104,15 @@ pub struct ViaSetup {
     /// overstates the loss at low frequencies; off by default, as the
     /// via's own dielectric loss is small beside the traces').
     pub lossy: bool,
+    /// Add the barrel's copper loss (skin effect, roughness `rough_um`)
+    /// and, when not `lossy`, its dielectric loss (the stack-up's Df, 0.02
+    /// where none is given) along the barrel from layer to layer.
+    pub metal_loss: bool,
+    /// Copper roughness for that loss, µm RMS (0: smooth).
+    pub rough_um: f64,
+    /// Er and Df for every dielectric layer, in place of the stack-up's.
+    pub er: Option<f64>,
+    pub df: Option<f64>,
 }
 
 impl ViaSetup {
@@ -125,6 +134,10 @@ impl ViaSetup {
             points: 400,
             cell: 0.0,
             lossy: false,
+            metal_loss: true,
+            rough_um: 1.0,
+            er: None,
+            df: None,
         }
     }
 }
@@ -498,6 +511,43 @@ struct Probe {
     i: Vec<(usize, f64, u8)>,
 }
 
+/// `stackup` with every dielectric layer at `er` and `df` where given.
+pub fn materials(stackup: &Stackup, er: Option<f64>, df: Option<f64>) -> Stackup {
+    let mut s = stackup.clone();
+    for l in &mut s.layers {
+        if l.kind == LayerKind::Dielectric {
+            if let Some(e) = er {
+                l.dielectric_constant = Some(e);
+            }
+            if let Some(d) = df {
+                l.loss_tangent = Some(d);
+            }
+        }
+    }
+    s
+}
+
+/// The stack-up's Er and Df between two copper layers (thickness
+/// weighted; Df 0.02 where none is given), as the via sees them.
+pub fn materials_between(stackup: &Stackup, from: u8, to: u8) -> Option<(f64, f64)> {
+    let st = stack(stackup);
+    let (a, b) = (*st.sheet.get(from as usize)?, *st.sheet.get(to as usize)?);
+    let (lo, hi) = (a.min(b), a.max(b));
+    let (lo, hi) = if hi - lo < 1e-9 {
+        (0.0, *st.sheet.last()?)
+    } else {
+        (lo, hi)
+    };
+    let (mut w, mut e, mut d) = (0.0, 0.0, 0.0);
+    for sl in &st.slabs {
+        let t = (sl.1.min(hi) - sl.0.max(lo)).max(0.0);
+        w += t;
+        e += t * sl.2;
+        d += t * if sl.3 > 0.0 { sl.3 } else { 0.02 };
+    }
+    (w > 0.0).then(|| (e / w, d / w))
+}
+
 /// Solves a via transition on `stackup`.
 pub fn solve(stackup: &Stackup, setup: &ViaSetup) -> Result<ViaResult, String> {
     solve_with(stackup, setup, &|_| {})
@@ -510,6 +560,14 @@ pub fn solve_with(
     progress: &dyn Fn(f64),
 ) -> Result<ViaResult, String> {
     let clock = std::time::Instant::now();
+    // Materials given on the setup stand for the stack-up's.
+    let own;
+    let stackup = if setup.er.is_some() || setup.df.is_some() {
+        own = materials(stackup, setup.er, setup.df);
+        &own
+    } else {
+        stackup
+    };
     let st = stack(stackup);
     let nl = st.sheet.len();
     if nl < 2 {
@@ -1547,6 +1605,54 @@ pub fn solve_with(
             (a + b) / 2.0 * zr
         })
     };
+    // Loss along the barrel, which the grid's perfect copper leaves out:
+    // a coaxial line of the barrel's length, the drill inside the antipad,
+    // at the via's own impedance (each leg's, Zdiff/2, for a pair).
+    if setup.metal_loss {
+        let (za, zb) = (st.sheet[from], st.sheet[to]);
+        let (lo, hi) = (za.min(zb), za.max(zb));
+        let (mut w, mut er_sum, mut df_sum) = (0.0, 0.0, 0.0);
+        for sl in &st.slabs {
+            let t = (sl.1.min(hi) - sl.0.max(lo)).max(0.0);
+            w += t;
+            er_sum += t * sl.2;
+            df_sum += t * if sl.3 > 0.0 { sl.3 } else { 0.02 };
+        }
+        if w > 0.0 {
+            let (er, df) = (er_sum / w, df_sum / w);
+            let len = (hi - lo) * MIL;
+            let a = setup.drill / 2.0 * MIL;
+            let b = (setup.antipad / 2.0 * MIL).max(a * 1.05);
+            let z_leg = z_via
+                .map(|z| if ns == 2 { z / 2.0 } else { z })
+                .filter(|z| *z > 1.0)
+                .unwrap_or(60.0 / er.sqrt() * (b / a).ln());
+            const RHO: f64 = 1.72e-8;
+            let mut at_mid = (0.0, 0.0);
+            for (k, &f) in freqs.iter().enumerate() {
+                let rs = (std::f64::consts::PI * f * MU0 * RHO).sqrt()
+                    * crate::sim::loss::rough(f, setup.rough_um);
+                let ac = rs / (2.0 * z_leg) * (1.0 / a + 1.0 / b) / std::f64::consts::TAU;
+                let ad = if setup.lossy {
+                    0.0
+                } else {
+                    std::f64::consts::PI * f * er.sqrt() * df / C0
+                };
+                s21[k] = s21[k].scale((-(ac + ad) * len).exp());
+                if f <= setup.fmax_ghz * 0.5e9 {
+                    at_mid = (ac * len * 8.686, ad * len * 8.686);
+                }
+            }
+            notes.push(format!(
+                "barrel loss added (copper {:.1} um rough, Df {:.4}): {:.3} dB copper + {:.3} dB dielectric at {:.0} GHz",
+                setup.rough_um,
+                df,
+                at_mid.0,
+                at_mid.1,
+                setup.fmax_ghz / 2.0
+            ));
+        }
+    }
     if power > 1.005 {
         notes.push(format!(
             "the grid gave up to {:.1} % more power out than in; scaled back to passive (a finer cell would help)",
@@ -2045,7 +2151,7 @@ pub fn board_via(board: &crate::Board) -> Option<(f64, f64, f64)> {
     Some((drill, pad, antipad))
 }
 
-fn point_in(v: &[[f64; 2]], p: [f64; 2]) -> bool {
+pub(crate) fn point_in(v: &[[f64; 2]], p: [f64; 2]) -> bool {
     let mut inside = false;
     let mut j = v.len() - 1;
     for i in 0..v.len() {
@@ -2060,7 +2166,7 @@ fn point_in(v: &[[f64; 2]], p: [f64; 2]) -> bool {
     inside
 }
 
-fn seg_dist(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
+pub(crate) fn seg_dist(p: [f64; 2], a: [f64; 2], b: [f64; 2]) -> f64 {
     let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
     let l2 = dx * dx + dy * dy;
     let t = if l2 > 0.0 {

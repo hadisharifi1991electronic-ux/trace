@@ -12,12 +12,13 @@ fn internal(v: i32) -> f64 {
 /// Maps Altium layer ids (1 top copper ... 32 bottom copper, 33+ other
 /// layers) onto Trace layers, numbering copper from the top as stacked.
 pub(crate) struct LayerMap {
-    copper: [Option<u8>; 33],
+    /// Altium ids 1..=32 (signal) and 39..=54 (internal planes).
+    copper: [Option<u8>; 55],
 }
 
 impl LayerMap {
     pub(crate) fn new(stackup: &Stackup) -> Self {
-        let mut copper = [None; 33];
+        let mut copper = [None; 55];
         let ids: Vec<u8> = stackup
             .copper_layers()
             .filter_map(|l| l.altium_id)
@@ -32,7 +33,9 @@ impl LayerMap {
 
     /// Altium layer byte of copper layer `i` (counted from the top).
     pub(crate) fn id_of(&self, i: u8) -> Option<u8> {
-        (1..=32u8).find(|&id| self.copper[id as usize] == Some(i))
+        (1..=32u8)
+            .chain(39..=54)
+            .find(|&id| self.copper[id as usize] == Some(i))
     }
 
     pub(crate) fn get(&self, id: u8) -> LayerRef {
@@ -1017,6 +1020,7 @@ fn read_binary(path: &Path) -> Result<Board> {
     // Vias the board's back drilling rule asks to backdrill, before
     // pouring so pours keep clear of them.
     trace_core::backdrill::apply_rules(&mut board);
+    plane_pours(&mut board, &board_props);
     // Pours saved without their copper are poured here.
     trace_core::pour::pour_missing(&mut board);
     trace_core::pour::mark_unpoured(&mut board);
@@ -1093,6 +1097,45 @@ fn read_models<R: std::io::Read + std::io::Seek>(
     Ok(())
 }
 
+/// Altium internal planes are negative: copper everywhere but where the
+/// plane clearance cuts round other nets. Each plane layer with a net of
+/// its own gets a pour over the whole board, poured on load.
+pub(crate) fn plane_pours(board: &mut Board, props: &Props) {
+    let planes: Vec<(u8, u8)> = board
+        .stackup
+        .copper_layers()
+        .enumerate()
+        .filter_map(|(i, l)| {
+            l.altium_id
+                .filter(|id| (39..=54).contains(id))
+                .map(|id| (i as u8, id - 38))
+        })
+        .collect();
+    if planes.is_empty() || board.geometry.outline.len() < 3 {
+        return;
+    }
+    for (layer, n) in planes {
+        let name = p_str(props, &format!("PLANE{n}NETNAME"));
+        let Some(net) = board.nets.iter().position(|x| x.name == name) else {
+            continue; // no net, or a split plane ("(Multiple Nets)")
+        };
+        board.nets[net].has_pour = true;
+        board.geometry.pours.push(Pour {
+            layer: LayerRef::Copper(layer),
+            net: Some(net as u32),
+            outline: board.geometry.outline.clone(),
+            remove_dead: false,
+            order: i32::MIN,
+            min_island: 0.0,
+            connect: None,
+        });
+    }
+}
+
+fn p_str(p: &Props, k: &str) -> String {
+    p.get(k).unwrap_or("").to_string()
+}
+
 pub(crate) fn parse_stackup(p: &Props) -> Stackup {
     let mut layers = Vec::new();
     for i in 0.. {
@@ -1104,7 +1147,9 @@ pub(crate) fn parse_stackup(p: &Props) -> Stackup {
         let material = p.get(&key("DIELMATERIAL")).map(str::to_string);
         let lname = name.to_ascii_lowercase();
         let kind = match id >> 16 {
-            0x0100 => LayerKind::Copper,
+            // Signal layers, and internal planes (negative copper, poured
+            // here from the plane's net).
+            0x0100 | 0x0101 => LayerKind::Copper,
             0x0104 => LayerKind::Dielectric,
             _ if lname.contains("mask") => LayerKind::SolderMask,
             _ if lname.contains("silk") || lname.contains("overlay") => LayerKind::Silkscreen,
@@ -1119,7 +1164,10 @@ pub(crate) fn parse_stackup(p: &Props) -> Stackup {
         .unwrap_or_default();
         layers.push(StackLayer {
             // Bottom copper is stored as 0xFFFF; primitives call it layer 32.
-            altium_id: (kind == LayerKind::Copper).then_some(if id & 0xFFFF == 0xFFFF {
+            // Internal plane n is layer 38 + n.
+            altium_id: (kind == LayerKind::Copper).then_some(if id >> 16 == 0x0101 {
+                38 + (id & 0xFF) as u8
+            } else if id & 0xFFFF == 0xFFFF {
                 32
             } else {
                 (id & 0xFF) as u8
@@ -1175,5 +1223,37 @@ pub(crate) fn parse_rule(p: &Props) -> Rule {
         priority: p.int("PRIORITY").unwrap_or(0),
         scope,
         params,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::records::split_pcb;
+
+    fn props(text: &str) -> Props {
+        let mut d = (text.len() as u32 + 1).to_le_bytes().to_vec();
+        d.extend_from_slice(text.as_bytes());
+        d.push(0);
+        split_pcb(&d, 0).remove(0)
+    }
+
+    #[test]
+    fn internal_planes_are_copper() {
+        let p = props(
+            "|V9_STACK_LAYER0_NAME=Top|V9_STACK_LAYER0_LAYERID=16777217|V9_STACK_LAYER0_COPTHICK=1.4mil\
+             |V9_STACK_LAYER1_NAME=D1|V9_STACK_LAYER1_LAYERID=17039361|V9_STACK_LAYER1_DIELHEIGHT=5mil\
+             |V9_STACK_LAYER2_NAME=GND|V9_STACK_LAYER2_LAYERID=16842754|V9_STACK_LAYER2_COPTHICK=1.4mil\
+             |V9_STACK_LAYER3_NAME=D2|V9_STACK_LAYER3_LAYERID=17039362|V9_STACK_LAYER3_DIELHEIGHT=40mil\
+             |V9_STACK_LAYER4_NAME=Bot|V9_STACK_LAYER4_LAYERID=16842751|V9_STACK_LAYER4_COPTHICK=1.4mil|",
+        );
+        let s = parse_stackup(&p);
+        let ids: Vec<Option<u8>> = s.copper_layers().map(|l| l.altium_id).collect();
+        assert_eq!(ids, vec![Some(1), Some(40), Some(32)]);
+        let m = LayerMap::new(&s);
+        assert_eq!(m.id_of(1), Some(40));
+        assert_eq!(m.id_of(2), Some(32));
+        // Primitives on a plane layer (split lines) stay off the copper.
+        assert!(matches!(m.get(40), LayerRef::Other(40)));
     }
 }

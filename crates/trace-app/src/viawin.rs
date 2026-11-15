@@ -42,6 +42,10 @@ pub struct ViaWindow {
     to_target: bool,
     sizing: Option<SizeRun>,
     sized_note: Option<String>,
+    /// Er and Df of one's own instead of the stack-up's.
+    own_mat: bool,
+    er: f64,
+    df: f64,
 }
 
 impl Default for ViaWindow {
@@ -66,11 +70,36 @@ impl Default for ViaWindow {
             to_target: true,
             sizing: None,
             sized_note: None,
+            own_mat: false,
+            er: 4.0,
+            df: 0.02,
         }
     }
 }
 
 impl ViaWindow {
+    /// Opens the window on a via as built (from the impedance check), with
+    /// its target.
+    pub fn load(&mut self, board: &Board, s: ViaSetup, target: f64) {
+        self.board_key = (board as *const Board as usize, board.geometry.vias.len());
+        self.is_pair = s.pair.is_some();
+        if let Some(p) = s.pair {
+            self.pitch = p;
+        }
+        self.auto_width = s.w_from.is_none() && s.w_to.is_none();
+        let mut s = s;
+        // The check's quick grid; the window chooses its own.
+        s.cell = 0.0;
+        s.fmax_ghz = self.setup.fmax_ghz.max(s.fmax_ghz);
+        s.points = self.setup.points.max(s.points);
+        self.setup = s;
+        self.target_z = target;
+        self.result = None;
+        self.opt = None;
+        self.sized_note = None;
+        self.open = true;
+    }
+
     pub fn show(&mut self, ctx: &egui::Context, board: &Board, stackup: &Stackup) {
         if !self.open {
             return;
@@ -254,6 +283,64 @@ impl ViaWindow {
                         .range(2.0..=100.0)
                         .suffix(" GHz"),
                 );
+                ui.end_row();
+                // Materials: the stack-up's between the two layers, or
+                // values of one's own for every dielectric layer.
+                let stack = fdtd::materials_between(stackup, s.from, s.to);
+                ui.label("Dielectric");
+                ui.horizontal(|ui| {
+                    if ui
+                        .checkbox(&mut self.own_mat, "own")
+                        .on_hover_text(
+                            "Off: each layer's Er and Df from the stack-up. On: these for every \
+                             dielectric layer (traces and via alike)",
+                        )
+                        .changed()
+                        && self.own_mat
+                    {
+                        if let Some((e, d)) = stack {
+                            self.er = (e * 100.0).round() / 100.0;
+                            self.df = (d * 10000.0).round() / 10000.0;
+                        }
+                    }
+                    if self.own_mat {
+                        ui.label("Er");
+                        ui.add(
+                            egui::DragValue::new(&mut self.er)
+                                .speed(0.01)
+                                .range(1.0..=15.0)
+                                .max_decimals(2),
+                        );
+                        ui.label("Df");
+                        ui.add(
+                            egui::DragValue::new(&mut self.df)
+                                .speed(0.0002)
+                                .range(0.0..=0.1)
+                                .max_decimals(4),
+                        );
+                    } else if let Some((e, d)) = stack {
+                        ui.label(RichText::new(format!("Er {e:.2}, Df {d:.4} (stack-up)")).weak());
+                    }
+                });
+                s.er = self.own_mat.then_some(self.er);
+                s.df = self.own_mat.then_some(self.df);
+                ui.label("Loss");
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut s.metal_loss, "copper and Df")
+                        .on_hover_text(
+                            "The barrel's skin-effect copper loss (with roughness) and its \
+                             dielectric loss; off: perfect copper, no Df (the grid alone)",
+                        );
+                    ui.add_enabled(
+                        s.metal_loss,
+                        egui::DragValue::new(&mut s.rough_um)
+                            .speed(0.05)
+                            .range(0.0..=10.0)
+                            .max_decimals(2)
+                            .prefix("rough ")
+                            .suffix(" µm"),
+                    );
+                });
                 ui.end_row();
             });
         egui::CollapsingHeader::new("Manufacturing limits and target")
@@ -517,7 +604,7 @@ impl ViaWindow {
                 let (s1, il) = viaopt::judge(&o.best, self.opt_f);
                 ui.label(
                     RichText::new(format!(
-                        "Best: {}. Worst return loss to {:.1} GHz {:.1} dB (was {:.1} dB); {:.2} dB through at {:.1} GHz.",
+                        "Best: {}. Worst return loss to {:.1} GHz {:.1} dB (was {:.1} dB); {:.3} dB through at {:.1} GHz.",
                         viaopt::describe(&o.best_setup),
                         self.opt_f,
                         s1,
@@ -550,7 +637,7 @@ impl ViaWindow {
                                         ui.label("");
                                     } else {
                                         ui.label(format!("{:.1} dB", t.worst_rl));
-                                        ui.label(format!("{:.2} dB", t.il));
+                                        ui.label(format!("{:.3} dB", t.il));
                                     }
                                     ui.end_row();
                                 }
@@ -682,7 +769,7 @@ fn plot(ui: &mut egui::Ui, r: &ViaResult, kind: &str) {
                     egui::pos2(x(r.f[k]) + 6.0, plot.bottom() - 6.0),
                     egui::Align2::LEFT_BOTTOM,
                     format!(
-                        "{:.2} GHz  {kind}21 {:.2} dB  {kind}11 {:.1} dB",
+                        "{:.2} GHz  {kind}21 {:.3} dB  {kind}11 {:.1} dB",
                         r.f[k],
                         r.s21[k].db(),
                         r.s11[k].db()

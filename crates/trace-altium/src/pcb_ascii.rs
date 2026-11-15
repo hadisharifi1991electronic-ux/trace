@@ -647,6 +647,7 @@ pub(crate) fn read(path: &Path) -> Result<Board> {
     // pouring so pours keep clear of them.
     trace_core::backdrill::apply_rules(&mut board);
     // Pours saved without their copper are poured here.
+    crate::pcb::plane_pours(&mut board, &board_props);
     trace_core::pour::pour_missing(&mut board);
     trace_core::pour::mark_unpoured(&mut board);
     trace_core::connectivity::analyse(&mut board);

@@ -60,9 +60,17 @@ USAGE:
                                                 DC voltage drop (IR drop) over a supply net's pours, tracks and
                                                 vias from the source part to the loads (no --load: the total,
                                                 default 1 A, shared by pad count); with out, a drop map per layer
+    trace zcheck <board> [--tol 10] [--rule PATTERN=Z] [--diff PATTERN=Z] [--no-pairs] [--no-rf]
+                 [--no-vias] [--via-kinds 6] [--min-length 30] [report.csv]
+                                                board-wide impedance check: every controlled trace run (field
+                                                solver, per net, layer and width) and every kind of via (3D)
+                                                against its target. Targets: --rule/--diff (net or pair name,
+                                                * and ?), every pair (100, USB 90, PCIe/SATA 85) and nets on
+                                                coax connector pins (50). Off by more than --tol % fails.
     trace via <board> <layer> <layer> [--drill D] [--pad P] [--antipad A] [--width W] [--width2 W]
               [--pair PITCH] [--oval] [--returns N@D] [--backdrill] [--fmax 40] [--cell C]
               [--target 50] [--fab drill=8-20,ring=4,antipad=20-80,gap=4]
+              [--er 3.6] [--df 0.004] [--lossless] [--rough 1.0] [--feed 1in]
               [--optimise GHz [--free-pitch] [--try-backdrill] [--keep-pad]] [--check] [out.s2p] [out.svg]
                                                 3D full-wave (FDTD) solve of a via from one layer to another
                                                 with the board's stack-up (default drill, pad and antipad from
@@ -233,6 +241,7 @@ fn main() -> ExitCode {
         ["ir", file, net, rest @ ..] => ir(file, net, rest),
         ["pdn", file, net, rest @ ..] => pdn_cmd(file, net, rest),
         ["via", file, from, to, rest @ ..] => via(file, from, to, rest),
+        ["zcheck", file, rest @ ..] => zcheck_cmd(file, rest),
         ["pairsize", file, layer, rest @ ..] => pairsize(file, layer, rest),
         ["validate", rest @ ..] => validate(rest),
         ["stitch", file, net, out, rest @ ..] => stitch_cmd(file, net, out, rest),
@@ -2121,6 +2130,120 @@ fn validate(rest: &[&str]) -> Res {
     }
 }
 
+fn zcheck_cmd(file: &str, rest: &[&str]) -> Res {
+    use trace_core::zcheck::{self, Goal, Rule};
+    let b = board(file)?;
+    let mut goal = Goal::default();
+    let mut out: Option<&str> = None;
+    let mut i = 0;
+    let rule = |a: &str, diff: bool| -> Result<Rule, String> {
+        let (p, z) = a
+            .rsplit_once('=')
+            .ok_or_else(|| format!("{a}: give PATTERN=OHMS"))?;
+        let ohms: f64 = z
+            .trim_end_matches(|c: char| c.is_alphabetic())
+            .parse()
+            .map_err(|_| format!("{a}: bad ohms"))?;
+        Ok(Rule {
+            pattern: p.to_string(),
+            diff,
+            ohms,
+        })
+    };
+    while i < rest.len() {
+        let next = |i: usize| -> Result<&str, String> {
+            rest.get(i + 1)
+                .copied()
+                .ok_or_else(|| format!("{} needs a value", rest[i]))
+        };
+        match rest[i] {
+            "--tol" => {
+                goal.tolerance = next(i)?.trim_end_matches('%').parse::<f64>()? / 100.0;
+                i += 1;
+            }
+            "--rule" => {
+                goal.rules.push(rule(next(i)?, false)?);
+                i += 1;
+            }
+            "--diff" => {
+                goal.rules.push(rule(next(i)?, true)?);
+                i += 1;
+            }
+            "--no-pairs" => goal.pairs = false,
+            "--no-rf" => goal.rf = false,
+            "--no-vias" => goal.vias = false,
+            "--via-kinds" => {
+                goal.via_kinds = next(i)?.parse()?;
+                i += 1;
+            }
+            "--min-length" => {
+                goal.min_length = next(i)?.trim_end_matches("mil").parse()?;
+                i += 1;
+            }
+            a if !a.starts_with("--") && out.is_none() => out = Some(a),
+            a => return Err(format!("unknown option {a}").into()),
+        }
+        i += 1;
+    }
+    let geo = b.layer_geometry();
+    let nets = zcheck::controlled(&b, &goal);
+    println!("Controlled nets: {}", nets.len());
+    for c in nets.iter().take(40) {
+        println!(
+            "  {} {:.0} Ω {} ({})",
+            c.name,
+            c.ohms,
+            if c.diff { "differential" } else { "single" },
+            c.why
+        );
+    }
+    if nets.len() > 40 {
+        println!("  and {} more", nets.len() - 40);
+    }
+    let t = std::time::Instant::now();
+    let last = std::cell::Cell::new(String::new());
+    let rep = zcheck::check(&b, &b.stackup, &goal, &|p, what| {
+        if what != last.take().as_str() {
+            eprintln!("  {:3.0} % {what}", p * 100.0);
+        }
+        last.set(what.to_string());
+    });
+    println!("{} ({:.0} s)", rep.summary(), t.elapsed().as_secs_f64());
+    let fails: Vec<_> = rep.failing().collect();
+    if !fails.is_empty() {
+        println!("Off target:");
+        for f in &fails {
+            println!("  {}", f.describe(&geo));
+        }
+    }
+    let ok = rep.findings.len() - fails.len();
+    if ok > 0 {
+        println!("On target: {ok}");
+        for f in rep
+            .findings
+            .iter()
+            .filter(|f| f.off().abs() <= rep.tolerance)
+            .take(20)
+        {
+            println!("  {}", f.describe(&geo));
+        }
+    }
+    if rep.vias_skipped.0 > 0 {
+        println!(
+            "Not solved: {} more via kind(s), {} via(s) (--via-kinds to raise)",
+            rep.vias_skipped.0, rep.vias_skipped.1
+        );
+    }
+    for n in &rep.notes {
+        println!("Note: {n}");
+    }
+    if let Some(o) = out {
+        std::fs::write(o, rep.csv(&geo))?;
+        println!("Wrote {o}");
+    }
+    Ok(())
+}
+
 fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     use trace_core::fdtd::{self, ViaSetup};
     let b = board(file)?;
@@ -2154,6 +2277,7 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     let (mut try_backdrill, mut keep_pad, mut check) = (false, false, false);
     let mut fab: Option<trace_core::viaopt::FabLimits> = None;
     let mut target: Option<f64> = None;
+    let mut feed: Option<f64> = None;
     let mut it = rest.iter();
     let len = |x: Option<&&str>, what: &str| -> Result<f64, Box<dyn std::error::Error>> {
         let x = x.ok_or(format!("{what} needs a length"))?;
@@ -2174,6 +2298,24 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
             "--try-backdrill" => try_backdrill = true,
             "--keep-pad" => keep_pad = true,
             "--check" => check = true,
+            "--lossless" => v.metal_loss = false,
+            "--rough" => {
+                let x = it.next().ok_or("--rough needs um")?;
+                v.rough_um = x
+                    .trim_end_matches("um")
+                    .parse::<f64>()
+                    .map_err(|_| format!("not a roughness: {x}"))?;
+            }
+            "--feed" => feed = Some(len(it.next(), a)?),
+            "--er" | "--df" => {
+                let x = it.next().ok_or(format!("{a} needs a value"))?;
+                let v_: f64 = x.parse().map_err(|_| format!("not a number: {x}"))?;
+                if a == "--er" {
+                    v.er = Some(v_);
+                } else {
+                    v.df = Some(v_);
+                }
+            }
             "--target" => {
                 let x = it.next().ok_or("--target needs ohms")?;
                 target = Some(
@@ -2240,7 +2382,31 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
             _ => return Err(format!("unknown option {a}").into()),
         }
     }
+    // Materials given stand for the stack-up's everywhere (traces too).
+    let (b, geo) = if v.er.is_some() || v.df.is_some() {
+        let mut b = b;
+        b.stackup = fdtd::materials(&b.stackup, v.er, v.df);
+        let geo = b.layer_geometry();
+        (b, geo)
+    } else {
+        (b, geo)
+    };
     let names = |l: u8| geo[l as usize].name.clone();
+    if let Some((er, df)) = fdtd::materials_between(&b.stackup, v.from, v.to) {
+        println!(
+            "Dielectric between the layers: Er {er:.2}, Df {df:.4}{}; copper {}",
+            if v.er.is_some() || v.df.is_some() {
+                " (as given)"
+            } else {
+                " (stack-up)"
+            },
+            if v.metal_loss {
+                format!("loss on, {:.1} um rough", v.rough_um)
+            } else {
+                "perfect (--lossless)".into()
+            }
+        );
+    }
     println!(
         "Via {} to {}{}: drill {:.1} mil, pad {:.1}, antipad {:.1}, {} return via(s) at {:.1} mil{}",
         names(v.from),
@@ -2324,7 +2490,7 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
         for tr in &o.trials {
             match &tr.error {
                 None => println!(
-                    "  {:>7.1} dB {:>7.2} dB  {}",
+                    "  {:>7.1} dB {:>7.3} dB  {}",
                     tr.worst_rl,
                     tr.il,
                     viaopt::describe(&tr.setup)
@@ -2343,7 +2509,7 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
         let (s0, _) = viaopt::judge(&o.start, fg);
         let (s1, il) = viaopt::judge(&o.best, fg);
         println!(
-            "Best: {}\n  worst return loss {s1:.1} dB (was {s0:.1} dB), {il:.2} dB through at {fg} GHz",
+            "Best: {}\n  worst return loss {s1:.1} dB (was {s0:.1} dB), {il:.3} dB through at {fg} GHz",
             viaopt::describe(&o.best_setup)
         );
         let title = format!("Via {} to {} (optimised)", names(v.from), names(v.to));
@@ -2431,6 +2597,42 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     );
     for note in &r.notes {
         println!("Note: {note}");
+    }
+    if let Some(len_mil) = feed {
+        // The via with `len_mil` of its own traces each side: the traces'
+        // loss from the 2D field solver (per leg for a pair).
+        let lines: Vec<Option<trace_core::field::Line>> = [(v.from, r.w[0]), (v.to, r.w[1])]
+            .iter()
+            .map(|&(l, w)| {
+                geo.get(l as usize)
+                    .and_then(|g| trace_core::field::single(g, w))
+            })
+            .collect();
+        println!(
+            "With {:.0} mil ({:.2} in) of trace each side ({kind}21, dB):",
+            len_mil,
+            len_mil / 1000.0
+        );
+        println!(
+            "  {:>7}  {:>9}  {:>9}  {:>9}",
+            "GHz", "via", "traces", "total"
+        );
+        for k in (0..n).filter(|k| (k + 1) % (n / 8).max(1) == 0) {
+            let f = r.f[k] * 1e9;
+            let tr: f64 = lines
+                .iter()
+                .flatten()
+                .map(|l| l.db_per_in(f, 0.02, Some(v.rough_um)) * len_mil / 1000.0)
+                .sum();
+            let via = r.s21[k].db();
+            println!(
+                "  {:>7.2}  {:>9.3}  {:>9.3}  {:>9.3}",
+                r.f[k],
+                via,
+                -tr,
+                via - tr
+            );
+        }
     }
     let title = format!(
         "{} via, {} to {}",

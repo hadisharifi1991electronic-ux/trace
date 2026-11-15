@@ -157,7 +157,7 @@ pub struct GroupResult {
     pub failing: usize,
 }
 
-fn glob(pattern: &str, text: &str) -> bool {
+pub(crate) fn glob(pattern: &str, text: &str) -> bool {
     let p: Vec<char> = pattern.to_ascii_uppercase().chars().collect();
     let t: Vec<char> = text.to_ascii_uppercase().chars().collect();
     let (mut pi, mut ti) = (0, 0);

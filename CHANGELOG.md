@@ -3,6 +3,44 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.64.0 (2026-11-15)
+
+- Impedance check (Tools > Signal and power integrity > Impedance check…,
+  `trace zcheck`): every controlled trace run and every kind of via on
+  the board against its target impedance, the worst first.
+  - Targets: rules by net or pair name (* and ?), every differential pair
+    (100 Ω, 90 Ω for USB, 85 Ω for PCIe and SATA) and every net on the
+    signal pin of a coaxial connector (SMA, U.FL, MMCX..., 50 Ω).
+  - Traces: per net, layer and width from the 2D field solver, pour
+    beside the track counted (coplanar); coupled pair runs by Zdiff,
+    uncoupled stretches by Z0; with the width or gap that would meet the
+    target.
+  - Vias: grouped by how they are built (layers joined, drill, pad,
+    antipad from the plane holes, pair pitch, ground vias around); each
+    kind solved once in 3D for its impedance, with the antipad that would
+    meet the target and a button that opens it in the via window to size
+    or optimise it.
+  - Off by more than the tolerance (10 %) fails; click a line to show it
+    on the board; report as CSV.
+- Via loss: the 3D via solve now adds the barrel's copper loss (skin
+  effect, 1 µm roughness; `--rough`) and its dielectric loss (the
+  stack-up's Df) from layer to layer, which the grid's perfect copper
+  left out, and says how much; `--lossless` for the old result. Through
+  loss is shown to 3 decimals. `trace via … --feed 1in` adds that much of
+  each trace's loss (2D field solver) for a channel figure.
+- Materials for the via: the via window shows the stack-up's Er and Df
+  between the two layers and takes values of one's own ("own": Er, Df for
+  every dielectric layer, traces and via alike), with the copper loss
+  switch and roughness; CLI `--er 3.6 --df 0.004`. The CLI prints the
+  materials and which losses it counted.
+- Altium internal planes are read: plane layers join the stack-up as
+  copper and are poured from their net over the board, keeping the
+  PlaneClearance rule (20 mil when none) round other nets. Before, a
+  board with planes lost them, so impedance, return path and 3D via
+  results took the next signal layer as the reference (Clocker's top 50 Ω
+  width read 90 mil; now 11.6 mil, as designed). Saving over the
+  original PcbDoc leaves the planes as they were.
+
 ## 0.63.1 (2026-11-15)
 
 - Via optimiser: the quick grid can be 10 dB or more off when the return

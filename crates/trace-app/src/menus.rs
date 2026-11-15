@@ -564,6 +564,9 @@ impl App {
                 if item(ui, true, "Pair cross-sections…", "", "Track widths and gaps on a layer that give the target Zdiff, ranked by loss") {
                     self.pairs.open = true;
                 }
+                if item(ui, true, "Impedance check…", "", "Every controlled trace and via kind against its target impedance (pairs, coax nets, rules)") {
+                    self.zcheck.open = true;
+                }
             });
         });
         ui.separator();

@@ -476,6 +476,11 @@ pub(crate) fn p(k: &str, v: impl Into<String>) -> (String, String) {
 
 /// Layer numbers in both of Altium's schemes: the byte used before
 /// Altium Designer 19 and the 32-bit id used since.
+const PLANE_NAMES: [&str; 16] = [
+    "PLANE1", "PLANE2", "PLANE3", "PLANE4", "PLANE5", "PLANE6", "PLANE7", "PLANE8", "PLANE9",
+    "PLANE10", "PLANE11", "PLANE12", "PLANE13", "PLANE14", "PLANE15", "PLANE16",
+];
+
 #[derive(Clone, Copy)]
 struct AltLayer {
     v6: u8,
@@ -660,6 +665,12 @@ impl<'a> Writer<'a> {
                     v6: 32,
                     v7: 0x0100_FFFF,
                     name: "BOTTOM",
+                },
+                // An internal plane (layer 38 + n).
+                id @ 39..=54 => AltLayer {
+                    v6: id,
+                    v7: 0x0101_0000 + (id - 38) as u32,
+                    name: PLANE_NAMES[(id - 39) as usize],
                 },
                 id => AltLayer {
                     v6: id,

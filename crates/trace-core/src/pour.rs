@@ -150,6 +150,34 @@ impl Gaps {
     }
 }
 
+/// The clearance round other nets on an Altium internal plane layer (its
+/// PlaneClearance rule, 20 mil when there is none); `None` on other layers.
+pub fn plane_gap(board: &Board, layer: &LayerRef) -> Option<f64> {
+    let LayerRef::Copper(i) = layer else {
+        return None;
+    };
+    let id = board.stackup.copper_layers().nth(*i as usize)?.altium_id?;
+    if !(39..=54).contains(&id) {
+        return None;
+    }
+    let mut rules: Vec<_> = board
+        .rules
+        .iter()
+        .filter(|r| r.enabled && r.kind.eq_ignore_ascii_case("PlaneClearance"))
+        .collect();
+    rules.sort_by_key(|r| r.priority);
+    let gap = rules
+        .first()
+        .and_then(|r| {
+            r.params
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("CLEARANCE"))
+                .and_then(|(_, v)| Length::parse(v))
+        })
+        .map_or(20.0, |l| l.mil());
+    Some(gap)
+}
+
 /// The gaps for a pour of `net`: from the highest-priority clearance rule
 /// scoped to polygons that covers the net, else the board's catch-all
 /// clearance rule (the lowest priority). A rule's per-object polygon gaps
@@ -489,7 +517,18 @@ fn pour_among(board: &Board, areas: &[Polygon], index: usize) -> Vec<Polygon> {
     let Some(def) = g.pours.get(index) else {
         return Vec::new();
     };
-    let gaps = pour_gaps(board, def.net);
+    let gaps = match plane_gap(board, &def.layer) {
+        Some(g) => Gaps {
+            track: g,
+            arc: g,
+            smd: g,
+            th: g,
+            via: g,
+            area: g,
+            hole: g,
+        },
+        None => pour_gaps(board, def.net),
+    };
     let clearance = gaps.max();
     let LayerRef::Copper(layer) = def.layer else {
         return Vec::new();

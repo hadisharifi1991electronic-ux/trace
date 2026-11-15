@@ -1359,12 +1359,16 @@ impl<'a> Merge<'a> {
 
     fn areas(&mut self) {
         let layers = Layers::new(&self.base.stackup);
+        // Copper poured on internal planes is Trace's picture of the
+        // plane, not a record of the file: it stays out.
+        let plane = |b: &Board, q: &Polygon| trace_core::pour::plane_gap(b, &q.layer).is_some();
         let base: Vec<Polygon> = self
             .base
             .geometry
             .polygons
             .iter()
             .chain(&self.base.geometry.areas)
+            .filter(|q| !plane(self.base, q))
             .cloned()
             .collect();
         let ed: Vec<Polygon> = self
@@ -1373,6 +1377,7 @@ impl<'a> Merge<'a> {
             .polygons
             .iter()
             .chain(&self.ed.geometry.areas)
+            .filter(|q| !plane(self.ed, q))
             .cloned()
             .collect();
         let pour_net = |s: &Self, q: &Polygon| {
@@ -1765,10 +1770,17 @@ impl<'a> Merge<'a> {
                 }
             }
         }
-        if self.ed.geometry.pours.len() > recs.len() {
+        let pours = self
+            .ed
+            .geometry
+            .pours
+            .iter()
+            .filter(|p| trace_core::pour::plane_gap(self.ed, &p.layer).is_none())
+            .count();
+        if pours > recs.len() {
             self.report.notes.push(format!(
                 "{} new pours kept as copper areas only",
-                self.ed.geometry.pours.len() - recs.len()
+                pours - recs.len()
             ));
         }
         let n = recs.len();

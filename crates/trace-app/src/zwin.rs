@@ -70,6 +70,13 @@ impl ZWindow {
                 ui.horizontal(|ui| {
                     ui.checkbox(&mut self.goal.pairs, "Differential pairs")
                         .on_hover_text("100 Ω, 90 Ω for USB, 85 Ω for PCIe and SATA");
+                    ui.add_enabled(
+                        self.goal.pairs,
+                        egui::Checkbox::new(&mut self.goal.pairs_by_name, "also by name"),
+                    )
+                    .on_hover_text(
+                        "Nets named X_P/X_N, X+/X-, XP/XN that run side by side, where the board defines no pair",
+                    );
                     ui.checkbox(&mut self.goal.rf, "Coax connector nets, 50 Ω");
                 });
                 ui.horizontal(|ui| {
@@ -80,7 +87,17 @@ impl ZWindow {
                             .range(1.0..=50.0)
                             .suffix(" %"),
                     );
-                    ui.label("fails. Shortest run");
+                    ui.label("fails, up to");
+                    ui.add(
+                        egui::DragValue::new(&mut self.goal.ghz)
+                            .speed(0.1)
+                            .range(0.1..=100.0)
+                            .suffix(" GHz"),
+                    )
+                    .on_hover_text(
+                        "Runs shorter than a twentieth of a wavelength here are electrically short: shown, not failed",
+                    );
+                    ui.label("Shortest run");
                     ui.add(
                         egui::DragValue::new(&mut self.goal.min_length)
                             .speed(1.0)
@@ -153,11 +170,13 @@ impl ZWindow {
                             }
                         });
                     });
+                // Named pairs are found when checking (too slow to count
+                // each frame).
                 let nets = zcheck::controlled(board, &self.goal).len();
                 ui.horizontal(|ui| {
                     let busy = self.running.is_some();
                     if ui
-                        .add_enabled(!busy && nets > 0, egui::Button::new("Check"))
+                        .add_enabled(!busy, egui::Button::new("Check"))
                         .clicked()
                     {
                         let mut goal = self.goal.clone();
@@ -180,7 +199,11 @@ impl ZWindow {
                         });
                         self.running = Some((rx, prog));
                     }
-                    ui.label(format!("{nets} controlled net(s)"));
+                    ui.label(if self.goal.pairs && self.goal.pairs_by_name {
+                        format!("{nets} controlled net(s), and pairs found by name")
+                    } else {
+                        format!("{nets} controlled net(s)")
+                    });
                     if let Some((_, p)) = &self.running {
                         let (f, what) = p.lock().map(|p| p.clone()).unwrap_or_default();
                         ui.spinner();
@@ -209,12 +232,15 @@ impl ZWindow {
                         .max_height(320.0)
                         .show(ui, |ui| {
                             for f in &r.findings {
-                                let bad = f.off().abs() > r.tolerance;
-                                if !bad && !self.show_ok {
+                                let off = f.off().abs() > r.tolerance;
+                                let bad = off && !f.short;
+                                if !off && !self.show_ok {
                                     continue;
                                 }
                                 let colour = if bad {
                                     Color32::LIGHT_RED
+                                } else if off {
+                                    Color32::from_rgb(230, 170, 60)
                                 } else {
                                     ui.visuals().text_color()
                                 };

@@ -3,6 +3,21 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.64.1 (2026-11-15)
+
+- Impedance check:
+  - Pairs by name: nets X_P/X_N, X+/X-, XP/XN, _DP/_DN, _T/_C that run
+    side by side count as differential pairs where the board defines none
+    (Allegro boards often define none; CutiePi: 10 found).
+  - Electrically short runs (under a twentieth of a wavelength at the
+    frequency of interest, 6 GHz by default; `--ghz`) that are off target
+    are listed apart, in amber, and do not fail: neck-downs at connector
+    pins and caps.
+  - Says so when the stack-up has no dielectric thicknesses (nothing can
+    be solved) instead of reporting nothing.
+- `trace cascade --line Z@1in@…`: line lengths take in, mm or um as well
+  as mil.
+
 ## 0.64.0 (2026-11-15)
 
 - Impedance check (Tools > Signal and power integrity > Impedance check…,

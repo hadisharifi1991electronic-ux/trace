@@ -61,7 +61,7 @@ USAGE:
                                                 vias from the source part to the loads (no --load: the total,
                                                 default 1 A, shared by pad count); with out, a drop map per layer
     trace zcheck <board> [--tol 10] [--rule PATTERN=Z] [--diff PATTERN=Z] [--no-pairs] [--no-rf]
-                 [--no-vias] [--via-kinds 6] [--min-length 30] [report.csv]
+                 [--no-vias] [--via-kinds 6] [--min-length 30] [--ghz 6] [--no-name-pairs] [report.csv]
                                                 board-wide impedance check: every controlled trace run (field
                                                 solver, per net, layer and width) and every kind of via (3D)
                                                 against its target. Targets: --rule/--diff (net or pair name,
@@ -1983,11 +1983,19 @@ fn cascade(load: &str, rest: &[&str]) -> Res {
         match a {
             "--line" => {
                 let x = it.next().ok_or("--line needs Z@length[@Eeff[@dB/in]]")?;
+                // The length takes mil (the default), mm, um or in.
                 let v: Vec<f64> = x
                     .split('@')
-                    .map(|p| p.trim_end_matches("mil").parse::<f64>())
-                    .collect::<Result<_, _>>()
-                    .map_err(|_| format!("not Z@length@Eeff@dB/in: {x}"))?;
+                    .enumerate()
+                    .map(|(k, p)| {
+                        if k == 1 {
+                            trace_core::Length::parse(p).map(|l| l.mil())
+                        } else {
+                            p.parse::<f64>().ok()
+                        }
+                    })
+                    .collect::<Option<_>>()
+                    .ok_or_else(|| format!("not Z@length@Eeff@dB/in: {x}"))?;
                 if v.len() < 2 {
                     return Err(format!("--line needs Z@length: {x}").into());
                 }
@@ -2172,6 +2180,11 @@ fn zcheck_cmd(file: &str, rest: &[&str]) -> Res {
             "--no-pairs" => goal.pairs = false,
             "--no-rf" => goal.rf = false,
             "--no-vias" => goal.vias = false,
+            "--no-name-pairs" => goal.pairs_by_name = false,
+            "--ghz" => {
+                goal.ghz = next(i)?.trim_end_matches("GHz").parse()?;
+                i += 1;
+            }
             "--via-kinds" => {
                 goal.via_kinds = next(i)?.parse()?;
                 i += 1;
@@ -2186,7 +2199,8 @@ fn zcheck_cmd(file: &str, rest: &[&str]) -> Res {
         i += 1;
     }
     let geo = b.layer_geometry();
-    let nets = zcheck::controlled(&b, &goal);
+    let (named, _) = zcheck::with_name_pairs(&b, &goal);
+    let nets = zcheck::controlled(named.as_ref().unwrap_or(&b), &goal);
     println!("Controlled nets: {}", nets.len());
     for c in nets.iter().take(40) {
         println!(
@@ -2216,15 +2230,28 @@ fn zcheck_cmd(file: &str, rest: &[&str]) -> Res {
             println!("  {}", f.describe(&geo));
         }
     }
-    let ok = rep.findings.len() - fails.len();
-    if ok > 0 {
-        println!("On target: {ok}");
-        for f in rep
-            .findings
-            .iter()
-            .filter(|f| f.off().abs() <= rep.tolerance)
-            .take(20)
-        {
+    let short: Vec<_> = rep
+        .findings
+        .iter()
+        .filter(|f| f.short && f.off().abs() > rep.tolerance)
+        .collect();
+    if !short.is_empty() {
+        println!(
+            "Off but electrically short (under a twentieth of a wavelength at {} GHz):",
+            goal.ghz
+        );
+        for f in &short {
+            println!("  {}", f.describe(&geo));
+        }
+    }
+    let ok: Vec<_> = rep
+        .findings
+        .iter()
+        .filter(|f| f.off().abs() <= rep.tolerance)
+        .collect();
+    if !ok.is_empty() {
+        println!("On target: {}", ok.len());
+        for f in ok.iter().take(20) {
             println!("  {}", f.describe(&geo));
         }
     }

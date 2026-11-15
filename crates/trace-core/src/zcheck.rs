@@ -45,6 +45,12 @@ pub struct Goal {
     /// Band of the via solves, GHz (their impedance is read from the low
     /// part of it).
     pub via_fmax: f64,
+    /// Highest frequency of interest, GHz: runs shorter than a twentieth
+    /// of a wavelength there are electrically short (noted, not failed).
+    pub ghz: f64,
+    /// Nets named like a pair (X_P/X_N, X+/X-, XP/XN) that run side by
+    /// side count as pairs where the board defines none for them.
+    pub pairs_by_name: bool,
 }
 
 impl Default for Goal {
@@ -58,6 +64,8 @@ impl Default for Goal {
             vias: true,
             via_kinds: 6,
             via_fmax: 20.0,
+            ghz: 6.0,
+            pairs_by_name: true,
         }
     }
 }
@@ -130,6 +138,99 @@ pub fn rf_nets(board: &Board) -> Vec<(u32, String)> {
         }
     }
     out
+}
+
+/// Pairs by name: nets X_P/X_N, X+/X-, XP/XN (also _DP/_DN, _T/_C) not in
+/// a defined pair, that run side by side somewhere.
+pub fn name_pairs(board: &Board) -> Vec<crate::DiffPair> {
+    const ENDS: [(&str, &str); 6] = [
+        ("_P", "_N"),
+        ("+", "-"),
+        ("_DP", "_DN"),
+        ("_T", "_C"),
+        ("P", "N"),
+        ("_POS", "_NEG"),
+    ];
+    let paired: std::collections::HashSet<&str> = board
+        .diff_pairs
+        .iter()
+        .flat_map(|p| [p.positive.as_str(), p.negative.as_str()])
+        .collect();
+    let idx: HashMap<String, u32> = board
+        .nets
+        .iter()
+        .enumerate()
+        .map(|(i, n)| (n.name.to_ascii_uppercase(), i as u32))
+        .collect();
+    let mut out = Vec::new();
+    let mut taken: std::collections::HashSet<u32> = Default::default();
+    for (i, n) in board.nets.iter().enumerate() {
+        let i = i as u32;
+        if paired.contains(n.name.as_str()) || taken.contains(&i) {
+            continue;
+        }
+        let up = n.name.to_ascii_uppercase();
+        for (pe, ne) in ENDS {
+            let Some(stem) = up.strip_suffix(pe) else {
+                continue;
+            };
+            if stem.is_empty() {
+                continue;
+            }
+            let Some(&j) = idx.get(&format!("{stem}{ne}")) else {
+                continue;
+            };
+            if taken.contains(&j) || paired.contains(board.nets[j as usize].name.as_str()) {
+                continue;
+            }
+            // Side by side on at least a fifth of the positive's tracks.
+            let tracks: Vec<&crate::Track> = board
+                .geometry
+                .tracks
+                .iter()
+                .filter(|t| t.net == Some(i) && !t.text)
+                .collect();
+            if tracks.is_empty() {
+                continue;
+            }
+            let coupled = tracks
+                .iter()
+                .filter(|t| board.pair_gap(t, j).is_some())
+                .count();
+            if coupled * 5 < tracks.len() {
+                continue;
+            }
+            let name = stem.trim_end_matches('_').to_string();
+            out.push(crate::DiffPair {
+                name: board.nets[i as usize]
+                    .name
+                    .get(..name.len())
+                    .unwrap_or(&name)
+                    .to_string(),
+                positive: n.name.clone(),
+                negative: board.nets[j as usize].name.clone(),
+            });
+            taken.insert(i);
+            taken.insert(j);
+            break;
+        }
+    }
+    out
+}
+
+/// The board with the pairs found by name added (when the goal asks for
+/// them), and those pairs.
+pub fn with_name_pairs(board: &Board, goal: &Goal) -> (Option<Board>, Vec<crate::DiffPair>) {
+    if !(goal.pairs && goal.pairs_by_name) {
+        return (None, Vec::new());
+    }
+    let extra = name_pairs(board);
+    if extra.is_empty() {
+        return (None, extra);
+    }
+    let mut b = board.clone();
+    b.diff_pairs.extend(extra.iter().cloned());
+    (Some(b), extra)
 }
 
 /// The nets the check covers, with their targets.
@@ -242,6 +343,9 @@ pub struct Finding {
     pub at: [f64; 2],
     /// What would bring it to the target.
     pub hint: Option<String>,
+    /// Shorter than a twentieth of a wavelength at the frequency of
+    /// interest: noted, not failed.
+    pub short: bool,
 }
 
 impl Finding {
@@ -282,11 +386,16 @@ impl Finding {
             ),
         };
         format!(
-            "{}: {what}: {:.1} Ω against {:.0} Ω ({:+.0} %){}",
+            "{}: {what}: {:.1} Ω against {:.0} Ω ({:+.0} %){}{}",
             self.name,
             self.z,
             self.target,
             self.off() * 100.0,
+            if self.short {
+                " (electrically short)"
+            } else {
+                ""
+            },
             self.hint
                 .as_ref()
                 .map_or(String::new(), |h| format!("; {h}"))
@@ -309,7 +418,7 @@ impl Report {
     pub fn failing(&self) -> impl Iterator<Item = &Finding> {
         self.findings
             .iter()
-            .filter(|f| f.off().abs() > self.tolerance)
+            .filter(|f| !f.short && f.off().abs() > self.tolerance)
     }
 
     pub fn summary(&self) -> String {
@@ -320,11 +429,21 @@ impl Report {
             .filter(|f| matches!(f.kind, Kind::Trace { .. }))
             .count();
         let vias = self.findings.len() - traces;
+        let short = self
+            .findings
+            .iter()
+            .filter(|f| f.short && f.off().abs() > self.tolerance)
+            .count();
         format!(
-            "{} controlled net(s): {n} of {} checks off target by more than {:.0} % ({traces} trace runs, {vias} via kinds)",
+            "{} controlled net(s): {n} of {} checks off target by more than {:.0} % ({traces} trace runs, {vias} via kinds){}",
             self.nets,
             self.findings.len(),
-            self.tolerance * 100.0
+            self.tolerance * 100.0,
+            if short > 0 {
+                format!("; {short} more off but electrically short")
+            } else {
+                String::new()
+            }
         )
     }
 
@@ -386,15 +505,36 @@ pub fn check(
     progress: &dyn Fn(f64, &str),
 ) -> Report {
     let geo = crate::impedance::layer_geometry(stackup);
+    let (own, by_name) = with_name_pairs(board, goal);
+    let board = own.as_ref().unwrap_or(board);
     let nets = controlled(board, goal);
     let mut rep = Report {
         tolerance: goal.tolerance,
         nets: nets.len(),
         ..Default::default()
     };
+    if !by_name.is_empty() {
+        rep.notes.push(format!(
+            "{} pair(s) found by name (the board defines none for them): {}",
+            by_name.len(),
+            by_name
+                .iter()
+                .take(8)
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
     if nets.is_empty() {
         rep.notes.push(
             "no controlled nets: the board has no differential pairs or coax connectors; add a rule"
+                .into(),
+        );
+        return rep;
+    }
+    if geo.iter().all(|g| g.above.is_none() && g.below.is_none()) {
+        rep.notes.push(
+            "the stack-up has no dielectric thicknesses, so no trace or via can be solved; give one (Impedance window, or --stackup file)"
                 .into(),
         );
         return rep;
@@ -470,7 +610,12 @@ pub fn check(
         if !z.is_finite() {
             continue;
         }
+        // A twentieth of a wavelength at the frequency of interest, mil.
+        let eeff = crate::field::single(g, r.width).map_or(g.er, |l| l.eeff);
+        let short = goal.ghz > 0.0
+            && r.length < 299_792_458.0 / (goal.ghz * 1e9 * eeff.max(1.0).sqrt()) / 20.0 / 25.4e-6;
         rep.findings.push(Finding {
+            short,
             net: r.net,
             name: if diff {
                 c.name.clone()
@@ -734,6 +879,7 @@ fn vias(
         // Only the positive net's vias are listed, so a pair counts once.
         let count = members.len();
         rep.findings.push(Finding {
+            short: false,
             net: b.net,
             name: c.name.clone(),
             kind: Kind::Via {

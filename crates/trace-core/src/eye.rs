@@ -35,6 +35,101 @@ pub struct EyeSetup {
     pub prbs: u32,
     /// Most bits to fold (a long pattern is cut).
     pub bits: usize,
+    /// Transmitter taps and receiver CTLE.
+    pub eq: Equaliser,
+}
+
+/// Equalisation: a 3-tap transmit FFE and a receive CTLE.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Equaliser {
+    /// Pre-cursor tap (0 to about -0.25).
+    pub pre: f64,
+    /// Post-cursor tap, de-emphasis (0 to about -0.4).
+    pub post: f64,
+    /// CTLE: peaking, dB (DC this far below the peak; 0: none).
+    pub ctle_db: f64,
+    /// CTLE peak (its first pole), GHz (0: half the bit rate).
+    pub ctle_ghz: f64,
+}
+
+impl Equaliser {
+    /// The main tap: the driver's peak swing is shared by the taps.
+    pub fn main(&self) -> f64 {
+        1.0 - self.pre.abs() - self.post.abs()
+    }
+
+    pub fn is_none(&self) -> bool {
+        self.pre == 0.0 && self.post == 0.0 && self.ctle_db <= 0.0
+    }
+
+    /// Transmit FFE at `f` Hz for a bit `ui` s long.
+    fn ffe(&self, f: f64, ui: f64) -> Cx {
+        let w = 2.0 * PI * f * ui;
+        Cx::new(self.main(), 0.0)
+            .add(Cx::expj(w).scale(self.pre))
+            .add(Cx::expj(-w).scale(self.post))
+    }
+
+    /// CTLE at `f` Hz: a zero below the peak and two poles; DC is
+    /// `ctle_db` down and the peak near 0 dB, as a receiver's CTLE (it
+    /// takes away low frequencies rather than adding gain).
+    fn ctle(&self, f: f64, gbps: f64) -> Cx {
+        if self.ctle_db <= 0.0 {
+            return Cx::new(1.0, 0.0);
+        }
+        let fp = if self.ctle_ghz > 0.0 {
+            self.ctle_ghz
+        } else {
+            gbps / 2.0
+        } * 1e9;
+        let fz = fp / 10f64.powf(self.ctle_db / 20.0);
+        let fp2 = 4.0 * fp;
+        Cx::new(1.0, f / fz)
+            .div(Cx::new(1.0, f / fp))
+            .div(Cx::new(1.0, f / fp2))
+            .scale(fz / fp)
+    }
+
+    /// One line: "FFE pre -0.05, main 0.80, post -0.15; CTLE 6 dB at 5 GHz".
+    pub fn describe(&self, gbps: f64) -> String {
+        let mut parts = Vec::new();
+        if self.pre != 0.0 || self.post != 0.0 {
+            // De-emphasis: the steady level against the transition's.
+            let de = if self.main() > 0.0 {
+                20.0 * ((self.main() - self.post.abs() - self.pre.abs())
+                    / (self.main() + self.post.abs() + self.pre.abs()))
+                .abs()
+                .max(1e-6)
+                .log10()
+            } else {
+                0.0
+            };
+            parts.push(format!(
+                "FFE pre {:.3}, main {:.3}, post {:.3} ({:.1} dB de-emphasis)",
+                self.pre,
+                self.main(),
+                self.post,
+                de
+            ));
+        }
+        if self.ctle_db > 0.0 {
+            let fp = if self.ctle_ghz > 0.0 {
+                self.ctle_ghz
+            } else {
+                gbps / 2.0
+            };
+            parts.push(format!(
+                "CTLE {} dB peaking at {} GHz",
+                trim(self.ctle_db),
+                trim(fp)
+            ));
+        }
+        if parts.is_empty() {
+            "no equalisation".into()
+        } else {
+            parts.join("; ")
+        }
+    }
 }
 
 impl Default for EyeSetup {
@@ -45,6 +140,7 @@ impl Default for EyeSetup {
             rise_ps: 0.0,
             prbs: 7,
             bits: 2047,
+            eq: Equaliser::default(),
         }
     }
 }
@@ -84,6 +180,8 @@ pub struct EyeResult {
     /// Time of the pulse peak after the bit starts, ns.
     pub peak_ns: f64,
     pub notes: Vec<String>,
+    /// The equalisation used.
+    pub eq: Equaliser,
 }
 
 impl EyeResult {
@@ -129,7 +227,7 @@ impl EyeResult {
         );
         let _ = writeln!(
             o,
-            "  worst case height (peak distortion) {:.1} mV; pulse peak {:.3} ns after the bit",
+            "  worst case height (peak distortion) {:.1} mV; sampled {:.3} ns after the bit starts",
             self.worst_height * 1e3,
             self.peak_ns
         );
@@ -150,6 +248,9 @@ impl EyeResult {
                 }
             }
             let _ = writeln!(o, "{line}");
+        }
+        if !self.eq.is_none() {
+            let _ = writeln!(o, "  with {}", self.eq.describe(self.gbps));
         }
         for n in &self.notes {
             let _ = writeln!(o, "  note: {n}");
@@ -387,10 +488,179 @@ impl Pulse {
         }
         sum * self.df
     }
+
+    /// `n` samples from `t0`, `step` apart (phasors turned, no sines in
+    /// the loop).
+    fn grid(&self, t0: f64, step: f64, n: usize) -> Vec<f64> {
+        let mut out = vec![self.dc * self.df; n];
+        for (f, p) in self.f.iter().zip(&self.spec) {
+            let rot = Cx::expj(2.0 * PI * f * step);
+            let mut z = p.mul(Cx::expj(2.0 * PI * f * t0)).scale(2.0 * self.df);
+            for o in out.iter_mut() {
+                *o += z.re;
+                z = z.mul(rot);
+            }
+        }
+        out
+    }
+}
+
+/// Equalisation chosen for a path.
+#[derive(Clone, Debug)]
+pub struct EqChoice {
+    pub eq: Equaliser,
+    /// Worst case eye height (peak distortion), volts, without and with
+    /// the equaliser.
+    pub before: f64,
+    pub after: f64,
+    pub tries: usize,
+}
+
+/// Worst case height (peak distortion) when sampling a pulse at `c`;
+/// `q` holds `per` points a bit over one period.
+fn pd_at(q: &[f64], per: usize, c: usize) -> f64 {
+    let n = q.len();
+    let mut isi = 0.0;
+    for k in 1..n / per {
+        isi += q[(c + k * per) % n].abs();
+    }
+    q[c] - isi
+}
+
+/// Worst case eye area: the opening summed over the sampling phases of
+/// one bit around the pulse's peak (closed eyes compare by their least
+/// closed phase, below every open one).
+fn pd_area(q: &[f64], per: usize) -> f64 {
+    let n = q.len() / per * per;
+    let q = &q[..n];
+    let Some((imax, _)) = q.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)) else {
+        return f64::MIN;
+    };
+    let mut area = 0.0;
+    let mut most = f64::MIN;
+    for o in -(per as isize)..=(per as isize) {
+        let c = (imax as isize + o).rem_euclid(n as isize) as usize;
+        let h = pd_at(q, per, c);
+        area += h.max(0.0);
+        most = most.max(h);
+    }
+    if area > 0.0 {
+        area
+    } else {
+        most - 1e3
+    }
+}
+
+/// The sampling point near the pulse's peak whose worst case opening
+/// holds best over a quarter bit either side (an eye open in both
+/// directions), with that score and the opening at the point itself.
+fn best_phase(q: &[f64], per: usize) -> (usize, f64, f64) {
+    let n = q.len() / per * per;
+    let q = &q[..n];
+    let Some((imax, _)) = q.iter().enumerate().max_by(|a, b| a.1.total_cmp(b.1)) else {
+        return (0, 0.0, 0.0);
+    };
+    let at = |c: isize| (c).rem_euclid(n as isize) as usize;
+    let side = (per / 4) as isize;
+    let mut best = (imax, f64::MIN, 0.0);
+    for o in -(per as isize / 2)..=(per as isize / 2) {
+        let c = imax as isize + o;
+        let centre = pd_at(q, per, at(c));
+        let score = centre
+            .min(pd_at(q, per, at(c - side)))
+            .min(pd_at(q, per, at(c + side)));
+        if score > best.1 {
+            best = (at(c), score, centre);
+        }
+    }
+    best
+}
+
+/// Picks the transmit taps and CTLE that open the worst case eye most.
+pub fn optimise(
+    rep: &Report,
+    setup: &EyeSetup,
+    use_ffe: bool,
+    use_ctle: bool,
+) -> Result<EqChoice, String> {
+    const PER: usize = 8;
+    let ui = 1e-9 / setup.gbps.max(1e-6);
+    let step = ui / PER as f64;
+    let mut plain = setup.clone();
+    plain.eq = Equaliser::default();
+    let mut ctles = vec![(0.0, 0.0)];
+    if use_ctle {
+        for db in 1..=18 {
+            for k in [0.5, 0.75, 1.0] {
+                ctles.push((db as f64, k * setup.gbps / 2.0));
+            }
+        }
+    }
+    let mut taps = vec![(0.0, 0.0)];
+    if use_ffe {
+        taps.clear();
+        for i in 0..=6 {
+            for j in 0..=14 {
+                taps.push((0.0 - 0.025 * i as f64, 0.0 - 0.025 * j as f64));
+            }
+        }
+    }
+    let mut before = 0.0;
+    let mut best = (f64::MIN, Equaliser::default(), 0.0);
+    let mut tries = 0;
+    for (db, ghz) in ctles {
+        let mut s2 = plain.clone();
+        s2.eq = Equaliser {
+            ctle_db: db,
+            ctle_ghz: ghz,
+            ..Default::default()
+        };
+        let (pulse, ..) = spectrum(rep, &s2)?;
+        let n = ((1.0 / pulse.df / step) as usize) / PER * PER;
+        if n < 4 * PER {
+            return Err(
+                "the sweep's step is too coarse for this bit rate: raise the points".into(),
+            );
+        }
+        let p = pulse.grid(0.0, step, n);
+        let mut q = vec![0.0; n];
+        for &(pre, post) in &taps {
+            let main = 1.0 - pre.abs() - post.abs();
+            for (i, v) in q.iter_mut().enumerate() {
+                *v = main * p[i] + pre * p[(i + PER) % n] + post * p[(i + n - PER) % n];
+            }
+            let (_, _, centre) = best_phase(&q, PER);
+            let score = pd_area(&q, PER);
+            tries += 1;
+            if db == 0.0 && pre == 0.0 && post == 0.0 {
+                before = centre * setup.amplitude;
+            }
+            if score > best.0 + 1e-9 {
+                best = (
+                    score,
+                    Equaliser {
+                        pre,
+                        post,
+                        ctle_db: db,
+                        ctle_ghz: ghz,
+                    },
+                    centre * setup.amplitude,
+                );
+            }
+        }
+    }
+    Ok(EqChoice {
+        eq: best.1,
+        before: before.max(0.0),
+        after: best.2.max(0.0),
+        tries,
+    })
 }
 
 /// Builds the eye of a path.
-pub fn eye(rep: &Report, setup: &EyeSetup) -> Result<EyeResult, String> {
+/// The band-limited spectrum of one bit through the path (with the
+/// equaliser), its bit time and notes on the sweep.
+fn spectrum(rep: &Report, setup: &EyeSetup) -> Result<(Pulse, f64, Vec<String>), String> {
     if rep.f.len() < 4 || setup.gbps <= 0.0 {
         return Err("no sweep or no bit rate".into());
     }
@@ -414,8 +684,10 @@ pub fn eye(rep: &Report, setup: &EyeSetup) -> Result<EyeResult, String> {
     if !even {
         return Err("the sweep is not evenly spaced from zero".into());
     }
+    let eq = setup.eq;
     // The zero term from the first two points.
-    let h0 = 2.0 * h[0].re - h[1].re;
+    let h0 =
+        (2.0 * h[0].re - h[1].re) * (eq.main() + eq.pre + eq.post) * eq.ctle(0.0, setup.gbps).re;
     let taper_from = 0.8 * fmax;
     let mut spec = Vec::with_capacity(h.len());
     for (k, hk) in h.iter().enumerate() {
@@ -429,7 +701,11 @@ pub fn eye(rep: &Report, setup: &EyeSetup) -> Result<EyeResult, String> {
             1.0
         };
         let p = Cx::expj(-PI * f * ui).scale(ui * sinc * g * taper);
-        spec.push(hk.mul(p));
+        let mut v = hk.mul(p);
+        if !eq.is_none() {
+            v = v.mul(eq.ffe(f, ui)).mul(eq.ctle(f, setup.gbps));
+        }
+        spec.push(v);
     }
     let pulse = Pulse {
         f: (1..=h.len()).map(|k| df * k as f64).collect(),
@@ -448,6 +724,14 @@ pub fn eye(rep: &Report, setup: &EyeSetup) -> Result<EyeResult, String> {
             trim((need * 1e-9 * 2.0).ceil() / 2.0)
         ));
     }
+    Ok((pulse, rise, notes))
+}
+
+/// Builds the eye of a path.
+pub fn eye(rep: &Report, setup: &EyeSetup) -> Result<EyeResult, String> {
+    let (pulse, rise, mut notes) = spectrum(rep, setup)?;
+    let ui = 1e-9 / setup.gbps;
+    let df = pulse.df;
     // The pulse over one period of the series, to find its peak.
     let period = 1.0 / df;
     let dt = ui / PER_UI as f64;
@@ -459,7 +743,7 @@ pub fn eye(rep: &Report, setup: &EyeSetup) -> Result<EyeResult, String> {
             trim(setup.gbps)
         ));
     }
-    let coarse: Vec<f64> = (0..total).map(|i| pulse.at(i as f64 * dt)).collect();
+    let coarse: Vec<f64> = pulse.grid(0.0, dt, total);
     let (ipk, &vpk) = coarse
         .iter()
         .enumerate()
@@ -468,6 +752,11 @@ pub fn eye(rep: &Report, setup: &EyeSetup) -> Result<EyeResult, String> {
     if vpk <= 1e-9 {
         return Err("the path passes no signal at this bit rate".into());
     }
+    // Sampling phase: the one near the peak with the widest worst case
+    // opening (an equalised pulse overshoots, so its peak is not always
+    // the best place).
+    let _ = ipk;
+    let ipk = best_phase(&coarse, PER_UI).0;
     let t_peak = ipk as f64 * dt;
     // Cursors: one per bit over the period, a few before the main one.
     let n_cur = total / PER_UI;
@@ -479,7 +768,7 @@ pub fn eye(rep: &Report, setup: &EyeSetup) -> Result<EyeResult, String> {
     // Each cursor's samples over the 2 UI window, kept while they matter.
     let mut rows: Vec<(isize, Vec<f64>)> = Vec::new();
     for k in -(pre as isize)..(n_cur as isize - pre as isize) {
-        let row: Vec<f64> = (0..SAMPLES).map(|s| pulse.at(at(k, s))).collect();
+        let row = pulse.grid(at(k, 0), dt, SAMPLES);
         rows.push((k, row));
     }
     let keep = 1e-4 * vpk;
@@ -626,6 +915,7 @@ pub fn eye(rep: &Report, setup: &EyeSetup) -> Result<EyeResult, String> {
         pulse: pulse_pts,
         peak_ns: (t_peak - ui / 2.0) * 1e9,
         notes,
+        eq: setup.eq,
     })
 }
 
@@ -698,5 +988,35 @@ mod tests {
         assert!(lossy.jitter_ps > clean.jitter_ps);
         // The worst case bounds the pattern's eye from below.
         assert!(lossy.worst_height <= lossy.height + 1e-6);
+    }
+
+    #[test]
+    fn equalising_a_lossy_line_opens_the_eye() {
+        let rep = line_report(50.0, 1.0, 4.0, 20.0, 400);
+        let setup = EyeSetup {
+            gbps: 10.0,
+            ..Default::default()
+        };
+        let plain = eye(&rep, &setup).unwrap();
+        let c = optimise(&rep, &setup, true, true).unwrap();
+        assert!(c.after > c.before + 0.05, "{c:?}");
+        assert!(
+            (c.before - plain.worst_height).abs() < 0.03,
+            "{c:?} {}",
+            plain.summary()
+        );
+        let eq = eye(&rep, &EyeSetup { eq: c.eq, ..setup }).unwrap();
+        assert!(
+            eq.worst_height > plain.worst_height + 0.03,
+            "{}{}",
+            plain.summary(),
+            eq.summary()
+        );
+        assert!(
+            eq.height > plain.height,
+            "{}{}",
+            plain.summary(),
+            eq.summary()
+        );
     }
 }

@@ -3,6 +3,23 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.68.0 (2026-11-15)
+
+- Equalisation in the eye (Path loss window > Eye diagram, `trace path
+  --eye 16 --eq auto`): a 3-tap transmit FFE (pre and post taps, sharing
+  the driver's swing with the main tap; `--ffe -0.05,-0.15`) and a
+  receive CTLE (one zero, two poles, DC this many dB below the peak;
+  `--ctle 6@8` for 6 dB at 8 GHz, default half the bit rate). "Pick
+  best" (`--eq auto|ffe|ctle`) tries taps in 0.025 steps and CTLE
+  peaking 1-18 dB at 0.5, 0.75 and 1 x half the bit rate, about 5800
+  settings in a second or two, and keeps the one with the largest worst
+  case eye area (the opening from the pulse's cursors summed across the
+  bit), so it does not buy height with width. The eye then samples at
+  the point whose opening holds best a quarter bit either side.
+  Clocker IC1.6 to J15.1 at 20 Gbit/s: 88 -> 100 mV, width kept.
+- The eye's pulse is sampled with turned phasors instead of a sine per
+  point, several times faster on fine sweeps.
+
 ## 0.67.0 (2026-11-15)
 
 - Eye diagram from the path (Path loss window > Eye diagram, `trace path

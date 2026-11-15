@@ -62,7 +62,8 @@ USAGE:
                                                 default 1 A, shared by pad count); with out, a drop map per layer
     trace path <board> <from> [<to>] [--ghz 6] [--points 200] [--quick-vias] [--model PATTERN=file.sNp]
                [--load chip.s1p] [--df 0.02] [--fmin GHz] [--fit PATTERN] [--tune [1-6] [--il-weight 1]
-               [--any] [--free PATTERN]] [--eye GBPS [--amp 0.8] [--rise PS] [--prbs 7] [--eye-svg eye.svg]]
+               [--any] [--free PATTERN]] [--eye GBPS [--amp 0.8] [--rise PS] [--prbs 7] [--eye-svg eye.svg]
+               [--ffe PRE,POST] [--ctle DB[@GHZ]] [--eq auto|ffe|ctle]]
                [out.s2p] [out.svg] [out.csv]
                                                 whole-path loss: the routed path from a pin (J503.1, or a part
                                                 with one signal pin, or a net) to another (default: the farthest
@@ -83,6 +84,9 @@ USAGE:
                                                 pulse response: height, width, jitter, worst case from the
                                                 cursors; --amp volts p-p into a matched load, --rise 20-80 %
                                                 ps (default 0.3 bit); sweeps to 2.5 x the bit rate by default.
+                                                --ffe: transmit pre and post taps; --ctle: receiver peaking, dB
+                                                at GHz (default half the bit rate); --eq picks them for the
+                                                widest worst case eye.
     trace zcheck <board> [--tol 10] [--rule PATTERN=Z] [--diff PATTERN=Z] [--no-pairs] [--no-rf]
                  [--no-vias] [--via-kinds 6] [--min-length 30] [--ghz 6] [--no-name-pairs] [report.csv]
                                                 board-wide impedance check: every controlled trace run (field
@@ -2170,6 +2174,7 @@ fn path_cmd(file: &str, rest: &[&str]) -> Res {
     let mut goal: Option<TuneGoal> = None;
     let mut eye: Option<trace_core::eye::EyeSetup> = None;
     let mut eye_svg: Option<&str> = None;
+    let mut eq_auto: Option<(bool, bool)> = None;
     let (mut ghz_set, mut points_set) = (false, false);
     let mut pins: Vec<&str> = Vec::new();
     let mut outs: Vec<&str> = Vec::new();
@@ -2212,6 +2217,39 @@ fn path_cmd(file: &str, rest: &[&str]) -> Res {
                     _ => e.bits = v.parse()?,
                 }
                 eye = Some(e);
+                i += 1;
+            }
+            "--ffe" => {
+                let mut e = eye.take().unwrap_or_default();
+                let v = next(i)?;
+                let (a, b) = v
+                    .split_once(',')
+                    .ok_or_else(|| format!("{v}: give PRE,POST (such as -0.05,-0.15)"))?;
+                e.eq.pre = -a.trim().parse::<f64>()?.abs();
+                e.eq.post = -b.trim().parse::<f64>()?.abs();
+                eye = Some(e);
+                i += 1;
+            }
+            "--ctle" => {
+                let mut e = eye.take().unwrap_or_default();
+                let v = next(i)?.to_ascii_lowercase();
+                let (db, at) = v.split_once('@').unwrap_or((v.as_str(), ""));
+                e.eq.ctle_db = db.trim_end_matches("db").parse()?;
+                if !at.is_empty() {
+                    e.eq.ctle_ghz = at.trim_end_matches("ghz").parse()?;
+                }
+                eye = Some(e);
+                i += 1;
+            }
+            "--eq" => {
+                eq_auto = Some(match next(i)? {
+                    "ffe" => (true, false),
+                    "ctle" => (false, true),
+                    _ => (true, true),
+                });
+                if eye.is_none() {
+                    eye = Some(Default::default());
+                }
                 i += 1;
             }
             "--eye-svg" => {
@@ -2407,7 +2445,24 @@ fn path_cmd(file: &str, rest: &[&str]) -> Res {
     for n in &rep.notes {
         println!("Note: {n}");
     }
-    if let Some(e) = &eye {
+    if let Some(e) = &mut eye {
+        if let Some((ffe, ctle)) = eq_auto {
+            let plain = trace_core::eye::EyeSetup {
+                eq: Default::default(),
+                ..e.clone()
+            };
+            let r0 = trace_core::eye::eye(&rep, &plain)?;
+            print!("Without equalisation: {}", r0.summary());
+            let c = trace_core::eye::optimise(&rep, e, ffe, ctle)?;
+            println!(
+                "Equalisation picked ({} tries): {}; worst case height {:.1} -> {:.1} mV",
+                c.tries,
+                c.eq.describe(e.gbps),
+                c.before * 1e3,
+                c.after * 1e3
+            );
+            e.eq = c.eq;
+        }
         let r = trace_core::eye::eye(&rep, e)?;
         print!("{}", r.summary());
         if let Some(o) = eye_svg {

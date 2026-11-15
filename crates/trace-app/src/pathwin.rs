@@ -36,6 +36,10 @@ pub struct PathWindow {
     eye: EyeSetup,
     /// The eye of the last result, once asked for.
     eye_result: Option<Result<EyeResult, String>>,
+    /// Let the picker choose the taps and the CTLE.
+    pick_ffe: bool,
+    pick_ctle: bool,
+    picked: Option<trace_core::eye::EqChoice>,
 }
 
 impl Default for PathWindow {
@@ -61,6 +65,9 @@ impl Default for PathWindow {
             last: None,
             eye: EyeSetup::default(),
             eye_result: None,
+            pick_ffe: true,
+            pick_ctle: true,
+            picked: None,
         }
     }
 }
@@ -324,6 +331,61 @@ impl PathWindow {
                                 });
                         });
                         ui.horizontal(|ui| {
+                            ui.label("Transmit taps: pre");
+                            ui.add(egui::DragValue::new(&mut self.eye.eq.pre).speed(0.005).range(-0.3..=0.0).fixed_decimals(3));
+                            ui.label("post");
+                            ui.add(egui::DragValue::new(&mut self.eye.eq.post).speed(0.005).range(-0.45..=0.0).fixed_decimals(3))
+                                .on_hover_text("De-emphasis: the bit after a change is sent this much weaker");
+                            ui.label("CTLE");
+                            ui.add(egui::DragValue::new(&mut self.eye.eq.ctle_db).speed(0.1).range(0.0..=24.0).suffix(" dB"))
+                                .on_hover_text("Receiver peaking: DC this far below the peak (0: none)");
+                            ui.label("at");
+                            ui.add(
+                                egui::DragValue::new(&mut self.eye.eq.ctle_ghz)
+                                    .speed(0.05)
+                                    .range(0.0..=60.0)
+                                    .custom_formatter(|v, _| if v <= 0.0 { "half the rate".into() } else { format!("{v:.2} GHz") }),
+                            );
+                        });
+                        ui.horizontal(|ui| {
+                            let rep = match &self.last {
+                                Some(Ok((r, _))) => Some(r),
+                                _ => None,
+                            };
+                            ui.checkbox(&mut self.pick_ffe, "taps");
+                            ui.checkbox(&mut self.pick_ctle, "CTLE");
+                            if ui
+                                .add_enabled(rep.is_some() && (self.pick_ffe || self.pick_ctle), egui::Button::new("Pick best"))
+                                .on_hover_text("Chooses the ticked ones for the widest worst case eye (opening summed across the bit), then draws it")
+                                .clicked()
+                            {
+                                if let Some(r) = rep {
+                                    match trace_core::eye::optimise(r, &self.eye, self.pick_ffe, self.pick_ctle) {
+                                        Ok(c) => {
+                                            self.eye.eq = c.eq;
+                                            self.picked = Some(c);
+                                            self.eye_result = Some(trace_core::eye::eye(r, &self.eye));
+                                        }
+                                        Err(e) => self.eye_result = Some(Err(e)),
+                                    }
+                                }
+                            }
+                            if ui.small_button("None").on_hover_text("No equalisation").clicked() {
+                                self.eye.eq = Default::default();
+                                self.picked = None;
+                            }
+                            if let Some(c) = &self.picked {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "picked: worst case {:.1} -> {:.1} mV",
+                                        c.before * 1e3,
+                                        c.after * 1e3
+                                    ))
+                                    .small(),
+                                );
+                            }
+                        });
+                        ui.horizontal(|ui| {
                             let need = (2.5 * self.eye.gbps).ceil().max(1.0);
                             if ui
                                 .button(format!("Sweep for it ({} GHz)", need))
@@ -482,6 +544,9 @@ impl PathWindow {
                                     ))
                                     .strong(),
                                 );
+                                if !e.eq.is_none() {
+                                    ui.label(RichText::new(format!("With {}", e.eq.describe(e.gbps))).small());
+                                }
                                 eye_plot(ui, e);
                                 for n in &e.notes {
                                     ui.label(RichText::new(n).small().color(Color32::from_rgb(230, 170, 60)));

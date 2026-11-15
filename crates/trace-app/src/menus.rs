@@ -363,6 +363,15 @@ impl App {
         ) {
             self.variants.open = true;
         }
+        if item(
+            ui,
+            has,
+            "Compare with another version…",
+            "",
+            "What changed between this board and another file of it: parts, nets, routing, rules, stack-up",
+        ) {
+            self.compare.open = true;
+        }
         ui.separator();
         if item(ui, true, "Projects panel", "", "") {
             self.studio.show(crate::studio::Pane::Projects);

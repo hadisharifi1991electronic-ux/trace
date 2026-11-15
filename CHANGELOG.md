@@ -3,6 +3,22 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.70.0 (2026-11-15)
+
+- Design compare (Project > Compare with another version…, `trace
+  compare first second [report.txt|.csv]`): what changed between two
+  versions of a board. Parts by designator: added, removed, moved
+  (past `--tol`, 1 mil), rotated, flipped, footprint, value and part
+  number. Nets by name: added, removed, renamed (the same pins under a
+  new name), and pins joined or left. Routing net by net: length (past
+  `--length-tol` 10 mil and 2 %), vias and layers. Net classes,
+  differential pairs, rules (on/off, priority, scope, each parameter),
+  the stack-up layer by layer (name, kind, thickness, Er, Df, material)
+  and the outline. The window reads the other board in the background
+  (pick it or paste its path), says which is the newer one, filters by
+  area or text, shows each change on the open board, and saves the
+  report as text or CSV. The CLI exits 1 when the boards differ.
+
 ## 0.69.0 (2026-11-15)
 
 - Crosstalk in the eye (Eye diagram > crosstalk, `trace path --eye 5

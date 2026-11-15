@@ -10,6 +10,7 @@ pub mod board;
 pub mod body;
 pub mod bus;
 pub mod clear3d;
+pub mod compare;
 pub mod connectivity;
 pub mod constraints;
 pub mod drc;

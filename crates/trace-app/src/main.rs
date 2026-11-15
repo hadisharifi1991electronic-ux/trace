@@ -7,6 +7,7 @@ mod autowin;
 mod canvas;
 mod clearwin;
 mod cm;
+mod comparewin;
 mod drc;
 mod editing;
 mod fanwin;
@@ -140,6 +141,7 @@ pub struct App {
     via: viawin::ViaWindow,
     zcheck: zwin::ZWindow,
     pathloss: pathwin::PathWindow,
+    compare: comparewin::CompareWindow,
     pairs: pairwin::PairWindow,
     stitch: stitchwin::StitchWindow,
     tidy: tidywin::TidyWindow,
@@ -236,6 +238,7 @@ impl App {
             via: viawin::ViaWindow::default(),
             zcheck: zwin::ZWindow::default(),
             pathloss: pathwin::PathWindow::default(),
+            compare: comparewin::CompareWindow::default(),
             pairs: pairwin::PairWindow::default(),
             stitch: stitchwin::StitchWindow::default(),
             tidy: tidywin::TidyWindow::default(),
@@ -3371,7 +3374,18 @@ impl eframe::App for App {
                 .show(ctx, &scene.board, self.imp.stackup(), self.selected),
             None => None,
         };
-        if let Some((at, text)) = shown {
+        let compared = match &self.scene {
+            Some(scene) => self.compare.show(
+                ctx,
+                &scene.board,
+                &scene
+                    .path
+                    .file_name()
+                    .map_or(String::new(), |n| n.to_string_lossy().to_string()),
+            ),
+            None => None,
+        };
+        if let Some((at, text)) = shown.or(compared) {
             let p = [at[0] as f32, at[1] as f32];
             self.focus = Some(Focus::Point(p, 3.0));
             self.needs_fit = false;

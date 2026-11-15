@@ -89,6 +89,12 @@ USAGE:
                                                 widest worst case eye. --xtalk: nets beside the path's traces
                                                 switch too (near or far end, whichever is worse), in the eye and
                                                 as each one's worst case closure.
+    trace compare <first> <second> [--tol 1] [--length-tol 10] [--no-routing] [report.txt|report.csv]
+                                                design compare: parts added, removed, moved, rotated, flipped or
+                                                changed (footprint, value, part number), nets added, removed,
+                                                renamed (same pins) or with pins joined or left, routing per
+                                                net (length, vias, layers), net classes, pairs, rules and the
+                                                stack-up; exits 1 when they differ
     trace zcheck <board> [--tol 10] [--rule PATTERN=Z] [--diff PATTERN=Z] [--no-pairs] [--no-rf]
                  [--no-vias] [--via-kinds 6] [--min-length 30] [--ghz 6] [--no-name-pairs] [report.csv]
                                                 board-wide impedance check: every controlled trace run (field
@@ -272,6 +278,7 @@ fn main() -> ExitCode {
         ["via", file, from, to, rest @ ..] => via(file, from, to, rest),
         ["zcheck", file, rest @ ..] => zcheck_cmd(file, rest),
         ["path" | "pathloss", file, rest @ ..] => path_cmd(file, rest),
+        ["compare" | "diff", a, b, rest @ ..] => compare_cmd(a, b, rest),
         ["pairsize", file, layer, rest @ ..] => pairsize(file, layer, rest),
         ["validate", rest @ ..] => validate(rest),
         ["stitch", file, net, out, rest @ ..] => stitch_cmd(file, net, out, rest),
@@ -2505,6 +2512,52 @@ fn path_cmd(file: &str, rest: &[&str]) -> Res {
         println!("Wrote {o}");
     }
     Ok(())
+}
+
+fn compare_cmd(a: &str, b: &str, rest: &[&str]) -> Res {
+    use trace_core::compare::{compare, Options};
+    let mut opt = Options::default();
+    let mut out: Option<&str> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i] {
+            "--tol" => {
+                opt.move_tol = rest.get(i + 1).ok_or("--tol needs mil")?.parse()?;
+                i += 1;
+            }
+            "--length-tol" => {
+                opt.length_tol = rest.get(i + 1).ok_or("--length-tol needs mil")?.parse()?;
+                i += 1;
+            }
+            "--no-routing" => opt.routing = false,
+            x if x.starts_with("--") => return Err(format!("unknown option {x}").into()),
+            x => out = Some(x),
+        }
+        i += 1;
+    }
+    let (ba, bb) = (board(a)?, board(b)?);
+    let c = compare(&ba, &bb, &opt);
+    let name = |p: &str| {
+        std::path::Path::new(p)
+            .file_name()
+            .map_or(p.to_string(), |n| n.to_string_lossy().to_string())
+    };
+    let text = c.report(&name(a), &name(b));
+    print!("{text}");
+    if let Some(o) = out {
+        let body = if o.to_ascii_lowercase().ends_with(".csv") {
+            c.csv()
+        } else {
+            text
+        };
+        std::fs::write(o, body)?;
+        println!("Wrote {o}");
+    }
+    if c.changes.is_empty() {
+        Ok(())
+    } else {
+        std::process::exit(1)
+    }
 }
 
 fn zcheck_cmd(file: &str, rest: &[&str]) -> Res {

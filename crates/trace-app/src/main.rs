@@ -16,6 +16,7 @@ mod menus;
 mod pairwin;
 mod panelize;
 mod panes;
+mod pathwin;
 mod pdnwin;
 mod placing;
 mod power;
@@ -138,6 +139,7 @@ pub struct App {
     pdn: pdnwin::PdnWindow,
     via: viawin::ViaWindow,
     zcheck: zwin::ZWindow,
+    pathloss: pathwin::PathWindow,
     pairs: pairwin::PairWindow,
     stitch: stitchwin::StitchWindow,
     tidy: tidywin::TidyWindow,
@@ -233,6 +235,7 @@ impl App {
             pdn: pdnwin::PdnWindow::default(),
             via: viawin::ViaWindow::default(),
             zcheck: zwin::ZWindow::default(),
+            pathloss: pathwin::PathWindow::default(),
             pairs: pairwin::PairWindow::default(),
             stitch: stitchwin::StitchWindow::default(),
             tidy: tidywin::TidyWindow::default(),
@@ -3361,6 +3364,19 @@ impl eframe::App for App {
                 }
             }
             None => {}
+        }
+        let shown = match &self.scene {
+            Some(scene) => self
+                .pathloss
+                .show(ctx, &scene.board, self.imp.stackup(), self.selected),
+            None => None,
+        };
+        if let Some((at, text)) = shown {
+            let p = [at[0] as f32, at[1] as f32];
+            self.focus = Some(Focus::Point(p, 3.0));
+            self.needs_fit = false;
+            self.marker = Some(p);
+            self.message = Some((text, false));
         }
         let placed = self
             .scene

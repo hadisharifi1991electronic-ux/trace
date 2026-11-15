@@ -30,6 +30,7 @@ pub mod impedance;
 pub mod nettie;
 pub mod pairopt;
 pub mod panel;
+pub mod pathloss;
 pub mod pdn;
 pub mod pi;
 pub mod place;

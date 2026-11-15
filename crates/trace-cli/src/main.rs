@@ -60,6 +60,16 @@ USAGE:
                                                 DC voltage drop (IR drop) over a supply net's pours, tracks and
                                                 vias from the source part to the loads (no --load: the total,
                                                 default 1 A, shared by pad count); with out, a drop map per layer
+    trace path <board> <from> [<to>] [--ghz 6] [--points 200] [--quick-vias] [--model PATTERN=file.sNp]
+               [--load chip.s1p] [--df 0.02] [out.s2p] [out.svg] [out.csv]
+                                                whole-path loss: the routed path from a pin (J503.1, or a part
+                                                with one signal pin, or a net) to another (default: the farthest
+                                                chip pin), through series parts and baluns, with shunt parts off
+                                                it; traces from the field solver, vias in 3D (--quick-vias: a
+                                                coaxial estimate), parts from --model files (by designator,
+                                                value or part number; .s2p, .s1p shunt, .s3p balun with port 1
+                                                unbalanced) or from their value and case. Cascaded insertion and
+                                                return loss to --ghz; --load ends it in a chip's port model.
     trace zcheck <board> [--tol 10] [--rule PATTERN=Z] [--diff PATTERN=Z] [--no-pairs] [--no-rf]
                  [--no-vias] [--via-kinds 6] [--min-length 30] [--ghz 6] [--no-name-pairs] [report.csv]
                                                 board-wide impedance check: every controlled trace run (field
@@ -242,6 +252,7 @@ fn main() -> ExitCode {
         ["pdn", file, net, rest @ ..] => pdn_cmd(file, net, rest),
         ["via", file, from, to, rest @ ..] => via(file, from, to, rest),
         ["zcheck", file, rest @ ..] => zcheck_cmd(file, rest),
+        ["path" | "pathloss", file, rest @ ..] => path_cmd(file, rest),
         ["pairsize", file, layer, rest @ ..] => pairsize(file, layer, rest),
         ["validate", rest @ ..] => validate(rest),
         ["stitch", file, net, out, rest @ ..] => stitch_cmd(file, net, out, rest),
@@ -2136,6 +2147,150 @@ fn validate(rest: &[&str]) -> Res {
     } else {
         Err("some checks failed".into())
     }
+}
+
+fn path_cmd(file: &str, rest: &[&str]) -> Res {
+    use trace_core::pathloss::{self, Options};
+    use trace_core::touchstone;
+    let b = board(file)?;
+    let mut opt = Options::default();
+    let mut pins: Vec<&str> = Vec::new();
+    let mut outs: Vec<&str> = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        let next = |i: usize| -> Result<&str, String> {
+            rest.get(i + 1)
+                .copied()
+                .ok_or_else(|| format!("{} needs a value", rest[i]))
+        };
+        match rest[i] {
+            "--ghz" => {
+                opt.ghz = next(i)?.trim_end_matches("GHz").parse()?;
+                i += 1;
+            }
+            "--points" => {
+                opt.points = next(i)?.parse()?;
+                i += 1;
+            }
+            "--quick-vias" | "--no-vias" => opt.vias_3d = false,
+            "--df" => {
+                opt.tan_d = next(i)?.parse()?;
+                i += 1;
+            }
+            "--model" => {
+                let a = next(i)?;
+                let (pat, f) = a
+                    .split_once('=')
+                    .ok_or_else(|| format!("{a}: give PATTERN=file.sNp"))?;
+                let n = touchstone::read(std::path::Path::new(f))?;
+                println!(
+                    "Model {pat}: {f} ({} port(s), {:.3}-{:.3} GHz, {} points)",
+                    n.ports,
+                    n.f.first().unwrap_or(&0.0),
+                    n.f.last().unwrap_or(&0.0),
+                    n.f.len()
+                );
+                opt.models.push((pat.to_string(), n));
+                i += 1;
+            }
+            "--load" => {
+                let f = next(i)?;
+                opt.load = Some(touchstone::read(std::path::Path::new(f))?);
+                i += 1;
+            }
+            a if a.starts_with("--") => return Err(format!("unknown option {a}").into()),
+            a if a.contains('.')
+                && [".s2p", ".svg", ".csv", ".txt"]
+                    .iter()
+                    .any(|e| a.to_ascii_lowercase().ends_with(e)) =>
+            {
+                outs.push(a)
+            }
+            a => pins.push(a),
+        }
+        i += 1;
+    }
+    let Some(from) = pins.first() else {
+        return Err("give the start pin (J503.1, a part, or a net)".into());
+    };
+    opt.from = from.to_string();
+    opt.to = pins.get(1).map(|s| s.to_string());
+    let t = std::time::Instant::now();
+    let last = std::cell::Cell::new(String::new());
+    let rep = pathloss::run(&b, &b.stackup, &opt, &|p, what| {
+        if what != last.take().as_str() {
+            eprintln!("  {:3.0} % {what}", p * 100.0);
+        }
+        last.set(what.to_string());
+    })?;
+    println!("{} ({:.0} s)", rep.summary(), t.elapsed().as_secs_f64());
+    let top = rep.f.last().copied().unwrap_or(0.0);
+    println!(
+        "Ports: {} ({} ohm) to {} ({} ohm)",
+        rep.start, rep.z_ref[0], rep.end, rep.z_ref[1]
+    );
+    println!(
+        "  {:<44} {:>6} {:>8} {:>9} {:>9}  model",
+        "section",
+        "Z",
+        "mil",
+        format!("own@{top}"),
+        "total dB"
+    );
+    for s in &rep.sections {
+        println!(
+            "  {:<44} {:>6} {:>8.0} {:>9.3} {:>9.3}  {}{}",
+            format!("{} [{}]", s.what, s.net),
+            s.z.map_or("".to_string(), |z| format!("{z:.1}")),
+            s.length,
+            s.loss_db,
+            s.total_db,
+            if s.diff { "(diff) " } else { "" },
+            s.model
+        );
+    }
+    let mut marks: Vec<f64> = [
+        0.5, 1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0, 10.0, 12.0, 15.0, 20.0, 30.0, 40.0,
+    ]
+    .into_iter()
+    .filter(|f| *f < top - 1e-9)
+    .collect();
+    marks.push(top);
+    let il: Vec<String> = marks
+        .iter()
+        .filter_map(|&f| rep.il_at(f).map(|d| format!("{f} GHz {d:.3}")))
+        .collect();
+    println!("Insertion loss, dB: {}", il.join(", "));
+    if let Some((rl, f)) = rep.worst_rl() {
+        println!("Return loss: worst {rl:.1} dB at {f:.2} GHz");
+    }
+    if !rep.s11_loaded.is_empty() {
+        let w = rep
+            .f
+            .iter()
+            .zip(&rep.s11_loaded)
+            .map(|(f, s)| (s.db(), *f))
+            .max_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((d, f)) = w {
+            println!("Into the path with the load at the end: worst {d:.1} dB at {f:.2} GHz");
+        }
+    }
+    for n in &rep.notes {
+        println!("Note: {n}");
+    }
+    for o in outs {
+        let lo = o.to_ascii_lowercase();
+        let text = if lo.ends_with(".svg") {
+            rep.svg(&format!("{} to {}", rep.start, rep.end))
+        } else if lo.ends_with(".csv") {
+            rep.csv()
+        } else {
+            rep.touchstone()
+        };
+        std::fs::write(o, text)?;
+        println!("Wrote {o}");
+    }
+    Ok(())
 }
 
 fn zcheck_cmd(file: &str, rest: &[&str]) -> Res {

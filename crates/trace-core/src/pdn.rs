@@ -465,7 +465,7 @@ pub fn feeds(board: &Board, net: u32, ground: u32) -> Vec<Feed> {
     out
 }
 
-enum BeadModel {
+pub(crate) enum BeadModel {
     /// A ferrite bead: its impedance at 100 MHz, and whether its value
     /// gave it.
     Bead { z100: f64, rated: bool },
@@ -475,7 +475,7 @@ enum BeadModel {
 
 /// A bead's rating from its value: "600R@100MHz", "120 ohm", Murata
 /// "BLM18PG221SN1" (221 = 220 Ω); an inductor's from "1uH".
-fn bead_model(f: &Feed) -> BeadModel {
+pub(crate) fn bead_model(f: &Feed) -> BeadModel {
     let v = f.value.to_ascii_uppercase();
     let des = f.designator.to_ascii_uppercase();
     let is_l = (des.starts_with('L') || des.starts_with("FL"))

@@ -567,6 +567,9 @@ impl App {
                 if item(ui, true, "Impedance check…", "", "Every controlled trace and via kind against its target impedance (pairs, coax nets, rules)") {
                     self.zcheck.open = true;
                 }
+                if item(ui, true, "Path loss…", "", "The routed path between two pins, traces, vias and parts cascaded: insertion and return loss to your GHz, Touchstone") {
+                    self.pathloss.open = true;
+                }
             });
         });
         ui.separator();

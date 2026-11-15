@@ -95,7 +95,7 @@ pub struct Controlled {
     pub why: String,
 }
 
-fn is_ground(name: &str) -> bool {
+pub(crate) fn is_ground(name: &str) -> bool {
     let n = name.to_ascii_uppercase();
     n.contains("GND") || n.contains("VSS") || n == "0V"
 }
@@ -653,7 +653,7 @@ struct Built {
 
 /// Signal layers a via joins: copper of its own net (tracks, arcs, pads)
 /// touching it.
-fn joined_layers(board: &Board, v: &crate::Via) -> Vec<(u8, Option<f64>)> {
+pub(crate) fn joined_layers(board: &Board, v: &crate::Via) -> Vec<(u8, Option<f64>)> {
     let c = mil(&v.at);
     let r = v.diameter.mil() / 2.0 + 0.5;
     let mut out: BTreeMap<u8, Option<f64>> = BTreeMap::new();
@@ -740,6 +740,66 @@ fn antipad(board: &Board, v: &crate::Via, other: Option<[f64; 2]>) -> Option<(f6
     radii.get(radii.len() / 2).map(|&(r, b)| (2.0 * r, b))
 }
 
+/// A via as built between copper layers `from` and `to`: its drill, pad,
+/// the antipad from the plane holes round it, the partner via `mate`
+/// (distance, centre) for a pair, and the ground vias near it as returns.
+pub(crate) fn build_via(
+    board: &Board,
+    v: &crate::Via,
+    from: u8,
+    to: u8,
+    mate: Option<(f64, [f64; 2])>,
+    ground: &[bool],
+) -> ViaSetup {
+    let g = &board.geometry;
+    let at = mil(&v.at);
+    let mut s = ViaSetup::new(from, to);
+    s.drill = v.hole.mil();
+    s.pad = v.diameter.mil();
+    let (ap, oval) = antipad(board, v, mate.map(|m| m.1)).unwrap_or((s.pad + 12.0, false));
+    // For an oval round both, the nearest edge gives its width.
+    s.antipad = ap;
+    s.antipad_oval = oval;
+    s.pair = mate.map(|m| m.0);
+    // Return vias: ground vias near the signal via.
+    let reach = 4.0 * s.antipad.max(s.pad);
+    let mut d: Vec<f64> = g
+        .vias
+        .iter()
+        .filter(|o| o.net.is_some_and(|n| ground.get(n as usize) == Some(&true)))
+        .map(|o| {
+            let q = mil(&o.at);
+            (q[0] - at[0]).hypot(q[1] - at[1])
+        })
+        .filter(|&x| x < reach)
+        .collect();
+    d.sort_by(f64::total_cmp);
+    d.truncate(if s.pair.is_some() { 4 } else { 6 });
+    s.returns = d.len();
+    s.return_dist = if d.is_empty() {
+        s.antipad / 2.0 + 10.0
+    } else {
+        (d.iter().sum::<f64>() / d.len() as f64).max(s.antipad / 2.0 + s.pad / 2.0)
+    };
+    s
+}
+
+/// The partner's via beside `v`, for a pair: distance and centre.
+pub(crate) fn mate_via(board: &Board, v: &crate::Via, partner: u32) -> Option<(f64, [f64; 2])> {
+    let at = mil(&v.at);
+    board
+        .geometry
+        .vias
+        .iter()
+        .filter(|o| o.net == Some(partner))
+        .map(|o| {
+            let q = mil(&o.at);
+            ((q[0] - at[0]).hypot(q[1] - at[1]), q)
+        })
+        .filter(|(d, _)| *d < 6.0 * v.diameter.mil().max(10.0))
+        .min_by(|a, b| a.0.total_cmp(&b.0))
+}
+
 fn vias(
     board: &Board,
     stackup: &Stackup,
@@ -762,50 +822,13 @@ fn vias(
             let (to, wt) = layers[layers.len() - 1];
             let at = mil(&v.at);
             // The partner's via beside it, for a pair.
-            let mate = c.partner.and_then(|p| {
-                g.vias
-                    .iter()
-                    .filter(|o| o.net == Some(p))
-                    .map(|o| {
-                        let q = mil(&o.at);
-                        ((q[0] - at[0]).hypot(q[1] - at[1]), q)
-                    })
-                    .filter(|(d, _)| *d < 6.0 * v.diameter.mil().max(10.0))
-                    .min_by(|a, b| a.0.total_cmp(&b.0))
-            });
+            let mate = c.partner.and_then(|p| mate_via(board, v, p));
             if c.partner.is_some() && mate.is_none() {
                 continue; // a pair's net leaving on its own (rare)
             }
-            let mut s = ViaSetup::new(from, to);
-            s.drill = v.hole.mil();
-            s.pad = v.diameter.mil();
-            let (ap, oval) = antipad(board, v, mate.map(|m| m.1)).unwrap_or((s.pad + 12.0, false));
-            // For an oval round both, the nearest edge gives its width.
-            s.antipad = ap;
-            s.antipad_oval = oval;
-            s.pair = mate.map(|m| m.0);
+            let mut s = build_via(board, v, from, to, mate, &ground);
             s.w_from = wf;
             s.w_to = wt;
-            // Return vias: ground vias near the signal via.
-            let reach = 4.0 * s.antipad.max(s.pad);
-            let mut d: Vec<f64> = g
-                .vias
-                .iter()
-                .filter(|o| o.net.is_some_and(|n| ground.get(n as usize) == Some(&true)))
-                .map(|o| {
-                    let q = mil(&o.at);
-                    (q[0] - at[0]).hypot(q[1] - at[1])
-                })
-                .filter(|&x| x < reach)
-                .collect();
-            d.sort_by(f64::total_cmp);
-            d.truncate(if s.pair.is_some() { 4 } else { 6 });
-            s.returns = d.len();
-            s.return_dist = if d.is_empty() {
-                s.antipad / 2.0 + 10.0
-            } else {
-                (d.iter().sum::<f64>() / d.len() as f64).max(s.antipad / 2.0 + s.pad / 2.0)
-            };
             s.fmax_ghz = goal.via_fmax;
             // The impedance comes from the low band, so few points; the
             // grid stays the solver's own (a coarser one moved a Clocker

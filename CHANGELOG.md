@@ -3,6 +3,35 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.65.0 (2026-11-15)
+
+- Whole-path loss (Tools > Signal and power integrity > Path loss…,
+  `trace path`): pick a start pin (J503.1, a part with one signal pin, or
+  a net) and an end pin (or the farthest chip pin), and Trace follows the
+  routed copper between them, through series parts and baluns, and
+  cascades every section into one insertion and return loss to your GHz:
+  - Traces: each run (same layer, width and pair gap) from the 2D field
+    solver, with the pour beside it, copper roughness and Df; coupled
+    pair runs in odd mode, break-outs uncoupled.
+  - Vias: each kind solved in 3D (pairs as pairs), or a coaxial estimate
+    with the stub below (`--quick-vias`).
+  - Parts: a vendor Touchstone file by designator, value or part number
+    (`--model PATTERN=file`: .s2p series part, .s1p shunt part, .s3p
+    balun with port 1 unbalanced, converted to mixed mode), or a model
+    from the value and case (capacitor ESR/ESL, resistor, inductor,
+    bead, ideal balun from its 1:2 or 50:100 ratio).
+  - Shunt parts off the path (to ground or across the pair) with the
+    stub that leads to them.
+  - Pairs the board does not define are followed through matching parts
+    on both lines (AC caps to a balun).
+  - `--load chip.s1p`: return loss into the path ending in a chip's port
+    model.
+  - Output: a section table (impedance, own loss, loss from the start),
+    the IL and RL plot, a Touchstone file (version 2 when one end is a
+    pair, 100 Ω, and the other single-ended), CSV and SVG.
+- Clocker IN_CLK1 (IC1 to the SMA J15 through C5, TR2 and C1, two pair
+  vias in 3D): 3.98 dB at 6 GHz, 0.84 dB at 3 GHz.
+
 ## 0.64.2 (2026-11-15)
 
 - Impedance check: vias whose barrel is shorter than a twentieth of a

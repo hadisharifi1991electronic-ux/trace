@@ -53,6 +53,15 @@ pub struct Options {
     /// Lowest frequency of interest, GHz: the worst return loss is taken
     /// from here up (a DC block's corner lies below the band).
     pub fmin: f64,
+    /// Fitted parts (designator patterns) taken as empty sites, for the
+    /// tuner to choose again.
+    pub free: Vec<String>,
+    /// The tuner may put a capacitor or an inductor in any site (else C
+    /// sites take capacitors and L sites inductors).
+    pub any_part: bool,
+    /// Of footprints stacked on the same pads, the ones fitted
+    /// (designator patterns).
+    pub fit: Vec<String>,
 }
 
 impl Default for Options {
@@ -67,6 +76,9 @@ impl Default for Options {
             load: None,
             tan_d: 0.02,
             fmin: 0.0,
+            free: Vec::new(),
+            any_part: false,
+            fit: Vec::new(),
         }
     }
 }
@@ -713,6 +725,14 @@ fn is_balun(board: &Board, comp: usize) -> bool {
         || text.contains("TRANSFORMER")
 }
 
+/// A fitted part the tuner may choose again.
+fn freed(opt: &Options, des: &str) -> bool {
+    let d = des.to_ascii_uppercase();
+    opt.free
+        .iter()
+        .any(|p| crate::constraints::glob(&p.to_ascii_uppercase(), &d))
+}
+
 /// A value that says the part is not chosen or not fitted: TBD, DNI,
 /// DNP, NC, N/A, empty.
 fn placeholder(value: &str) -> bool {
@@ -741,6 +761,9 @@ fn part_model(
     want_ports: usize,
 ) -> Option<PartModel> {
     if !crate::variant::fitted(board, comp) {
+        return None;
+    }
+    if freed(opt, &board.components[comp].designator) {
         return None;
     }
     let p = &board.components[comp];
@@ -1468,12 +1491,32 @@ enum El {
 }
 
 /// What one element is, once modelled, at every frequency.
+#[derive(Clone)]
 struct Built {
     sec: Section,
     /// ABCD per frequency (in the element's mode).
     m: Vec<Abcd>,
     /// Port references this element changes to (a balun) or None.
     mode_after: Option<bool>,
+    /// An empty part site (TBD, DNI) a matching part may go in.
+    site: Option<Site>,
+}
+
+/// An empty part site on the path.
+#[derive(Clone, Debug)]
+struct Site {
+    /// In series with the line (else to ground, or across the pair).
+    series: bool,
+    across: bool,
+    diff: bool,
+    pack: Package,
+    /// The designators of the site (one, or alternates on the same pads).
+    names: Vec<String>,
+    /// Capacitors, inductors, or either, may go here.
+    caps: bool,
+    inductors: bool,
+    /// For a shunt site: the stub to it, per frequency.
+    stub: Vec<Abcd>,
 }
 
 struct Ctx<'a> {
@@ -1611,6 +1654,7 @@ impl Ctx<'_> {
             },
             m,
             mode_after: None,
+            site: None,
         })
     }
 
@@ -1781,6 +1825,7 @@ impl Ctx<'_> {
             },
             m,
             mode_after: None,
+            site: None,
         })
     }
 
@@ -1872,6 +1917,7 @@ impl Ctx<'_> {
                 },
                 m,
                 mode_after: Some(next_diff),
+                site: None,
             });
         }
         // A series part (in each line of a pair), with any other part on
@@ -1907,6 +1953,7 @@ impl Ctx<'_> {
             let pc = &board.components[ci];
             match pm {
                 Some(pm) => used.push((ci, x, y, pm)),
+                None if freed(self.opt, &pc.designator) => {}
                 None => unfitted.push(format!(
                     "{} {}",
                     pc.designator,
@@ -1915,6 +1962,54 @@ impl Ctx<'_> {
                 )),
             }
         }
+        // Footprints stacked on the same pads are alternatives: only one
+        // is fitted. Take the one --fit names, else a capacitor, then an
+        // inductor, then a resistor.
+        let stacked = |a: &(usize, usize, usize, PartModel),
+                       b: &(usize, usize, usize, PartModel)| {
+            let near = |x: usize, y: usize| {
+                let (p, q) = (&g.pads[x], &g.pads[y]);
+                let r = 0.5
+                    * p.size_x
+                        .mil()
+                        .max(p.size_y.mil())
+                        .max(q.size_x.mil())
+                        .max(q.size_y.mil());
+                p.layer == q.layer && dist(mil(&p.at), mil(&q.at)) < r
+            };
+            near(a.1, b.1) && near(a.2, b.2)
+        };
+        let rank = |u: &(usize, usize, usize, PartModel)| {
+            let d = board.components[u.0].designator.to_ascii_uppercase();
+            let forced = self
+                .opt
+                .fit
+                .iter()
+                .any(|p| crate::constraints::glob(&p.to_ascii_uppercase(), &d));
+            let kind = match prefix(&d).as_str() {
+                "C" => 0,
+                "L" => 1,
+                "R" => 2,
+                _ => 3,
+            };
+            (!forced, kind)
+        };
+        let mut kept: Vec<(usize, usize, usize, PartModel)> = Vec::new();
+        let mut left: Vec<(usize, usize, usize, PartModel)> = used;
+        left.sort_by_key(|u| rank(u));
+        for u in left {
+            if let Some(k) = kept.iter().position(|k| stacked(k, &u)) {
+                self.notes.push(format!(
+                    "{} and {} are alternative footprints on the same pads: took {} (--fit to choose)",
+                    board.components[kept[k].0].designator,
+                    board.components[u.0].designator,
+                    board.components[kept[k].0].designator
+                ));
+                continue;
+            }
+            kept.push(u);
+        }
+        let used = kept;
         if !unfitted.is_empty() {
             self.notes.push(format!(
                 "not fitted or no value, left out: {}{}",
@@ -1984,6 +2079,25 @@ impl Ctx<'_> {
                 pc.param(&["Value", "Comment", "Device Type"]).unwrap_or("")
             )
         };
+        let site = used.is_empty().then(|| {
+            let names: Vec<String> = group
+                .iter()
+                .map(|u| board.components[u.0].designator.clone())
+                .collect();
+            let pre: Vec<String> = names.iter().map(|n| prefix(n)).collect();
+            let (x, y) = (&g.pads[*pa].at, &g.pads[*pb].at);
+            let pitch = (x.x.mil() - y.x.mil()).hypot(x.y.mil() - y.y.mil());
+            Site {
+                series: true,
+                across: false,
+                diff,
+                pack: Package::from_pitch(pitch),
+                caps: self.opt.any_part || pre.iter().any(|p| p != "L"),
+                inductors: self.opt.any_part || pre.iter().any(|p| p != "C"),
+                names,
+                stub: Vec::new(),
+            }
+        });
         let what = if used.is_empty() {
             format!("{des} {value} (no value: 0 Ω link)")
         } else {
@@ -2019,6 +2133,7 @@ impl Ctx<'_> {
             },
             m,
             mode_after: None,
+            site,
         })
     }
 
@@ -2046,14 +2161,15 @@ impl Ctx<'_> {
             .filter(|(_, p)| p.component == Some(*comp as u32))
             .map(|(i, _)| i)
             .collect();
-        let pm = match part_model(board, *comp, &pads, self.opt, 1) {
-            Some(PartModel::File(n)) => PartModel::File(n),
+        let pm: Option<PartModel> = match part_model(board, *comp, &pads, self.opt, 1) {
+            Some(PartModel::File(n)) => Some(PartModel::File(n)),
             _ => match part_model(board, *comp, &pads, self.opt, 2) {
                 Some(PartModel::File(n)) if n.ports != 1 => return None,
-                Some(pm) => pm,
+                Some(pm) => Some(pm),
+                None if freed(self.opt, &des) => None,
                 None => {
                     self.notes.push(format!(
-                        "{des} {} to {}: not fitted or no value, left off",
+                        "{des} {} to {}: not fitted or no value, left off (its pad and stub stay)",
                         if value.is_empty() {
                             "(no value)"
                         } else {
@@ -2061,7 +2177,7 @@ impl Ctx<'_> {
                         },
                         if *across { "the other line" } else { "ground" }
                     ));
-                    return None;
+                    None
                 }
             },
         };
@@ -2081,15 +2197,22 @@ impl Ctx<'_> {
                 built.push(b);
             }
         }
-        let m: Vec<Abcd> = (0..self.f.len())
+        let chains: Vec<Abcd> = (0..self.f.len())
             .map(|k| {
-                let f = self.f[k];
                 let mut chain = IDENT;
                 for b in &built {
                     chain = mul(&chain, &b.m[k]);
                 }
+                chain
+            })
+            .collect();
+        let m: Vec<Abcd> = (0..self.f.len())
+            .map(|k| {
+                let f = self.f[k];
+                let chain = chains[k];
                 let zl = pm
-                    .z(f)
+                    .as_ref()
+                    .and_then(|pm| pm.z(f))
                     .filter(|z| z.re.is_finite() && z.im.is_finite())
                     .unwrap_or(Cx::new(OPEN_Z, 0.0));
                 // To ground from one line of a pair: twice its impedance
@@ -2103,6 +2226,25 @@ impl Ctx<'_> {
         let top = m.last().copied().unwrap_or(IDENT);
         let own = -s_from_abcd(&top, zr, zr)[2].db();
         let at = mil(&g.pads[*pad].at);
+        let site = pm.is_none().then(|| {
+            let pitch = if pads.len() >= 2 {
+                let (x, y) = (&g.pads[pads[0]].at, &g.pads[pads[1]].at);
+                (x.x.mil() - y.x.mil()).hypot(x.y.mil() - y.y.mil())
+            } else {
+                40.0
+            };
+            let pre = prefix(&des);
+            Site {
+                series: false,
+                across: *across,
+                diff,
+                pack: Package::from_pitch(pitch),
+                caps: self.opt.any_part || pre != "L",
+                inductors: self.opt.any_part || pre != "C",
+                names: vec![des.clone()],
+                stub: chains,
+            }
+        });
         Some(Built {
             sec: Section {
                 what: format!(
@@ -2126,10 +2268,13 @@ impl Ctx<'_> {
                 loss_db: own,
                 total_db: 0.0,
                 at,
-                model: pm.describe(),
+                model: pm
+                    .as_ref()
+                    .map_or("not fitted: an open pad".to_string(), |p| p.describe()),
             },
             m,
             mode_after: None,
+            site,
         })
     }
 }
@@ -2306,6 +2451,20 @@ pub fn run(
     opt: &Options,
     progress: &dyn Fn(f64, &str),
 ) -> Result<Report, String> {
+    let p = prepare(board, stackup, opt, progress)?;
+    progress(0.95, "cascading");
+    let r = finish(&p, &p.built);
+    progress(1.0, "done");
+    Ok(r)
+}
+
+/// Finds the routed path and models each section.
+fn prepare(
+    board: &Board,
+    stackup: &Stackup,
+    opt: &Options,
+    progress: &dyn Fn(f64, &str),
+) -> Result<Prepared, String> {
     progress(0.0, "finding the path");
     let geo = crate::impedance::layer_geometry(stackup);
     if geo.iter().all(|g| g.above.is_none() && g.below.is_none()) {
@@ -2879,43 +3038,64 @@ pub fn run(
         }
     }
     rep.notes.append(&mut ctx.notes);
-    progress(0.95, "cascading");
-    let z1 = Ctx::z_ref(merged.first().is_some_and(|x| x.1));
+    let start_diff = merged.first().is_some_and(|x| x.1);
+    rep.f = f;
+    rep.fmin = opt.fmin;
+    Ok(Prepared {
+        rep,
+        built,
+        start_diff,
+        load: opt.load.clone(),
+    })
+}
+
+/// A path found and modelled, before the cascade.
+struct Prepared {
+    rep: Report,
+    built: Vec<Built>,
+    start_diff: bool,
+    load: Option<Network>,
+}
+
+/// Cascades the sections into the report.
+fn finish(p: &Prepared, built: &[Built]) -> Report {
+    let mut rep = p.rep.clone();
+    let f = rep.f.clone();
+    let z1 = Ctx::z_ref(p.start_diff);
     let mut total: Vec<Abcd> = vec![IDENT; f.len()];
-    let mut mode = merged.first().is_some_and(|x| x.1);
+    let mut mode = p.start_diff;
     let top = f.len() - 1;
-    for b in built.iter_mut() {
+    let mut sections = Vec::new();
+    for b in built {
         for (k, t) in total.iter_mut().enumerate() {
             *t = mul(t, &b.m[k]);
         }
         if let Some(m) = b.mode_after {
             mode = m;
         }
-        b.sec.total_db = -s_from_abcd(&total[top], z1, Ctx::z_ref(mode))[2].db();
+        let mut sec = b.sec.clone();
+        sec.total_db = -s_from_abcd(&total[top], z1, Ctx::z_ref(mode))[2].db();
+        sections.push(sec);
     }
     let z2 = Ctx::z_ref(mode);
     rep.z_ref = [z1, z2];
     rep.s = total.iter().map(|m| s_from_abcd(m, z1, z2)).collect();
-    if let Some(load) = &opt.load {
+    if let Some(load) = &p.load {
+        let sedz = z2 > 75.0 && load.z_ref < 75.0;
+        if sedz {
+            rep.notes.push(
+                "the load is a single-ended model at the pair's end: taken as its single-ended equivalent (SEDZ, Zdiff = 2 × Z)"
+                    .into(),
+            );
+        }
         rep.s11_loaded = f
             .iter()
             .zip(&total)
-            .map(|(&ff, m)| {
-                let zl = load
-                    .impedance(ff.clamp(
-                        *load.f.first().unwrap_or(&ff),
-                        *load.f.last().unwrap_or(&ff),
-                    ))
-                    .unwrap_or(c(z2));
-                crate::touchstone::z_to_gamma(z_in(m, zl), z1)
-            })
+            .map(|(&ff, m)| crate::touchstone::z_to_gamma(z_in(m, load_z(load, ff, sedz)), z1))
             .collect();
-    }
-    if let Some(load) = &opt.load {
         let band = valid_band(load);
         if let Some((lo, hi)) = band {
-            let top = f.last().copied().unwrap_or(0.0);
-            if lo > f[0] + 1e-9 || hi < top - 1e-9 {
+            if lo > f[0] + 1e-9 || hi < f[top] - 1e-9 {
                 rep.notes.push(format!(
                     "the load model is valid from {} to {} GHz; outside that it is held at its nearest point, and the worst return loss with it is taken inside",
                     trim_num(lo),
@@ -2925,16 +3105,398 @@ pub fn run(
         }
         rep.load_band = band;
     }
-    rep.f = f;
-    rep.fmin = opt.fmin;
     rep.length = built
         .iter()
         .filter(|b| b.sec.kind == "trace")
         .map(|b| b.sec.length)
         .sum();
-    rep.sections = built.into_iter().map(|b| b.sec).collect();
+    rep.sections = sections;
+    rep
+}
+
+/// The load's impedance at `f` GHz (differential when `sedz`).
+fn load_z(load: &Network, f: f64, sedz: bool) -> Cx {
+    let g = at_clamped(load, f)
+        .and_then(|v| v.first().copied())
+        .unwrap_or(c(0.0));
+    // A single-ended model (50 Ω) at a pair's end is the single-ended
+    // equivalent (SEDZ): Γ is the same with the differential impedance
+    // twice as high.
+    let zr = if sedz { 2.0 * load.z_ref } else { load.z_ref };
+    if sub(c(1.0), g).abs() < 1e-9 {
+        c(OPEN_Z)
+    } else {
+        crate::touchstone::gamma_to_z(g, zr)
+    }
+}
+
+// ---------------------------------------------------------------------
+// Matching: values for the empty part sites.
+
+/// What the tuner aims at.
+#[derive(Clone, Debug)]
+pub struct TuneGoal {
+    /// Band, GHz (0 to 0: from `fmin` to the top of the sweep).
+    pub band: (f64, f64),
+    /// Weight of the mean insertion loss in the band against the worst
+    /// return loss (both dB).
+    pub il_weight: f64,
+    /// Smallest and largest capacitor (F) and inductor (H) to try.
+    pub c_range: (f64, f64),
+    pub l_range: (f64, f64),
+}
+
+impl Default for TuneGoal {
+    fn default() -> Self {
+        TuneGoal {
+            band: (0.0, 0.0),
+            il_weight: 1.0,
+            c_range: (0.1e-12, 100e-12),
+            l_range: (0.3e-9, 47e-9),
+        }
+    }
+}
+
+/// The part chosen for a site.
+#[derive(Clone, Debug)]
+pub struct Choice {
+    /// The site's designators (alternates on the same pads with /).
+    pub site: String,
+    pub series: bool,
+    pub across: bool,
+    /// "1.2 pF", "3.3 nH", "0 Ω link" or "open".
+    pub part: String,
+    pub at: [f64; 2],
+}
+
+/// The tuner's result.
+#[derive(Clone, Debug)]
+pub struct Tuned {
+    pub before: Report,
+    pub after: Report,
+    pub choices: Vec<Choice>,
+    /// Worst return loss in the band, dB, before and after (with the
+    /// load when one is given).
+    pub worst: (f64, f64),
+    /// Mean insertion loss in the band, dB, before and after.
+    pub il: (f64, f64),
+    /// The band used, GHz.
+    pub band: (f64, f64),
+    pub evaluations: usize,
+}
+
+/// E12 values from `lo` to `hi`.
+fn e12(lo: f64, hi: f64) -> Vec<f64> {
+    const E: [f64; 12] = [1.0, 1.2, 1.5, 1.8, 2.2, 2.7, 3.3, 3.9, 4.7, 5.6, 6.8, 8.2];
+    let mut out = Vec::new();
+    let mut dec = 10f64.powf(lo.log10().floor());
+    while dec <= hi * 1.0001 {
+        for e in E {
+            let v = e * dec;
+            if v >= lo * 0.9999 && v <= hi * 1.0001 {
+                out.push(v);
+            }
+        }
+        dec *= 10.0;
+    }
+    out
+}
+
+#[derive(Clone, Copy, Debug)]
+enum Cand {
+    /// Nothing fitted: a 0 Ω link in series, open in shunt.
+    Empty,
+    Cap(f64),
+    Ind(f64),
+}
+
+impl Cand {
+    fn label(self, series: bool) -> String {
+        match self {
+            Cand::Empty if series => "0 Ω link".into(),
+            Cand::Empty => "open".into(),
+            Cand::Cap(c) => format!("{} pF", sig(c * 1e12)),
+            Cand::Ind(l) => format!("{} nH", sig(l * 1e9)),
+        }
+    }
+
+    /// The part's model in a case.
+    fn model(self, pack: Package) -> Option<PartModel> {
+        match self {
+            Cand::Empty => None,
+            Cand::Cap(farads) => {
+                let m = pdn::CapModel::mlcc(farads, pack);
+                Some(PartModel::Rlc {
+                    r: if farads < 1e-9 { 0.15 } else { m.esr },
+                    l: m.esl,
+                    c: Some(farads),
+                    cp: 0.0,
+                })
+            }
+            // A chip inductor: Q about 30 at 2 GHz, 0.1 pF across.
+            Cand::Ind(h) => Some(PartModel::Rlc {
+                r: TAU * 2e9 * h / 30.0,
+                l: h,
+                c: None,
+                cp: 0.1e-12,
+            }),
+        }
+    }
+}
+
+impl Site {
+    /// This site's ABCD at `f` GHz (frequency index `k`) with `cand` in it.
+    fn abcd(&self, cand: Cand, f: f64, k: usize) -> Abcd {
+        if self.series {
+            let z = match cand.model(self.pack) {
+                Some(m) => m.z(f).unwrap_or(c(0.0)),
+                // A 0 Ω link: the case's own inductance.
+                None => Cx::new(0.01, TAU * f * 1e9 * self.pack.esl() * 0.8),
+            };
+            let m = series(z);
+            if self.diff {
+                to_diff(&m)
+            } else {
+                m
+            }
+        } else {
+            let zl = cand
+                .model(self.pack)
+                .and_then(|m| m.z(f))
+                .unwrap_or(c(OPEN_Z));
+            let zl = if self.diff && !self.across {
+                zl.scale(2.0)
+            } else {
+                zl
+            };
+            let chain = self.stub.get(k).copied().unwrap_or(IDENT);
+            shunt(c(1.0).div(z_in(&chain, zl)))
+        }
+    }
+}
+
+/// Chooses parts for the empty sites (TBD, DNI, or `opt.free`) on the
+/// path for the best match over the band: the worst return loss (into
+/// the load, when one is given) plus the mean insertion loss times
+/// `il_weight`, each extra part costing a little so that empty sites
+/// stay empty unless a part helps.
+pub fn tune(
+    board: &Board,
+    stackup: &Stackup,
+    opt: &Options,
+    goal: &TuneGoal,
+    progress: &dyn Fn(f64, &str),
+) -> Result<Tuned, String> {
+    let p = prepare(board, stackup, opt, &|x, w| progress(0.6 * x, w))?;
+    let before = finish(&p, &p.built);
+    let sites: Vec<usize> = (0..p.built.len())
+        .filter(|&i| p.built[i].site.is_some())
+        .collect();
+    if sites.is_empty() {
+        return Err(
+            "no empty part sites on the path (TBD, DNI); name fitted parts to choose again (free)"
+                .into(),
+        );
+    }
+    let f = &p.rep.f;
+    let top = f.last().copied().unwrap_or(0.0);
+    let (mut lo, mut hi) = if goal.band.1 > goal.band.0 {
+        goal.band
+    } else {
+        (opt.fmin, top)
+    };
+    lo = lo.max(opt.fmin);
+    if let Some((a, b)) = before.load_band {
+        lo = lo.max(a);
+        hi = hi.min(b);
+    }
+    let ks: Vec<usize> = (0..f.len())
+        .filter(|&k| f[k] >= lo - 1e-9 && f[k] <= hi + 1e-9)
+        .collect();
+    if ks.is_empty() {
+        return Err(format!("no frequencies between {lo} and {hi} GHz"));
+    }
+    // Candidates per site.
+    let caps = e12(goal.c_range.0, goal.c_range.1);
+    let inds = e12(goal.l_range.0, goal.l_range.1);
+    let cands: Vec<Vec<Cand>> = sites
+        .iter()
+        .map(|&i| {
+            let s = p.built[i].site.as_ref().expect("site");
+            let mut v = vec![Cand::Empty];
+            if s.caps {
+                v.extend(caps.iter().map(|&x| Cand::Cap(x)));
+            }
+            if s.inductors {
+                v.extend(inds.iter().map(|&x| Cand::Ind(x)));
+            }
+            v
+        })
+        .collect();
+    // Each site's ABCD for each candidate at the band's frequencies.
+    let table: Vec<Vec<Vec<Abcd>>> = sites
+        .iter()
+        .zip(&cands)
+        .map(|(&i, cs)| {
+            let s = p.built[i].site.as_ref().expect("site");
+            cs.iter()
+                .map(|&cd| ks.iter().map(|&k| s.abcd(cd, f[k], k)).collect())
+                .collect()
+        })
+        .collect();
+    // The fixed sections between sites, multiplied out.
+    let mut segs: Vec<Vec<Abcd>> = vec![vec![IDENT; ks.len()]; sites.len() + 1];
+    let mut seg = 0;
+    for (i, b) in p.built.iter().enumerate() {
+        if sites.get(seg) == Some(&i) {
+            seg += 1;
+            continue;
+        }
+        for (j, &k) in ks.iter().enumerate() {
+            segs[seg][j] = mul(&segs[seg][j], &b.m[k]);
+        }
+    }
+    let z1 = Ctx::z_ref(p.start_diff);
+    let z2 = before.z_ref[1];
+    let sedz = p.load.as_ref().is_some_and(|l| z2 > 75.0 && l.z_ref < 75.0);
+    let loads: Option<Vec<Cx>> = p
+        .load
+        .as_ref()
+        .map(|l| ks.iter().map(|&k| load_z(l, f[k], sedz)).collect());
+    let evals = std::cell::Cell::new(0usize);
+    let score = |pick: &[usize]| -> (f64, f64, f64) {
+        evals.set(evals.get() + 1);
+        let mut worst = f64::MIN;
+        let mut il = 0.0;
+        for j in 0..ks.len() {
+            let mut t = segs[0][j];
+            for (n, &ci) in pick.iter().enumerate() {
+                t = mul(&t, &table[n][ci][j]);
+                t = mul(&t, &segs[n + 1][j]);
+            }
+            let s = s_from_abcd(&t, z1, z2);
+            let rl = match &loads {
+                Some(zl) => crate::touchstone::z_to_gamma(z_in(&t, zl[j]), z1).db(),
+                None => s[0].db(),
+            };
+            worst = worst.max(rl);
+            il += -s[2].db();
+        }
+        let il = il / ks.len() as f64;
+        let parts = pick.iter().filter(|&&c| c != 0).count() as f64;
+        (worst + goal.il_weight * il + 0.02 * parts, worst, il)
+    };
+    // Coordinate descent from several starts: all empty, then seeded
+    // starts.
+    let n = sites.len();
+    let mut best: Vec<usize> = vec![0; n];
+    let mut best_s = score(&best).0;
+    let mut seed: u64 = 0x9E37_79B9_7F4A_7C15;
+    let starts = 8;
+    for start in 0..starts {
+        progress(0.6 + 0.38 * start as f64 / starts as f64, "choosing parts");
+        let mut cur: Vec<usize> = if start == 0 {
+            vec![0; n]
+        } else {
+            cands
+                .iter()
+                .map(|cs| {
+                    seed ^= seed << 13;
+                    seed ^= seed >> 7;
+                    seed ^= seed << 17;
+                    // Half the sites empty, the rest at random.
+                    if seed.is_multiple_of(2) {
+                        0
+                    } else {
+                        (seed >> 8) as usize % cs.len()
+                    }
+                })
+                .collect()
+        };
+        let mut cur_s = score(&cur).0;
+        for _sweep in 0..10 {
+            let mut moved = false;
+            for si in 0..n {
+                for ci in 0..cands[si].len() {
+                    if ci == cur[si] {
+                        continue;
+                    }
+                    let old = cur[si];
+                    cur[si] = ci;
+                    let sc = score(&cur).0;
+                    if sc < cur_s - 1e-6 {
+                        cur_s = sc;
+                        moved = true;
+                    } else {
+                        cur[si] = old;
+                    }
+                }
+            }
+            if !moved {
+                break;
+            }
+        }
+        if cur_s < best_s {
+            best_s = cur_s;
+            best = cur;
+        }
+    }
+    let (_, w0, il0) = score(&vec![0; n]);
+    let (_, w1, il1) = score(&best);
+    // The tuned path at every frequency.
+    let mut built = p.built.clone();
+    let mut choices = Vec::new();
+    for (n_, &i) in sites.iter().enumerate() {
+        let s = built[i].site.clone().expect("site");
+        let cd = cands[n_][best[n_]];
+        built[i].m = (0..f.len()).map(|k| s.abcd(cd, f[k], k)).collect();
+        let label = cd.label(s.series);
+        let name = s.names.join("/");
+        built[i].sec.what = format!(
+            "{name}: {label} (tuned){}",
+            if s.series {
+                ""
+            } else if s.across {
+                " across the pair"
+            } else {
+                " to ground"
+            }
+        );
+        built[i].sec.model = cd
+            .model(s.pack)
+            .map_or("nothing fitted".to_string(), |m| m.describe());
+        choices.push(Choice {
+            site: name,
+            series: s.series,
+            across: s.across,
+            part: label,
+            at: built[i].sec.at,
+        });
+    }
+    let mut before = before;
+    before.fmin = lo;
+    let mut after = finish(&p, &built);
+    after.fmin = lo;
+    after.notes.push(format!(
+        "tuned {} site(s) for {}-{} GHz: worst return loss {:.1} -> {:.1} dB, mean insertion loss {:.3} -> {:.3} dB",
+        n,
+        trim_num(lo),
+        trim_num(hi),
+        w0,
+        w1,
+        il0,
+        il1
+    ));
     progress(1.0, "done");
-    Ok(rep)
+    Ok(Tuned {
+        before,
+        after,
+        choices,
+        worst: (w0, w1),
+        il: (il0, il1),
+        band: (lo, hi),
+        evaluations: evals.get(),
+    })
 }
 
 #[cfg(test)]
@@ -3152,6 +3714,8 @@ mod tests {
         add("L1", "TBD0201", [(1000.0, 60.0, 0), (1040.0, 60.0, 1)]);
         // A shunt site on the line, not fitted.
         add("C2", "DNI", [(300.0, 4.0, 0), (300.0, 40.0, 2)]);
+        // A 0 Ω footprint stacked on C1's pads: an alternative, not both.
+        add("R1", "0", [(1000.0, 0.0, 0), (1040.0, 0.0, 1)]);
         let r = run(&b, &b.stackup, &opt, &|_, _| {}).expect("path");
         assert!(
             (r.il_db() - want.il_db()).abs() < 1e-6,
@@ -3160,10 +3724,24 @@ mod tests {
             want.il_db()
         );
         let notes = r.notes.join(" | ");
-        assert!(notes.contains("L1") && notes.contains("C2"), "{notes}");
+        assert!(
+            notes.contains("L1") && notes.contains("C2") && notes.contains("took C1"),
+            "{notes}"
+        );
+        // --fit takes the other.
+        let fit = Options {
+            fit: vec!["R1".into()],
+            ..opt.clone()
+        };
+        let rf = run(&b, &b.stackup, &fit, &|_, _| {}).expect("path");
+        assert!(rf.notes.join(" ").contains("took R1"));
         // A 1 pF shunt there is seen.
         let mut b2 = b.clone();
-        let c2 = b2.components.len() - 1;
+        let c2 = b2
+            .components
+            .iter()
+            .position(|c| c.designator == "C2")
+            .unwrap();
         b2.components[c2]
             .params
             .insert("Value".into(), "1pF".into());
@@ -3195,6 +3773,66 @@ mod tests {
         assert_eq!(valid_band(&n), Some((1.0, 6.0)));
         let m = crate::touchstone::parse("# GHz S MA R 50\n0.5 0.3 10\n6 0.4 20\n", 1).unwrap();
         assert_eq!(valid_band(&m), Some((0.5, 6.0)));
+    }
+
+    #[test]
+    fn tuner_matches_a_mismatched_load() {
+        use crate::{Length, Pad, PadShape, Point};
+        let mut b = board();
+        // Two empty sites near the chip: a series one is C1's own place
+        // (made TBD), a shunt one by U1.
+        b.components[1].params.insert("Value".into(), "TBD".into());
+        let mut c = b.components[1].clone();
+        c.designator = "C9".into();
+        b.components.push(c);
+        let ci = (b.components.len() - 1) as u32;
+        for (k, (x, y, net)) in [(1900.0, 4.0, 1u32), (1900.0, 40.0, 2u32)]
+            .into_iter()
+            .enumerate()
+        {
+            b.geometry.pads.push(Pad {
+                layer: LayerRef::Copper(0),
+                net: Some(net),
+                component: Some(ci),
+                name: format!("{}", k + 1),
+                at: Point::mil(x, y),
+                size_x: Length::from_mil(12.0),
+                size_y: Length::from_mil(12.0),
+                hole: Length(0),
+                shape: PadShape::Rect,
+                rotation_deg: 0.0,
+                outline: Vec::new(),
+                stack: Vec::new(),
+                fab: Default::default(),
+            });
+        }
+        // A chip input of 20 - j30 Ω: badly matched.
+        let g = crate::touchstone::z_to_gamma(Cx::new(20.0, -30.0), 50.0);
+        let load = crate::touchstone::parse(
+            &format!(
+                "# GHz S RI R 50\n0 {} {}\n10 {} {}\n",
+                g.re, g.im, g.re, g.im
+            ),
+            1,
+        )
+        .unwrap();
+        let opt = Options {
+            from: "J1".into(),
+            ghz: 3.0,
+            points: 60,
+            vias_3d: false,
+            load: Some(load),
+            any_part: true,
+            ..Default::default()
+        };
+        let goal = TuneGoal {
+            band: (2.3, 2.5),
+            ..Default::default()
+        };
+        let t = tune(&b, &b.stackup, &opt, &goal, &|_, _| {}).expect("tune");
+        assert_eq!(t.choices.len(), 2, "{:?}", t.choices);
+        assert!(t.worst.0 > -6.0, "before {}", t.worst.0);
+        assert!(t.worst.1 < -12.0, "after {} {:?}", t.worst.1, t.choices);
     }
 
     #[test]

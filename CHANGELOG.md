@@ -3,6 +3,32 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.66.0 (2026-11-15)
+
+- Matching tuner (Path loss window > Tune the match, `trace path --tune
+  1-6`): chooses E12 capacitors and inductors, with their case's ESR,
+  ESL and self-resonance, for the empty part sites on the path (TBD,
+  DNI, not fitted, or parts named to choose again with `--free`), for
+  the best worst-case return loss over the band (into the chip's model
+  with `--load`) plus `--il-weight` times the mean insertion loss. Each
+  extra part costs a little, so a site stays empty unless a part helps.
+  Series sites take a 0 Ω link or a part; shunt sites stay open or take
+  a part, through the stub that leads to them. C sites take capacitors
+  and L sites inductors unless `--any`. The window lists the parts
+  chosen (click to show them on the board), the before and after worst
+  return loss and insertion loss, and the tuned path's plot and table.
+- Path loss, from the ADRV0926 RX1 retest:
+  - Footprints stacked on the same pads (C302 18 pF, R302 0 Ω and
+    L302 TBD on one site) are alternatives: one is taken, a capacitor
+    first, then an inductor, then a resistor, or the ones `--fit` names
+    (Fitted where footprints share pads, in the window), with a note.
+    0.65.1 put them all in parallel, so the 0 Ω link hid the DC block.
+  - A single-ended chip model (50 Ω, such as ADI's SEDZ port models) at
+    a pair's end is taken as the single-ended equivalent: the
+    differential impedance is twice its own (0.65.1 used it as is).
+  - An empty shunt site keeps its pad and the stub to it (an open stub)
+    in the path.
+
 ## 0.65.1 (2026-11-15)
 
 - Path loss, from the ADRV0926 RX1 test (J301 to U101.H17):

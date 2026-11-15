@@ -302,6 +302,7 @@ trace via board.PcbDoc 1 7 --pair 40 --optimise 10 best.s2p   tune a pair's anti
 trace via board.PcbDoc 1 7 --check   solve on two grids and say whether the result converged
 trace zcheck board.PcbDoc --diff "USB*=90" --rule "*RF*=50" report.csv   every controlled trace and via kind against its target impedance
 trace path board.brd J401.1 U101.A5 --model "C3?=cap.s2p" --model T301=balun.s3p path.s2p path.svg   whole-path loss: every trace, via and part between two pins cascaded (IL/RL, Touchstone)
+trace path board.brd J301 --load chip.s1p --tune 1-6 --fit "C30?" tuned.s2p   choose E12 L/C for the empty (TBD/DNI) match sites for the best return loss into the chip
 trace via board.PcbDoc 1 7 --target 50 --fab drill=8-16,ring=4,antipad=20-70   size the via to 50 ohm within the fab limits (add --optimise 10 for best RL+IL)
 trace pairsize board.PcbDoc 3 --zdiff 100 --ghz 8   every width and gap for 100 ohm on a layer, ranked by loss
 trace cascade chip.s1p via.s2p --line 50@500@3.4   return loss into vias and lines ending in a chip's port model

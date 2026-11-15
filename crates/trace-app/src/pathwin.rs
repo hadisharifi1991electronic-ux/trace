@@ -3,14 +3,12 @@
 
 use eframe::egui::{self, Color32, RichText, Stroke};
 use std::sync::{mpsc, Arc, Mutex};
-use trace_core::pathloss::{self, Options, Report};
+use trace_core::pathloss::{self, Options, Report, TuneGoal, Tuned};
 use trace_core::touchstone::Network;
 use trace_core::{Board, Stackup};
 
-type Run = (
-    mpsc::Receiver<Result<Report, String>>,
-    Arc<Mutex<(f64, String)>>,
-);
+type Outcome = Result<(Report, Option<Tuned>), String>;
+type Run = (mpsc::Receiver<Outcome>, Arc<Mutex<(f64, String)>>);
 
 pub struct PathWindow {
     pub open: bool,
@@ -25,8 +23,15 @@ pub struct PathWindow {
     models: Vec<(String, String, Result<Network, String>)>,
     new_pattern: String,
     load: Option<(String, Result<Network, String>)>,
+    /// Footprints fitted where several share pads, and fitted parts the
+    /// tuner may choose again (comma-separated patterns).
+    fit: String,
+    free: String,
+    any_part: bool,
+    band: (f64, f64),
+    il_weight: f64,
     running: Option<Run>,
-    last: Option<Result<Report, String>>,
+    last: Option<Outcome>,
 }
 
 impl Default for PathWindow {
@@ -43,6 +48,11 @@ impl Default for PathWindow {
             models: Vec::new(),
             new_pattern: String::new(),
             load: None,
+            fit: String::new(),
+            free: String::new(),
+            any_part: false,
+            band: (1.0, 6.0),
+            il_weight: 1.0,
             running: None,
             last: None,
         }
@@ -229,11 +239,62 @@ impl PathWindow {
                         });
                     });
                 ui.horizontal(|ui| {
+                    ui.label("Fitted where footprints share pads");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.fit)
+                            .hint_text("R302, C30?")
+                            .desired_width(120.0),
+                    )
+                    .on_hover_text("Of parts stacked on the same pads only one is fitted; without a name a capacitor is taken, then an inductor, then a resistor");
+                });
+                egui::CollapsingHeader::new("Tune the match")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(
+                                "Chooses E12 capacitors and inductors (with their case's parasitics) for the empty sites on the path \
+                                 (TBD, DNI, or the parts named below) for the best worst-case return loss over the band, into the \
+                                 load when one is given, plus the mean insertion loss times the weight.",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                        ui.horizontal(|ui| {
+                            ui.label("Band");
+                            ui.add(egui::DragValue::new(&mut self.band.0).speed(0.05).range(0.0..=100.0).suffix(" GHz"));
+                            ui.label("to");
+                            ui.add(egui::DragValue::new(&mut self.band.1).speed(0.05).range(0.0..=100.0).suffix(" GHz"));
+                            ui.label("IL weight");
+                            ui.add(egui::DragValue::new(&mut self.il_weight).speed(0.1).range(0.0..=20.0));
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Also choose again");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.free)
+                                    .hint_text("C30?, L301")
+                                    .desired_width(120.0),
+                            );
+                            ui.checkbox(&mut self.any_part, "C or L in any site")
+                                .on_hover_text("Off: C sites take capacitors and L sites inductors");
+                        });
+                    });
+                ui.horizontal(|ui| {
                     let busy = self.running.is_some();
-                    if ui
+                    let run = ui
                         .add_enabled(!busy && !self.from.trim().is_empty(), egui::Button::new("Run"))
-                        .clicked()
-                    {
+                        .clicked();
+                    let tune = ui
+                        .add_enabled(!busy && !self.from.trim().is_empty(), egui::Button::new("Tune match"))
+                        .on_hover_text("Choose parts for the empty sites (see Tune the match)")
+                        .clicked();
+                    if run || tune {
+                        let list = |t: &str| -> Vec<String> {
+                            t.split([',', ' ', ';'])
+                                .map(str::trim)
+                                .filter(|x| !x.is_empty())
+                                .map(String::from)
+                                .collect()
+                        };
                         let opt = Options {
                             from: self.from.trim().to_string(),
                             to: Some(self.to.trim().to_string()).filter(|t| !t.is_empty()),
@@ -248,7 +309,15 @@ impl PathWindow {
                             load: self.load.as_ref().and_then(|l| l.1.as_ref().ok().cloned()),
                             tan_d: self.tan_d,
                             fmin: self.fmin,
+                            free: if tune { list(&self.free) } else { Vec::new() },
+                            any_part: self.any_part,
+                            fit: list(&self.fit),
                         };
+                        let goal = tune.then(|| TuneGoal {
+                            band: self.band,
+                            il_weight: self.il_weight,
+                            ..Default::default()
+                        });
                         let b = board.clone();
                         let st = stackup.clone();
                         let (tx, rx) = mpsc::channel();
@@ -256,12 +325,17 @@ impl PathWindow {
                         let p2 = prog.clone();
                         let c = ctx.clone();
                         std::thread::spawn(move || {
-                            let r = pathloss::run(&b, &st, &opt, &|f, what| {
+                            let pr = |f: f64, what: &str| {
                                 if let Ok(mut p) = p2.lock() {
                                     *p = (f, what.to_string());
                                 }
                                 c.request_repaint();
-                            });
+                            };
+                            let r: Outcome = match goal {
+                                None => pathloss::run(&b, &st, &opt, &pr).map(|r| (r, None)),
+                                Some(g) => pathloss::tune(&b, &st, &opt, &g, &pr)
+                                    .map(|t| (t.after.clone(), Some(t))),
+                            };
                             let _ = tx.send(r);
                             c.request_repaint();
                         });
@@ -277,8 +351,34 @@ impl PathWindow {
                     Some(Err(e)) => {
                         ui.colored_label(Color32::LIGHT_RED, e);
                     }
-                    Some(Ok(r)) => {
+                    Some(Ok((r, tuned))) => {
                         ui.separator();
+                        if let Some(t) = tuned {
+                            ui.label(
+                                RichText::new(format!(
+                                    "Tuned for {}-{} GHz: worst return loss {:.1} -> {:.1} dB, mean insertion loss {:.3} -> {:.3} dB",
+                                    t.band.0, t.band.1, t.worst.0, t.worst.1, t.il.0, t.il.1
+                                ))
+                                .strong()
+                                .color(Color32::from_rgb(90, 200, 120)),
+                            );
+                            egui::Grid::new("path_tuned").striped(true).show(ui, |ui| {
+                                for c in &t.choices {
+                                    if ui.link(&c.site).on_hover_text("Show it on the board").clicked() {
+                                        out = Some((c.at, format!("{}: {}", c.site, c.part)));
+                                    }
+                                    ui.label(RichText::new(&c.part).strong());
+                                    ui.label(if c.series {
+                                        "in series"
+                                    } else if c.across {
+                                        "across the pair"
+                                    } else {
+                                        "to ground"
+                                    });
+                                    ui.end_row();
+                                }
+                            });
+                        }
                         ui.label(RichText::new(r.summary()).strong());
                         ui.label(format!(
                             "Ports: {} ({} Ω) to {} ({} Ω)",

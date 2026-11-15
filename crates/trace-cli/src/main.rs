@@ -61,7 +61,8 @@ USAGE:
                                                 vias from the source part to the loads (no --load: the total,
                                                 default 1 A, shared by pad count); with out, a drop map per layer
     trace path <board> <from> [<to>] [--ghz 6] [--points 200] [--quick-vias] [--model PATTERN=file.sNp]
-               [--load chip.s1p] [--df 0.02] [--fmin GHz] [out.s2p] [out.svg] [out.csv]
+               [--load chip.s1p] [--df 0.02] [--fmin GHz] [--fit PATTERN] [--tune [1-6] [--il-weight 1]
+               [--any] [--free PATTERN]] [out.s2p] [out.svg] [out.csv]
                                                 whole-path loss: the routed path from a pin (J503.1, or a part
                                                 with one signal pin, or a net) to another (default: the farthest
                                                 chip pin), through series parts and baluns, with shunt parts off
@@ -71,7 +72,12 @@ USAGE:
                                                 unbalanced) or from their value and case. Cascaded insertion and
                                                 return loss to --ghz (worst RL from --fmin); --load ends it in
                                                 a chip's port model. Parts valued TBD/DNI/DNP (or not fitted in
-                                                the variant) are left out; parts on the same two nets combine.
+                                                the variant) are left out; parts on the same two nets combine,
+                                                and of footprints stacked on the same pads one is taken (--fit).
+                                                --tune: chooses E12 capacitors and inductors for the empty (TBD,
+                                                DNI, or --free) sites for the best worst-case return loss (into
+                                                --load) over the band, plus --il-weight x mean insertion loss;
+                                                --any lets C and L sites take either.
     trace zcheck <board> [--tol 10] [--rule PATTERN=Z] [--diff PATTERN=Z] [--no-pairs] [--no-rf]
                  [--no-vias] [--via-kinds 6] [--min-length 30] [--ghz 6] [--no-name-pairs] [report.csv]
                                                 board-wide impedance check: every controlled trace run (field
@@ -2152,10 +2158,11 @@ fn validate(rest: &[&str]) -> Res {
 }
 
 fn path_cmd(file: &str, rest: &[&str]) -> Res {
-    use trace_core::pathloss::{self, Options};
+    use trace_core::pathloss::{self, Options, TuneGoal};
     use trace_core::touchstone;
     let b = board(file)?;
     let mut opt = Options::default();
+    let mut goal: Option<TuneGoal> = None;
     let mut pins: Vec<&str> = Vec::new();
     let mut outs: Vec<&str> = Vec::new();
     let mut i = 0;
@@ -2181,6 +2188,35 @@ fn path_cmd(file: &str, rest: &[&str]) -> Res {
             }
             "--fmin" => {
                 opt.fmin = next(i)?.trim_end_matches("GHz").parse()?;
+                i += 1;
+            }
+            "--tune" => {
+                let mut g = goal.take().unwrap_or_default();
+                // An optional band, "1-6" (GHz).
+                if let Some((a, z)) = rest
+                    .get(i + 1)
+                    .and_then(|v| v.trim_end_matches("GHz").split_once('-'))
+                {
+                    if let (Ok(a), Ok(z)) = (a.parse::<f64>(), z.parse::<f64>()) {
+                        g.band = (a, z);
+                        i += 1;
+                    }
+                }
+                goal = Some(g);
+            }
+            "--il-weight" => {
+                let mut g = goal.take().unwrap_or_default();
+                g.il_weight = next(i)?.parse()?;
+                goal = Some(g);
+                i += 1;
+            }
+            "--any" => opt.any_part = true,
+            "--free" => {
+                opt.free.push(next(i)?.to_string());
+                i += 1;
+            }
+            "--fit" => {
+                opt.fit.push(next(i)?.to_string());
                 i += 1;
             }
             "--model" => {
@@ -2223,12 +2259,49 @@ fn path_cmd(file: &str, rest: &[&str]) -> Res {
     opt.to = pins.get(1).map(|s| s.to_string());
     let t = std::time::Instant::now();
     let last = std::cell::Cell::new(String::new());
-    let rep = pathloss::run(&b, &b.stackup, &opt, &|p, what| {
+    let prog = |p: f64, what: &str| {
         if what != last.take().as_str() {
             eprintln!("  {:3.0} % {what}", p * 100.0);
         }
         last.set(what.to_string());
-    })?;
+    };
+    let rep = match &goal {
+        None => pathloss::run(&b, &b.stackup, &opt, &prog)?,
+        Some(g) => {
+            let tuned = pathloss::tune(&b, &b.stackup, &opt, g, &prog)?;
+            println!("Before: {}", tuned.before.summary());
+            println!(
+                "Tuned for {}-{} GHz{} ({} tries):",
+                tuned.band.0,
+                tuned.band.1,
+                if opt.load.is_some() {
+                    ", into the load"
+                } else {
+                    ""
+                },
+                tuned.evaluations
+            );
+            for c in &tuned.choices {
+                println!(
+                    "  {:<16} {:<10} {}",
+                    c.site,
+                    c.part,
+                    if c.series {
+                        "in series"
+                    } else if c.across {
+                        "across the pair"
+                    } else {
+                        "to ground"
+                    }
+                );
+            }
+            println!(
+                "Worst return loss in the band: {:.1} -> {:.1} dB; mean insertion loss {:.3} -> {:.3} dB",
+                tuned.worst.0, tuned.worst.1, tuned.il.0, tuned.il.1
+            );
+            tuned.after
+        }
+    };
     println!("{} ({:.0} s)", rep.summary(), t.elapsed().as_secs_f64());
     let top = rep.f.last().copied().unwrap_or(0.0);
     println!(

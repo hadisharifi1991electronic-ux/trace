@@ -11,6 +11,10 @@ use trace_core::{Board, Stackup};
 type Solved = Result<ViaResult, String>;
 type Optimised = Result<ViaOpt, String>;
 type OptRun = (mpsc::Receiver<Optimised>, Arc<Mutex<(f64, String)>>);
+type SizeRun = (
+    mpsc::Receiver<Result<viaopt::Sized, String>>,
+    Arc<Mutex<(f64, String)>>,
+);
 
 pub struct ViaWindow {
     pub open: bool,
@@ -31,6 +35,13 @@ pub struct ViaWindow {
     opt_backdrill: bool,
     opt_running: Option<OptRun>,
     opt: Option<Optimised>,
+    /// What the board house can make; the target impedance and whether
+    /// Solve sizes the via to it.
+    fab: viaopt::FabLimits,
+    target_z: f64,
+    to_target: bool,
+    sizing: Option<SizeRun>,
+    sized_note: Option<String>,
 }
 
 impl Default for ViaWindow {
@@ -50,6 +61,11 @@ impl Default for ViaWindow {
             opt_backdrill: false,
             opt_running: None,
             opt: None,
+            fab: viaopt::FabLimits::default(),
+            target_z: 50.0,
+            to_target: true,
+            sizing: None,
+            sized_note: None,
         }
     }
 }
@@ -83,6 +99,36 @@ impl ViaWindow {
                     ctx.request_repaint_after(std::time::Duration::from_millis(250))
                 }
                 Err(mpsc::TryRecvError::Disconnected) => self.opt_running = None,
+            }
+        }
+        if let Some((rx, _)) = &self.sizing {
+            match rx.try_recv() {
+                Ok(Ok(sz)) => {
+                    self.is_pair = sz.setup.pair.is_some();
+                    if let Some(p) = sz.setup.pair {
+                        self.pitch = p;
+                    }
+                    self.sized_note = Some(match &sz.note {
+                        Some(n) => format!("Closest: {}; {n}.", viaopt::describe(&sz.setup)),
+                        None => format!(
+                            "Sized to {:.1} Ω in {} solves: {}.",
+                            sz.result.z_via.unwrap_or(f64::NAN),
+                            sz.steps.len(),
+                            viaopt::describe(&sz.setup)
+                        ),
+                    });
+                    self.setup = sz.setup.clone();
+                    self.result = Some((sz.setup, Ok(sz.result)));
+                    self.sizing = None;
+                }
+                Ok(Err(e)) => {
+                    self.result = Some((self.setup.clone(), Err(e)));
+                    self.sizing = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(250))
+                }
+                Err(mpsc::TryRecvError::Disconnected) => self.sizing = None,
             }
         }
         let mut open = self.open;
@@ -181,7 +227,16 @@ impl ViaWindow {
                 }
                 ui.end_row();
                 ui.label("Pair");
-                ui.checkbox(&mut self.is_pair, "differential, vias at");
+                if ui
+                    .checkbox(&mut self.is_pair, "differential, vias at")
+                    .changed()
+                {
+                    self.target_z = match (self.is_pair, self.target_z) {
+                        (true, z) if (z - 50.0).abs() < 0.01 => 100.0,
+                        (false, z) if (z - 100.0).abs() < 0.01 => 50.0,
+                        (_, z) => z,
+                    };
+                }
                 mil(ui, &mut self.pitch, s.pad + 1.0, 300.0);
                 s.pair = self.is_pair.then_some(self.pitch);
                 ui.add_enabled(
@@ -201,9 +256,96 @@ impl ViaWindow {
                 );
                 ui.end_row();
             });
+        egui::CollapsingHeader::new("Manufacturing limits and target")
+            .id_salt("via-fab")
+            .default_open(true)
+            .show(ui, |ui| {
+                let f = &mut self.fab;
+                let mil = |ui: &mut egui::Ui, v: &mut f64| {
+                    ui.add(
+                        egui::DragValue::new(v)
+                            .speed(0.25)
+                            .range(1.0..=200.0)
+                            .max_decimals(2)
+                            .suffix(" mil"),
+                    );
+                };
+                egui::Grid::new("via-fab-grid")
+                    .num_columns(4)
+                    .spacing([12.0, 6.0])
+                    .show(ui, |ui| {
+                        ui.label("Drill").on_hover_text("Finished hole sizes the board house drills");
+                        ui.horizontal(|ui| {
+                            mil(ui, &mut f.drill.0);
+                            ui.label("to");
+                            mil(ui, &mut f.drill.1);
+                        });
+                        ui.label("Annular ring").on_hover_text("Smallest pad copper each side of the hole");
+                        mil(ui, &mut f.ring);
+                        ui.end_row();
+                        ui.label("Antipad").on_hover_text("Clearance hole in the planes, smallest and largest diameter");
+                        ui.horizontal(|ui| {
+                            mil(ui, &mut f.antipad.0);
+                            ui.label("to");
+                            mil(ui, &mut f.antipad.1);
+                        });
+                        ui.label("Copper gap").on_hover_text("Smallest copper to copper gap (pad to plane, pad to pad)");
+                        mil(ui, &mut f.clearance);
+                        ui.end_row();
+                        f.drill.1 = f.drill.1.max(f.drill.0);
+                        f.antipad.1 = f.antipad.1.max(f.antipad.0);
+                        ui.label("Target");
+                        ui.add(
+                            egui::DragValue::new(&mut self.target_z)
+                                .speed(0.5)
+                                .range(10.0..=200.0)
+                                .suffix(" Ω"),
+                        )
+                        .on_hover_text("The via's own impedance (differential for a pair)");
+                        ui.checkbox(&mut self.to_target, "Solve sizes the via to it")
+                            .on_hover_text("Solve moves the antipad (then the drill) within the limits until the 3D solve gives the target; off: Solve takes the via as set");
+                        ui.end_row();
+                    });
+            });
         ui.horizontal(|ui| {
-            let ok = self.setup.from != self.setup.to && self.running.is_none();
-            if ui.add_enabled(ok, egui::Button::new("Solve")).clicked() {
+            let ok =
+                self.setup.from != self.setup.to && self.running.is_none() && self.sizing.is_none();
+            let sizing = ok
+                && self.to_target
+                && ui
+                    .add_enabled(ok, egui::Button::new("Solve"))
+                    .on_hover_text(
+                        "Sizes the via to the target impedance within the limits, with 3D solves",
+                    )
+                    .clicked();
+            if sizing {
+                let st = stackup.clone();
+                let base = self.setup.clone();
+                let goal = viaopt::ViaGoal::within(&base, base.fmax_ghz, &self.fab);
+                let target = self.target_z;
+                let (tx, rx) = mpsc::channel();
+                let prog = Arc::new(Mutex::new((0.0, String::new())));
+                let p2 = prog.clone();
+                let c = ctx.clone();
+                std::thread::spawn(move || {
+                    let r = viaopt::size_to(&st, &base, target, &goal, &|f, what| {
+                        if let Ok(mut p) = p2.lock() {
+                            *p = (f, what.to_string());
+                        }
+                    });
+                    let _ = tx.send(r);
+                    c.request_repaint();
+                });
+                self.sized_note = None;
+                self.sizing = Some((rx, prog));
+            }
+            if let Some((_, p)) = &self.sizing {
+                ui.spinner();
+                if let Ok(p) = p.lock() {
+                    ui.label(format!("{:.0} %: sizing, {}", p.0 * 100.0, p.1));
+                }
+            }
+            if !self.to_target && ui.add_enabled(ok, egui::Button::new("Solve")).clicked() {
                 let st = stackup.clone();
                 let setup = self.setup.clone();
                 let (tx, rx) = mpsc::channel();
@@ -279,7 +421,13 @@ impl ViaWindow {
         if r.stub > 0.5 {
             line += &format!("; stub {:.1} mil", r.stub);
         }
+        if let Some(z) = r.z_via {
+            line += &format!("; via {z:.1} Ω");
+        }
         ui.label(RichText::new(line).strong());
+        if let Some(n) = &self.sized_note {
+            ui.label(n);
+        }
         if let Some((f, db)) = r.notch() {
             ui.colored_label(
                 Color32::from_rgb(230, 180, 90),
@@ -311,7 +459,7 @@ impl ViaWindow {
             {
                 let st = stackup.clone();
                 let base = self.setup.clone();
-                let mut goal = viaopt::ViaGoal::around(&base, self.opt_f);
+                let mut goal = viaopt::ViaGoal::within(&base, self.opt_f, &self.fab);
                 goal.try_backdrill = self.opt_backdrill && !base.backdrill;
                 if !self.opt_pad {
                     goal.pad = (base.pad, base.pad);
@@ -336,7 +484,7 @@ impl ViaWindow {
                 self.opt = None;
                 self.opt_running = Some((rx, prog));
             }
-            ui.label("for the best return loss up to");
+            ui.label("for the best return and insertion loss up to");
             ui.add(
                 egui::DragValue::new(&mut self.opt_f)
                     .speed(0.5)

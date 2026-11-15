@@ -3,6 +3,28 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.63.0 (2026-11-15)
+
+- Via design to manufacturing limits and a target impedance (Via
+  S-parameters window, "Manufacturing limits and target"):
+  - Limits from the fab's capabilities: drill min to max, annular ring,
+    antipad min to max and copper gap. Every setup Solve and Optimise try
+    keeps to them.
+  - Target impedance (50 Ω single, 100 Ω for a pair by default). Solve
+    sizes the via to it: a coaxial first guess, then the antipad by the
+    secant method on its 3D solves, and the drill when the antipad meets
+    a limit. It stops within 2 % (or 1 Ω), and says how close the limits
+    allow when the target is out of reach.
+  - Optimise now weighs insertion loss with return loss (worst and mean
+    return loss plus mean insertion loss across the band), tries the
+    drill too, and solves its best few again on a finer grid to pick the
+    winner.
+  - The via's own impedance (as a TDR would show it) is fitted from each
+    3D solve and shown with the result.
+- CLI: `trace via … --target 50 --fab drill=8-16,ring=4,antipad=20-70,gap=4`
+  sizes to the target; add `--optimise <GHz>` to optimise within the
+  limits after it.
+
 ## 0.62.0 (2026-11-15)
 
 - PCB Filter panel: select by a query, as in Altium, such as

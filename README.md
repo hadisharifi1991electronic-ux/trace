@@ -300,6 +300,7 @@ trace pdn board.brd VDD_SOC --amps 3 --optimise [--add 2] [--die-c 20n] [--csv z
 trace via board.PcbDoc 1 7 --returns 2@30mil via.s2p via.svg   3D full-wave via solve: S-parameters, stub resonance
 trace via board.PcbDoc 1 7 --pair 40 --optimise 10 best.s2p   tune a pair's antipad (round or oval) and return vias and pads (--free-pitch: the pitch too; --try-backdrill)
 trace via board.PcbDoc 1 7 --check   solve on two grids and say whether the result converged
+trace via board.PcbDoc 1 7 --target 50 --fab drill=8-16,ring=4,antipad=20-70   size the via to 50 ohm within the fab limits (add --optimise 10 for best RL+IL)
 trace pairsize board.PcbDoc 3 --zdiff 100 --ghz 8   every width and gap for 100 ohm on a layer, ranked by loss
 trace cascade chip.s1p via.s2p --line 50@500@3.4   return loss into vias and lines ending in a chip's port model
 trace stackup board.brd stack.txt   the board's stack-up as text; edit it, then any command takes --stackup stack.txt

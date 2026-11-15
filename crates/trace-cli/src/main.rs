@@ -62,6 +62,7 @@ USAGE:
                                                 default 1 A, shared by pad count); with out, a drop map per layer
     trace via <board> <layer> <layer> [--drill D] [--pad P] [--antipad A] [--width W] [--width2 W]
               [--pair PITCH] [--oval] [--returns N@D] [--backdrill] [--fmax 40] [--cell C]
+              [--target 50] [--fab drill=8-20,ring=4,antipad=20-80,gap=4]
               [--optimise GHz [--free-pitch] [--try-backdrill] [--keep-pad]] [--check] [out.s2p] [out.svg]
                                                 3D full-wave (FDTD) solve of a via from one layer to another
                                                 with the board's stack-up (default drill, pad and antipad from
@@ -71,7 +72,10 @@ USAGE:
                                                 return vias for the best return loss to GHz, keeping the pair's
                                                 pitch unless --free-pitch; it also tries smaller pads (unless
                                                 --keep-pad) and, with --try-backdrill, removing the stub.
-                                                --check solves again on a finer grid and says if it converged
+                                                --check solves again on a finer grid and says if it converged;
+                                                --target Z sizes the antipad (then the drill) for that via
+                                                impedance within the --fab limits; with --fab, --optimise also
+                                                tries drills in range and counts the through loss
     trace pairsize <board> <layer> [--zdiff 100] [--wmin W] [--wmax W] [--gap S] [--ghz 8] [--next D] [--xtalk 2]
                                                 Every track width and gap on a layer that gives the target Zdiff
                                                 (2D field solver), ranked by loss, with crosstalk and etch
@@ -2148,6 +2152,8 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     let mut optimise: Option<f64> = None;
     let mut free_pitch = false;
     let (mut try_backdrill, mut keep_pad, mut check) = (false, false, false);
+    let mut fab: Option<trace_core::viaopt::FabLimits> = None;
+    let mut target: Option<f64> = None;
     let mut it = rest.iter();
     let len = |x: Option<&&str>, what: &str| -> Result<f64, Box<dyn std::error::Error>> {
         let x = x.ok_or(format!("{what} needs a length"))?;
@@ -2168,6 +2174,45 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
             "--try-backdrill" => try_backdrill = true,
             "--keep-pad" => keep_pad = true,
             "--check" => check = true,
+            "--target" => {
+                let x = it.next().ok_or("--target needs ohms")?;
+                target = Some(
+                    x.trim_end_matches(['o', 'h', 'm', 'Ω', 'O', 'H', 'M'])
+                        .trim()
+                        .parse::<f64>()
+                        .map_err(|_| format!("not an impedance: {x}"))?,
+                );
+            }
+            "--fab" => {
+                // drill=8-20,ring=4,antipad=20-80,gap=4 (mil)
+                let x = it.next().ok_or("--fab needs limits")?;
+                let mut f = fab.unwrap_or_default();
+                for part in x.split(',') {
+                    let (k, val) = part
+                        .split_once('=')
+                        .ok_or(format!("--fab: {part}: not key=value"))?;
+                    let n = |t: &str| -> Result<f64, String> {
+                        Length::parse(t.trim())
+                            .map(|l| l.mil())
+                            .or_else(|| t.trim().parse().ok())
+                            .ok_or(format!("--fab: not a length: {t}"))
+                    };
+                    let range = |t: &str| -> Result<(f64, f64), String> {
+                        match t.split_once('-') {
+                            Some((a, b)) => Ok((n(a)?, n(b)?)),
+                            None => n(t).map(|v| (v, v)),
+                        }
+                    };
+                    match k.trim() {
+                        "drill" => f.drill = range(val)?,
+                        "ring" => f.ring = n(val)?,
+                        "antipad" => f.antipad = range(val)?,
+                        "gap" | "clearance" => f.clearance = n(val)?,
+                        _ => return Err(format!("--fab: unknown {k}").into()),
+                    }
+                }
+                fab = Some(f);
+            }
             "--optimise" | "--optimize" => {
                 let x = it.next().ok_or("--optimise needs GHz")?;
                 optimise = Some(
@@ -2208,9 +2253,54 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
         v.return_dist,
         if v.backdrill { ", backdrilled" } else { "" }
     );
+    if let Some(zt) = target {
+        use trace_core::viaopt;
+        let goal = match &fab {
+            Some(f) => viaopt::ViaGoal::within(&v, v.fmax_ghz, f),
+            None => viaopt::ViaGoal::around(&v, v.fmax_ghz),
+        };
+        let t = std::time::Instant::now();
+        let sz = viaopt::size_to(&b.stackup, &v, zt, &goal, &|p, what| {
+            eprint!("\r  sizing… {:3.0}% {what:<44}", p * 100.0);
+        })?;
+        eprintln!("\r  sized in {:.0} s{:60}", t.elapsed().as_secs_f64(), "");
+        for (s, z) in &sz.steps {
+            println!(
+                "  {:>8}  {}",
+                z.map_or("?".into(), |z| format!("{z:.1} Ω")),
+                viaopt::describe(s)
+            );
+        }
+        println!(
+            "{}: {} gives {:.1} Ω (target {zt:.0} Ω)",
+            if sz.reached { "Sized" } else { "Closest" },
+            viaopt::describe(&sz.setup),
+            sz.result.z_via.unwrap_or(f64::NAN)
+        );
+        if let Some(n) = &sz.note {
+            println!("  {n}");
+        }
+        if optimise.is_none() {
+            let title = format!("Via {} to {} ({zt:.0} Ω)", names(v.from), names(v.to));
+            for out in &outs {
+                let text = if out.to_ascii_lowercase().ends_with(".svg") {
+                    sz.result.svg(&title)
+                } else {
+                    sz.result.touchstone(&title)
+                };
+                std::fs::write(out, text)?;
+                println!("Wrote {out}");
+            }
+            return Ok(());
+        }
+        v = sz.setup.clone();
+    }
     if let Some(fg) = optimise {
         use trace_core::viaopt;
-        let mut goal = viaopt::ViaGoal::around(&v, fg);
+        let mut goal = match &fab {
+            Some(f) => viaopt::ViaGoal::within(&v, fg, f),
+            None => viaopt::ViaGoal::around(&v, fg),
+        };
         goal.try_backdrill = try_backdrill;
         if keep_pad {
             goal.pad = (v.pad, v.pad);
@@ -2303,6 +2393,9 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
             String::new()
         }
     );
+    if let Some(z) = r.z_via {
+        println!("Via impedance: {z:.1} ohm (as a TDR would show it)");
+    }
     let kind = if r.z_ref > 60.0 { "Sdd" } else { "S" };
     println!(
         "  {:>7}  {:>9}  {:>9}  {:>9}",

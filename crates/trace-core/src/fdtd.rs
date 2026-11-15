@@ -155,6 +155,10 @@ pub struct ViaResult {
     /// The largest |S11|² + |S21|² before the result was made passive
     /// (1 or less: it already was).
     pub power: f64,
+    /// The via's own impedance, Ω (differential for a pair): that of the
+    /// line, as long as the barrel between the two layers, that gives the
+    /// same S11 at low frequencies (a TDR would show about this).
+    pub z_via: Option<f64>,
     pub notes: Vec<String>,
 }
 
@@ -1490,6 +1494,59 @@ pub fn solve_with(
             s21[k] = s21[k].scale(g);
         }
     }
+    // The via's own impedance, from S11 where the barrel is electrically
+    // short.
+    let z_via = {
+        let (za, zb) = (st.sheet[from], st.sheet[to]);
+        let (lo, hi) = (za.min(zb), za.max(zb));
+        let len = hi - lo;
+        let (mut w, mut sum) = (0.0, 0.0);
+        for sl in &st.slabs {
+            let t = (sl.1.min(hi) - sl.0.max(lo)).max(0.0);
+            w += t;
+            sum += t * sl.2;
+        }
+        let er = if w > 0.0 { sum / w } else { 4.0 };
+        let pts: Vec<(f64, Cx)> = freqs
+            .iter()
+            .zip(&s11)
+            .map(|(&f, &s)| (std::f64::consts::TAU * f * er.sqrt() * len * MIL / C0, s))
+            .filter(|(th, _)| *th > 0.02 && *th <= 0.6)
+            .collect();
+        (len > 1.0 && pts.len() >= 3).then(|| {
+            let err = |zv: f64| -> f64 {
+                pts.iter()
+                    .map(|&(th, m)| {
+                        let (sn, cs) = th.sin_cos();
+                        let num = Cx::new(0.0, (zv - 1.0 / zv) * sn);
+                        let den = Cx::new(2.0 * cs, (zv + 1.0 / zv) * sn);
+                        let d = num.div(den).add(m.scale(-1.0));
+                        d.abs().powi(2)
+                    })
+                    .sum()
+            };
+            // Log-spaced scan, then golden-section refinement.
+            let mut best = (f64::MAX, 1.0);
+            for k in 0..=200 {
+                let zv = 10f64.powf(-1.0 + 2.0 * k as f64 / 200.0);
+                let e = err(zv);
+                if e < best.0 {
+                    best = (e, zv);
+                }
+            }
+            let (mut a, mut b) = (best.1 / 1.03, best.1 * 1.03);
+            for _ in 0..40 {
+                let m1 = a + 0.382 * (b - a);
+                let m2 = a + 0.618 * (b - a);
+                if err(m1) < err(m2) {
+                    b = m2;
+                } else {
+                    a = m1;
+                }
+            }
+            (a + b) / 2.0 * zr
+        })
+    };
     if power > 1.005 {
         notes.push(format!(
             "the grid gave up to {:.1} % more power out than in; scaled back to passive (a finer cell would help)",
@@ -1515,6 +1572,7 @@ pub fn solve_with(
         steps,
         cell: d0,
         power,
+        z_via,
         notes,
     })
 }

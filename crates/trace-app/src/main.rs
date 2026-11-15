@@ -2729,6 +2729,12 @@ impl eframe::App for App {
         // Altium's keys: P and U open the Place and Route key menus,
         // Ctrl+W routes, Ctrl+M measures, Q switches mil and mm.
         self.accel_keys(ctx, board2d && self.scene.is_some(), typing);
+        if !typing && board2d && self.scene.is_some() {
+            self.selection_memory(ctx);
+            if ctx.input_mut(|i| i.consume_key(egui::Modifiers::SHIFT, egui::Key::F)) {
+                self.find_similar();
+            }
+        }
         if !typing {
             let (route_w, measure_m, units_q) = ctx.input_mut(|i| {
                 (
@@ -3313,6 +3319,7 @@ impl eframe::App for App {
             self.active_bar(ctx);
         }
         self.keys_window(ctx);
+        self.similar_window(ctx);
         let pick = match &self.scene {
             Some(scene) => self
                 .cm

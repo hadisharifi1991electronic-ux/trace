@@ -23,6 +23,9 @@ pub enum PcbView {
     Pairs,
 }
 
+/// A Find Similar attribute: name, value shown, query term, ticked.
+pub type Attr = (&'static str, String, String, bool);
+
 /// State of the PCB and Properties panels.
 #[derive(Default)]
 pub struct PaneState {
@@ -32,7 +35,28 @@ pub struct PaneState {
     /// cleared when the selection changes.
     fields: HashMap<&'static str, String>,
     fields_for: String,
+    /// PCB Filter: the query, its error or result, recent queries.
+    pub query: String,
+    query_err: Option<String>,
+    query_res: Option<String>,
+    no_zoom: bool,
+    history: Vec<String>,
+    /// Selection memory, Ctrl+1..8 stores and Alt+1..8 recalls.
+    pub memory: [Option<trace_core::select::Sel>; 8],
+    /// Find Similar Objects: the object and each attribute, ticked to match.
+    pub similar: Option<(trace_core::query::Obj, Vec<Attr>)>,
 }
+
+/// Example queries for the PCB Filter panel: (label, query).
+const EXAMPLES: &[(&str, &str)] = &[
+    ("Vias with small holes", "IsVia And HoleSize < 8mil"),
+    ("Thin tracks", "IsTrack And Width < 5mil"),
+    ("Ground copper", "InNet('GND*')"),
+    ("Parts on the bottom", "IsComponent And OnBottom"),
+    ("Capacitors", "IsComponent And Designator Like 'C*'"),
+    ("Tracks without a net", "IsTrack And Not HasNet"),
+    ("Pair copper", "InDifferentialPair('*')"),
+];
 
 /// A row with a small icon and a selectable name.
 fn icon_row(ui: &mut egui::Ui, icon: Icon, text: &str, on: bool) -> egui::Response {
@@ -67,6 +91,7 @@ impl App {
             Pane::Projects => self.projects_pane(ui),
             Pane::Navigator => self.side_panel(ui),
             Pane::Pcb => self.pcb_pane(ui),
+            Pane::Filter => self.filter_pane(ui),
             Pane::Layers => self.layers_pane(ui),
             Pane::Properties => self.properties_pane(ui),
             Pane::Messages => self.messages_pane(ui),
@@ -423,6 +448,287 @@ impl App {
                 self.select_part(&d, true);
                 self.edit.sel.clear();
                 self.edit.sel.parts.insert(i);
+            }
+        }
+    }
+
+    fn filter_pane(&mut self, ui: &mut egui::Ui) {
+        if self.scene.is_none() {
+            ui.label(RichText::new("No board open.").weak());
+            return;
+        }
+        let id = egui::Id::new("pcb_filter_query");
+        let enter = ui.memory(|m| m.has_focus(id))
+            && ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::Enter));
+        ui.add(
+            egui::TextEdit::multiline(&mut self.panes.query)
+                .id(id)
+                .hint_text("IsTrack And InNet('GND') And Width < 10mil")
+                .desired_rows(3)
+                .desired_width(f32::INFINITY)
+                .font(egui::TextStyle::Monospace),
+        );
+        let mut run = enter;
+        ui.horizontal(|ui| {
+            if ui
+                .button("Apply")
+                .on_hover_text("Select what the query picks (Ctrl+Enter)")
+                .clicked()
+            {
+                run = true;
+            }
+            if ui.button("Clear").clicked() {
+                self.panes.query.clear();
+                self.panes.query_err = None;
+                self.panes.query_res = None;
+                self.edit.sel.clear();
+            }
+            let mut zoom = !self.panes.no_zoom;
+            if ui.checkbox(&mut zoom, "Zoom").changed() {
+                self.panes.no_zoom = !zoom;
+            }
+        });
+        if run {
+            let q = self.panes.query.clone();
+            self.run_query(&q);
+        }
+        if let Some(e) = &self.panes.query_err {
+            ui.label(RichText::new(e).color(Color32::from_rgb(255, 150, 84)));
+        } else if let Some(r) = &self.panes.query_res {
+            ui.label(RichText::new(r).color(crate::studio::ACCENT));
+        }
+        caption(ui, "Examples");
+        for (label, q) in EXAMPLES {
+            if ui.link(*label).on_hover_text(*q).clicked() {
+                self.panes.query = q.to_string();
+                self.run_query(q);
+            }
+        }
+        if !self.panes.history.is_empty() {
+            caption(ui, "Recent");
+            for q in self.panes.history.clone().iter().rev() {
+                if ui.link(RichText::new(q).monospace().small()).clicked() {
+                    self.panes.query = q.clone();
+                    self.run_query(q);
+                }
+            }
+        }
+        egui::CollapsingHeader::new("Query words")
+            .id_salt("query_help")
+            .show(ui, |ui| {
+                ui.label(RichText::new(
+                    "Kinds: IsTrack, IsArc, IsVia, IsComponent\n\
+                     Tests: InNet('n*'), InNetClass('c'), InDifferentialPair('p'), OnLayer('Top*'), OnTop, OnBottom, InComponent('U1'), InComponentClass('c'), HasNet\n\
+                     Values: Net, Layer, Width, HoleSize, Diameter, Length, X, Y, Designator, Footprint, Value, Rotation, Side\n\
+                     Compare: = <> < > <= >= Like ('*' and '?')\n\
+                     Combine: And, Or, Not, ( )\n\
+                     Lengths: 5mil, 0.2mm, 0.01in (mil if no unit)",
+                ).small());
+            });
+    }
+
+    /// Runs a PCB Filter query: selects what it picks and zooms to it.
+    pub(crate) fn run_query(&mut self, q: &str) {
+        let Some(scene) = &self.scene else { return };
+        match trace_core::query::parse(q) {
+            Err(e) => {
+                self.panes.query_err = Some(e);
+                self.panes.query_res = None;
+            }
+            Ok(expr) => {
+                let sel = trace_core::query::run(&scene.board, &expr);
+                let bounds = sel.bounds(&scene.board);
+                self.panes.query_err = None;
+                let mut parts = Vec::new();
+                for (n, k) in [
+                    (sel.parts.len(), "parts"),
+                    (sel.tracks.len(), "tracks"),
+                    (sel.arcs.len(), "arcs"),
+                    (sel.vias.len(), "vias"),
+                ] {
+                    if n > 0 {
+                        parts.push(format!("{n} {k}"));
+                    }
+                }
+                self.panes.query_res = Some(if parts.is_empty() {
+                    "Nothing matches.".into()
+                } else {
+                    format!("Selected {}.", parts.join(", "))
+                });
+                let q = q.trim().to_string();
+                self.panes.history.retain(|h| h != &q);
+                self.panes.history.push(q);
+                if self.panes.history.len() > 10 {
+                    self.panes.history.remove(0);
+                }
+                self.selected = None;
+                self.picked = None;
+                self.edit.sel = sel;
+                self.go_board();
+                self.mode3d = false;
+                if let (Some(b), false) = (bounds, self.panes.no_zoom) {
+                    let m = 0.1 * (b[2] - b[0]).max(b[3] - b[1]).max(50.0);
+                    self.focus = Some(crate::Focus::Area([
+                        (b[0] - m) as f32,
+                        (b[1] - m) as f32,
+                        (b[2] + m) as f32,
+                        (b[3] + m) as f32,
+                    ]));
+                    self.needs_fit = false;
+                }
+            }
+        }
+    }
+
+    /// The one object selected or last clicked, for Find Similar Objects.
+    pub(crate) fn single_object(&self) -> Option<trace_core::query::Obj> {
+        use trace_core::query::Obj;
+        let s = &self.edit.sel;
+        if s.len() == 1 {
+            if let Some(&i) = s.parts.iter().next() {
+                return Some(Obj::Part(i));
+            }
+            if let Some(&i) = s.tracks.iter().next() {
+                return Some(Obj::Track(i));
+            }
+            if let Some(&i) = s.arcs.iter().next() {
+                return Some(Obj::Arc(i));
+            }
+            if let Some(&i) = s.vias.iter().next() {
+                return Some(Obj::Via(i));
+            }
+        }
+        if s.is_empty() {
+            return match self.picked {
+                Some(Source::Track(i)) => Some(Obj::Track(i)),
+                Some(Source::Arc(i)) => Some(Obj::Arc(i)),
+                Some(Source::Via(i)) => Some(Obj::Via(i)),
+                _ => None,
+            };
+        }
+        None
+    }
+
+    /// Opens Find Similar Objects for the selected object.
+    pub(crate) fn find_similar(&mut self) {
+        let (Some(o), Some(scene)) = (self.single_object(), &self.scene) else {
+            self.message = Some((
+                "Select one part, track, arc or via first, then Find Similar Objects (Shift+F)."
+                    .into(),
+                true,
+            ));
+            return;
+        };
+        let attrs = trace_core::query::attributes(&scene.board, o)
+            .into_iter()
+            .enumerate()
+            .map(|(i, (k, v, q))| (k, v, q, i == 0))
+            .collect();
+        self.panes.similar = Some((o, attrs));
+    }
+
+    /// The Find Similar Objects window.
+    pub(crate) fn similar_window(&mut self, ctx: &egui::Context) {
+        let Some((_, attrs)) = &mut self.panes.similar else {
+            return;
+        };
+        let mut open = true;
+        let mut apply = false;
+        egui::Window::new("Find Similar Objects")
+            .open(&mut open)
+            .collapsible(false)
+            .default_width(360.0)
+            .show(ctx, |ui| {
+                ui.label(
+                    RichText::new("Tick what must be the same; the rest may be anything.").weak(),
+                );
+                egui::Grid::new("similar")
+                    .num_columns(3)
+                    .striped(true)
+                    .spacing([10.0, 4.0])
+                    .show(ui, |ui| {
+                        for (k, v, _, on) in attrs.iter_mut() {
+                            ui.label(RichText::new(*k).weak());
+                            ui.label(v.as_str());
+                            ui.checkbox(on, "Same");
+                            ui.end_row();
+                        }
+                    });
+                ui.add_space(4.0);
+                if ui.button("Select matching").clicked() {
+                    apply = true;
+                }
+            });
+        if apply {
+            let q: Vec<String> = attrs.iter().filter(|a| a.3).map(|a| a.2.clone()).collect();
+            let q = if q.is_empty() {
+                "All".to_string()
+            } else {
+                q.join(" And ")
+            };
+            self.panes.query = q.clone();
+            self.panes.similar = None;
+            self.run_query(&q);
+            self.studio.show(Pane::Filter);
+            return;
+        }
+        if !open {
+            self.panes.similar = None;
+        }
+    }
+
+    /// Ctrl+1..8 stores the selection, Alt+1..8 brings it back.
+    pub(crate) fn selection_memory(&mut self, ctx: &egui::Context) {
+        use egui::Key::*;
+        let keys = [Num1, Num2, Num3, Num4, Num5, Num6, Num7, Num8];
+        for (n, k) in keys.into_iter().enumerate() {
+            let (store, recall) = ctx.input_mut(|i| {
+                (
+                    i.consume_key(egui::Modifiers::COMMAND, k),
+                    i.consume_key(egui::Modifiers::ALT, k),
+                )
+            });
+            if store {
+                if self.edit.sel.is_empty() {
+                    self.panes.memory[n] = None;
+                    self.message = Some((format!("Memory {} cleared", n + 1), false));
+                } else {
+                    self.panes.memory[n] = Some(self.edit.sel.clone());
+                    self.message = Some((
+                        format!(
+                            "Stored {} in memory {} (Alt+{} brings it back)",
+                            self.edit.sel.describe(),
+                            n + 1,
+                            n + 1
+                        ),
+                        false,
+                    ));
+                }
+            }
+            if recall {
+                match &self.panes.memory[n] {
+                    Some(s) => {
+                        self.edit.sel = s.clone();
+                        if let Some(scene) = &self.scene {
+                            self.edit.sel.keep_valid(&scene.board);
+                        }
+                        self.selected = None;
+                        self.message = Some((
+                            format!("Memory {}: {}", n + 1, self.edit.sel.describe()),
+                            false,
+                        ));
+                    }
+                    None => {
+                        self.message = Some((
+                            format!(
+                                "Memory {} is empty (Ctrl+{} stores the selection)",
+                                n + 1,
+                                n + 1
+                            ),
+                            true,
+                        ));
+                    }
+                }
             }
         }
     }

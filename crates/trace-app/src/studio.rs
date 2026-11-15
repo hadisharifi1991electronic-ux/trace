@@ -19,16 +19,18 @@ pub enum Pane {
     Projects,
     Navigator,
     Pcb,
+    Filter,
     Layers,
     Properties,
     Messages,
 }
 
 impl Pane {
-    pub const ALL: [Pane; 6] = [
+    pub const ALL: [Pane; 7] = [
         Pane::Projects,
         Pane::Navigator,
         Pane::Pcb,
+        Pane::Filter,
         Pane::Layers,
         Pane::Properties,
         Pane::Messages,
@@ -39,6 +41,7 @@ impl Pane {
             Pane::Projects => "Projects",
             Pane::Navigator => "Navigator",
             Pane::Pcb => "PCB",
+            Pane::Filter => "PCB Filter",
             Pane::Layers => "Layers",
             Pane::Properties => "Properties",
             Pane::Messages => "Messages",
@@ -50,6 +53,7 @@ impl Pane {
             Pane::Projects => "The open project: its board, schematic sheets and libraries",
             Pane::Navigator => "Board summary, find a net or part, the selected net, measuring",
             Pane::Pcb => "Every net, part, class and differential pair of the board; click to select and zoom",
+            Pane::Filter => "Select tracks, arcs, vias and parts by a query, such as IsVia And HoleSize < 8mil",
             Pane::Layers => "Show and hide layers, pick the current layer",
             Pane::Properties => "What is selected, with its settings to change",
             Pane::Messages => "What Trace has said this session",
@@ -61,6 +65,7 @@ impl Pane {
             Pane::Projects => "projects",
             Pane::Navigator => "navigator",
             Pane::Pcb => "pcb",
+            Pane::Filter => "filter",
             Pane::Layers => "layers",
             Pane::Properties => "properties",
             Pane::Messages => "messages",
@@ -130,7 +135,13 @@ impl Default for Studio {
     fn default() -> Self {
         Studio {
             left: Dock {
-                panes: vec![Pane::Projects, Pane::Navigator, Pane::Pcb, Pane::Layers],
+                panes: vec![
+                    Pane::Projects,
+                    Pane::Navigator,
+                    Pane::Pcb,
+                    Pane::Filter,
+                    Pane::Layers,
+                ],
                 on: Some(Pane::Projects),
                 open: true,
             },
@@ -1073,6 +1084,8 @@ pub const KEYS: &[(&str, &str)] = &[
     ("Ctrl+Z / Ctrl+Y", "Undo / redo"),
     ("Ctrl+A, C, X, V", "Select all, copy, cut, paste"),
     ("Ctrl+R", "Turn the selection 90°"),
+    ("Shift+F", "Find Similar Objects"),
+    ("Ctrl+1..8 / Alt+1..8", "Store / recall a selection"),
     ("Esc", "Cancel, then clear the selection"),
 ];
 

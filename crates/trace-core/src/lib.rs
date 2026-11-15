@@ -34,6 +34,7 @@ pub mod pdn;
 pub mod pi;
 pub mod place;
 pub mod pour;
+pub mod query;
 pub mod reuse;
 pub mod route;
 pub mod sch_edit;

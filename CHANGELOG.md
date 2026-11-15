@@ -3,6 +3,25 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.62.0 (2026-11-15)
+
+- PCB Filter panel: select by a query, as in Altium, such as
+  `IsVia And InNet('GND') And HoleSize < 12mil` or
+  `IsComponent And Designator Like 'TP*' And OnBottom`. Kinds (IsTrack,
+  IsArc, IsVia, IsComponent), tests (InNet, InNetClass,
+  InDifferentialPair, OnLayer, OnTop, OnBottom, InComponent,
+  InComponentClass, HasNet), values (Net, Layer, Width, HoleSize,
+  Diameter, Length, X, Y, Designator, Footprint, Value, Rotation, Side),
+  `= <> < > <= >= Like`, And, Or, Not and brackets; lengths in mil, mm,
+  um or in. Apply (Ctrl+Enter) selects the result and zooms to it;
+  examples and recent queries are one click away.
+- Find Similar Objects (Edit menu, Shift+F): tick what must match the
+  selected part, track, arc or via (net, layer, width, hole, footprint,
+  value, side...) and select everything like it.
+- Selection memory: Ctrl+1..8 stores the selection, Alt+1..8 brings it
+  back (also Edit > Selection memory).
+- Core: `trace_core::query` (parse, run, attributes).
+
 ## 0.61.0 (2026-11-15)
 
 - 3D via solver, stronger:

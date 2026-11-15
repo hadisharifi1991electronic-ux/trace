@@ -219,6 +219,40 @@ impl App {
         ) {
             self.studio.show(crate::studio::Pane::Navigator);
         }
+        if item(ui, has, "Find Similar Objects…", "Shift+F", "Select everything like the selected part, track, arc or via: same net, layer, width, footprint…") {
+            self.find_similar();
+        }
+        if item(
+            ui,
+            has,
+            "PCB Filter (query)…",
+            "",
+            "Select by a query such as IsVia And HoleSize < 8mil",
+        ) {
+            self.studio.show(crate::studio::Pane::Filter);
+        }
+        ui.menu_button("Selection memory", |ui| {
+            ui.label(
+                RichText::new("Ctrl+1..8 stores the selection, Alt+1..8 brings it back").weak(),
+            );
+            for n in 0..8 {
+                let what = self.panes.memory[n].as_ref().map(|s| s.describe());
+                if item(
+                    ui,
+                    what.is_some(),
+                    &format!("{}: {}", n + 1, what.as_deref().unwrap_or("empty")),
+                    &format!("Alt+{}", n + 1),
+                    "",
+                ) {
+                    if let Some(s) = self.panes.memory[n].clone() {
+                        self.edit.sel = s;
+                        if let Some(scene) = &self.scene {
+                            self.edit.sel.keep_valid(&scene.board);
+                        }
+                    }
+                }
+            }
+        });
     }
 
     fn view_menu(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, has: bool) {

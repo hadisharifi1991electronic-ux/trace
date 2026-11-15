@@ -120,6 +120,8 @@ pub struct Report {
     pub z_ref: [f64; 2],
     /// S11 with the load at the end, when one was given.
     pub s11_loaded: Vec<Cx>,
+    /// The load's impedance per frequency, when one was given.
+    pub load_z: Vec<Cx>,
     pub sections: Vec<Section>,
     /// Trace length along the path, mil.
     pub length: f64,
@@ -3088,10 +3090,12 @@ fn finish(p: &Prepared, built: &[Built]) -> Report {
                     .into(),
             );
         }
-        rep.s11_loaded = f
+        rep.load_z = f.iter().map(|&ff| load_z(load, ff, sedz)).collect();
+        rep.s11_loaded = rep
+            .load_z
             .iter()
             .zip(&total)
-            .map(|(&ff, m)| crate::touchstone::z_to_gamma(z_in(m, load_z(load, ff, sedz)), z1))
+            .map(|(&zl, m)| crate::touchstone::z_to_gamma(z_in(m, zl), z1))
             .collect();
         let band = valid_band(load);
         if let Some((lo, hi)) = band {

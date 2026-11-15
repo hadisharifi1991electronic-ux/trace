@@ -3,6 +3,23 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.67.0 (2026-11-15)
+
+- Eye diagram from the path (Path loss window > Eye diagram, `trace path
+  --eye 10`): the path's S-parameters, driven by a matched source and
+  ended in the chip's model when one is given (`--load`), give the
+  response to one bit with a Gaussian edge (`--rise`, 20-80 %, default
+  30 % of a bit). A PRBS pattern (`--prbs` 7, 9, 11 or 15) is built from
+  it by superposition and folded into an eye two bits wide: height and
+  width at the centre, jitter from the threshold crossings, and the
+  worst case opening from the cursors (peak distortion). The window
+  draws the eye and saves it as SVG with the pulse response and its
+  cursors; "Sweep for it" sets the top of the sweep to 2.5 x the bit
+  rate and a fine step, and the CLI does the same unless `--ghz` or
+  `--points` is given. Notes say when the sweep stops too low for the
+  edge, when the pulse does not settle within the sweep's period, and
+  when the ports differ (a balun from 100 to 50 ohm scales the voltage).
+
 ## 0.66.0 (2026-11-15)
 
 - Matching tuner (Path loss window > Tune the match, `trace path --tune

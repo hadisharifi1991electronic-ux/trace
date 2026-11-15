@@ -16,6 +16,7 @@ pub mod drc;
 pub mod eco;
 pub mod edit;
 pub mod erc;
+pub mod eye;
 pub mod fanout;
 pub mod fdtd;
 pub mod field;

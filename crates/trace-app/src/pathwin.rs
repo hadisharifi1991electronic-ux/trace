@@ -3,6 +3,7 @@
 
 use eframe::egui::{self, Color32, RichText, Stroke};
 use std::sync::{mpsc, Arc, Mutex};
+use trace_core::eye::{EyeResult, EyeSetup};
 use trace_core::pathloss::{self, Options, Report, TuneGoal, Tuned};
 use trace_core::touchstone::Network;
 use trace_core::{Board, Stackup};
@@ -32,6 +33,9 @@ pub struct PathWindow {
     il_weight: f64,
     running: Option<Run>,
     last: Option<Outcome>,
+    eye: EyeSetup,
+    /// The eye of the last result, once asked for.
+    eye_result: Option<Result<EyeResult, String>>,
 }
 
 impl Default for PathWindow {
@@ -55,6 +59,8 @@ impl Default for PathWindow {
             il_weight: 1.0,
             running: None,
             last: None,
+            eye: EyeSetup::default(),
+            eye_result: None,
         }
     }
 }
@@ -79,6 +85,13 @@ impl PathWindow {
         }
         if let Some((rx, _)) = &self.running {
             if let Ok(r) = rx.try_recv() {
+                // An eye shown before is drawn again for the new path.
+                if self.eye_result.is_some() {
+                    self.eye_result = match &r {
+                        Ok((rep, _)) => Some(trace_core::eye::eye(rep, &self.eye)),
+                        Err(_) => None,
+                    };
+                }
                 self.last = Some(r);
                 self.running = None;
             }
@@ -278,6 +291,63 @@ impl PathWindow {
                                 .on_hover_text("Off: C sites take capacitors and L sites inductors");
                         });
                     });
+                egui::CollapsingHeader::new("Eye diagram")
+                    .default_open(false)
+                    .show(ui, |ui| {
+                        ui.label(
+                            RichText::new(
+                                "A PRBS pattern through the path (into the load when one is given), built from the path's pulse response: height, width and jitter of the eye, and the worst case from the cursors. The edge's content reaches about 2.5 × the bit rate: sweep that high.",
+                            )
+                            .small()
+                            .weak(),
+                        );
+                        ui.horizontal(|ui| {
+                            ui.label("Bit rate");
+                            ui.add(egui::DragValue::new(&mut self.eye.gbps).speed(0.05).range(0.01..=112.0).suffix(" Gbit/s"));
+                            ui.label("swing");
+                            ui.add(egui::DragValue::new(&mut self.eye.amplitude).speed(0.01).range(0.01..=5.0).suffix(" V p-p"))
+                                .on_hover_text("What the driver puts into a matched load (differential for a pair)");
+                            ui.label("edge");
+                            ui.add(
+                                egui::DragValue::new(&mut self.eye.rise_ps)
+                                    .speed(0.5)
+                                    .range(0.0..=5000.0)
+                                    .custom_formatter(|v, _| if v <= 0.0 { "auto".into() } else { format!("{v:.1} ps") }),
+                            )
+                                .on_hover_text("20 to 80 %; 0: 30 % of a bit");
+                            egui::ComboBox::from_id_salt("eye_prbs")
+                                .selected_text(format!("PRBS{}", self.eye.prbs))
+                                .show_ui(ui, |ui| {
+                                    for n in [7u32, 9, 11, 15] {
+                                        ui.selectable_value(&mut self.eye.prbs, n, format!("PRBS{n}"));
+                                    }
+                                });
+                        });
+                        ui.horizontal(|ui| {
+                            let need = (2.5 * self.eye.gbps).ceil().max(1.0);
+                            if ui
+                                .button(format!("Sweep for it ({} GHz)", need))
+                                .on_hover_text("Sets the top of the sweep and a fine step for this bit rate; then press Run")
+                                .clicked()
+                            {
+                                self.ghz = need;
+                                self.points = ((need * 40.0).ceil() as usize).clamp(200, 2000);
+                            }
+                            let rep = match &self.last {
+                                Some(Ok((r, _))) => Some(r),
+                                _ => None,
+                            };
+                            if ui
+                                .add_enabled(rep.is_some(), egui::Button::new("Draw eye"))
+                                .on_hover_text("From the last run")
+                                .clicked()
+                            {
+                                if let Some(r) = rep {
+                                    self.eye_result = Some(trace_core::eye::eye(r, &self.eye));
+                                }
+                            }
+                        });
+                    });
                 ui.horizontal(|ui| {
                     let busy = self.running.is_some();
                     let run = ui
@@ -397,6 +467,31 @@ impl PathWindow {
                                 "Into the path with the load at the end: worst {d:.1} dB at {f:.2} GHz"
                             ));
                         }
+                        match &self.eye_result {
+                            Some(Ok(e)) => {
+                                ui.label(
+                                    RichText::new(format!(
+                                        "Eye at {} Gbit/s: height {:.1} mV ({:.0} %), width {:.1} ps ({:.0} %), jitter {:.1} ps p-p, worst case {:.1} mV",
+                                        e.gbps,
+                                        e.height * 1e3,
+                                        100.0 * e.height_share(),
+                                        e.width_ps,
+                                        100.0 * e.width_share(),
+                                        e.jitter_ps,
+                                        e.worst_height * 1e3
+                                    ))
+                                    .strong(),
+                                );
+                                eye_plot(ui, e);
+                                for n in &e.notes {
+                                    ui.label(RichText::new(n).small().color(Color32::from_rgb(230, 170, 60)));
+                                }
+                            }
+                            Some(Err(e)) => {
+                                ui.colored_label(Color32::LIGHT_RED, format!("Eye: {e}"));
+                            }
+                            None => {}
+                        }
                         plot(ui, r);
                         for n in &r.notes {
                             ui.label(RichText::new(n).small().weak());
@@ -458,6 +553,15 @@ impl PathWindow {
                             }
                             if ui.button("Save sections (CSV)…").clicked() {
                                 save(&format!("{base}.csv"), "csv", r.csv());
+                            }
+                            if let Some(Ok(e)) = &self.eye_result {
+                                if ui.button("Save eye (SVG)…").clicked() {
+                                    save(
+                                        &format!("{base}-eye.svg"),
+                                        "svg",
+                                        e.svg(&format!("{} to {} at {} Gbit/s", r.start, r.end, e.gbps)),
+                                    );
+                                }
                             }
                         });
                     }
@@ -614,6 +718,96 @@ fn plot(ui: &mut egui::Ui, r: &Report) {
                     ui.visuals().text_color(),
                 );
             }
+        }
+    }
+}
+
+/// The eye: every trace over two bits, the opening marked at the centre.
+fn eye_plot(ui: &mut egui::Ui, e: &EyeResult) {
+    let w = ui.available_width().max(320.0);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 300.0), egui::Sense::hover());
+    let p = ui.painter_at(rect);
+    let plot = egui::Rect::from_min_max(
+        egui::pos2(rect.left() + 56.0, rect.top() + 6.0),
+        egui::pos2(rect.right() - 8.0, rect.bottom() - 18.0),
+    );
+    let grid = ui.visuals().widgets.noninteractive.bg_stroke.color;
+    let text = ui.visuals().weak_text_color();
+    let vmax = e
+        .traces
+        .iter()
+        .flatten()
+        .map(|v| (*v as f64).abs())
+        .fold(e.amplitude / 2.0, f64::max)
+        * 1.08;
+    let n = e.traces.first().map_or(65, |t| t.len()).max(2);
+    let x = |i: f64| plot.left() + plot.width() * (i / (n - 1) as f64) as f32;
+    let y = |v: f64| plot.top() + plot.height() * (0.5 - v / (2.0 * vmax)) as f32;
+    let step = [
+        0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5, 1.0, 2.0,
+    ]
+    .into_iter()
+    .find(|s| vmax / s <= 4.0)
+    .unwrap_or(5.0);
+    let mut v = -(vmax / step).floor() * step;
+    while v <= vmax + 1e-12 {
+        p.line_segment(
+            [
+                egui::pos2(plot.left(), y(v)),
+                egui::pos2(plot.right(), y(v)),
+            ],
+            Stroke::new(1.0_f32, grid),
+        );
+        p.text(
+            egui::pos2(plot.left() - 4.0, y(v)),
+            egui::Align2::RIGHT_CENTER,
+            format!("{:.0} mV", v * 1e3),
+            egui::FontId::proportional(10.0),
+            text,
+        );
+        v += step;
+    }
+    for k in 0..=4 {
+        let xi = x(k as f64 * (n - 1) as f64 / 4.0);
+        p.line_segment(
+            [egui::pos2(xi, plot.top()), egui::pos2(xi, plot.bottom())],
+            Stroke::new(1.0_f32, grid),
+        );
+        p.text(
+            egui::pos2(xi, plot.bottom() + 1.0),
+            egui::Align2::CENTER_TOP,
+            format!("{:.0} ps", (k as f64 / 2.0 - 1.0) * e.ui_ps),
+            egui::FontId::proportional(10.0),
+            text,
+        );
+    }
+    let col = Color32::from_rgba_unmultiplied(70, 140, 240, 70);
+    for t in &e.traces {
+        let pts: Vec<egui::Pos2> = t
+            .iter()
+            .enumerate()
+            .map(|(i, v)| egui::pos2(x(i as f64), y(*v as f64)))
+            .collect();
+        p.add(egui::Shape::line(pts, Stroke::new(1.0_f32, col)));
+    }
+    if e.height > 0.0 {
+        let xc = x((n - 1) as f64 / 2.0);
+        p.line_segment(
+            [egui::pos2(xc, y(e.high)), egui::pos2(xc, y(e.low))],
+            Stroke::new(2.0_f32, Color32::from_rgb(235, 110, 50)),
+        );
+    }
+    if let Some(pos) = resp.hover_pos() {
+        if plot.contains(pos) {
+            let t = ((pos.x - plot.left()) / plot.width()) as f64 * 2.0 - 1.0;
+            let v = (0.5 - ((pos.y - plot.top()) / plot.height()) as f64) * 2.0 * vmax;
+            p.text(
+                pos + egui::vec2(8.0, -8.0),
+                egui::Align2::LEFT_BOTTOM,
+                format!("{:.1} ps, {:.1} mV", t * e.ui_ps, v * 1e3),
+                egui::FontId::proportional(12.0),
+                ui.visuals().text_color(),
+            );
         }
     }
 }

@@ -62,7 +62,8 @@ USAGE:
                                                 default 1 A, shared by pad count); with out, a drop map per layer
     trace path <board> <from> [<to>] [--ghz 6] [--points 200] [--quick-vias] [--model PATTERN=file.sNp]
                [--load chip.s1p] [--df 0.02] [--fmin GHz] [--fit PATTERN] [--tune [1-6] [--il-weight 1]
-               [--any] [--free PATTERN]] [out.s2p] [out.svg] [out.csv]
+               [--any] [--free PATTERN]] [--eye GBPS [--amp 0.8] [--rise PS] [--prbs 7] [--eye-svg eye.svg]]
+               [out.s2p] [out.svg] [out.csv]
                                                 whole-path loss: the routed path from a pin (J503.1, or a part
                                                 with one signal pin, or a net) to another (default: the farthest
                                                 chip pin), through series parts and baluns, with shunt parts off
@@ -78,6 +79,10 @@ USAGE:
                                                 DNI, or --free) sites for the best worst-case return loss (into
                                                 --load) over the band, plus --il-weight x mean insertion loss;
                                                 --any lets C and L sites take either.
+                                                --eye: PRBS eye at the far end (into --load) from the path's
+                                                pulse response: height, width, jitter, worst case from the
+                                                cursors; --amp volts p-p into a matched load, --rise 20-80 %
+                                                ps (default 0.3 bit); sweeps to 2.5 x the bit rate by default.
     trace zcheck <board> [--tol 10] [--rule PATTERN=Z] [--diff PATTERN=Z] [--no-pairs] [--no-rf]
                  [--no-vias] [--via-kinds 6] [--min-length 30] [--ghz 6] [--no-name-pairs] [report.csv]
                                                 board-wide impedance check: every controlled trace run (field
@@ -2163,6 +2168,9 @@ fn path_cmd(file: &str, rest: &[&str]) -> Res {
     let b = board(file)?;
     let mut opt = Options::default();
     let mut goal: Option<TuneGoal> = None;
+    let mut eye: Option<trace_core::eye::EyeSetup> = None;
+    let mut eye_svg: Option<&str> = None;
+    let (mut ghz_set, mut points_set) = (false, false);
     let mut pins: Vec<&str> = Vec::new();
     let mut outs: Vec<&str> = Vec::new();
     let mut i = 0;
@@ -2175,10 +2183,39 @@ fn path_cmd(file: &str, rest: &[&str]) -> Res {
         match rest[i] {
             "--ghz" => {
                 opt.ghz = next(i)?.trim_end_matches("GHz").parse()?;
+                ghz_set = true;
                 i += 1;
             }
             "--points" => {
                 opt.points = next(i)?.parse()?;
+                points_set = true;
+                i += 1;
+            }
+            "--eye" => {
+                let mut e = eye.take().unwrap_or_default();
+                e.gbps = next(i)?
+                    .to_ascii_lowercase()
+                    .trim_end_matches("gbps")
+                    .trim_end_matches("gb/s")
+                    .trim_end_matches('g')
+                    .parse()?;
+                eye = Some(e);
+                i += 1;
+            }
+            "--amp" | "--rise" | "--prbs" | "--bits" => {
+                let mut e = eye.take().unwrap_or_default();
+                let v = next(i)?;
+                match rest[i] {
+                    "--amp" => e.amplitude = v.trim_end_matches(['V', 'v']).parse()?,
+                    "--rise" => e.rise_ps = v.trim_end_matches("ps").parse()?,
+                    "--prbs" => e.prbs = v.trim_start_matches("PRBS").parse()?,
+                    _ => e.bits = v.parse()?,
+                }
+                eye = Some(e);
+                i += 1;
+            }
+            "--eye-svg" => {
+                eye_svg = Some(next(i)?);
                 i += 1;
             }
             "--quick-vias" | "--no-vias" => opt.vias_3d = false,
@@ -2257,6 +2294,16 @@ fn path_cmd(file: &str, rest: &[&str]) -> Res {
     };
     opt.from = from.to_string();
     opt.to = pins.get(1).map(|s| s.to_string());
+    if let Some(e) = &eye {
+        // The edge's content reaches about 2.5 × the bit rate; a fine
+        // step keeps the pulse from wrapping.
+        if !ghz_set {
+            opt.ghz = (2.5 * e.gbps).ceil().max(opt.ghz);
+        }
+        if !points_set {
+            opt.points = ((opt.ghz * 40.0).ceil() as usize).max(opt.points);
+        }
+    }
     let t = std::time::Instant::now();
     let last = std::cell::Cell::new(String::new());
     let prog = |p: f64, what: &str| {
@@ -2359,6 +2406,20 @@ fn path_cmd(file: &str, rest: &[&str]) -> Res {
     }
     for n in &rep.notes {
         println!("Note: {n}");
+    }
+    if let Some(e) = &eye {
+        let r = trace_core::eye::eye(&rep, e)?;
+        print!("{}", r.summary());
+        if let Some(o) = eye_svg {
+            std::fs::write(
+                o,
+                r.svg(&format!(
+                    "{} to {} at {} Gbit/s",
+                    rep.start, rep.end, e.gbps
+                )),
+            )?;
+            println!("Wrote {o}");
+        }
     }
     for o in outs {
         let lo = o.to_ascii_lowercase();

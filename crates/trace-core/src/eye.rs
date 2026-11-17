@@ -40,6 +40,9 @@ pub struct EyeSetup {
     /// Nets coupling into the path (from [`aggressors`]); each switches
     /// at the same rate with its own pattern.
     pub aggressors: Vec<Aggressor>,
+    /// Send a clock (1010...) instead of the PRBS: a strobe or clock
+    /// line. The aggressors still send their PRBS.
+    pub clock: bool,
 }
 
 /// A net (or pair) running beside the path, and how it couples in.
@@ -181,6 +184,7 @@ impl Default for EyeSetup {
             bits: 2047,
             eq: Equaliser::default(),
             aggressors: Vec::new(),
+            clock: false,
         }
     }
 }
@@ -227,6 +231,16 @@ pub struct EyeResult {
     pub xtalk: Vec<XtalkHit>,
     /// Worst case height with every aggressor at its worst, volts.
     pub worst_with_xtalk: f64,
+    /// The sampling point (the middle of the eye), ns after the bit
+    /// starts at the driver: the flight time plus half a bit.
+    pub sample_ns: f64,
+    /// Threshold crossings into the next bit, ps after the sampling
+    /// point: earliest, mean and latest (the open window runs from
+    /// the latest less a bit to the earliest).
+    pub cross_ps: [f64; 3],
+    /// The inner edge of the eye over the 2 UI window: lowest one and
+    /// highest zero at each sample, volts.
+    pub inner: Vec<(f32, f32)>,
 }
 
 impl EyeResult {
@@ -1051,9 +1065,13 @@ pub fn eye(rep: &Report, setup: &EyeSetup) -> Result<EyeResult, String> {
     let keep = 1e-4 * vpk;
     rows.retain(|(k, row)| *k == 0 || row.iter().any(|v| v.abs() > keep));
     // The tail at the end of the period (it would wrap into the start).
+    // (Leaving out the edge's own spread before t = 0, which wraps to
+    // the end of the period.)
+    let lead = (3.0 * rise / 1.683 / dt).ceil() as usize;
     let tail = coarse
         .iter()
-        .skip(total.saturating_sub(PER_UI * 2))
+        .take(total.saturating_sub(lead))
+        .skip(total.saturating_sub(PER_UI * 2 + lead))
         .map(|v| v.abs())
         .fold(0.0, f64::max);
     let late = coarse
@@ -1097,7 +1115,16 @@ pub fn eye(rep: &Report, setup: &EyeSetup) -> Result<EyeResult, String> {
         ));
     }
     // The pattern by superposition, periodic over its length.
-    let bits = prbs(setup.prbs, setup.bits);
+    let random = prbs(setup.prbs, setup.bits);
+    let asym: Vec<f64> = random.iter().map(|&b| if b { 1.0 } else { -1.0 }).collect();
+    let na = asym.len() as isize;
+    let bits = if setup.clock {
+        (0..(random.len() / 2 * 2).max(128))
+            .map(|k| k % 2 == 0)
+            .collect()
+    } else {
+        random
+    };
     let nb = bits.len() as isize;
     let sym: Vec<f64> = bits.iter().map(|&b| if b { 1.0 } else { -1.0 }).collect();
     let half = amp / 2.0;
@@ -1120,7 +1147,7 @@ pub fn eye(rep: &Report, setup: &EyeSetup) -> Result<EyeResult, String> {
         for (i, nz) in noises.iter().enumerate() {
             let shift = 1 + 37 * (i as isize + 1);
             for (k, row) in &nz.rows {
-                let a = sym[(n - k + shift).rem_euclid(nb) as usize] * nz.half;
+                let a = asym[(n - k + shift).rem_euclid(na) as usize] * nz.half;
                 for (w, r) in wave.iter_mut().zip(row) {
                     *w += a * r;
                 }
@@ -1153,6 +1180,19 @@ pub fn eye(rep: &Report, setup: &EyeSetup) -> Result<EyeResult, String> {
     let high = ones_min[PER_UI];
     let low = zeros_max[PER_UI];
     let height = (high - low).max(0.0);
+    let cross_ps = if crossings.is_empty() {
+        [ui * 0.5e12; 3]
+    } else {
+        let lo = crossings.iter().copied().fold(f64::MAX, f64::min);
+        let hi = crossings.iter().copied().fold(f64::MIN, f64::max);
+        let mean = crossings.iter().sum::<f64>() / crossings.len() as f64;
+        [lo * 1e12, mean * 1e12, hi * 1e12]
+    };
+    let inner: Vec<(f32, f32)> = ones_min
+        .iter()
+        .zip(&zeros_max)
+        .map(|(&a, &b)| (a as f32, b as f32))
+        .collect();
     let jitter = if crossings.len() > 1 {
         let lo = crossings.iter().copied().fold(f64::MAX, f64::min);
         let hi = crossings.iter().copied().fold(f64::MIN, f64::max);
@@ -1178,7 +1218,7 @@ pub fn eye(rep: &Report, setup: &EyeSetup) -> Result<EyeResult, String> {
         notes.push("the eye is closed at the centre".into());
     }
     let wraps = (1u64 << setup.prbs.clamp(7, 31)) - 1;
-    if (bits.len() as u64) < wraps {
+    if !setup.clock && (bits.len() as u64) < wraps {
         notes.push(format!(
             "PRBS{} cut to its first {} bits",
             setup.prbs,
@@ -1220,6 +1260,9 @@ pub fn eye(rep: &Report, setup: &EyeSetup) -> Result<EyeResult, String> {
         notes,
         eq: setup.eq,
         worst_with_xtalk: (worst_height - closure).max(0.0),
+        sample_ns: t_peak * 1e9,
+        cross_ps,
+        inner,
         xtalk: {
             let mut x: Vec<XtalkHit> = noises.into_iter().map(|n| n.hit).collect();
             x.sort_by(|a, b| b.closure.total_cmp(&a.closure));

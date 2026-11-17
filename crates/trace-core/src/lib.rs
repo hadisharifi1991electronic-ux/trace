@@ -10,6 +10,7 @@ pub mod board;
 pub mod body;
 pub mod bom;
 pub mod bus;
+pub mod bussim;
 pub mod clear3d;
 pub mod compare;
 pub mod connectivity;

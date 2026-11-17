@@ -112,6 +112,17 @@ USAGE:
                                                 convection from correlations and radiation; Tj per part, maps per
                                                 layer, heat balance; --check solves again on a 1.5x finer grid and
                                                 gives error bars
+    trace bus <board> NETS... --from U1 [--to U5] --rate MT/S [--strobe DQS0] [--swing 0.8] [--rise PS]
+              [--setup PS] [--hold PS] [--mask 136mV,0.2UI] [--offset 0.5 | --edge-aligned] [--no-xtalk]
+              [--vias-3d] [--prbs 7] [timing.svg] [bits.csv] [report.txt]
+                                                parallel bus (DDR byte lane, address bus, any source-synchronous
+                                                group; NETS are names or patterns such as DDR_DQ*): every bit's
+                                                routed path cascaded from the board, its eye with the nets beside
+                                                it switching, its valid window against the strobe's edge (flight
+                                                time, launch offset, jitter), setup/hold margins per bit, the
+                                                receiver mask at the strobe (DDR4-2400: 136mV,0.2UI), and the
+                                                bus's margin as routed, trained and per-bit deskewed. Exits 1 on
+                                                a failure
     trace flex <board> [--radius [B1=]MIL] [--dynamic] [--keepout 30] [--angle 10] [report.txt]
                                                 rigid-flex: zones with their layers and thickness, bends with
                                                 their least radius (IPC-2223: 6/12/24x the flex, 100x dynamic),
@@ -316,6 +327,7 @@ fn main() -> ExitCode {
         ["compare" | "diff", a, b, rest @ ..] => compare_cmd(a, b, rest),
         ["flex", file, rest @ ..] => flex_cmd(file, rest),
         ["thermal", file, rest @ ..] => thermal_cmd(file, rest),
+        ["bus", file, rest @ ..] => bus_cmd(file, rest),
         ["bom", file, rest @ ..] => bom_cmd(file, rest),
         ["pairsize", file, layer, rest @ ..] => pairsize(file, layer, rest),
         ["validate", rest @ ..] => validate(rest),
@@ -2704,6 +2716,97 @@ fn thermal_cmd(file: &str, rest: &[&str]) -> Res {
         };
         std::fs::write(o, text)?;
         println!("Wrote {o}");
+    }
+    Ok(())
+}
+
+fn bus_cmd(file: &str, rest: &[&str]) -> Res {
+    use trace_core::bussim::{self, BusSetup};
+    let b = board(file)?;
+    let mut setup = BusSetup::default();
+    let mut outs: Vec<&str> = Vec::new();
+    let mut rate_set = false;
+    let num = |a: &str, v: &str, unit: &str| -> Result<f64, String> {
+        v.trim()
+            .to_ascii_lowercase()
+            .trim_end_matches(unit)
+            .trim()
+            .parse::<f64>()
+            .map_err(|_| format!("{a}: {v} is not a number"))
+    };
+    let mut it = rest.iter();
+    while let Some(&a) = it.next() {
+        let mut val = || it.next().copied().ok_or(format!("{a} needs a value"));
+        match a {
+            "--from" => setup.from = val()?.to_string(),
+            "--to" => setup.to = Some(val()?.to_string()),
+            "--strobe" | "--clock" => setup.strobe = Some(val()?.to_string()),
+            "--rate" => {
+                setup.mts = num(a, val()?, "mt/s")?;
+                rate_set = true;
+            }
+            "--swing" => setup.swing = num(a, val()?, "v")?,
+            "--rise" => setup.rise_ps = num(a, val()?, "ps")?,
+            "--setup" => setup.setup_ps = num(a, val()?, "ps")?,
+            "--hold" => setup.hold_ps = num(a, val()?, "ps")?,
+            "--offset" => setup.strobe_offset_ui = num(a, val()?, "ui")?,
+            "--edge-aligned" => setup.strobe_offset_ui = 0.0,
+            "--prbs" => setup.prbs = num(a, val()?, "")? as u32,
+            "--no-xtalk" => setup.xtalk = false,
+            "--vias-3d" => setup.vias_3d = true,
+            "--mask" => {
+                let v = val()?;
+                let (h, w) = v.split_once(',').ok_or("--mask: HEIGHTmV,WIDTHUI")?;
+                let h = num(a, h, "mv")? / 1e3;
+                let w = num(a, w, "ui")?;
+                if !(0.0..1.0).contains(&w) || h <= 0.0 {
+                    return Err("--mask: height above 0 mV, width below 1 UI".into());
+                }
+                setup.mask = Some((h, w));
+            }
+            _ if a.starts_with("--") => return Err(format!("bus: unknown option {a}").into()),
+            _ => {
+                let low = a.to_ascii_lowercase();
+                if low.ends_with(".svg") || low.ends_with(".csv") || low.ends_with(".txt") {
+                    outs.push(a);
+                } else {
+                    setup.nets.push(a.to_string());
+                }
+            }
+        }
+    }
+    if !rate_set {
+        return Err("bus: give --rate in MT/s (DDR3-1600: 1600)".into());
+    }
+    if setup.nets.is_empty() {
+        return Err("bus: name the bus's nets (patterns such as \"DDR_D*\" work)".into());
+    }
+    let t0 = std::time::Instant::now();
+    let prog = |f: f64, what: &str| eprint!("\r  {:>3.0}% {:<40}", f * 100.0, what);
+    let r = bussim::run(&b, &setup, &prog)?;
+    eprintln!();
+    print!("{}", r.report());
+    println!("({:.1} s)", t0.elapsed().as_secs_f64());
+    let title = format!(
+        "{} bus timing",
+        Path::new(file)
+            .file_stem()
+            .map_or(String::new(), |s| s.to_string_lossy().into_owned())
+    );
+    for o in outs {
+        let low = o.to_ascii_lowercase();
+        let text = if low.ends_with(".svg") {
+            r.svg(&title)
+        } else if low.ends_with(".csv") {
+            r.csv()
+        } else {
+            r.report()
+        };
+        std::fs::write(o, text)?;
+        println!("Wrote {o}");
+    }
+    if !r.passes() {
+        std::process::exit(1);
     }
     Ok(())
 }

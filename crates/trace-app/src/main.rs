@@ -5,6 +5,7 @@
 
 mod autowin;
 mod bomwin;
+mod buswin;
 mod canvas;
 mod clearwin;
 mod cm;
@@ -142,6 +143,7 @@ pub struct App {
     power: power::PowerWindow,
     pdn: pdnwin::PdnWindow,
     thermal: thermwin::ThermalWindow,
+    bus_sim: buswin::BusWindow,
     via: viawin::ViaWindow,
     zcheck: zwin::ZWindow,
     pathloss: pathwin::PathWindow,
@@ -242,6 +244,7 @@ impl App {
             power: power::PowerWindow::default(),
             pdn: pdnwin::PdnWindow::default(),
             thermal: thermwin::ThermalWindow::default(),
+            bus_sim: buswin::BusWindow::default(),
             via: viawin::ViaWindow::default(),
             zcheck: zwin::ZWindow::default(),
             pathloss: pathwin::PathWindow::default(),
@@ -3359,6 +3362,7 @@ impl eframe::App for App {
             self.power.show(ctx, &scene.board, self.selected);
             self.pdn.show(ctx, &scene.board, self.selected);
             self.thermal.show(ctx, &scene.board, self.selected);
+            self.bus_sim.show(ctx, &scene.board);
             self.via.show(ctx, &scene.board, self.imp.stackup());
             self.pairs.show(ctx, &scene.board, self.imp.stackup());
         }

@@ -3,6 +3,33 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.76.0 (2026-11-17)
+
+- Bus simulation (`trace bus`, Tools > Signal and power integrity >
+  Bus simulation): a DDR byte lane, an address bus or any
+  source-synchronous group simulated bit by bit. Each bit's routed
+  path is cascaded from the board (traces, vias and parts, as in
+  `trace path`) and its eye built with the nets beside it switching,
+  the bus's other bits among them. The strobe or clock (a pair is
+  found by its name or either line, DQS0 / DQSN0 included) is sent
+  as a clock with the same aggressors.
+- From each eye comes the window in which the bit is valid at the
+  receiver, measured from the moment it leaves the driver, so the
+  flight time, loss, reflections and crosstalk all show in it. The
+  strobe's edge lands at its own flight time plus its launch offset
+  (half a bit when centred, as DDR sends it) with its own jitter.
+- Per bit: length, insertion loss, skew, eye height and width,
+  crosstalk closure and the worst aggressor, setup and hold margins
+  against the receiver's tSU/tH, and the receiver mask (VdIVW over
+  TdIVW, DDR4 and later) at the strobe.
+- For the whole bus: the window where every bit is valid, and the
+  margin as routed, with the strobe centred on the lane (training),
+  and with each bit deskewed (per-bit training). Timing chart (SVG),
+  CSV and a text report; exits 1 when a bit fails.
+- Eyes: a clock pattern for strobes; the threshold crossings and the
+  eye's inner edge are kept; the "pulse has not settled" note no
+  longer fires on slow edges.
+
 ## 0.75.0 (2026-11-17)
 
 - Thermal analysis (`trace thermal`, Tools > Signal and power

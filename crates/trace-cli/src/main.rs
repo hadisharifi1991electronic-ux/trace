@@ -102,6 +102,16 @@ USAGE:
                                                 number on two footprints, lines that could share a part, one
                                                 source; costs per board and for N. --template writes a parts
                                                 file to fill in. Exits 1 on errors.
+    trace thermal <board> --power U1=2.5W[@jc0.5/jb8]... [--heatsink U1=40x40x20[,fins=10,fin=1,base=3,
+                  k=200,tim=0.1@3,contact=0.05]] [--ambient 25] [--air M/S] [--vertical] [--cell MM]
+                  [--k-diel 0.81/0.29] [--check] [map.svg] [temps.csv] [report.txt]
+                                                3D steady-state temperatures: board conduction from the real copper
+                                                of every layer and the via barrels, parts as JEDEC two-resistor
+                                                packages (θJC, θJB; guessed from size when not given), plate-fin
+                                                heatsinks with TIM and contact resistance, natural or forced
+                                                convection from correlations and radiation; Tj per part, maps per
+                                                layer, heat balance; --check solves again on a 1.5x finer grid and
+                                                gives error bars
     trace flex <board> [--radius [B1=]MIL] [--dynamic] [--keepout 30] [--angle 10] [report.txt]
                                                 rigid-flex: zones with their layers and thickness, bends with
                                                 their least radius (IPC-2223: 6/12/24x the flex, 100x dynamic),
@@ -305,6 +315,7 @@ fn main() -> ExitCode {
         ["path" | "pathloss", file, rest @ ..] => path_cmd(file, rest),
         ["compare" | "diff", a, b, rest @ ..] => compare_cmd(a, b, rest),
         ["flex", file, rest @ ..] => flex_cmd(file, rest),
+        ["thermal", file, rest @ ..] => thermal_cmd(file, rest),
         ["bom", file, rest @ ..] => bom_cmd(file, rest),
         ["pairsize", file, layer, rest @ ..] => pairsize(file, layer, rest),
         ["validate", rest @ ..] => validate(rest),
@@ -2201,6 +2212,9 @@ fn validate(rest: &[&str]) -> Res {
     let quick = rest.contains(&"--quick");
     let mut c = validate::field_checks();
     c.extend(validate::ir_checks());
+    let t = std::time::Instant::now();
+    c.extend(validate::thermal_checks());
+    eprintln!("  thermal checks: {:.0} s", t.elapsed().as_secs_f64());
     if !quick {
         let t = std::time::Instant::now();
         let last = std::cell::Cell::new(-1i32);
@@ -2558,6 +2572,135 @@ fn path_cmd(file: &str, rest: &[&str]) -> Res {
             rep.csv()
         } else {
             rep.touchstone()
+        };
+        std::fs::write(o, text)?;
+        println!("Wrote {o}");
+    }
+    Ok(())
+}
+
+fn thermal_cmd(file: &str, rest: &[&str]) -> Res {
+    use trace_core::thermal::{self, Air, Heatsink, Setup};
+    let b = board(file)?;
+    let mut setup = Setup::new();
+    let mut sinks: Vec<(String, Heatsink)> = Vec::new();
+    let mut outs: Vec<&str> = Vec::new();
+    let mut check = false;
+    let mut speed = 0.0;
+    let mut vertical = false;
+    let mut it = rest.iter();
+    while let Some(&a) = it.next() {
+        let mut val = || it.next().copied().ok_or(format!("{a} needs a value"));
+        match a {
+            "--power" => {
+                for p in val()?.split(',') {
+                    setup.sources.push(thermal::parse_power(&b, p)?);
+                }
+            }
+            "--heatsink" => {
+                let v = val()?;
+                let (part, spec) = v.split_once('=').ok_or("--heatsink: PART=LxWxH[,...]")?;
+                sinks.push((part.trim().to_string(), Heatsink::parse(spec)?));
+            }
+            "--ambient" => {
+                setup.ambient_c = val()?
+                    .trim_end_matches(['C', 'c'])
+                    .parse()
+                    .map_err(|_| "--ambient: not °C")?
+            }
+            "--air" => {
+                speed = val()?
+                    .trim_end_matches("m/s")
+                    .parse()
+                    .map_err(|_| "--air: not m/s")?
+            }
+            "--vertical" => vertical = true,
+            "--cell" => {
+                setup.cell_mm = val()?
+                    .trim_end_matches("mm")
+                    .parse()
+                    .map_err(|_| "--cell: not mm")?
+            }
+            "--k-diel" => {
+                let v = val()?;
+                let (i, z) = v.split_once('/').unwrap_or((v, v));
+                setup.k_diel = Some((
+                    i.parse().map_err(|_| "--k-diel: not W/mK")?,
+                    z.parse().map_err(|_| "--k-diel: not W/mK")?,
+                ));
+            }
+            "--emissivity" => {
+                setup.emissivity = val()?.parse().map_err(|_| "--emissivity: not a number")?
+            }
+            "--check" => check = true,
+            _ if !a.starts_with("--") => outs.push(a),
+            _ => return Err(format!("unknown option {a}").into()),
+        }
+    }
+    setup.air = if speed > 0.0 {
+        Air::Forced { speed }
+    } else {
+        Air::Natural { vertical }
+    };
+    for (part, h) in sinks {
+        let s = setup
+            .sources
+            .iter_mut()
+            .find(|s| b.components[s.part].designator.eq_ignore_ascii_case(&part))
+            .ok_or(format!("--heatsink {part}: give its --power first"))?;
+        s.heatsink = Some(h);
+    }
+    for s in &setup.sources {
+        println!(
+            "{}: {:.2} W, θJC {:.2} K/W, θJB {:.2} K/W{}",
+            b.components[s.part].designator,
+            s.watts,
+            s.theta_jc,
+            s.theta_jb,
+            s.heatsink
+                .as_ref()
+                .map_or(String::new(), |h| format!("; heatsink {}", h.describe()))
+        );
+    }
+    println!(
+        "Air: {}, ambient {:.1} °C",
+        match setup.air {
+            Air::Forced { speed } => format!("{speed:.1} m/s along x"),
+            Air::Natural { vertical: true } => "still, board on its edge".into(),
+            Air::Natural { vertical: false } => "still, board lying flat".into(),
+        },
+        setup.ambient_c
+    );
+    let t = std::time::Instant::now();
+    let r = if check {
+        let mc = thermal::check_mesh(&b, &setup)?;
+        println!(
+            "Grid check (cells {:.2} and {:.2} mm):",
+            mc.coarse.cell, mc.fine.cell
+        );
+        for (d, tj, e) in &mc.error {
+            println!("  {d}: Tj {tj:.1} °C ± {e:.2} K");
+        }
+        mc.fine
+    } else {
+        thermal::solve(&b, &setup)?
+    };
+    eprintln!("  solved in {:.1} s", t.elapsed().as_secs_f64());
+    print!("{}", r.report());
+    let title = format!(
+        "{}: temperatures",
+        Path::new(file)
+            .file_stem()
+            .map_or(String::new(), |s| s.to_string_lossy().into_owned())
+    );
+    for o in outs {
+        let low = o.to_ascii_lowercase();
+        let text = if low.ends_with(".svg") {
+            r.svg(&title)
+        } else if low.ends_with(".csv") {
+            r.csv()
+        } else {
+            r.report()
         };
         std::fs::write(o, text)?;
         println!("Wrote {o}");

@@ -3,6 +3,38 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.75.0 (2026-11-17)
+
+- Thermal analysis (`trace thermal`, Tools > Signal and power
+  integrity > Thermal): a 3D steady-state finite-volume solve of the
+  whole board. Every copper layer is sampled from the real tracks,
+  pours and pads (in-plane conductivity bounded from both sides, so a
+  hatched or broken plane is not treated as solid), every via barrel
+  carries heat between layers, and the dielectric uses the stack-up
+  material (FR-4, polyimide, Rogers, PTFE, ceramic, metal core).
+- Parts use the JEDEC two-resistor model (junction to case top and
+  junction to board, from the datasheet; sensible guesses from the
+  package size and exposed pad when left empty). Junction heat enters
+  the board through the part's own pads, shared by their copper.
+- Heatsinks: a plate-fin sink on any part with its base spread solved
+  in 2D, fin efficiency, thermal interface material and contact
+  resistance, natural convection between fins (Bar-Cohen and Rohsenow),
+  forced air (Teertstra, Yovanovich and Culham) and radiation.
+- Board surfaces use the right correlation for the side and
+  orientation (heated plate facing up or down, vertical board by
+  Churchill and Chu, forced flow over a flat plate) with air
+  properties at the film temperature, plus radiation; the solve
+  iterates until these settle and checks that heat in equals heat out.
+- `--check` (grid check in the window) solves again on a 1.5 times
+  finer grid and gives every temperature an error bar.
+- Results: junction, case, board and heatsink temperature per part,
+  share of heat into the board, θJA, and per-layer temperature maps
+  (SVG, CSV, text report).
+- `trace validate` now checks the solver against an exact Bessel
+  solution for a heated disc on a copper plate (0.2%), the exact fin
+  efficiency, an energy balance, the grid check, and JEDEC 2s2p
+  boards for SOIC-8 (7% from the datasheet θJA) and SON-8 (17%).
+
 ## 0.74.0 (2026-11-17)
 
 - Accurate 3D via solves (`trace via ... --accurate [dB]`, Accurate in

@@ -34,6 +34,7 @@ mod studio;
 mod swapwin;
 mod symlib;
 mod testwin;
+mod thermwin;
 mod tidywin;
 mod toolbar;
 mod varwin;
@@ -140,6 +141,7 @@ pub struct App {
     sim: simwin::SimWindow,
     power: power::PowerWindow,
     pdn: pdnwin::PdnWindow,
+    thermal: thermwin::ThermalWindow,
     via: viawin::ViaWindow,
     zcheck: zwin::ZWindow,
     pathloss: pathwin::PathWindow,
@@ -239,6 +241,7 @@ impl App {
             sim: simwin::SimWindow::default(),
             power: power::PowerWindow::default(),
             pdn: pdnwin::PdnWindow::default(),
+            thermal: thermwin::ThermalWindow::default(),
             via: viawin::ViaWindow::default(),
             zcheck: zwin::ZWindow::default(),
             pathloss: pathwin::PathWindow::default(),
@@ -3355,6 +3358,7 @@ impl eframe::App for App {
                 .show(ctx, &scene.board, self.imp.stackup(), self.selected);
             self.power.show(ctx, &scene.board, self.selected);
             self.pdn.show(ctx, &scene.board, self.selected);
+            self.thermal.show(ctx, &scene.board, self.selected);
             self.via.show(ctx, &scene.board, self.imp.stackup());
             self.pairs.show(ctx, &scene.board, self.imp.stackup());
         }

@@ -553,6 +553,383 @@ pub fn via_checks(progress: &dyn Fn(f64)) -> Vec<Check> {
     out
 }
 
+/// Modified Bessel functions I1 and K1 (Abramowitz & Stegun 9.8.3,
+/// 9.8.7, 9.8.8), good to about 1e-7.
+fn bessel_k1(x: f64) -> f64 {
+    if x <= 2.0 {
+        let t = x / 3.75;
+        let t2 = t * t;
+        let i1 = x
+            * (0.5
+                + t2 * (0.878_905_94
+                    + t2 * (0.514_988_69
+                        + t2 * (0.150_849_34
+                            + t2 * (0.026_587_33 + t2 * (0.003_015_32 + t2 * 0.000_324_11))))));
+        let y = x * x / 4.0;
+        (x * (x / 2.0).ln() * i1
+            + 1.0
+            + y * (0.154_431_44
+                + y * (-0.672_785_79
+                    + y * (-0.181_568_97
+                        + y * (-0.019_194_02 + y * (-0.001_104_04 + y * -0.000_046_86))))))
+            / x
+    } else {
+        let y = 2.0 / x;
+        (-x).exp() / x.sqrt()
+            * (1.253_314_14
+                + y * (0.234_986_19
+                    + y * (-0.036_556_20
+                        + y * (0.015_042_68
+                            + y * (-0.007_803_53 + y * (0.003_256_14 + y * -0.000_682_45))))))
+    }
+}
+
+/// A board for the thermal checks: `copper` (thickness µm, full pour)
+/// per copper layer, dielectrics `diel_mm` between, `w` by `h` mm.
+fn thermal_board(copper: &[(f64, bool)], diel_mm: &[f64], w: f64, h: f64) -> crate::Board {
+    use crate::*;
+    let mut b = Board::default();
+    let corner = [
+        Point::mil(0.0, 0.0),
+        Point {
+            x: Length::from_mm(w),
+            y: Length::from_mm(0.0),
+        },
+        Point {
+            x: Length::from_mm(w),
+            y: Length::from_mm(h),
+        },
+        Point {
+            x: Length::from_mm(0.0),
+            y: Length::from_mm(h),
+        },
+    ];
+    b.geometry.outline = corner.to_vec();
+    for (i, &(um, full)) in copper.iter().enumerate() {
+        if i > 0 {
+            b.stackup.layers.push(StackLayer {
+                name: format!("D{i}"),
+                altium_id: None,
+                kind: LayerKind::Dielectric,
+                thickness: Length::from_mm(diel_mm[i - 1]),
+                dielectric_constant: Some(4.2),
+                loss_tangent: None,
+                roughness_um: None,
+                material: Some("FR-4".into()),
+            });
+        }
+        b.stackup.layers.push(StackLayer {
+            name: format!("L{}", i + 1),
+            altium_id: None,
+            kind: LayerKind::Copper,
+            thickness: Length::from_mm(um / 1000.0),
+            dielectric_constant: None,
+            loss_tangent: None,
+            roughness_um: None,
+            material: None,
+        });
+        if full {
+            b.geometry.polygons.push(Polygon {
+                layer: LayerRef::Copper(i as u8),
+                net: None,
+                outline: corner.to_vec(),
+                holes: Vec::new(),
+                pour: None,
+                component: None,
+                teardrop: false,
+            });
+        }
+    }
+    b
+}
+
+fn thermal_part(b: &mut crate::Board, name: &str, x: f64, y: f64) -> usize {
+    use crate::*;
+    b.components.push(Component {
+        designator: name.into(),
+        footprint: String::new(),
+        library_ref: None,
+        x: Length::from_mm(x),
+        y: Length::from_mm(y),
+        rotation_deg: 0.0,
+        side: Side::Top,
+        sheet: None,
+        params: Default::default(),
+    });
+    b.components.len() - 1
+}
+
+fn thermal_pad(b: &mut crate::Board, part: usize, x: f64, y: f64, w: f64, h: f64, round: bool) {
+    use crate::*;
+    b.geometry.pads.push(Pad {
+        layer: LayerRef::Copper(0),
+        net: None,
+        component: Some(part as u32),
+        name: "1".into(),
+        at: Point {
+            x: Length::from_mm(x),
+            y: Length::from_mm(y),
+        },
+        size_x: Length::from_mm(w),
+        size_y: Length::from_mm(h),
+        hole: Length::from_mm(0.0),
+        shape: if round {
+            PadShape::Round
+        } else {
+            PadShape::Rect
+        },
+        rotation_deg: 0.0,
+        outline: Vec::new(),
+        stack: Vec::new(),
+        fab: Default::default(),
+    });
+}
+
+/// The thermal solver against exact answers and a JEDEC package.
+pub fn thermal_checks() -> Vec<Check> {
+    use crate::thermal::{self, Air, Setup, Source};
+    let g = "3D thermal solver";
+    let mut out = Vec::new();
+    // 1. A disc of uniform heat on a large thin plate cooled on both
+    // faces: θ(0) = q''/(2h) (1 - m a K1(m a)), m = sqrt(2h / (k t)). The
+    // plate: 70 µm of copper on 20 µm of laminate (and an empty copper
+    // layer under it), so the copper is one sheet through its thickness.
+    let mut b = thermal_board(&[(70.0, true), (35.0, false)], &[0.02], 200.0, 200.0);
+    let p = thermal_part(&mut b, "TP1", 100.0, 100.0);
+    let a = 5.0;
+    thermal_pad(&mut b, p, 100.0, 100.0, 2.0 * a, 2.0 * a, true);
+    let h = 25.0;
+    let mut s = Setup::new();
+    s.fixed_h = Some(h);
+    s.cell_mm = 1.0;
+    s.k_diel = Some((0.81, 0.29));
+    s.sources.push(Source {
+        part: p,
+        watts: 1.0,
+        theta_jc: 1e9,
+        // A weak link makes the flux into the copper uniform over the
+        // disc (a strong one would hold the disc at one temperature).
+        theta_jb: 1e5,
+        heatsink: None,
+    });
+    let kt = 390.0 * 70e-6 + 0.81 * 0.055e-3;
+    let m = (2.0 * h / kt).sqrt();
+    let am = a * 1e-3;
+    let q = 1.0 / (PI * am * am);
+    let exact = q / (2.0 * h) * (1.0 - m * am * bessel_k1(m * am));
+    let coarse = thermal::solve(&b, &s);
+    if let Ok(r) = &coarse {
+        out.push(Check {
+            group: g,
+            name: "Heated disc (r 5 mm, 1 W) on a 70 µm copper plate, h 25 both faces: centre rise"
+                .into(),
+            reference: "exact (fin equation on a plate: Bessel K1)",
+            want: exact,
+            got: r.board_max.0 - r.ambient_c,
+            unit: "K",
+            limit: 3.0,
+            abs: false,
+            at_most: false,
+        });
+        out.push(Check {
+            group: g,
+            name: "Heated disc: heat out of the faces against the power in".into(),
+            reference: "exact (energy balance)",
+            want: 0.0,
+            got: r.balance_pct.abs(),
+            unit: "%",
+            limit: 0.1,
+            abs: true,
+            at_most: true,
+        });
+    }
+    s.cell_mm = 0.67;
+    if let (Ok(c), Ok(f)) = (&coarse, thermal::solve(&b, &s)) {
+        out.push(Check {
+            group: g,
+            name: "Heated disc: centre rise, 1 mm cells vs 0.67 mm".into(),
+            reference: "convergence (the finer grid)",
+            want: f.board_max.0 - f.ambient_c,
+            got: c.board_max.0 - c.ambient_c,
+            unit: "K",
+            limit: 2.0,
+            abs: false,
+            at_most: false,
+        });
+    }
+    // 2. A straight fin: the closed-form efficiency against a fine finite
+    // difference solution of k t θ'' = 2 h θ with a convecting tip.
+    {
+        let (hh, k, t, len) = (40.0, 200.0, 1.0e-3, 30.0e-3);
+        let n = 4000;
+        let dx = len / n as f64;
+        // Tridiagonal: root θ = 1.
+        let mut a = vec![0.0; n + 1];
+        let mut bb = vec![0.0; n + 1];
+        let mut c = vec![0.0; n + 1];
+        let mut d = vec![0.0; n + 1];
+        bb[0] = 1.0;
+        d[0] = 1.0;
+        for i in 1..n {
+            a[i] = k * t / dx;
+            c[i] = k * t / dx;
+            bb[i] = -(2.0 * k * t / dx + 2.0 * hh * dx);
+        }
+        a[n] = k * t / dx;
+        bb[n] = -(k * t / dx + hh * dx + hh * t);
+        for i in 1..=n {
+            let w = a[i] / bb[i - 1];
+            bb[i] -= w * c[i - 1];
+            d[i] -= w * d[i - 1];
+        }
+        let mut th = vec![0.0; n + 1];
+        th[n] = d[n] / bb[n];
+        for i in (0..n).rev() {
+            th[i] = (d[i] - c[i] * th[i + 1]) / bb[i];
+        }
+        let q_root = k * t * (th[0] - th[1]) / dx + hh * dx * th[0];
+        let ideal = hh * (2.0 * len + t);
+        let eta_fd = q_root / ideal;
+        let eta = thermal::fin_efficiency(hh, k, t * 1e3, len * 1e3);
+        out.push(Check {
+            group: g,
+            name: "Heatsink fin (1 x 30 mm aluminium, h 40): efficiency".into(),
+            reference: "exact (finite differences, 4000 steps)",
+            want: eta_fd,
+            got: eta,
+            unit: "",
+            limit: 1.0,
+            abs: false,
+            at_most: false,
+        });
+    }
+    // 3. A SOIC-8 on the JEDEC JESD51-7 2s2p board (114.3 x 76.2 mm,
+    // 2 oz outer, 1 oz planes, 1.6 mm) in still air, from its datasheet
+    // θJC(top) 67.6 and θJB 59.6 K/W (TI TPS2066A, D package): the
+    // datasheet's θJA is 119.3 K/W. A two-resistor model is good to about
+    // 20% on θJA, so the check allows 25%.
+    let mut b = thermal_board(
+        &[(70.0, false), (35.0, true), (35.0, true), (70.0, false)],
+        &[0.71, 0.71, 0.0001_f64.max(0.71)],
+        114.3,
+        76.2,
+    );
+    let (cx, cy) = (57.15, 38.1);
+    let p = thermal_part(&mut b, "U1", cx, cy);
+    for k in 0..4 {
+        let x = cx - 1.905 + 1.27 * k as f64;
+        for sy in [-2.7, 2.7] {
+            thermal_pad(&mut b, p, x, cy + sy, 0.6, 1.55, false);
+            // JESD51-7 fan-out: a 0.25 mm trace from each lead outward.
+            let y1 = if sy < 0.0 { cy - 25.0 } else { cy + 25.0 };
+            b.geometry.tracks.push(crate::Track {
+                layer: crate::LayerRef::Copper(0),
+                net: None,
+                start: crate::Point {
+                    x: Length::from_mm(x),
+                    y: Length::from_mm(cy + sy),
+                },
+                end: crate::Point {
+                    x: Length::from_mm(x),
+                    y: Length::from_mm(y1),
+                },
+                width: Length::from_mm(0.25),
+                component: None,
+                text: false,
+            });
+        }
+    }
+    let mut s = Setup::new();
+    s.air = Air::Natural { vertical: false };
+    s.cell_mm = 0.5;
+    s.sources.push(Source {
+        part: p,
+        watts: 0.5,
+        theta_jc: 67.6,
+        theta_jb: 59.6,
+        heatsink: None,
+    });
+    // 4. A 3 x 3 mm SON-8 with an exposed pad soldered to four thermal
+    // vias into the planes (JESD51-5), same board: TI TPS2066A DRB,
+    // θJC(top) 53, θJB 14.2, θJA 47.5 K/W.
+    let mut b2 = thermal_board(
+        &[(70.0, false), (35.0, true), (35.0, true), (70.0, false)],
+        &[0.71, 0.71, 0.71],
+        114.3,
+        76.2,
+    );
+    let p2 = thermal_part(&mut b2, "U1", cx, cy);
+    thermal_pad(&mut b2, p2, cx, cy, 1.65, 2.4, false);
+    for k in 0..4 {
+        let x = cx - 0.975 + 0.65 * k as f64;
+        for sy in [-1.45, 1.45] {
+            thermal_pad(&mut b2, p2, x, cy + sy, 0.3, 0.6, false);
+            let y1 = if sy < 0.0 { cy - 25.0 } else { cy + 25.0 };
+            b2.geometry.tracks.push(crate::Track {
+                layer: crate::LayerRef::Copper(0),
+                net: None,
+                start: crate::Point {
+                    x: Length::from_mm(x),
+                    y: Length::from_mm(cy + sy),
+                },
+                end: crate::Point {
+                    x: Length::from_mm(x),
+                    y: Length::from_mm(y1),
+                },
+                width: Length::from_mm(0.25),
+                component: None,
+                text: false,
+            });
+        }
+    }
+    for (dx, dy) in [(-0.4, -0.6), (0.4, -0.6), (-0.4, 0.6), (0.4, 0.6)] {
+        b2.geometry.vias.push(crate::Via {
+            net: None,
+            from_layer: 0,
+            to_layer: 3,
+            at: crate::Point {
+                x: Length::from_mm(cx + dx),
+                y: Length::from_mm(cy + dy),
+            },
+            diameter: Length::from_mm(0.6),
+            hole: Length::from_mm(0.33),
+            rings: Vec::new(),
+            fab: Default::default(),
+        });
+    }
+    let mut s2 = s.clone();
+    s2.sources[0].part = p2;
+    s2.sources[0].theta_jc = 53.0;
+    s2.sources[0].theta_jb = 14.2;
+    if let Ok(r) = thermal::solve(&b2, &s2) {
+        out.push(Check {
+            group: g,
+            name: "SON-8 with exposed pad and 4 thermal vias, JEDEC 2s2p, still air: θJA".into(),
+            reference: "datasheet (TI TPS2066A DRB: 47.5 K/W, JESD51-7/-5)",
+            want: 47.5,
+            got: r.parts[0].theta_ja,
+            unit: "K/W",
+            limit: 25.0,
+            abs: false,
+            at_most: false,
+        });
+    }
+    if let Ok(r) = thermal::solve(&b, &s) {
+        out.push(Check {
+            group: g,
+            name: "SOIC-8 on the JEDEC 2s2p board in still air: θJA from θJC and θJB".into(),
+            reference: "datasheet (TI TPS2066A D: 119.3 K/W, JESD51-7)",
+            want: 119.3,
+            got: r.parts[0].theta_ja,
+            unit: "K/W",
+            limit: 25.0,
+            abs: false,
+            at_most: false,
+        });
+    }
+    out
+}
+
 /// The checks as a text table.
 pub fn report(checks: &[Check]) -> String {
     let mut s = String::new();

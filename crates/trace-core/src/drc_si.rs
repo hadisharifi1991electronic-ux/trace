@@ -46,7 +46,7 @@ pub(super) fn check(board: &Board, info: &NetInfo, out: &mut Vec<Violation>) {
 
 /// The copper of every copper layer, rasterised: per cell the net slot of
 /// the copper there (0 for none).
-struct Planes {
+pub(crate) struct Planes {
     x0: f64,
     y0: f64,
     cell: f64,
@@ -54,16 +54,16 @@ struct Planes {
     h: usize,
     /// Per copper layer: cells and the net of each slot. `None` where the
     /// layer is not a plane.
-    layers: Vec<Option<Plane>>,
+    pub(crate) layers: Vec<Option<Plane>>,
 }
 
-struct Plane {
+pub(crate) struct Plane {
     cells: Vec<u8>,
     nets: Vec<Option<u32>>,
 }
 
 impl Planes {
-    fn new(board: &Board) -> Planes {
+    pub(crate) fn new(board: &Board) -> Planes {
         let g = &board.geometry;
         let n = board.stackup.copper_layers().count().max(
             g.polygons
@@ -209,7 +209,7 @@ impl Planes {
 
     /// The plane copper of layer `l` at `p`: `None` for no copper, else
     /// the net (which may itself be `None`, a fill without a net).
-    fn at(&self, l: usize, p: P) -> Option<Option<u32>> {
+    pub(crate) fn at(&self, l: usize, p: P) -> Option<Option<u32>> {
         let plane = self.layers.get(l)?.as_ref()?;
         let i = ((p[0] - self.x0) / self.cell).floor();
         let j = ((p[1] - self.y0) / self.cell).floor();
@@ -222,7 +222,7 @@ impl Planes {
         }
     }
 
-    fn is_plane(&self, l: usize) -> bool {
+    pub(crate) fn is_plane(&self, l: usize) -> bool {
         self.layers.get(l).is_some_and(Option::is_some)
     }
 }
@@ -238,7 +238,7 @@ fn ring_area(r: &[P]) -> f64 {
 
 /// Dielectric height (mil) from each copper layer to the copper layer
 /// above and below it.
-fn heights(board: &Board) -> Vec<(Option<f64>, Option<f64>)> {
+pub(crate) fn heights(board: &Board) -> Vec<(Option<f64>, Option<f64>)> {
     crate::impedance::layer_geometry(&board.stackup)
         .iter()
         .map(|g| (g.above, g.below))
@@ -246,6 +246,13 @@ fn heights(board: &Board) -> Vec<(Option<f64>, Option<f64>)> {
 }
 
 // --------------------------------------------------------- return path
+
+/// The return path findings alone (for the EMI check).
+pub(crate) fn return_path_hits(board: &Board, planes: &Planes) -> Vec<Violation> {
+    let mut out = Vec::new();
+    return_path(board, planes, &mut out);
+    out
+}
 
 /// A piece of track to walk: its points, width and board item.
 struct Run {
@@ -354,7 +361,7 @@ impl Own {
     }
 }
 
-fn layer_name(board: &Board, l: usize) -> String {
+pub(crate) fn layer_name(board: &Board, l: usize) -> String {
     board
         .stackup
         .copper_layers()

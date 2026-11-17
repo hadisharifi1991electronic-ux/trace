@@ -123,6 +123,14 @@ USAGE:
                                                 receiver mask at the strobe (DDR4-2400: 136mV,0.2UI), and the
                                                 bus's margin as routed, trained and per-bit deskewed. Exits 1 on
                                                 a failure
+    trace emi <board> [--net CLK=25MHz@2ns,3.3V]... [--no-auto] [--clock 50MHz@1ns,3.3V]
+              [--limit fcc-b|fcc-a|cispr-b|cispr-a] [--margin 6] [spectrum.svg] [findings.csv] [report.txt]
+                                                board-level EMI check of the fast nets (clocks found by name,
+                                                the nets given, every pair): tracks over plane gaps or splits,
+                                                layer changes with no return via or capacitor near, fast tracks
+                                                near the board edge, ground stitching along the edge over
+                                                lambda/20, and each clock's radiation (differential-mode loop,
+                                                Ott) against the FCC or CISPR 32 limit. Exits 1 on a high finding
     trace flex <board> [--radius [B1=]MIL] [--dynamic] [--keepout 30] [--angle 10] [report.txt]
                                                 rigid-flex: zones with their layers and thickness, bends with
                                                 their least radius (IPC-2223: 6/12/24x the flex, 100x dynamic),
@@ -328,6 +336,7 @@ fn main() -> ExitCode {
         ["flex", file, rest @ ..] => flex_cmd(file, rest),
         ["thermal", file, rest @ ..] => thermal_cmd(file, rest),
         ["bus", file, rest @ ..] => bus_cmd(file, rest),
+        ["emi", file, rest @ ..] => emi_cmd(file, rest),
         ["bom", file, rest @ ..] => bom_cmd(file, rest),
         ["pairsize", file, layer, rest @ ..] => pairsize(file, layer, rest),
         ["validate", rest @ ..] => validate(rest),
@@ -2806,6 +2815,66 @@ fn bus_cmd(file: &str, rest: &[&str]) -> Res {
         println!("Wrote {o}");
     }
     if !r.passes() {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
+fn emi_cmd(file: &str, rest: &[&str]) -> Res {
+    use trace_core::emi::{self, EmiSetup, FastNet, Limit, Severity};
+    let b = board(file)?;
+    let mut setup = EmiSetup::default();
+    let mut outs: Vec<&str> = Vec::new();
+    let mut it = rest.iter();
+    while let Some(&a) = it.next() {
+        let mut val = || it.next().copied().ok_or(format!("{a} needs a value"));
+        match a {
+            "--net" => setup.nets.push(FastNet::parse(val()?)?),
+            "--no-auto" => setup.auto = false,
+            "--clock" => {
+                let f = FastNet::parse(&format!("*={}", val()?))?;
+                setup.auto_freq = f.freq;
+                setup.auto_rise = f.rise;
+                setup.auto_volts = f.volts;
+            }
+            "--limit" => {
+                let v = val()?;
+                setup.limit = Limit::parse(v)
+                    .ok_or_else(|| format!("--limit: {v} (fcc-b, fcc-a, cispr-b, cispr-a)"))?
+            }
+            "--margin" => {
+                setup.margin_db = val()?
+                    .trim_end_matches("dB")
+                    .parse()
+                    .map_err(|_| "--margin: not dB")?
+            }
+            _ if a.starts_with("--") => return Err(format!("emi: unknown option {a}").into()),
+            _ => outs.push(a),
+        }
+    }
+    let t0 = std::time::Instant::now();
+    let r = emi::check(&b, &setup);
+    print!("{}", r.report());
+    println!("({:.1} s)", t0.elapsed().as_secs_f64());
+    let title = format!(
+        "{} EMI",
+        Path::new(file)
+            .file_stem()
+            .map_or(String::new(), |s| s.to_string_lossy().into_owned())
+    );
+    for o in outs {
+        let low = o.to_ascii_lowercase();
+        let text = if low.ends_with(".svg") {
+            r.svg(&title)
+        } else if low.ends_with(".csv") {
+            r.csv()
+        } else {
+            r.report()
+        };
+        std::fs::write(o, text)?;
+        println!("Wrote {o}");
+    }
+    if r.count(Severity::High) > 0 {
         std::process::exit(1);
     }
     Ok(())

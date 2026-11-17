@@ -314,6 +314,7 @@ trace via board.PcbDoc 1 7 --accurate   refine the grid until converged, extrapo
 trace sparam check vendor.s4p via.s2p   passivity, reciprocity and causality of any Touchstone file
 trace thermal board.brd --power U1=2.5W@jc0.5/jb8,U2=1W --heatsink U1=40x40x15,fins=10 --air 1 --check map.svg   3D steady-state temperatures: Tj per part, heatsinks, convection and radiation, grid error bars
 trace bus board.brd "DDR_DQ*" DDR_DM0 --from U1 --to U5 --strobe DQS0 --rate 3200 --mask 136mV,0.2UI timing.svg   DDR/parallel bus: per-bit eyes with crosstalk, valid windows against the strobe, setup/hold and mask margins (as routed, trained, deskewed)
+trace emi board.brd --net CLK=25MHz@2ns,3.3V --limit cispr-b spectrum.svg findings.csv   EMI check: plane gaps and splits, layer changes without return vias, edge traces and stitching, clock radiation against FCC/CISPR limits
 trace zcheck board.PcbDoc --diff "USB*=90" --rule "*RF*=50" report.csv   every controlled trace and via kind against its target impedance
 trace path board.brd J401.1 U101.A5 --model "C3?=cap.s2p" --model T301=balun.s3p path.s2p path.svg   whole-path loss: every trace, via and part between two pins cascaded (IL/RL, Touchstone)
 trace path board.brd J301 --load chip.s1p --tune 1-6 --fit "C30?" tuned.s2p   choose E12 L/C for the empty (TBD/DNI) match sites for the best return loss into the chip

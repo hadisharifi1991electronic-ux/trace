@@ -582,6 +582,9 @@ impl App {
                 if item(ui, true, "Bus simulation (DDR, parallel)…", "", "Every bit of a bus: its eye with the nets beside it switching, its valid window against the strobe, setup/hold margins, the receiver mask; as routed, trained and deskewed") {
                     self.bus_sim.open = true;
                 }
+                if item(ui, true, "EMI check…", "", "Fast nets over plane gaps and splits, layer changes with no return via, tracks near the edge, edge stitching, and each clock's radiation against the FCC or CISPR limit") {
+                    self.emi.open = true;
+                }
                 if item(ui, true, "Via S-parameters (3D)…", "", "3D full-wave solve of a via or via pair: return and insertion loss, stub resonance, Touchstone") {
                     self.via.open = true;
                 }

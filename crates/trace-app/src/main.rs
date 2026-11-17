@@ -12,6 +12,7 @@ mod cm;
 mod comparewin;
 mod drc;
 mod editing;
+mod emiwin;
 mod fanwin;
 mod flexwin;
 mod fpview;
@@ -144,6 +145,7 @@ pub struct App {
     pdn: pdnwin::PdnWindow,
     thermal: thermwin::ThermalWindow,
     bus_sim: buswin::BusWindow,
+    emi: emiwin::EmiWindow,
     via: viawin::ViaWindow,
     zcheck: zwin::ZWindow,
     pathloss: pathwin::PathWindow,
@@ -245,6 +247,7 @@ impl App {
             pdn: pdnwin::PdnWindow::default(),
             thermal: thermwin::ThermalWindow::default(),
             bus_sim: buswin::BusWindow::default(),
+            emi: emiwin::EmiWindow::default(),
             via: viawin::ViaWindow::default(),
             zcheck: zwin::ZWindow::default(),
             pathloss: pathwin::PathWindow::default(),
@@ -3365,6 +3368,20 @@ impl eframe::App for App {
             self.bus_sim.show(ctx, &scene.board);
             self.via.show(ctx, &scene.board, self.imp.stackup());
             self.pairs.show(ctx, &scene.board, self.imp.stackup());
+        }
+        let emi_act = match &self.scene {
+            Some(scene) => self.emi.show(ctx, &scene.board),
+            None => None,
+        };
+        if let Some((net, at, text)) = emi_act {
+            let p = [at[0] as f32, at[1] as f32];
+            if let Some(n) = net {
+                self.select_net(n, false);
+            }
+            self.focus = Some(Focus::Point(p, 3.0));
+            self.needs_fit = false;
+            self.marker = Some(p);
+            self.message = Some((text, false));
         }
         let z_act = match &self.scene {
             Some(scene) => self.zcheck.show(ctx, &scene.board, self.imp.stackup()),

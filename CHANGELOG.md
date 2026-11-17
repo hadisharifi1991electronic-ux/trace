@@ -3,6 +3,32 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.77.0 (2026-11-17)
+
+- EMI check (`trace emi`, Tools > Signal and power integrity > EMI
+  check) of the fast nets: clocks found by name (CLK, SCK, XTAL,
+  OSC...), the nets given with their frequency, edge and swing, and
+  every differential pair. It reports, worst first, with where and
+  what to do:
+  - tracks over a gap in their reference plane, or across a split
+    between two plane nets;
+  - vias that move a net to a layer with another reference plane with
+    no return via (same plane net) or capacitor (different nets) near;
+  - fast tracks closer to the board edge than five times their height
+    over the plane;
+  - stretches of board edge with no ground via longer than a
+    twentieth of a wavelength at the fastest edge's knee frequency.
+- Radiation estimate for each clock: the loop its outer-layer route
+  makes with the plane under it (length times height) and its
+  harmonic currents (a trapezoid of the swing over twice the line's
+  impedance), into Ott's differential-mode formula over a ground
+  plane, against FCC Part 15 or CISPR 32 class A or B at their
+  distances. Margins per net, spectrum chart (SVG) and findings (CSV);
+  exits 1 on a high finding. "Show" in the window selects the net and
+  zooms to the spot.
+- Cables (common-mode radiation) are not modelled; the estimate is
+  the board's own.
+
 ## 0.76.0 (2026-11-17)
 
 - Bus simulation (`trace bus`, Tools > Signal and power integrity >

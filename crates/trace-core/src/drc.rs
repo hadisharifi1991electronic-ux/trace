@@ -20,7 +20,7 @@ use std::collections::{HashMap, HashSet};
 #[path = "drc_fab.rs"]
 mod fab;
 #[path = "drc_si.rs"]
-mod si;
+pub(crate) mod si;
 pub use fab::{height_rules, mask_rule, HeightRule, MaskRule};
 pub use si::{GAP_RUN, PARALLEL_LIMIT};
 

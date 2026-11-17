@@ -426,6 +426,9 @@ fn kind_of(name: &str, pair: bool) -> Kind {
         }
         return Kind::Lvds;
     }
+    if slow_bus(name).is_some() {
+        return Kind::Cmos;
+    }
     if is_clock(name) {
         return Kind::Clock;
     }
@@ -460,7 +463,53 @@ fn rf_role(name: &str) -> RfRole {
     }
 }
 
+/// Slow single-ended lines named for what they are: a control bus or a
+/// static control line, (bit rate, rise, volts). Their names often hold
+/// "CLK" (CLK_RESETB, LMK_SCLK) but they are not free-running clocks.
+fn slow_bus(name: &str) -> Option<(f64, f64, f64)> {
+    let u = name.to_ascii_uppercase();
+    let toks: Vec<&str> = u
+        .split(|c: char| !c.is_ascii_alphanumeric())
+        .filter(|t| !t.is_empty())
+        .collect();
+    let any = |ks: &[&str]| toks.iter().any(|t| ks.contains(t));
+    let starts = |ks: &[&str]| toks.iter().any(|t| ks.iter().any(|k| t.starts_with(k)));
+    // I²C: 400 kHz, edges set by the pull-ups.
+    if any(&[
+        "I2C", "IIC", "SMB", "SMBUS", "PMBUS", "SCL", "SDA", "SMBCLK", "SMBDAT",
+    ]) || starts(&["I2C", "SCL", "SDA"])
+    {
+        return Some((400e3, 100e-9, 3.3));
+    }
+    // SPI and its kin: 10 MHz, a few ns.
+    if any(&[
+        "SPI", "SCLK", "SCK", "MOSI", "MISO", "SDIO", "SDO", "SDI", "CSB", "CS", "SS", "SEN",
+        "SCLK1", "SCLK2", "SPICLK", "QSPI", "MDC", "MDIO", "JTAG", "TCK", "TMS", "TDI", "TDO",
+    ]) || starts(&["SPI", "QSPI", "SCLK", "MOSI", "MISO"])
+    {
+        return Some((10e6, 3e-9, 3.3));
+    }
+    // Static control: resets, enables, requests, interrupts, status.
+    if any(&["EN", "PD", "INT", "REQ", "RSTN", "NRST"])
+        || starts(&[
+            "RESET", "RST", "REQUEST", "ENABLE", "PWDN", "PWRDN", "IRQ", "GPIO", "LED", "STATUS",
+            "LOCK", "TRIG", "ALERT", "FAULT",
+        ])
+        || toks
+            .iter()
+            .any(|t| t.ends_with("RESET") || t.ends_with("RESETB") || t.ends_with("RSTB"))
+    {
+        return Some((1e6, 5e-9, 3.3));
+    }
+    None
+}
+
 fn defaults(kind: Kind, name: &str) -> (f64, f64, f64) {
+    if kind == Kind::Cmos {
+        if let Some(b) = slow_bus(name) {
+            return b;
+        }
+    }
     let f_name = freq_in_name(name);
     let u = name.to_ascii_uppercase();
     let has = |ks: &[&str]| ks.iter().any(|k| u.contains(k));
@@ -1416,6 +1465,23 @@ pub fn simulate(
         .min_by(|a, b| a.1.total_cmp(&b.1))
         .unwrap_or((0, 0.0));
     contributions.retain(|c| c.db.iter().any(|&d| d > -199.0));
+    // Nets that share a name (split nets, or a name on two islands of
+    // copper) are one source in the report: their fields add as power.
+    let mut merged: Vec<Contribution> = Vec::new();
+    for c in contributions {
+        match merged
+            .iter_mut()
+            .find(|m| m.source == c.source && m.mechanism == c.mechanism)
+        {
+            Some(m) => {
+                for (a, b) in m.db.iter_mut().zip(&c.db) {
+                    *a = add_db(*a, *b);
+                }
+            }
+            None => merged.push(c),
+        }
+    }
+    let mut contributions = merged;
     contributions.sort_by(|a, b| {
         b.db[wk]
             .total_cmp(&a.db[wk])
@@ -2306,6 +2372,25 @@ fn esc(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn control_lines_are_not_clocks() {
+        for n in [
+            "LMK_SCLK",
+            "FMC_SCLK",
+            "SCL_LOCAL",
+            "I2C_SDA",
+            "CLK_RESETB",
+            "CLK_SYSREF_REQUEST",
+        ] {
+            assert_eq!(kind_of(n, false), Kind::Cmos, "{n}");
+            assert!(defaults(Kind::Cmos, n).0 <= 10e6, "{n}");
+        }
+        assert_eq!(defaults(Kind::Cmos, "SCL_LOCAL").0, 400e3);
+        assert_eq!(kind_of("CLK_100M", false), Kind::Clock);
+        assert_eq!(kind_of("ENET_TXD0", false), Kind::Cmos);
+        assert_eq!(defaults(Kind::Cmos, "ENET_TXD0").0, 50e6);
+    }
+
     use super::*;
 
     fn seg(x: f64, len: f64, h: f64) -> Seg {

@@ -3,6 +3,16 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.80.3 (2026-11-17)
+
+- EMI simulation: control lines are no longer taken as 50 MHz clocks.
+  I²C (SCL, SDA) is taken at 400 kHz with slow edges, SPI and its kin
+  (SCLK, SCK, MOSI, MISO, SDIO, CS, JTAG, MDIO) at 10 MHz with 3 ns
+  edges, and resets, enables, requests and status lines (CLK_RESETB,
+  CLK_SYSREF_REQUEST) at 1 MHz, even when their names hold "CLK".
+- EMI simulation: nets that share a name are one line in the report,
+  their fields added, instead of the same line twice.
+
 ## 0.80.2 (2026-11-17)
 
 - EMI simulation, cables: every connector with a cable is now driven,

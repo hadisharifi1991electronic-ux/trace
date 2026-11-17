@@ -2232,6 +2232,10 @@ pub fn converge(
             best.s21[k] = best.s21[k].scale(sc);
         }
     }
+    // The via's impedance goes to the same limit as the S-parameters.
+    if let (true, Some(z2), Some(z3)) = (extrapolate, a2.z_via, a3.z_via) {
+        best.z_via = Some(z3 + (z3 - z2) * g);
+    }
     best.notes.retain(|n| !n.starts_with("the grid gave up to"));
     best.notes.push(format!(
         "accurate solve: {} grids down to {:.2} mil, {}{}",

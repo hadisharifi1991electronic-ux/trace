@@ -75,7 +75,7 @@ impl Default for ViaWindow {
             own_mat: false,
             er: 4.0,
             df: 0.02,
-            accurate: false,
+            accurate: true,
         }
     }
 }
@@ -142,9 +142,16 @@ impl ViaWindow {
                     }
                     self.sized_note = Some(match &sz.note {
                         Some(n) => format!("Closest: {}; {n}.", viaopt::describe(&sz.setup)),
-                        None => format!(
+                        None if sz.accurate.is_empty() => format!(
                             "Sized to {:.1} Ω in {} solves: {}.",
                             sz.result.z_via.unwrap_or(f64::NAN),
+                            sz.steps.len(),
+                            viaopt::describe(&sz.setup)
+                        ),
+                        None => format!(
+                            "Sized to {:.1} Ω on the converged grid ({} accurate and {} quick solves): {}.",
+                            sz.result.z_via.unwrap_or(f64::NAN),
+                            sz.accurate.len(),
                             sz.steps.len(),
                             viaopt::describe(&sz.setup)
                         ),
@@ -411,7 +418,10 @@ impl ViaWindow {
             if sizing {
                 let st = stackup.clone();
                 let base = self.setup.clone();
-                let goal = viaopt::ViaGoal::within(&base, base.fmax_ghz, &self.fab);
+                let mut goal = viaopt::ViaGoal::within(&base, base.fmax_ghz, &self.fab);
+                if !self.accurate {
+                    goal.accurate = None;
+                }
                 let target = self.target_z;
                 let (tx, rx) = mpsc::channel();
                 let prog = Arc::new(Mutex::new((0.0, String::new())));
@@ -435,14 +445,13 @@ impl ViaWindow {
                     ui.label(format!("{:.0} %: sizing, {}", p.0 * 100.0, p.1));
                 }
             }
-            if !self.to_target {
-                ui.checkbox(&mut self.accurate, "Accurate").on_hover_text(
-                    "Solves on finer and finer grids until the S-parameters stop moving, \
-                     extrapolates to a zero cell size and gives every point an error bar \
-                     (several minutes; the plain solve can be several dB optimistic on \
-                     return loss below about -35 dB)",
-                );
-            }
+            ui.checkbox(&mut self.accurate, "Accurate").on_hover_text(
+                "Solves on finer and finer grids until the S-parameters stop moving, \
+                 extrapolates to a zero cell size and gives every point an error bar. \
+                 Sizing and the optimiser then judge by that converged grid too \
+                 (tens of minutes; the quick grid can be several ohm and several dB off \
+                 on fine vias). Off: one quick grid.",
+            );
             if !self.to_target && ui.add_enabled(ok, egui::Button::new("Solve")).clicked() {
                 let st = stackup.clone();
                 let setup = self.setup.clone();
@@ -590,6 +599,9 @@ impl ViaWindow {
                 let base = self.setup.clone();
                 let mut goal = viaopt::ViaGoal::within(&base, self.opt_f, &self.fab);
                 goal.try_backdrill = self.opt_backdrill && !base.backdrill;
+                if !self.accurate {
+                    goal.accurate = None;
+                }
                 if !self.opt_pad {
                     goal.pad = (base.pad, base.pad);
                 }

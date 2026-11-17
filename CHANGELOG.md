@@ -3,6 +3,26 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.78.0 (2026-11-17)
+
+- Via sizing (`trace via --target`, the via window's Solve with a
+  target) now meets the target on the accurate, converged grid, not
+  the quick one. The quick grid only steers: each round solves the
+  quick answer accurately (grids refined until S11/S21 stop moving,
+  then extrapolated to a zero cell size), measures how far the quick
+  grid was off there, and searches the quick grid again aimed off by
+  that much, until the accurate impedance is within 2 %. The steps,
+  each accurate grid study and the final error bars are listed.
+- The via optimiser (`--optimise`, the window's Optimise) confirms its
+  front runners (up to 3) and the starting setup with the accurate
+  solve too, so the winner is picked on converged return loss.
+- The accurate solve also extrapolates the via impedance to a zero
+  cell size, not only the S-parameters.
+- `--quick` (CLI) or unticking Accurate (window) keeps the old single
+  finer grid; Accurate is now on by default in the via window and
+  applies to Solve, sizing and Optimise. `--accurate dB` sets the
+  tolerance sizing and the optimiser use.
+
 ## 0.77.1 (2026-11-17)
 
 - Return path (DRC and the EMI check): a track's reference is now the

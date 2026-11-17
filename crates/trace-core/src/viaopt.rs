@@ -6,8 +6,12 @@
 //! others held, keeping the best, on a coarse quick solve; a parabola
 //! through the best value and its neighbours then tries the point between
 //! them, and the passes repeat while they still gain. The winner is then
-//! solved again in full, with the next best few, on a grid 0.7 times as
-//! fine, and the best there wins. Return loss below the solver's accuracy (about
+//! solved again in full, with the next best few, by an accurate solve
+//! (grids refined until S11/S21 stop moving, then extrapolated to a zero
+//! cell size), and the best there wins. Sizing to an impedance works the
+//! same way: the quick grid finds the antipad, the accurate solve says how
+//! far the quick grid is off, and the quick search runs again aimed off by
+//! that much until the accurate impedance meets the target. Return loss below the solver's accuracy (about
 //! −45 dB) counts as equal, so the search stops chasing noise there and
 //! keeps the simpler setup.
 
@@ -50,6 +54,10 @@ pub struct ViaGoal {
     pub confirm: usize,
     /// Values per setting.
     pub steps: usize,
+    /// Judge the winners (and the sized via) by an accurate solve that
+    /// refines the grid until it converges; None keeps the old single
+    /// finer grid (quicker, but a few ohm and dB off on fine vias).
+    pub accurate: Option<fdtd::Tolerance>,
 }
 
 /// Return loss better than this is under the 3D solver's accuracy, dB.
@@ -90,6 +98,7 @@ impl ViaGoal {
             passes: 3,
             confirm: 4,
             steps: 4,
+            accurate: Some(fdtd::Tolerance::default()),
         }
     }
 }
@@ -167,9 +176,11 @@ pub struct ViaOpt {
     pub start: ViaResult,
     pub best_setup: ViaSetup,
     pub best: ViaResult,
-    /// The front runners solved again in full on the finer grid, with
-    /// their worst return loss there, dB (the best is among them).
+    /// The front runners solved again in full (accurately, by default),
+    /// with their worst return loss there, dB (the best is among them).
     pub confirmed: Vec<(ViaSetup, f64)>,
+    /// Each accurate front runner's grid study, in the same order.
+    pub verdicts: Vec<String>,
 }
 
 /// Worst |S11| (dB) up to `f`, and |S21| (dB) at `f`.
@@ -457,9 +468,15 @@ pub fn optimise(
         .filter(|&i| trials[i].error.is_none())
         .collect();
     order.sort_by(|&a, &b| trials[a].score.total_cmp(&trials[b].score));
+    // An accurate solve costs a few finer grids, so it confirms at most 3.
+    let confirm = if goal.accurate.is_some() {
+        goal.confirm.clamp(1, 3)
+    } else {
+        goal.confirm.max(1)
+    };
     let mut front: Vec<usize> = vec![best];
     for i in order {
-        if front.len() >= goal.confirm.max(1) {
+        if front.len() >= confirm {
             break;
         }
         // The quick grid can be 10 dB or more off at very good return
@@ -469,32 +486,65 @@ pub fn optimise(
         }
     }
     let n = front.len() as f64 + 1.0;
-    progress(0.86, "the starting setup in full");
-    let start = fdtd::solve_with(stackup, &fine(base), &|p| {
-        progress(0.86 + 0.14 * p / n, "the starting setup in full")
-    })?;
+    // The quick part is a small share of the time once accurate solves
+    // follow it.
+    let p0 = if goal.accurate.is_some() { 0.3 } else { 0.86 };
+    // In full: an accurate solve from the setup's own grid, or one solve
+    // on the finer grid.
+    let full = |v: &ViaSetup, prog: &dyn Fn(f64)| -> Result<(ViaResult, Option<String>), String> {
+        match &goal.accurate {
+            Some(tol) => {
+                let mut v = v.clone();
+                v.cell = base.cell.max(0.0);
+                fdtd::converge(stackup, &v, tol, prog).map(|c| {
+                    let verdict = c.verdict();
+                    (c.best, Some(verdict))
+                })
+            }
+            None => fdtd::solve_with(stackup, &fine(v), prog).map(|r| (r, None)),
+        }
+    };
+    let what0 = if goal.accurate.is_some() {
+        "the starting setup, accurate"
+    } else {
+        "the starting setup in full"
+    };
+    progress(p0, what0);
+    let (start, _) = full(base, &|p| progress(p0 + (1.0 - p0) * p / n, what0))?;
     let mut confirmed = Vec::new();
+    let mut verdicts = Vec::new();
     let mut winner: Option<(f64, ViaSetup, ViaResult)> = None;
     for (k, &i) in front.iter().enumerate() {
         let v = trials[i].setup.clone();
-        let what = format!("front runner {} of {} in full", k + 1, front.len());
-        let r = fdtd::solve_with(stackup, &fine(&v), &|p| {
-            progress(0.86 + 0.14 * (k as f64 + 1.0 + p) / n, &what)
+        let what = format!(
+            "front runner {} of {} {}",
+            k + 1,
+            front.len(),
+            if goal.accurate.is_some() {
+                "accurate"
+            } else {
+                "in full"
+            }
+        );
+        let (r, verdict) = full(&v, &|p| {
+            progress(p0 + (1.0 - p0) * (k as f64 + 1.0 + p) / n, &what)
         })?;
+        verdicts.extend(verdict);
         let sc = score_with(&r, f, goal.il_weight);
         confirmed.push((v.clone(), judge(&r, f).0));
         if winner.as_ref().is_none_or(|w| sc < w.0 - 0.05) {
             winner = Some((sc, v, r));
         }
     }
-    let (_, best_setup, full) = winner.ok_or("nothing to confirm")?;
+    let (_, best_setup, full_r) = winner.ok_or("nothing to confirm")?;
     progress(1.0, "done");
     Ok(ViaOpt {
         trials,
         start,
         best_setup,
-        best: full,
+        best: full_r,
         confirmed,
+        verdicts,
     })
 }
 
@@ -503,16 +553,90 @@ pub fn optimise(
 pub struct Sized {
     pub setup: ViaSetup,
     pub result: ViaResult,
-    /// Each solve on the way: the setup and the impedance it gave.
+    /// Each quick solve on the way: the setup and the impedance it gave.
     pub steps: Vec<(ViaSetup, Option<f64>)>,
-    /// Within 2 % (or 1 Ω) of the target.
+    /// Each accurate solve: the setup, its converged impedance and its
+    /// grid study.
+    pub accurate: Vec<(ViaSetup, Option<f64>, String)>,
+    /// Within 2 % (or 1 Ω) of the target (by the accurate solve, when on).
     pub reached: bool,
     pub note: Option<String>,
+}
+
+/// The quick-grid search: secant steps on ln(antipad) (the drill once the
+/// antipad is at a limit) from `v` until the impedance is within `tol` Ω
+/// of `target`. Returns the closest setup, its solve and its miss.
+#[allow(clippy::too_many_arguments)]
+fn secant(
+    stackup: &Stackup,
+    mut v: ViaSetup,
+    target: f64,
+    tol: f64,
+    slope0: f64,
+    goal: &ViaGoal,
+    steps: &mut Vec<(ViaSetup, Option<f64>)>,
+    progress: &dyn Fn(f64, &str),
+) -> Result<(ViaSetup, ViaResult, f64), String> {
+    let tries = 6;
+    let mut last: Option<(f64, f64)> = None; // (ln antipad, z)
+    let mut best: Option<(f64, ViaSetup, ViaResult)> = None;
+    for k in 0..tries {
+        let what = format!("antipad {:.1} mil, drill {:.1} mil", v.antipad, v.drill);
+        let r = fdtd::solve_with(stackup, &v, &|p| {
+            progress((k as f64 + p) / tries as f64, &what)
+        })?;
+        let z = r.z_via;
+        steps.push((v.clone(), z));
+        let Some(z) = z else {
+            return Err("the via is too short to tell its impedance; widen the band".into());
+        };
+        let miss = (z - target).abs();
+        if best.as_ref().is_none_or(|b| miss < b.0) {
+            best = Some((miss, v.clone(), r));
+        }
+        if miss <= tol {
+            break;
+        }
+        let x = v.antipad.ln();
+        let slope = match last {
+            Some((x0, z0)) if (x - x0).abs() > 1e-6 && (z - z0).abs() > 1e-6 => (z - z0) / (x - x0),
+            _ => slope0,
+        };
+        last = Some((x, z));
+        let mut n = v.clone();
+        n.antipad = (x + (target - z) / slope.max(1.0)).exp();
+        let n = legal(n, goal);
+        if (n.antipad - v.antipad).abs() < 0.25 {
+            // The antipad is at a limit: move the drill instead (a thinner
+            // drill raises the impedance).
+            let mut d = v.clone();
+            let ring = (d.pad - d.drill) / 2.0;
+            let step = if z < target { -2.0 } else { 2.0 };
+            d.drill = (d.drill + step).clamp(goal.drill.0, goal.drill.1.max(goal.drill.0));
+            d.pad = d.drill + 2.0 * ring;
+            let d = legal(d, goal);
+            if (d.drill - v.drill).abs() < 0.25 {
+                break;
+            }
+            v = d;
+            last = None;
+        } else {
+            v = n;
+        }
+    }
+    let (miss, setup, r) = best.ok_or("nothing solved")?;
+    Ok((setup, r, miss))
 }
 
 /// Sizes the antipad (and, when the antipad reaches a limit, the drill)
 /// so that the via's own impedance, from the 3D solve, meets `target` Ω
 /// (differential for a pair), within the goal's limits.
+///
+/// With `goal.accurate` (the default) the quick grid only steers: each
+/// round solves the quick grid's answer accurately (refined to
+/// convergence and extrapolated), takes how far the quick grid was off
+/// there, and searches the quick grid again for the target less that
+/// offset, until the accurate impedance is within 2 %.
 pub fn size_to(
     stackup: &Stackup,
     base: &ViaSetup,
@@ -543,73 +667,105 @@ pub fn size_to(
     } else {
         target
     };
+    let slope0 = 60.0 / er.sqrt() * if base.pair.is_some() { 2.0 } else { 1.0 };
+    let tol = (0.02 * target).max(1.0);
     let mut v = legal(base.clone(), goal);
     v.antipad = v.drill * (single * er.sqrt() / 60.0).exp();
     v = legal(v, goal);
-    let tries = 6;
     let mut steps: Vec<(ViaSetup, Option<f64>)> = Vec::new();
-    let mut last: Option<(f64, f64)> = None; // (ln antipad, z)
+    let Some(acc) = goal.accurate else {
+        let (setup, mut result, miss) = secant(
+            stackup,
+            v,
+            target,
+            tol,
+            slope0,
+            goal,
+            &mut steps,
+            &|p, w| progress(0.9 * p, w),
+        )?;
+        // The S-parameters of the sized via from a grid 0.7 times as fine
+        // (the quick grid overstates very good return loss); its
+        // impedance stays the one the sizing matched.
+        if base.cell <= 0.0 && result.cell > 0.0 {
+            let mut f = setup.clone();
+            f.cell = result.cell * 0.7;
+            let z = result.z_via;
+            result = fdtd::solve_with(stackup, &f, &|p| {
+                progress(0.9 + 0.1 * p, "the sized via on a finer grid")
+            })?;
+            result.z_via = result.z_via.or(z);
+        }
+        return Ok(finish(setup, result, steps, Vec::new(), miss, tol, target));
+    };
+    // Rounds of quick search then accurate solve; the quick part is a
+    // small share of the time.
+    let rounds = 3;
+    let share = |k: usize, p: f64| (k as f64 + p) / rounds as f64;
+    let (mut setup, _, _) = secant(
+        stackup,
+        v,
+        target,
+        tol * 0.5,
+        slope0,
+        goal,
+        &mut steps,
+        &|p, w| progress(share(0, 0.1 * p), w),
+    )?;
+    let mut accurate: Vec<(ViaSetup, Option<f64>, String)> = Vec::new();
     let mut best: Option<(f64, ViaSetup, ViaResult)> = None;
-    for k in 0..tries {
-        let what = format!("antipad {:.1} mil, drill {:.1} mil", v.antipad, v.drill);
-        let r = fdtd::solve_with(stackup, &v, &|p| {
-            progress(0.9 * (k as f64 + p) / tries as f64, &what)
+    for k in 0..rounds {
+        let what = format!("accurate solve {}: antipad {:.1} mil", k + 1, setup.antipad);
+        let c = fdtd::converge(stackup, &setup, &acc, &|p| {
+            progress(share(k, 0.1 + 0.9 * p), &what)
         })?;
-        let z = r.z_via;
-        steps.push((v.clone(), z));
-        let Some(z) = z else {
+        let za = c.best.z_via;
+        accurate.push((setup.clone(), za, c.verdict()));
+        let Some(za) = za else {
             return Err("the via is too short to tell its impedance; widen the band".into());
         };
-        let miss = (z - target).abs();
+        let miss = (za - target).abs();
+        let quick_z = c.runs[0].z_via;
         if best.as_ref().is_none_or(|b| miss < b.0) {
-            best = Some((miss, v.clone(), r));
+            best = Some((miss, setup.clone(), c.best));
         }
-        if miss <= (0.02 * target).max(1.0) {
+        if miss <= tol || k + 1 == rounds {
             break;
         }
-        // Next antipad: the secant on ln(antipad) once there are two
-        // points, else the coaxial slope.
-        let x = v.antipad.ln();
-        let slope = match last {
-            Some((x0, z0)) if (x - x0).abs() > 1e-6 && (z - z0).abs() > 1e-6 => (z - z0) / (x - x0),
-            _ => 60.0 / er.sqrt() * if base.pair.is_some() { 2.0 } else { 1.0 },
-        };
-        last = Some((x, z));
-        let mut n = v.clone();
-        n.antipad = (x + (target - z) / slope.max(1.0)).exp();
-        let n = legal(n, goal);
-        if (n.antipad - v.antipad).abs() < 0.25 {
-            // The antipad is at a limit: move the drill instead (a thinner
-            // drill raises the impedance).
-            let mut d = v.clone();
-            let ring = (d.pad - d.drill) / 2.0;
-            let step = if z < target { -2.0 } else { 2.0 };
-            d.drill = (d.drill + step).clamp(goal.drill.0, goal.drill.1.max(goal.drill.0));
-            d.pad = d.drill + 2.0 * ring;
-            let d = legal(d, goal);
-            if (d.drill - v.drill).abs() < 0.25 {
-                break;
-            }
-            v = d;
-            last = None;
-        } else {
-            v = n;
+        // How far the quick grid is off here; aim the quick search off by
+        // as much.
+        let Some(zq) = quick_z else { break };
+        let aim = target - (za - zq);
+        let (next, _, _) = secant(
+            stackup,
+            setup.clone(),
+            aim,
+            tol * 0.5,
+            slope0,
+            goal,
+            &mut steps,
+            &|p, w| progress(share(k + 1, 0.1 * p), w),
+        )?;
+        if (next.antipad - setup.antipad).abs() < 0.25 && (next.drill - setup.drill).abs() < 0.25 {
+            break;
         }
+        setup = next;
     }
-    let (miss, setup, mut result) = best.ok_or("nothing solved")?;
-    // The S-parameters of the sized via from a grid 0.7 times as fine (the
-    // quick grid overstates very good return loss); its impedance stays
-    // the one the sizing matched.
-    if base.cell <= 0.0 && result.cell > 0.0 {
-        let mut v = setup.clone();
-        v.cell = result.cell * 0.7;
-        let z = result.z_via;
-        result = fdtd::solve_with(stackup, &v, &|p| {
-            progress(0.9 + 0.1 * p, "the sized via on a finer grid")
-        })?;
-        result.z_via = result.z_via.or(z);
-    }
-    let reached = miss <= (0.02 * target).max(1.0);
+    let (miss, setup, result) = best.ok_or("nothing solved")?;
+    progress(1.0, "done");
+    Ok(finish(setup, result, steps, accurate, miss, tol, target))
+}
+
+fn finish(
+    setup: ViaSetup,
+    result: ViaResult,
+    steps: Vec<(ViaSetup, Option<f64>)>,
+    accurate: Vec<(ViaSetup, Option<f64>, String)>,
+    miss: f64,
+    tol: f64,
+    target: f64,
+) -> Sized {
+    let reached = miss <= tol;
     let note = (!reached).then(|| {
         format!(
             "the limits allow {:.1} Ω at best ({:.1} Ω off the {:.0} Ω target)",
@@ -618,14 +774,14 @@ pub fn size_to(
             target
         )
     });
-    progress(1.0, "done");
-    Ok(Sized {
+    Sized {
         setup,
         result,
         steps,
+        accurate,
         reached,
         note,
-    })
+    }
 }
 
 /// A one-line description of a setup.
@@ -709,6 +865,7 @@ mod tests {
         g.antipad = (20.0, 40.0);
         g.returns = vec![];
         g.steps = 2;
+        g.accurate = None;
         let o = optimise(&board(), &v, &g, &|_, _| {}).unwrap();
         assert!(o.trials.len() >= 3);
         let (s, _) = judge(&o.start, 12.0);
@@ -733,7 +890,8 @@ mod tests {
             antipad: (20.0, 60.0),
             clearance: 4.0,
         };
-        let g = ViaGoal::within(&v, 12.0, &fab);
+        let mut g = ViaGoal::within(&v, 12.0, &fab);
+        g.accurate = None;
         let s = size_to(&board(), &v, 50.0, &g, &|_, _| {}).unwrap();
         let first = s.steps[0].1.unwrap();
         let got = s.result.z_via.unwrap();
@@ -746,5 +904,42 @@ mod tests {
             assert!(st.drill >= 8.0 - 1e-9 && st.drill <= 14.0 + 1e-9);
             assert!(st.pad >= st.drill + 8.0 - 1e-9);
         }
+    }
+
+    #[test]
+    #[ignore = "slow (several grids per round): cargo test --release -- --ignored"]
+    fn accurate_sizing_judges_by_the_converged_grid() {
+        let mut v = ViaSetup::new(0, 3);
+        v.antipad = 20.0;
+        v.cell = 2.5;
+        v.fmax_ghz = 15.0;
+        v.points = 30;
+        let fab = FabLimits {
+            drill: (10.0, 10.0),
+            ring: 4.0,
+            antipad: (20.0, 60.0),
+            clearance: 4.0,
+        };
+        let mut g = ViaGoal::within(&v, 12.0, &fab);
+        g.accurate = Some(fdtd::Tolerance {
+            max_runs: 2,
+            ..Default::default()
+        });
+        let s = size_to(&board(), &v, 50.0, &g, &|_, _| {}).unwrap();
+        assert!(!s.accurate.is_empty());
+        // The result is the accurate one, and it is the closest of them.
+        let got = s.result.z_via.unwrap();
+        let best = s
+            .accurate
+            .iter()
+            .filter_map(|a| a.1)
+            .map(|z| (z - 50.0).abs())
+            .fold(f64::MAX, f64::min);
+        assert!(((got - 50.0).abs() - best).abs() < 1e-9);
+        assert!(s
+            .result
+            .notes
+            .iter()
+            .any(|n| n.starts_with("accurate solve")));
     }
 }

@@ -170,7 +170,10 @@ USAGE:
                                                 round metal is conformal (--staircase for the old stepped grid);
                                                 --target Z sizes the antipad (then the drill) for that via
                                                 impedance within the --fab limits; with --fab, --optimise also
-                                                tries drills in range and counts the through loss
+                                                tries drills in range and counts the through loss.
+                                                --target and --optimise judge by the accurate (converged) solve
+                                                by default, the quick grid only steering; --quick for the old
+                                                single finer grid
     trace pairsize <board> <layer> [--zdiff 100] [--wmin W] [--wmax W] [--gap S] [--ghz 8] [--next D] [--xtalk 2]
                                                 Every track width and gap on a layer that gives the target Zdiff
                                                 (2D field solver), ranked by loss, with crosstalk and etch
@@ -3234,6 +3237,7 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     let mut free_pitch = false;
     let (mut try_backdrill, mut keep_pad, mut check) = (false, false, false);
     let mut accurate: Option<fdtd::Tolerance> = None;
+    let mut quick = false;
     let mut fab: Option<trace_core::viaopt::FabLimits> = None;
     let mut target: Option<f64> = None;
     let mut feed: Option<f64> = None;
@@ -3257,6 +3261,7 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
             "--try-backdrill" => try_backdrill = true,
             "--keep-pad" => keep_pad = true,
             "--check" => check = true,
+            "--quick" => quick = true,
             "--accurate" => {
                 let mut t = fdtd::Tolerance::default();
                 // An optional tolerance: --accurate 0.02 (|S21| dB).
@@ -3396,14 +3401,31 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
             Some(f) => viaopt::ViaGoal::within(&v, v.fmax_ghz, f),
             None => viaopt::ViaGoal::around(&v, v.fmax_ghz),
         };
+        let mut goal = goal;
+        goal.accurate = if quick {
+            None
+        } else {
+            Some(accurate.unwrap_or_default())
+        };
         let t = std::time::Instant::now();
         let sz = viaopt::size_to(&b.stackup, &v, zt, &goal, &|p, what| {
             eprint!("\r  sizing… {:3.0}% {what:<44}", p * 100.0);
         })?;
         eprintln!("\r  sized in {:.0} s{:60}", t.elapsed().as_secs_f64(), "");
+        if !sz.accurate.is_empty() {
+            println!("Quick-grid solves (they steer the search):");
+        }
         for (s, z) in &sz.steps {
             println!(
                 "  {:>8}  {}",
+                z.map_or("?".into(), |z| format!("{z:.1} Ω")),
+                viaopt::describe(s)
+            );
+        }
+        for (k, (s, z, verdict)) in sz.accurate.iter().enumerate() {
+            println!(
+                "Accurate solve {}: {} at {}\n{verdict}",
+                k + 1,
                 z.map_or("?".into(), |z| format!("{z:.1} Ω")),
                 viaopt::describe(s)
             );
@@ -3439,6 +3461,11 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
             None => viaopt::ViaGoal::around(&v, fg),
         };
         goal.try_backdrill = try_backdrill;
+        goal.accurate = if quick {
+            None
+        } else {
+            Some(accurate.unwrap_or_default())
+        };
         if keep_pad {
             goal.pad = (v.pad, v.pad);
         }
@@ -3473,9 +3500,19 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
                 ),
             }
         }
-        println!("Front runners solved again on a finer grid (worst return loss to {fg} GHz):");
-        for (setup, rl) in &o.confirmed {
+        println!(
+            "Front runners solved again {} (worst return loss to {fg} GHz):",
+            if goal.accurate.is_some() {
+                "accurately, on grids refined to convergence"
+            } else {
+                "on a finer grid"
+            }
+        );
+        for (k, (setup, rl)) in o.confirmed.iter().enumerate() {
             println!("  {rl:>7.1} dB  {}", viaopt::describe(setup));
+            if let Some(v) = o.verdicts.get(k) {
+                println!("{v}");
+            }
         }
         let (s0, _) = viaopt::judge(&o.start, fg);
         let (s1, il) = viaopt::judge(&o.best, fg);

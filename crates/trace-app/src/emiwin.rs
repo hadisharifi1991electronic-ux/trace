@@ -3,6 +3,8 @@
 //! clock's estimated radiation.
 
 use eframe::egui::{self, Color32, RichText};
+use std::sync::mpsc;
+use trace_core::emi::sim::{RailSpec, SignalSpec, SimResult, SimSetup};
 use trace_core::emi::{self, EmiResult, EmiSetup, FastNet, Limit, Severity};
 use trace_core::Board;
 
@@ -21,6 +23,17 @@ pub struct EmiWindow {
     note: Option<String>,
     /// The findings for the board, when a check has run.
     pub overlay: Option<crate::overlay::Overlay>,
+    /// The simulation: sources given, cables, rails, options, run, result.
+    sim_signals: String,
+    sim_cables: String,
+    sim_rails: String,
+    sim_cmos: bool,
+    sim_planes: bool,
+    sim_running: Option<mpsc::Receiver<Result<SimResult, String>>>,
+    sim: Option<Result<SimResult, String>>,
+    map_sel: usize,
+    map_tex: Option<(usize, egui::TextureHandle)>,
+    findings_overlay: Option<crate::overlay::Overlay>,
 }
 
 impl Default for EmiWindow {
@@ -39,6 +52,16 @@ impl Default for EmiWindow {
             save_path: String::new(),
             note: None,
             overlay: None,
+            sim_signals: String::new(),
+            sim_cables: String::new(),
+            sim_rails: String::new(),
+            sim_cmos: true,
+            sim_planes: true,
+            sim_running: None,
+            sim: None,
+            map_sel: 0,
+            map_tex: None,
+            findings_overlay: None,
         }
     }
 }
@@ -143,7 +166,10 @@ impl EmiWindow {
                 match self.setup() {
                     Ok(s) => {
                         let r = emi::check(board, &s);
-                        self.overlay = Some(on_board(&r, board));
+                        let o = on_board(&r, board);
+                        self.findings_overlay = Some(o.clone());
+                        self.overlay = Some(o);
+                        self.map_tex = None;
                         self.result = Some(r);
                         self.error = None;
                     }
@@ -154,6 +180,7 @@ impl EmiWindow {
         if let Some(e) = &self.error {
             ui.colored_label(Color32::from_rgb(230, 110, 90), e);
         }
+        self.simulation(ui, board);
         let Some(r) = &self.result else {
             return None;
         };
@@ -291,6 +318,418 @@ impl EmiWindow {
         }
         act
     }
+}
+
+impl EmiWindow {
+    fn sim_setup(&self) -> Result<SimSetup, String> {
+        let mut s = SimSetup {
+            limit: self.limit,
+            margin_db: self.margin,
+            cmos: self.sim_cmos,
+            planes: self.sim_planes,
+            ..Default::default()
+        };
+        let parts = |t: &str| -> Vec<String> {
+            t.lines()
+                .flat_map(|l| l.split(';'))
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty())
+                .collect()
+        };
+        for x in parts(&self.sim_signals) {
+            s.signals.push(SignalSpec::parse(&x)?);
+        }
+        // Fast nets given above count as sources too.
+        for x in parts(&self.nets) {
+            s.signals.push(SignalSpec::parse(&x)?);
+        }
+        for x in parts(&self.sim_rails) {
+            s.rails.push(RailSpec::parse(&x)?);
+        }
+        for x in parts(&self.sim_cables) {
+            let (d, l) = x.split_once('=').ok_or(format!("{x}: J1=2m"))?;
+            let l = l.trim().trim_end_matches('m');
+            s.cables.push((
+                d.trim().to_string(),
+                l.parse().map_err(|_| format!("{x}: not metres"))?,
+            ));
+        }
+        Ok(s)
+    }
+
+    fn simulation(&mut self, ui: &mut egui::Ui, board: &Board) {
+        ui.separator();
+        ui.label(RichText::new("EMI simulation").strong());
+        ui.label(
+            "Every net and pair as a source (its IBIS model, your line, or a default for its kind), \
+             radiated by its outer traces, by the cables on the connectors (common mode), by the \
+             power planes' cavity edges (PDN model with the capacitors) and the decoupling loops, \
+             against the limit above; with each source's share, the fixes and what each gains, and \
+             the near field on the board.",
+        );
+        egui::Grid::new("emi-sim-in").num_columns(2).show(ui, |ui| {
+            ui.label("Sources");
+            ui.add_sized(
+                [520.0, 20.0],
+                egui::TextEdit::singleline(&mut self.sim_signals).hint_text(
+                    "JESD*=12.288Gbps@30ps,0.8V; DEV_CLK*=245.76MHz; RX1_IN*=2.4GHz,0dBm",
+                ),
+            );
+            ui.end_row();
+            ui.label("Cables");
+            ui.add_sized(
+                [520.0, 20.0],
+                egui::TextEdit::singleline(&mut self.sim_cables)
+                    .hint_text("J1=2m; J5=0.3m (else by connector kind)"),
+            );
+            ui.end_row();
+            ui.label("Rails");
+            ui.add_sized(
+                [520.0, 20.0],
+                egui::TextEdit::singleline(&mut self.sim_rails)
+                    .hint_text("VCCINT=2A@250MHz; VDD_1V8=0.2A"),
+            );
+            ui.end_row();
+        });
+        ui.horizontal(|ui| {
+            ui.checkbox(&mut self.sim_cmos, "single-ended data nets too");
+            ui.checkbox(&mut self.sim_planes, "power planes");
+            let busy = self.sim_running.is_some();
+            if ui
+                .add_enabled(!busy, egui::Button::new("Simulate"))
+                .clicked()
+            {
+                match self.sim_setup() {
+                    Ok(s) => {
+                        let b = board.clone();
+                        let (tx, rx) = mpsc::channel();
+                        let ctx = ui.ctx().clone();
+                        let token = crate::jobs::start(&ctx, "emi-sim");
+                        std::thread::spawn(move || {
+                            let _g = token.install();
+                            let r = emi::sim::simulate(&b, &s, &|_| {});
+                            let _ = tx.send(r);
+                            ctx.request_repaint();
+                        });
+                        self.sim_running = Some(rx);
+                        self.error = None;
+                    }
+                    Err(e) => self.error = Some(e),
+                }
+            }
+            if busy {
+                ui.spinner();
+                ui.label("Simulating…");
+                if crate::jobs::cancel_button(ui, "emi-sim") {
+                    self.sim_running = None;
+                }
+            }
+        });
+        if let Some(rx) = &self.sim_running {
+            if let Ok(r) = rx.try_recv() {
+                self.sim = Some(r);
+                self.sim_running = None;
+                self.map_tex = None;
+            }
+        }
+        let Some(res) = &self.sim else {
+            return;
+        };
+        let r = match res {
+            Ok(r) => r,
+            Err(e) => {
+                ui.colored_label(Color32::from_rgb(230, 110, 90), e);
+                return;
+            }
+        };
+        let (wf, wm) = r.worst;
+        let col = if wm < 0.0 {
+            Color32::from_rgb(230, 100, 80)
+        } else if wm < r.margin_db {
+            Color32::from_rgb(230, 170, 60)
+        } else {
+            Color32::from_rgb(90, 190, 130)
+        };
+        ui.label(
+            RichText::new(format!(
+                "Worst margin {wm:+.1} dB at {:.1} MHz against {} · {} sources ({} from IBIS or given)",
+                wf / 1e6,
+                r.limit_kind.name(),
+                r.signals.len(),
+                r.signals.iter().filter(|s| !s.assumed).count()
+            ))
+            .strong()
+            .color(col),
+        );
+        spectrum_plot(ui, r);
+        egui::CollapsingHeader::new("Contributions, worst first")
+            .default_open(true)
+            .show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .max_height(220.0)
+                    .id_salt("emi-contrib")
+                    .show(ui, |ui| {
+                        egui::Grid::new("emi-contrib-g")
+                            .num_columns(4)
+                            .striped(true)
+                            .show(ui, |ui| {
+                                for h in ["Margin", "At", "How", "Source"] {
+                                    ui.label(RichText::new(h).strong());
+                                }
+                                ui.end_row();
+                                for (c, f, m) in r.ranked().into_iter().take(60) {
+                                    let cc = if m < 0.0 {
+                                        Color32::from_rgb(230, 100, 80)
+                                    } else if m < r.margin_db {
+                                        Color32::from_rgb(230, 170, 60)
+                                    } else {
+                                        ui.visuals().text_color()
+                                    };
+                                    ui.colored_label(cc, format!("{m:+.1} dB"));
+                                    ui.label(format!("{:.1} MHz", f / 1e6));
+                                    ui.label(c.mechanism.label());
+                                    ui.label(&c.source);
+                                    ui.end_row();
+                                }
+                            });
+                    });
+            });
+        if !r.fixes.is_empty() {
+            ui.label(
+                RichText::new(format!("Fixes, by what each gains at {:.1} MHz", wf / 1e6)).strong(),
+            );
+            for x in &r.fixes {
+                ui.label(format!("{:>5.1} dB  {}", x.gain_db, x.text));
+            }
+        }
+        egui::CollapsingHeader::new(format!("Sources ({})", r.signals.len())).show(ui, |ui| {
+            egui::ScrollArea::vertical()
+                .max_height(200.0)
+                .id_salt("emi-src")
+                .show(ui, |ui| {
+                    for x in &r.signals {
+                        ui.label(format!(
+                            "{}  {}  {:.3} MHz  {:.0} ps  {:.2}  ({})",
+                            x.name,
+                            x.kind.label(),
+                            x.freq / 1e6,
+                            x.rise * 1e12,
+                            x.swing,
+                            x.origin
+                        ));
+                    }
+                });
+        });
+        for n in &r.notes {
+            ui.weak(format!("note: {n}"));
+        }
+        // Near-field map: pick one, shown here and on the board.
+        if let Some(m) = &r.map {
+            ui.horizontal(|ui| {
+                ui.label(format!("Near field at {:.1} MHz:", m.f / 1e6));
+                self.map_sel = self.map_sel.min(m.maps.len().saturating_sub(1));
+                egui::ComboBox::from_id_salt("emi-map")
+                    .width(260.0)
+                    .selected_text(m.maps.get(self.map_sel).map_or("", |x| x.0.as_str()))
+                    .show_ui(ui, |ui| {
+                        for (i, x) in m.maps.iter().enumerate() {
+                            if ui.selectable_value(&mut self.map_sel, i, &x.0).changed() {
+                                self.map_tex = None;
+                            }
+                        }
+                    });
+            });
+            if self
+                .map_tex
+                .as_ref()
+                .is_none_or(|(k, _)| *k != self.map_sel)
+            {
+                if let Some((name, unit, vals)) = m.maps.get(self.map_sel) {
+                    let top = vals.iter().cloned().fold(0.0f32, f32::max) as f64;
+                    let mut px = Vec::with_capacity(m.w * m.h);
+                    for j in (0..m.h).rev() {
+                        for i in 0..m.w {
+                            let v = vals[j * m.w + i] as f64;
+                            let t = trace_core::emfield::scale_t(v, top, 40.0, 20.0);
+                            px.push(if t <= 0.02 {
+                                Color32::TRANSPARENT
+                            } else {
+                                let c = trace_core::emfield::colour(t);
+                                Color32::from_rgb(c[0], c[1], c[2])
+                            });
+                        }
+                    }
+                    let img = egui::ColorImage {
+                        size: [m.w, m.h],
+                        pixels: px,
+                    };
+                    let tex = ui
+                        .ctx()
+                        .load_texture("emi-near", img, egui::TextureOptions::LINEAR);
+                    let (x1, y1) = (m.x0 + m.w as f64 * m.cell, m.y0 + m.h as f64 * m.cell);
+                    let mut o = self.findings_overlay.clone().unwrap_or_default();
+                    o.title = format!("EMI near field: {name}");
+                    o.image = Some((
+                        tex.clone(),
+                        [
+                            (m.x0 - m.cell / 2.0) as f32,
+                            (m.y0 - m.cell / 2.0) as f32,
+                            (x1 - m.cell / 2.0) as f32,
+                            (y1 - m.cell / 2.0) as f32,
+                        ],
+                    ));
+                    let c = |t: f64| {
+                        let c = trace_core::emfield::colour(t);
+                        Color32::from_rgb(c[0], c[1], c[2])
+                    };
+                    o.legend
+                        .push((c(1.0), format!("{} {unit}", trace_core::emfield::si(top))));
+                    o.legend.push((c(0.5), "−20 dB".into()));
+                    o.legend.push((c(0.05), "−40 dB".into()));
+                    o.on = true;
+                    self.overlay = Some(o);
+                    self.map_tex = Some((self.map_sel, tex));
+                }
+            }
+            if let Some((_, tex)) = &self.map_tex {
+                let w = ui.available_width().min(560.0);
+                let h = w * m.h as f32 / m.w.max(1) as f32;
+                ui.image((tex.id(), egui::vec2(w, h.min(520.0))));
+            }
+        }
+        ui.horizontal(|ui| {
+            if ui.button("Save spectrum (SVG)…").clicked() {
+                if let Some(p) = rfd::FileDialog::new()
+                    .add_filter("SVG", &["svg"])
+                    .set_file_name("emi-spectrum.svg")
+                    .save_file()
+                {
+                    let _ = std::fs::write(&p, r.svg("EMI"));
+                    self.note = Some(format!("Saved {}", p.display()));
+                }
+            }
+            if ui.button("Save near field (SVG)…").clicked() {
+                if let Some(p) = rfd::FileDialog::new()
+                    .add_filter("SVG", &["svg"])
+                    .set_file_name("emi-near.svg")
+                    .save_file()
+                {
+                    if let Some(t) = r.map_svg(board, "EMI") {
+                        let _ = std::fs::write(&p, t);
+                        self.note = Some(format!("Saved {}", p.display()));
+                    }
+                }
+            }
+            if ui.button("Save report…").clicked() {
+                if let Some(p) = rfd::FileDialog::new()
+                    .add_filter("Text", &["txt"])
+                    .set_file_name("emi-sim.txt")
+                    .save_file()
+                {
+                    let _ = std::fs::write(&p, r.report());
+                    self.note = Some(format!("Saved {}", p.display()));
+                }
+            }
+        });
+    }
+}
+
+/// The spectrum against the limit: the total, the top sources and the
+/// limit, on a log frequency axis.
+fn spectrum_plot(ui: &mut egui::Ui, r: &SimResult) {
+    use eframe::egui::{pos2, vec2, Stroke};
+    let (rect, _) = ui.allocate_exact_size(
+        vec2(ui.available_width().min(820.0), 260.0),
+        egui::Sense::hover(),
+    );
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 2.0, ui.visuals().extreme_bg_color);
+    let lo = (r.limit.iter().cloned().fold(f64::MAX, f64::min) - 60.0).floor();
+    let hi = (r
+        .limit
+        .iter()
+        .chain(r.total.iter())
+        .cloned()
+        .fold(f64::MIN, f64::max)
+        + 10.0)
+        .ceil();
+    let (l, rt, t, b) = (
+        rect.left() + 44.0,
+        rect.right() - 8.0,
+        rect.top() + 8.0,
+        rect.bottom() - 22.0,
+    );
+    let fx = |f: f64| l + (rt - l) * ((f / 30e6).ln() / (6e9f64 / 30e6).ln()) as f32;
+    let fy = |d: f64| b - (b - t) * ((d.max(lo) - lo) / (hi - lo)) as f32;
+    let grid = ui.visuals().weak_text_color().gamma_multiply(0.3);
+    let font = egui::FontId::proportional(10.0);
+    let mut d = (lo / 10.0).ceil() * 10.0;
+    while d <= hi {
+        p.line_segment([pos2(l, fy(d)), pos2(rt, fy(d))], Stroke::new(0.5f32, grid));
+        p.text(
+            pos2(l - 4.0, fy(d)),
+            egui::Align2::RIGHT_CENTER,
+            format!("{d:.0}"),
+            font.clone(),
+            ui.visuals().weak_text_color(),
+        );
+        d += 10.0;
+    }
+    for f in [30e6, 100e6, 300e6, 1e9, 3e9, 6e9] {
+        p.line_segment([pos2(fx(f), t), pos2(fx(f), b)], Stroke::new(0.5f32, grid));
+        let lab = if f >= 1e9 {
+            format!("{} GHz", f / 1e9)
+        } else {
+            format!("{} MHz", f / 1e6)
+        };
+        p.text(
+            pos2(fx(f), b + 2.0),
+            egui::Align2::CENTER_TOP,
+            lab,
+            font.clone(),
+            ui.visuals().weak_text_color(),
+        );
+    }
+    let cols = [
+        Color32::from_rgb(42, 111, 219),
+        Color32::from_rgb(224, 102, 61),
+        Color32::from_rgb(58, 164, 91),
+        Color32::from_rgb(155, 89, 182),
+        Color32::from_rgb(212, 160, 23),
+    ];
+    for (i, (c, _, _)) in r.ranked().into_iter().take(5).enumerate() {
+        for (k, &v) in c.db.iter().enumerate() {
+            if v > lo {
+                let x = fx(r.freqs[k]);
+                p.line_segment(
+                    [pos2(x, b), pos2(x, fy(v))],
+                    Stroke::new(1.0f32, cols[i].gamma_multiply(0.7)),
+                );
+            }
+        }
+        p.text(
+            pos2(rt - 4.0, t + 4.0 + 12.0 * i as f32),
+            egui::Align2::RIGHT_TOP,
+            format!("{} ({})", c.source, c.mechanism.label()),
+            font.clone(),
+            cols[i],
+        );
+    }
+    let poly = |v: &[f64]| -> Vec<egui::Pos2> {
+        v.iter()
+            .enumerate()
+            .filter(|(_, d)| **d > -199.0)
+            .map(|(k, &d)| pos2(fx(r.freqs[k]), fy(d)))
+            .collect()
+    };
+    p.add(egui::Shape::line(
+        poly(&r.total),
+        Stroke::new(1.0f32, ui.visuals().text_color()),
+    ));
+    p.add(egui::Shape::line(
+        poly(&r.limit),
+        Stroke::new(2.0f32, Color32::from_rgb(214, 39, 40)),
+    ));
 }
 
 fn severity_colour(s: Severity) -> Color32 {

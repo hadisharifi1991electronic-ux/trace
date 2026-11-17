@@ -119,6 +119,10 @@ pub struct ViaSetup {
     /// by default: on a through via a 2 mil conformal grid gave what a
     /// 0.55 mil stepped one did, at a twentieth of the time.
     pub conformal: bool,
+    /// Frequencies (GHz) at which to keep the fields on cut planes for
+    /// field maps (`emfield`): each snapped to the nearest point of the
+    /// sweep. At most four.
+    pub fields: Vec<f64>,
 }
 
 impl ViaSetup {
@@ -145,6 +149,7 @@ impl ViaSetup {
             er: None,
             df: None,
             conformal: true,
+            fields: Vec::new(),
         }
     }
 }
@@ -184,6 +189,8 @@ pub struct ViaResult {
     /// from the grid refinement of an accurate solve; empty otherwise.
     pub err11: Vec<f64>,
     pub err21: Vec<f64>,
+    /// Field maps at the frequencies asked for in `ViaSetup::fields`.
+    pub fields: Vec<crate::emfield::FieldMap>,
 }
 
 impl ViaResult {
@@ -1578,6 +1585,28 @@ pub fn solve_with(
             clock.elapsed().as_secs_f64()
         );
     }
+    // Field maps: the cut planes' nodes, and running transforms of the
+    // six components there (sampled every `every` steps, still eight or
+    // more samples a cycle).
+    let mut fcap = FieldCapture::new(
+        setup,
+        &freqs,
+        dt,
+        &x,
+        &y,
+        &z,
+        nx,
+        ny,
+        nz,
+        &ksheet,
+        &st,
+        from,
+        to,
+        via_top,
+        via_bot,
+        &sig,
+        &|i, j, k| cbx[id(i, j, k)] == 0.0 && cby[id(i, j, k)] == 0.0,
+    );
     let mut t_h = 0.0;
     let mut t_e = 0.0;
     for n in 0..max_steps {
@@ -1667,6 +1696,9 @@ pub fn solve_with(
                 }
             }
         }
+        if let Some(c) = fcap.as_mut() {
+            c.sample(n, dt, id, [&ex, &ey, &ez], [&hx, &hy, &hz]);
+        }
         for f in 0..nf {
             ph_e[f] = ph_e[f].mul(rot[f]);
             ph_h[f] = ph_h[f].mul(rot[f]);
@@ -1713,6 +1745,7 @@ pub fn solve_with(
     let mut s11 = Vec::with_capacity(nf);
     let mut s21 = Vec::with_capacity(nf);
     let mut zline = [0.0f64; 2];
+    let mut a1_at: Vec<Cx> = Vec::with_capacity(nf);
     let z_design = (z0[0] * z0[1]).sqrt() * if ns == 2 { 2.0 } else { 1.0 };
     for f in 0..nf {
         let mut zc = [Cx::new(zr, 0.0); 2];
@@ -1786,6 +1819,7 @@ pub fn solve_with(
         let zg = csqrt(zc[0].mul(zc[1])).scale(zr / z_design);
         let wave = |v: Cx, i: Cx, sgn: f64| v.add(i.mul(zg).scale(sgn)).div(csqrt(zg).scale(2.0));
         let a1 = wave(v1, i1, 1.0);
+        a1_at.push(a1);
         let b1 = wave(v1, i1, -1.0);
         let b2 = wave(v2, i2, 1.0);
         // The far resistor is not quite the reference, so a little comes
@@ -1932,7 +1966,29 @@ pub fn solve_with(
             (z0[0] * z0[1]).sqrt()
         ));
     }
+    let fields = match fcap {
+        Some(c) => {
+            let metal = |i: usize, j: usize, k: usize| {
+                let q = id(i, j, k);
+                [cbx[q], cby[q], cbz[q]]
+                    .iter()
+                    .filter(|&&b| b == 0.0)
+                    .count()
+                    >= 2
+            };
+            let er_at = |k: usize| {
+                let a = cell_mat[k.saturating_sub(1).min(nz - 1)].0;
+                let b = cell_mat[k.min(nz - 1)].0;
+                ((a + b) / 2.0) as f32
+            };
+            c.finish(
+                &a1_at, &metal, &er_at, &x, &y, &z, &sig, &ret, rd, ra, &st.names, setup,
+            )
+        }
+        None => Vec::new(),
+    };
     Ok(ViaResult {
+        fields,
         f: freqs.iter().map(|f| f / 1e9).collect(),
         s11,
         s21,
@@ -2815,6 +2871,398 @@ pub fn stub_resonance_ghz(len: f64, er: f64) -> f64 {
     C0 / (4.0 * len * MIL * er.sqrt()) / 1e9
 }
 
+/// The fields kept on cut planes for field maps.
+struct FieldCapture {
+    /// Sweep index of each field frequency, and ω.
+    fidx: Vec<usize>,
+    omega: Vec<f64>,
+    every: usize,
+    planes: Vec<CapPlane>,
+}
+
+struct CapPlane {
+    name: String,
+    cut: crate::emfield::Cut,
+    /// Grid indices along u and v, and the fixed index.
+    iu: Vec<usize>,
+    iv: Vec<usize>,
+    fixed: usize,
+    /// Per node: grid (i, j, k), and whether it is on a horizontal copper
+    /// sheet (then H holds the jump across it, the total surface current,
+    /// and Ez the field just below).
+    nodes: Vec<[usize; 3]>,
+    sheet: Vec<bool>,
+    /// Per frequency: six components' running transforms per node.
+    acc: Vec<Vec<[[f64; 2]; 6]>>,
+}
+
+impl FieldCapture {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        setup: &ViaSetup,
+        freqs: &[f64],
+        dt: f64,
+        x: &[f64],
+        y: &[f64],
+        z: &[f64],
+        nx: usize,
+        ny: usize,
+        nz: usize,
+        ksheet: &[usize],
+        st: &Stack,
+        from: usize,
+        to: usize,
+        via_top: usize,
+        via_bot: usize,
+        sig: &[[f64; 2]],
+        sheet_at: &dyn Fn(usize, usize, usize) -> bool,
+    ) -> Option<FieldCapture> {
+        use crate::emfield::Cut;
+        if setup.fields.is_empty() {
+            return None;
+        }
+        let nf = freqs.len();
+        let mut fidx: Vec<usize> = setup
+            .fields
+            .iter()
+            .take(4)
+            .map(|&g| {
+                (0..nf)
+                    .min_by(|&a, &b| {
+                        (freqs[a] - g * 1e9)
+                            .abs()
+                            .total_cmp(&(freqs[b] - g * 1e9).abs())
+                    })
+                    .unwrap_or(0)
+            })
+            .collect();
+        fidx.dedup();
+        let omega: Vec<f64> = fidx
+            .iter()
+            .map(|&k| std::f64::consts::TAU * freqs[k])
+            .collect();
+        let fhi = fidx.iter().map(|&k| freqs[k]).fold(0.0, f64::max);
+        let every = ((1.0 / (12.0 * fhi * dt)).floor() as usize).max(1);
+        let near = |v: &[f64], p: f64| -> usize {
+            (0..v.len())
+                .min_by(|&a, &b| (v[a] - p).abs().total_cmp(&(v[b] - p).abs()))
+                .unwrap_or(0)
+        };
+        // Leave out the absorbing layers (8 cells each side).
+        let pml = 8;
+        let ri = (pml + 1..=nx - pml - 1).collect::<Vec<_>>();
+        let rj = (pml + 1..=ny - pml - 1).collect::<Vec<_>>();
+        // Depth: from a little above the top copper (air) to a little
+        // below the bottom, whatever the PML.
+        let top_z = -(st.sheet[st.sheet.len() - 1] * 0.15).max(5.0);
+        let bot_z = st.sheet[st.sheet.len() - 1] - top_z;
+        let rk = (pml + 1..=nz - pml - 1)
+            .filter(|&k| z[k] >= top_z && z[k] <= bot_z)
+            .collect::<Vec<_>>();
+        let lname = |l: usize| {
+            let n = &st.names[l];
+            if n.eq_ignore_ascii_case(&format!("L{}", l + 1)) {
+                n.clone()
+            } else {
+                format!("L{} {n}", l + 1)
+            }
+        };
+        let mut planes = Vec::new();
+        let mut xy = |name: String, k: usize| {
+            planes.push((name, Cut::Xy { z: z[k] }, ri.clone(), rj.clone(), k));
+        };
+        let mut layers = vec![from, to];
+        layers.dedup();
+        for &l in &layers {
+            xy(format!("on {} (trace layer)", lname(l)), ksheet[l]);
+        }
+        // Mid-way through each dielectric the barrel crosses: where the
+        // via launches waves between the planes.
+        let gaps: Vec<usize> = (via_top..via_bot).collect();
+        let step = gaps.len().div_ceil(8).max(1);
+        for &l in gaps.iter().step_by(step) {
+            let zm = (st.sheet[l] + st.sheet[l + 1]) / 2.0;
+            let k = near(z, zm);
+            if k != ksheet[l] && k != ksheet[l + 1] {
+                xy(format!("between {} and {}", lname(l), lname(l + 1)), k);
+            }
+        }
+        let yv = sig[0][1];
+        let jv = near(y, yv);
+        planes.push((
+            format!("side view along the traces, y = {yv:.1} mil"),
+            Cut::Xz { y: y[jv] },
+            ri.clone(),
+            rk.clone(),
+            jv,
+        ));
+        let iv = near(x, 0.0);
+        planes.push((
+            "side view across, through the via".into(),
+            Cut::Yz { x: x[iv] },
+            rj.clone(),
+            rk.clone(),
+            iv,
+        ));
+        let planes = planes
+            .into_iter()
+            .map(|(name, cut, iu, iv, fixed)| {
+                let mut nodes = Vec::with_capacity(iu.len() * iv.len());
+                for &b in &iv {
+                    for &a in &iu {
+                        nodes.push(match cut {
+                            Cut::Xy { .. } => [a, b, fixed],
+                            Cut::Xz { .. } => [a, fixed, b],
+                            Cut::Yz { .. } => [fixed, a, b],
+                        });
+                    }
+                }
+                let acc = vec![vec![[[0.0; 2]; 6]; nodes.len()]; omega.len()];
+                let sheet = nodes.iter().map(|&[i, j, k]| sheet_at(i, j, k)).collect();
+                CapPlane {
+                    sheet,
+                    name,
+                    cut,
+                    iu,
+                    iv,
+                    fixed,
+                    nodes,
+                    acc,
+                }
+            })
+            .collect();
+        Some(FieldCapture {
+            fidx,
+            omega,
+            every,
+            planes,
+        })
+    }
+
+    /// After step `n`: E is at (n + 1) dt, H at (n + ½) dt.
+    fn sample(
+        &mut self,
+        n: usize,
+        dt: f64,
+        id: impl Fn(usize, usize, usize) -> usize + Sync,
+        e: [&[f32]; 3],
+        h: [&[f32]; 3],
+    ) {
+        if !n.is_multiple_of(self.every) {
+            return;
+        }
+        let w = self.every as f64;
+        let rot: Vec<([f64; 2], [f64; 2])> = self
+            .omega
+            .iter()
+            .map(|&om| {
+                let te = (n as f64 + 1.0) * dt;
+                let th = (n as f64 + 0.5) * dt;
+                (
+                    [(om * te).cos() * w, -(om * te).sin() * w],
+                    [(om * th).cos() * w, -(om * th).sin() * w],
+                )
+            })
+            .collect();
+        let id = &id;
+        let rot = &rot;
+        for p in &mut self.planes {
+            let nodes = &p.nodes;
+            let sheet = &p.sheet;
+            let mut accs: Vec<&mut [[[f64; 2]; 6]]> =
+                p.acc.iter_mut().map(|a| a.as_mut_slice()).collect();
+            // Split the nodes across threads.
+            let threads = std::thread::available_parallelism()
+                .map_or(1, |n| n.get())
+                .min(8);
+            let chunk = nodes.len().div_ceil(threads).max(1);
+            let mut parts: Vec<Vec<&mut [[[f64; 2]; 6]]>> = (0..nodes.len().div_ceil(chunk))
+                .map(|_| Vec::new())
+                .collect();
+            for a in accs.drain(..) {
+                for (q, c) in a.chunks_mut(chunk).enumerate() {
+                    parts[q].push(c);
+                }
+            }
+            std::thread::scope(|sc| {
+                for (q, mut part) in parts.into_iter().enumerate() {
+                    let lo = q * chunk;
+                    let nodes = &nodes[lo..((q + 1) * chunk).min(nodes.len())];
+                    sc.spawn(move || {
+                        for (m, &[i, j, k]) in nodes.iter().enumerate() {
+                            let v = node_fields(id, e, h, i, j, k, sheet[lo + m]);
+                            for (f, a) in part.iter_mut().enumerate() {
+                                let (re, rh) = rot[f];
+                                let slot = &mut a[m];
+                                for c in 0..6 {
+                                    let r = if c < 3 { re } else { rh };
+                                    slot[c][0] += v[c] * r[0];
+                                    slot[c][1] += v[c] * r[1];
+                                }
+                            }
+                        }
+                    });
+                }
+            });
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn finish(
+        self,
+        a1: &[Cx],
+        metal: &dyn Fn(usize, usize, usize) -> bool,
+        er_at: &dyn Fn(usize) -> f32,
+        x: &[f64],
+        y: &[f64],
+        z: &[f64],
+        sig: &[[f64; 2]],
+        ret: &[[f64; 2]],
+        rd: f64,
+        ra: f64,
+        names: &[String],
+        setup: &ViaSetup,
+    ) -> Vec<crate::emfield::FieldMap> {
+        use crate::emfield::{Cut, FieldMap, Plane};
+        let _ = names;
+        let circle = |c: [f64; 2], r: f64| -> Vec<[f64; 2]> {
+            (0..=48)
+                .map(|k| {
+                    let a = std::f64::consts::TAU * k as f64 / 48.0;
+                    [c[0] + r * a.cos(), c[1] + r * a.sin()]
+                })
+                .collect()
+        };
+        let mut maps = Vec::new();
+        for (fi, &k) in self.fidx.iter().enumerate() {
+            // Per 1 W incident: the wave a1 has |a1|²/2 = P for peak phasors.
+            let a = a1.get(k).copied().unwrap_or(Cx::new(1.0, 0.0));
+            let scale = Cx::new(std::f64::consts::SQRT_2, 0.0).div(if a.abs() > 0.0 {
+                a
+            } else {
+                Cx::new(1.0, 0.0)
+            });
+            let mut planes = Vec::new();
+            let mut outlines = Vec::new();
+            for p in &self.planes {
+                let (u, v): (Vec<f64>, Vec<f64>) = match p.cut {
+                    Cut::Xy { .. } => (
+                        p.iu.iter().map(|&i| x[i]).collect(),
+                        p.iv.iter().map(|&j| y[j]).collect(),
+                    ),
+                    Cut::Xz { .. } => (
+                        p.iu.iter().map(|&i| x[i]).collect(),
+                        p.iv.iter().map(|&k| z[k]).collect(),
+                    ),
+                    Cut::Yz { .. } => (
+                        p.iu.iter().map(|&j| y[j]).collect(),
+                        p.iv.iter().map(|&k| z[k]).collect(),
+                    ),
+                };
+                let n = p.nodes.len();
+                let mut e: [Vec<[f32; 2]>; 3] =
+                    [vec![[0.0; 2]; n], vec![[0.0; 2]; n], vec![[0.0; 2]; n]];
+                let mut h = e.clone();
+                for (m, slot) in p.acc[fi].iter().enumerate() {
+                    for c in 0..6 {
+                        let v = Cx::new(slot[c][0], slot[c][1]).mul(scale);
+                        let q = [v.re as f32, v.im as f32];
+                        if c < 3 {
+                            e[c][m] = q;
+                        } else {
+                            h[c - 3][m] = q;
+                        }
+                    }
+                }
+                let metal_v: Vec<bool> = p.nodes.iter().map(|&[i, j, k]| metal(i, j, k)).collect();
+                let er: Vec<f32> = p.nodes.iter().map(|&[_, _, k]| er_at(k)).collect();
+                let mut lines = Vec::new();
+                if matches!(p.cut, Cut::Xy { .. }) && setup.from != setup.to {
+                    for &c in sig {
+                        lines.push(circle(c, ra));
+                    }
+                    for &c in ret {
+                        lines.push(circle(c, rd));
+                    }
+                }
+                let _ = p.fixed;
+                planes.push(Plane {
+                    name: p.name.clone(),
+                    cut: p.cut,
+                    u,
+                    v,
+                    e,
+                    h,
+                    er,
+                    metal: metal_v,
+                });
+                outlines.push(lines);
+            }
+            maps.push(FieldMap {
+                f_ghz: setup.fmax_ghz * (k + 1) as f64 / setup.points.max(10) as f64,
+                title: format!(
+                    "{} L{} to L{}, drill {:.1} mil, antipad {:.1} mil",
+                    if sig.len() == 2 { "Pair via" } else { "Via" },
+                    setup.from + 1,
+                    setup.to + 1,
+                    setup.drill,
+                    setup.antipad
+                ),
+                planes,
+                outlines,
+            });
+        }
+        maps
+    }
+}
+
+/// The six field components averaged onto node (i, j, k).
+#[inline]
+fn node_fields(
+    id: &impl Fn(usize, usize, usize) -> usize,
+    e: [&[f32]; 3],
+    h: [&[f32]; 3],
+    i: usize,
+    j: usize,
+    k: usize,
+    sheet: bool,
+) -> [f64; 6] {
+    let g = |a: &[f32], q: usize| a[q] as f64;
+    if sheet {
+        // On copper: H's jump across the sheet (k + ½ less k − ½) is the
+        // surface current of both faces; Ez just below.
+        return [
+            0.0,
+            0.0,
+            g(e[2], id(i, j, k)),
+            0.5 * (g(h[0], id(i, j - 1, k)) + g(h[0], id(i, j, k))
+                - g(h[0], id(i, j - 1, k - 1))
+                - g(h[0], id(i, j, k - 1))),
+            0.5 * (g(h[1], id(i - 1, j, k)) + g(h[1], id(i, j, k))
+                - g(h[1], id(i - 1, j, k - 1))
+                - g(h[1], id(i, j, k - 1))),
+            0.0,
+        ];
+    }
+    [
+        0.5 * (g(e[0], id(i - 1, j, k)) + g(e[0], id(i, j, k))),
+        0.5 * (g(e[1], id(i, j - 1, k)) + g(e[1], id(i, j, k))),
+        0.5 * (g(e[2], id(i, j, k - 1)) + g(e[2], id(i, j, k))),
+        0.25 * (g(h[0], id(i, j - 1, k - 1))
+            + g(h[0], id(i, j, k - 1))
+            + g(h[0], id(i, j - 1, k))
+            + g(h[0], id(i, j, k))),
+        0.25 * (g(h[1], id(i - 1, j, k - 1))
+            + g(h[1], id(i, j, k - 1))
+            + g(h[1], id(i - 1, j, k))
+            + g(h[1], id(i, j, k))),
+        0.25 * (g(h[2], id(i - 1, j - 1, k))
+            + g(h[2], id(i, j - 1, k))
+            + g(h[2], id(i - 1, j, k))
+            + g(h[2], id(i, j, k))),
+    ]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2894,6 +3342,55 @@ mod tests {
         v.fmax_ghz = fmax;
         v.points = 40;
         v
+    }
+
+    #[test]
+    fn field_map_carries_one_watt() {
+        // A 50 ohm stripline with no via, 1 W in: the wave is 10 V and
+        // 0.2 A. The field between trace and plane is near V/h, and the
+        // surface current across the trace adds up to I.
+        let mut v = quick(1, 1, 20.0);
+        v.fields = vec![10.0];
+        let r = solve(&board_of("GSG", 5.0), &v).unwrap();
+        let m = &r.fields[0];
+        let p = m
+            .planes
+            .iter()
+            .find(|p| matches!(p.cut, crate::emfield::Cut::Yz { .. }))
+            .unwrap();
+        let (nu, nv) = (p.u.len(), p.v.len());
+        let a0 = (0..nu)
+            .min_by(|&a, &b| p.u[a].abs().total_cmp(&p.u[b].abs()))
+            .unwrap();
+        let c = |q: [f32; 2]| Cx::new(q[0] as f64, q[1] as f64);
+        // Mid-way between the top plane (z 0) and the trace (z 5).
+        let bm = (0..nv)
+            .min_by(|&a, &b| (p.v[a] - 2.5).abs().total_cmp(&(p.v[b] - 2.5).abs()))
+            .unwrap();
+        let ez = c(p.e[2][bm * nu + a0]).abs();
+        let want = 10.0 / (5.0 * MIL);
+        assert!((ez / want - 1.0).abs() < 0.15, "Ez {ez} V/m, V/h {want}");
+        // Current: Ampère's law round the trace, along rows mid-way
+        // above and below it (the field has died away at the sides).
+        let row = |zz: f64| {
+            let b = (0..nv)
+                .min_by(|&a, &b| (p.v[a] - zz).abs().total_cmp(&(p.v[b] - zz).abs()))
+                .unwrap();
+            let mut s = Cx::default();
+            for a in 0..nu - 1 {
+                s = s.add(c(p.h[1][b * nu + a]).scale((p.u[a + 1] - p.u[a]) * MIL));
+            }
+            s
+        };
+        let cur = row(2.5).add(row(7.5).scale(-1.0));
+        assert!((cur.abs() / 0.2 - 1.0).abs() < 0.15, "I {} A", cur.abs());
+        // The pictures encode.
+        let svg = m.svg(&crate::emfield::Quantity::ALL, 40.0);
+        assert!(svg.contains("data:image/png;base64,"));
+        let g = m.gif(0, crate::emfield::Quantity::E, 40.0, 4);
+        assert_eq!(&g[..6], b"GIF89a");
+        std::fs::write(std::env::temp_dir().join("trace-field-test.svg"), svg).unwrap();
+        std::fs::write(std::env::temp_dir().join("trace-field-test.gif"), g).unwrap();
     }
 
     #[test]

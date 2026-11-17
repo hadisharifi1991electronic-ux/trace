@@ -3,6 +3,61 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.80.0 (2026-11-17)
+
+- Field maps from the 3D solver. The via and pair solve can now keep
+  the electromagnetic fields at a frequency and draw them: |E| (V/m),
+  |H| (A/m), energy density ¼(ε|E|² + μ|H|²) (J/m³) and the surface
+  current density on the copper (A/m), on cut planes through the
+  structure: each trace layer, mid-way through every dielectric the
+  barrel crosses (where the via launches waves between the planes), a
+  side view along the traces and one across through the via. dB colour
+  scale with a scale bar, scaled to 1 W into port 1 (checked: on a
+  50 Ω stripline the field between trace and plane is within 5 % of
+  V/h and the current round the trace within 15 % of V/Z). "At an
+  instant" shows the field at one phase of the cycle; Animate steps it
+  through the cycle so the wave moves. In the Via window tick "Field
+  maps at … GHz" before Solve; the viewer has the plane, quantity,
+  scale and phase, and saves an SVG page of every plane or an animated
+  GIF of one. CLI: `trace via b 1 8 --fields 6 map.svg` (or map.gif,
+  `--field-plane`, `--field-quantity`, `--field-db`).
+- EMI simulation (the EMI window's Simulate, and `trace emi`), in place
+  of the single-clock estimate:
+  - Every signal net and pair is a source, not only the clocks: its
+    IBIS driver (edge and swing from [Ramp]) when given, your line
+    (`NET=12Gbps@30ps,0.8V`, `=125MHz`, `=2.4GHz,0dBm`), else a
+    default for its kind found from its name: clocks at the frequency
+    in the name (CLK_125M, REF_245M76) as lines; SerDes (JESD, GT,
+    PCIe, SATA, USB3, HDMI, SFP) as PRBS at their usual rates; LVDS,
+    USB 2 and MIPI pairs; RF and LO tones; single-ended data. Which
+    ones are assumed is listed.
+  - Traces: each outer segment and its return under it is a small
+    loop; the loops are added as vectors with the travelling wave's
+    phase along the net, toward 144 directions, worst kept (one loop
+    gives Ott's formula exactly). A pair is its two lines, the negative
+    one late by the pair's real length mismatch and 2 % weaker, so
+    skew and imbalance radiate as common mode by themselves.
+  - Cables: the return current's voltage across the plane (Hockanson's
+    current-driven model) drives the longest cable on the connectors
+    (coax, USB, Ethernet, HDMI 1 to 2 m, a mated FMC board 0.15 m,
+    headers 0.3 m; `--cable J1=2m`) as a monopole, capped at resonance.
+  - Power planes: each rail's plane impedance from the PDN model (the
+    cavity's resonances, its capacitors and regulator), times the
+    switching current that gets past the die's capacitance and the
+    package, is the voltage at the plane's edge, radiating as a slot;
+    and each decoupling capacitor's current in its mounting loop.
+    `--rail VCCINT=2A@250MHz` for real currents.
+  - Spectrum 30 MHz to 6 GHz against FCC class A/B or CISPR 32 class
+    A/B with the top sources drawn, every contribution ranked by
+    margin, and fixes scored by re-running the source with the change
+    (inner layer, matched lengths, slower edge, common-mode choke, two
+    more capacitors): the dB each one gains at the worst frequency.
+  - Near field on the board at the worst frequency: |H| 1 mm above the
+    top and below the bottom (Biot-Savart of each segment and its
+    image) and the current density on every copper layer (the track's
+    current and its return spread in the plane under it), drawn over
+    the board like the other results; `--map near.svg` in the CLI.
+
 ## 0.79.0 (2026-11-17)
 
 - Analysis results on the board. The EMI check, the thermal solve and

@@ -35,6 +35,9 @@ use std::collections::{HashMap, HashSet};
 use std::f64::consts::PI;
 use std::fmt::Write;
 
+#[path = "emi_sim.rs"]
+pub mod sim;
+
 const C0: f64 = 2.998e8;
 
 /// A fast net: its fundamental, edge and swing.

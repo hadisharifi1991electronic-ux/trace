@@ -123,14 +123,26 @@ USAGE:
                                                 receiver mask at the strobe (DDR4-2400: 136mV,0.2UI), and the
                                                 bus's margin as routed, trained and per-bit deskewed. Exits 1 on
                                                 a failure
-    trace emi <board> [--net CLK=25MHz@2ns,3.3V]... [--no-auto] [--clock 50MHz@1ns,3.3V]
+    trace emi <board> [--net CLK=25MHz@2ns,3.3V]... [--no-auto] [--clock 50MHz@1ns,3.3V] [--signal ..] [--ibis ..]
+              [--cable J1=1m] [--rail VCC=1A@100MHz] [--map near.svg] [--quick]
               [--limit fcc-b|fcc-a|cispr-b|cispr-a] [--margin 6] [spectrum.svg] [findings.csv] [report.txt]
                                                 board-level EMI check of the fast nets (clocks found by name,
                                                 the nets given, every pair): tracks over plane gaps or splits,
                                                 layer changes with no return via or capacitor near, fast tracks
                                                 near the board edge, ground stitching along the edge over
                                                 lambda/20, and each clock's radiation (differential-mode loop,
-                                                Ott) against the FCC or CISPR 32 limit. Exits 1 on a high finding
+                                                Ott) against the FCC or CISPR 32 limit; then the EMI simulation:
+                                                every net and pair as a source (IBIS --ibis U1=f.ibs, given
+                                                --signal NET=12Gbps@30ps,0.8V | 125MHz | 2.4GHz,0dBm, else a
+                                                default for its kind), radiated by its outer traces (loops with
+                                                the wave's phase, worst direction), by the cables on the
+                                                connectors (common mode, --cable J1=2m), by the power planes'
+                                                cavity edges (PDN model with the caps; --rail VCC=1A@100MHz) and
+                                                the decoupling loops: spectrum against the limit with each
+                                                source's share (spectrum.svg), the fixes and what each gains, and
+                                                --map near.svg: |H| over the board and current density per layer
+                                                at the worst frequency. --quick: the layout check only;
+                                                --no-cmos, --no-planes. Exits 1 on a high finding or a failure
     trace flex <board> [--radius [B1=]MIL] [--dynamic] [--keepout 30] [--angle 10] [report.txt]
                                                 rigid-flex: zones with their layers and thickness, bends with
                                                 their least radius (IPC-2223: 6/12/24x the flex, 100x dynamic),
@@ -173,7 +185,14 @@ USAGE:
                                                 tries drills in range and counts the through loss.
                                                 --target and --optimise judge by the accurate (converged) solve
                                                 by default, the quick grid only steering; --quick for the old
-                                                single finer grid
+                                                single finer grid.
+                                                --fields GHz[,GHz] map.svg keeps the fields at those frequencies
+                                                and draws |E|, |H|, energy density and surface current density
+                                                on cut planes (each trace layer, mid-way between the planes the
+                                                barrel crosses, side views along and across), dB colour scale,
+                                                per 1 W in; map.gif animates one plane through a cycle
+                                                (--field-plane N|name, --field-quantity E|H|energy|current,
+                                                --field-db 40 for the scale's depth)
     trace pairsize <board> <layer> [--zdiff 100] [--wmin W] [--wmax W] [--gap S] [--ghz 8] [--next D] [--xtalk 2]
                                                 Every track width and gap on a layer that gives the target Zdiff
                                                 (2D field solver), ranked by loss, with crosstalk and etch
@@ -2824,15 +2843,46 @@ fn bus_cmd(file: &str, rest: &[&str]) -> Res {
 }
 
 fn emi_cmd(file: &str, rest: &[&str]) -> Res {
+    use trace_core::emi::sim::{RailSpec, SignalSpec, SimSetup};
     use trace_core::emi::{self, EmiSetup, FastNet, Limit, Severity};
     let b = board(file)?;
     let mut setup = EmiSetup::default();
+    let mut sim = SimSetup::default();
+    let mut run_sim = true;
+    let mut map_out: Option<String> = None;
     let mut outs: Vec<&str> = Vec::new();
     let mut it = rest.iter();
     while let Some(&a) = it.next() {
         let mut val = || it.next().copied().ok_or(format!("{a} needs a value"));
         match a {
-            "--net" => setup.nets.push(FastNet::parse(val()?)?),
+            "--net" => {
+                let v = val()?;
+                setup.nets.push(FastNet::parse(v)?);
+                sim.signals.push(SignalSpec::parse(v)?);
+            }
+            "--signal" => sim.signals.push(SignalSpec::parse(val()?)?),
+            "--rail" => sim.rails.push(RailSpec::parse(val()?)?),
+            "--cable" => {
+                let v = val()?;
+                let (d, l) = v.split_once('=').ok_or("--cable J1=2m")?;
+                let l = l.trim().trim_end_matches('m');
+                sim.cables.push((
+                    d.trim().to_string(),
+                    l.parse().map_err(|_| format!("--cable: not metres: {l}"))?,
+                ));
+            }
+            "--ibis" => {
+                let v = val()?;
+                let (d, f) = v.split_once('=').ok_or("--ibis U1=file.ibs")?;
+                sim.ibis.push((
+                    d.trim().to_string(),
+                    trace_core::ibis::load(Path::new(f.trim()))?,
+                ));
+            }
+            "--no-cmos" => sim.cmos = false,
+            "--no-planes" => sim.planes = false,
+            "--quick" => run_sim = false,
+            "--map" => map_out = Some(val()?.to_string()),
             "--no-auto" => setup.auto = false,
             "--clock" => {
                 let f = FastNet::parse(&format!("*={}", val()?))?;
@@ -2843,13 +2893,15 @@ fn emi_cmd(file: &str, rest: &[&str]) -> Res {
             "--limit" => {
                 let v = val()?;
                 setup.limit = Limit::parse(v)
-                    .ok_or_else(|| format!("--limit: {v} (fcc-b, fcc-a, cispr-b, cispr-a)"))?
+                    .ok_or_else(|| format!("--limit: {v} (fcc-b, fcc-a, cispr-b, cispr-a)"))?;
+                sim.limit = setup.limit;
             }
             "--margin" => {
                 setup.margin_db = val()?
                     .trim_end_matches("dB")
                     .parse()
-                    .map_err(|_| "--margin: not dB")?
+                    .map_err(|_| "--margin: not dB")?;
+                sim.margin_db = setup.margin_db;
             }
             _ if a.starts_with("--") => return Err(format!("emi: unknown option {a}").into()),
             _ => outs.push(a),
@@ -2865,19 +2917,55 @@ fn emi_cmd(file: &str, rest: &[&str]) -> Res {
             .file_stem()
             .map_or(String::new(), |s| s.to_string_lossy().into_owned())
     );
+    let sres = if run_sim {
+        let t1 = std::time::Instant::now();
+        let last = std::cell::Cell::new(-1i32);
+        let progress = |f: f64| {
+            let pc = (f * 100.0) as i32;
+            if pc != last.get() {
+                last.set(pc);
+                eprint!("\r  simulating… {pc}%");
+            }
+        };
+        let s = emi::sim::simulate(&b, &sim, &progress)?;
+        eprintln!();
+        println!();
+        print!("{}", s.report());
+        println!("({:.1} s)", t1.elapsed().as_secs_f64());
+        Some(s)
+    } else {
+        None
+    };
     for o in outs {
         let low = o.to_ascii_lowercase();
         let text = if low.ends_with(".svg") {
-            r.svg(&title)
+            match &sres {
+                Some(s) => s.svg(&title),
+                None => r.svg(&title),
+            }
         } else if low.ends_with(".csv") {
             r.csv()
         } else {
-            r.report()
+            let mut t = r.report();
+            if let Some(s) = &sres {
+                t.push('\n');
+                t.push_str(&s.report());
+            }
+            t
         };
         std::fs::write(o, text)?;
         println!("Wrote {o}");
     }
-    if r.count(Severity::High) > 0 {
+    if let (Some(m), Some(s)) = (&map_out, &sres) {
+        match s.map_svg(&b, &title) {
+            Some(text) => {
+                std::fs::write(m, text)?;
+                println!("Wrote {m}");
+            }
+            None => println!("No near-field map (board too large or empty)"),
+        }
+    }
+    if r.count(Severity::High) > 0 || sres.as_ref().is_some_and(|s| s.worst.1 < 0.0) {
         std::process::exit(1);
     }
     Ok(())
@@ -3241,6 +3329,11 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     let mut fab: Option<trace_core::viaopt::FabLimits> = None;
     let mut target: Option<f64> = None;
     let mut feed: Option<f64> = None;
+    // Field maps: output, dB depth, plane, quantity (for an animation).
+    let mut field_out: Option<String> = None;
+    let mut field_db = 40.0;
+    let mut field_plane: Option<String> = None;
+    let mut field_q = trace_core::emfield::Quantity::E;
     let mut it = rest.iter();
     let len = |x: Option<&&str>, what: &str| -> Result<f64, Box<dyn std::error::Error>> {
         let x = x.ok_or(format!("{what} needs a length"))?;
@@ -3346,6 +3439,43 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
                 if !d.is_empty() {
                     v.return_dist = Length::parse(d).ok_or(format!("not a length: {d}"))?.mil();
                 }
+            }
+            "--fields" => {
+                // --fields 6[,10]GHz out.svg|out.gif
+                let x = it.next().ok_or("--fields needs GHz")?;
+                for f in x.trim_end_matches(['G', 'g', 'H', 'h', 'z']).split(',') {
+                    v.fields.push(
+                        f.trim()
+                            .parse()
+                            .map_err(|_| format!("not a frequency: {f}"))?,
+                    );
+                }
+                field_out = Some(
+                    it.next()
+                        .ok_or("--fields needs an output (.svg or .gif)")?
+                        .to_string(),
+                );
+            }
+            "--field-db" => {
+                let x = it.next().ok_or("--field-db needs dB")?;
+                field_db = x
+                    .trim_end_matches("dB")
+                    .parse()
+                    .map_err(|_| format!("not a number: {x}"))?;
+            }
+            "--field-plane" => {
+                field_plane = Some(
+                    it.next()
+                        .ok_or("--field-plane needs a name or number")?
+                        .to_string(),
+                )
+            }
+            "--field-quantity" => {
+                let x = it
+                    .next()
+                    .ok_or("--field-quantity needs E, H, energy or current")?;
+                field_q = trace_core::emfield::Quantity::parse(x)
+                    .ok_or(format!("not a quantity: {x} (E, H, energy, current)"))?;
             }
             "--fmax" => {
                 let x = it.next().ok_or("--fmax needs GHz")?;
@@ -3664,6 +3794,77 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
         names(v.from),
         names(v.to)
     );
+    if let Some(out) = &field_out {
+        use trace_core::emfield::Quantity;
+        let many = r.fields.len() > 1;
+        for m in &r.fields {
+            let path = if many {
+                let (stem, ext) = out.rsplit_once('.').unwrap_or((out.as_str(), "svg"));
+                format!("{stem}_{:.2}GHz.{ext}", m.f_ghz)
+            } else {
+                out.clone()
+            };
+            if path.to_ascii_lowercase().ends_with(".gif") {
+                let k = match &field_plane {
+                    Some(p) => p
+                        .parse::<usize>()
+                        .ok()
+                        .and_then(|n| n.checked_sub(1))
+                        .filter(|&n| n < m.planes.len())
+                        .or_else(|| {
+                            let p = p.to_ascii_lowercase();
+                            m.planes
+                                .iter()
+                                .position(|q| q.name.to_ascii_lowercase().contains(&p))
+                        })
+                        .ok_or(format!(
+                            "no plane {p}; planes: {}",
+                            m.planes
+                                .iter()
+                                .enumerate()
+                                .map(|(i, q)| format!("{} {}", i + 1, q.name))
+                                .collect::<Vec<_>>()
+                                .join("; ")
+                        ))?,
+                    None => m
+                        .planes
+                        .iter()
+                        .position(|q| matches!(q.cut, trace_core::emfield::Cut::Xz { .. }))
+                        .unwrap_or(0),
+                };
+                std::fs::write(&path, m.gif(k, field_q, field_db, 24))?;
+                println!(
+                    "Saved {path}: {} of {} through one cycle at {:.2} GHz",
+                    field_q.label(),
+                    m.planes[k].name,
+                    m.f_ghz
+                );
+            } else {
+                std::fs::write(&path, m.svg(&Quantity::ALL, field_db))?;
+                println!(
+                    "Saved {path}: field maps at {:.2} GHz ({} planes), per 1 W in",
+                    m.f_ghz,
+                    m.planes.len()
+                );
+            }
+            for (i, p) in m.planes.iter().enumerate() {
+                let peak = |q: Quantity| {
+                    p.values(q, None)
+                        .into_iter()
+                        .filter(|v| v.is_finite())
+                        .fold(0.0f64, f64::max)
+                };
+                println!(
+                    "  plane {}: {:<48} |E| {:>9} V/m  |H| {:>9} A/m  J {:>9} A/m",
+                    i + 1,
+                    p.name,
+                    trace_core::emfield::si(peak(Quantity::E)),
+                    trace_core::emfield::si(peak(Quantity::H)),
+                    trace_core::emfield::si(peak(Quantity::Current))
+                );
+            }
+        }
+    }
     for o in outs {
         let low = o.to_ascii_lowercase();
         if low.ends_with(".svg") {

@@ -14,6 +14,7 @@ mod drc;
 mod editing;
 mod emiwin;
 mod fanwin;
+mod fieldview;
 mod flexwin;
 mod fpview;
 mod imp;

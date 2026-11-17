@@ -48,6 +48,8 @@ pub struct ViaWindow {
     df: f64,
     /// Solve on finer grids until converged, with error bars.
     accurate: bool,
+    /// Field maps of the solve.
+    fields: crate::fieldview::FieldView,
 }
 
 impl Default for ViaWindow {
@@ -76,6 +78,7 @@ impl Default for ViaWindow {
             er: 4.0,
             df: 0.02,
             accurate: true,
+            fields: Default::default(),
         }
     }
 }
@@ -457,9 +460,13 @@ impl ViaWindow {
                  (tens of minutes; the quick grid can be several ohm and several dB off \
                  on fine vias). Off: one quick grid.",
             );
+            if !self.to_target {
+                self.fields.setup_row(ui);
+            }
             if !self.to_target && ui.add_enabled(ok, egui::Button::new("Solve")).clicked() {
                 let st = stackup.clone();
-                let setup = self.setup.clone();
+                let mut setup = self.setup.clone();
+                setup.fields = self.fields.freqs();
                 let accurate = self.accurate;
                 let (tx, rx) = mpsc::channel();
                 let prog = Arc::new(AtomicU32::new(0));
@@ -588,6 +595,7 @@ impl ViaWindow {
             ui.weak(n);
         }
         plot(ui, r, kind);
+        self.fields.show(ui, ctx, &r.fields);
     }
 }
 

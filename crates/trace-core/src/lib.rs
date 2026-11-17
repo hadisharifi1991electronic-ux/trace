@@ -19,6 +19,7 @@ pub mod constraints;
 pub mod drc;
 pub mod eco;
 pub mod edit;
+pub mod emfield;
 pub mod emi;
 pub mod erc;
 pub mod eye;

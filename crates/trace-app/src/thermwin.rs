@@ -34,6 +34,8 @@ pub struct ThermalWindow {
     texture: Option<(usize, egui::TextureHandle)>,
     save_path: String,
     note: Option<String>,
+    /// The temperature map and junction temperatures for the board.
+    pub overlay: Option<crate::overlay::Overlay>,
 }
 
 impl Default for ThermalWindow {
@@ -54,6 +56,7 @@ impl Default for ThermalWindow {
             texture: None,
             save_path: String::new(),
             note: None,
+            overlay: None,
         }
     }
 }
@@ -239,7 +242,9 @@ impl ThermalWindow {
                         let check = self.check;
                         let (tx, rx) = mpsc::channel();
                         let c = ctx.clone();
+                        let token = crate::jobs::start(ui.ctx(), "thermal");
                         std::thread::spawn(move || {
+                            let _g = token.install();
                             let r = if check {
                                 thermal::check_mesh(&b, &setup).map(|m| (m.fine, Some(m.error)))
                             } else {
@@ -256,6 +261,9 @@ impl ThermalWindow {
             }
             if self.running.is_some() {
                 ui.spinner();
+                if crate::jobs::cancel_button(ui, "thermal") {
+                    self.running = None;
+                }
                 ui.label("Solving…");
             }
         });
@@ -341,6 +349,41 @@ impl ThermalWindow {
                 pixels: px,
             };
             let tex = ctx.load_texture("thermal-map", img, egui::TextureOptions::NEAREST);
+            // The same map on the board, with each part's junction.
+            let mil = 1.0 / 0.0254;
+            let (x0, y0) = (r.origin[0] * mil, r.origin[1] * mil);
+            let (x1, y1) = (
+                x0 + r.cols as f64 * r.cell * mil,
+                y0 + r.rows as f64 * r.cell * mil,
+            );
+            let hot = |t: f64| {
+                let c = thermal::heat_color((t - lo) / (hi - lo).max(1e-9));
+                Color32::from_rgb(c[0], c[1], c[2])
+            };
+            let markers = r
+                .parts
+                .iter()
+                .filter_map(|p| {
+                    let c = board.components.get(p.part)?;
+                    Some(crate::overlay::Marker {
+                        at: [c.x.mil(), c.y.mil()],
+                        color: hot(p.junction_c),
+                        label: format!("{} Tj {:.1} °C", p.designator, p.junction_c),
+                    })
+                })
+                .collect();
+            self.overlay = Some(crate::overlay::Overlay {
+                title: format!("Thermal: {}", m.name),
+                markers,
+                nets: Vec::new(),
+                image: Some((tex.clone(), [x0 as f32, y0 as f32, x1 as f32, y1 as f32])),
+                legend: vec![
+                    (hot(lo), format!("{lo:.1} °C")),
+                    (hot((lo + hi) / 2.0), format!("{:.1} °C", (lo + hi) / 2.0)),
+                    (hot(hi), format!("{hi:.1} °C")),
+                ],
+                on: true,
+            });
             self.texture = Some((k, tex));
         }
         if let Some((_, tex)) = &self.texture {

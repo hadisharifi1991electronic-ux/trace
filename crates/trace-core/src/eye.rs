@@ -689,6 +689,7 @@ pub fn optimise(
     let mut best = (f64::MIN, Equaliser::default(), 0.0);
     let mut tries = 0;
     for (db, ghz) in ctles {
+        crate::cancel::check()?;
         let mut s2 = plain.clone();
         s2.eq = Equaliser {
             ctle_db: db,

@@ -319,7 +319,9 @@ impl StitchWindow {
                 let fenced = fenced.clone();
                 let (tx, rx) = mpsc::channel();
                 let c = ctx.clone();
+                let token = crate::jobs::start(ui.ctx(), "stitch");
                 std::thread::spawn(move || {
+                    let _g = token.install();
                     let r = match mode {
                         Mode::Stitch => stitch::stitch(
                             &b,
@@ -359,6 +361,9 @@ impl StitchWindow {
             }
             if self.running.is_some() {
                 ui.spinner();
+                if crate::jobs::cancel_button(ui, "stitch") {
+                    self.running = None;
+                }
                 ui.label("Placing…");
             }
         });

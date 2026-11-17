@@ -315,13 +315,18 @@ impl PdnWindow {
                 let (tx, rx) = mpsc::channel();
                 let b = board.clone();
                 let s = self.setup(net);
+                let token = crate::jobs::start(ui.ctx(), "pdn");
                 std::thread::spawn(move || {
+                    let _g = token.install();
                     let _ = tx.send(pdn::model(&b, &s));
                 });
                 self.running = Some(rx);
             }
             if busy {
                 ui.spinner();
+                if crate::jobs::cancel_button(ui, "pdn") {
+                    self.running = None;
+                }
                 ui.label("Solving the plane pair…");
             }
         });

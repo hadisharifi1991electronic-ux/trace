@@ -247,7 +247,9 @@ impl BomWindow {
                         let key = self.mouser_key.clone();
                         let c = ctx.clone();
                         self.progress = (0, want.len());
+                        let token = crate::jobs::start(ui.ctx(), "bom");
                         std::thread::spawn(move || {
+                            let _g = token.install();
                             let t2 = tx.clone();
                             let c2 = c.clone();
                             let r = bom::mouser_fetch(&key, &want, &bom::today(), move |d, n| {
@@ -261,6 +263,9 @@ impl BomWindow {
                     }
                     if busy {
                         ui.spinner();
+                        if crate::jobs::cancel_button(ui, "bom") {
+                            self.fetching = None;
+                        }
                         ui.label(format!("{} of {}", self.progress.0, self.progress.1));
                     }
                     if ui

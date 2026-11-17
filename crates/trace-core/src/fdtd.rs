@@ -1682,6 +1682,7 @@ pub fn solve_with(
         }
         if n % 200 == 0 {
             progress(n as f64 / max_steps as f64);
+            crate::cancel::check()?;
         }
     }
     if std::env::var("FDTD_DEBUG").is_ok() {

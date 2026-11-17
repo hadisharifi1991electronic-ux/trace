@@ -3411,6 +3411,7 @@ pub fn tune(
     let starts = 8;
     for start in 0..starts {
         progress(0.6 + 0.38 * start as f64 / starts as f64, "choosing parts");
+        crate::cancel::check()?;
         let mut cur: Vec<usize> = if start == 0 {
             vec![0; n]
         } else {

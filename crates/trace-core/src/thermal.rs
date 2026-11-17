@@ -1264,6 +1264,7 @@ pub fn solve(board: &Board, setup: &Setup) -> std::result::Result<Result, String
             rhs[srcs[k].j] += s.watts;
         }
         let next = pcg(&diag, &links, &rhs, t.clone(), n_nodes);
+        crate::cancel::check()?;
         let change = next
             .iter()
             .zip(&t)
@@ -1409,7 +1410,10 @@ fn pcg(
     let mut rz: f64 = (0..n).map(|i| r[i] * z[i]).sum();
     let norm_b = rhs.iter().map(|v| v * v).sum::<f64>().sqrt().max(1e-30);
     let mut ap = vec![0.0; n];
-    for _ in 0..20_000 {
+    for k in 0..20_000 {
+        if k % 50 == 0 && crate::cancel::cancelled() {
+            break;
+        }
         let rn = r.iter().map(|v| v * v).sum::<f64>().sqrt();
         if rn < 1e-10 * norm_b {
             break;

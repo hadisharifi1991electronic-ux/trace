@@ -362,6 +362,7 @@ pub fn optimise(
     let mut seen: std::collections::HashMap<String, usize> = Default::default();
     let done = std::cell::Cell::new(0usize);
     let mut run = |v: ViaSetup, what: &str, trials: &mut Vec<ViaTrial>| -> Result<usize, String> {
+        crate::cancel::check()?;
         let v = legal(v, goal);
         let k = key(&v);
         if let Some(&i) = seen.get(&k) {
@@ -515,6 +516,7 @@ pub fn optimise(
     let mut verdicts = Vec::new();
     let mut winner: Option<(f64, ViaSetup, ViaResult)> = None;
     for (k, &i) in front.iter().enumerate() {
+        crate::cancel::check()?;
         let v = trials[i].setup.clone();
         let what = format!(
             "front runner {} of {} {}",
@@ -715,6 +717,7 @@ pub fn size_to(
     let mut accurate: Vec<(ViaSetup, Option<f64>, String)> = Vec::new();
     let mut best: Option<(f64, ViaSetup, ViaResult)> = None;
     for k in 0..rounds {
+        crate::cancel::check()?;
         let what = format!("accurate solve {}: antipad {:.1} mil", k + 1, setup.antipad);
         let c = fdtd::converge(stackup, &setup, &acc, &|p| {
             progress(share(k, 0.1 + 0.9 * p), &what)

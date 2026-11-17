@@ -426,11 +426,13 @@ pub fn run(
     let results: Vec<std::sync::Mutex<Option<std::result::Result<Solved, String>>>> =
         (0..total).map(|_| std::sync::Mutex::new(None)).collect();
     progress(0.0, "finding and cascading each bit's path");
+    let token = crate::cancel::current();
     std::thread::scope(|sc| {
         for _ in 0..threads.min(total) {
             sc.spawn(|| loop {
+                let _g = crate::cancel::adopt(&token);
                 let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                if i >= total {
+                if i >= total || crate::cancel::cancelled() {
                     break;
                 }
                 let (net, clock) = &jobs[i];
@@ -443,6 +445,7 @@ pub fn run(
             });
         }
     });
+    crate::cancel::check()?;
     let mut solved: Vec<(String, std::result::Result<Solved, String>)> = jobs
         .iter()
         .zip(results)

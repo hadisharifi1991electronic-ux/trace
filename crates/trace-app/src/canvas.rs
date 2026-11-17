@@ -977,6 +977,43 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         }
     }
 
+    // Analysis results on the board: nets in their pass/fail colour,
+    // heat maps and finding markers.
+    let over_nets = app.overlays.net_colours();
+    if !over_nets.is_empty() {
+        let colour: std::collections::HashMap<u32, Color32> = over_nets.into_iter().collect();
+        // Dim the rest of the board so the coloured nets stand out.
+        shapes.push(Shape::rect_filled(
+            rect,
+            0.0,
+            Color32::from_black_alpha(120),
+        ));
+        let mut segs = Vec::new();
+        for t in &scene.board.geometry.tracks {
+            let Some(c) = t.net.and_then(|n| colour.get(&n)) else {
+                continue;
+            };
+            let a = view.to_screen(t.start.x.mil() as f32, t.start.y.mil() as f32);
+            let b = view.to_screen(t.end.x.mil() as f32, t.end.y.mil() as f32);
+            if !rect.expand(20.0).intersects(Rect::from_two_pos(a, b)) {
+                continue;
+            }
+            let w = (t.width.mil() as f32 * view.scale).max(3.0) + 2.0;
+            segs.push(([a, b], w, *c));
+        }
+        // Outlines first, so that no outline crosses a coloured track.
+        for (ab, w, _) in &segs {
+            shapes.push(Shape::line_segment(
+                *ab,
+                Stroke::new(w + 2.0, Color32::BLACK),
+            ));
+        }
+        for (ab, w, c) in segs {
+            shapes.push(Shape::line_segment(ab, Stroke::new(w, c)));
+        }
+    }
+    app.overlays.draw(&mut shapes, &painter, view);
+
     // Design rule violations on the layers shown: an X in the colour of
     // its kind, the one picked in the list larger.
     if app.drc.markers {
@@ -1014,6 +1051,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         ));
     }
     painter.extend(shapes);
+    app.overlays.legend(ui, rect);
     if let Some(ring) = shape_ring {
         app.add_shape(ring);
     }

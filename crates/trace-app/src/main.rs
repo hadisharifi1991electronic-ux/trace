@@ -17,7 +17,9 @@ mod fanwin;
 mod flexwin;
 mod fpview;
 mod imp;
+mod jobs;
 mod menus;
+mod overlay;
 mod pairwin;
 mod panelize;
 mod panes;
@@ -106,6 +108,7 @@ pub struct App {
     active: Slot,
     selected: Option<u32>,
     marker: Option<[f32; 2]>,
+    overlays: overlay::Overlays,
     search: String,
     message: Option<(String, bool)>, // text, is_error
     recent: Vec<PathBuf>,
@@ -216,6 +219,7 @@ impl App {
             active: Slot::Copper(0),
             selected: None,
             marker: None,
+            overlays: overlay::Overlays::default(),
             search: String::new(),
             message: None,
             recent,
@@ -376,6 +380,7 @@ impl App {
         match loaded {
             Ok(scene) => {
                 self.scene = Some(scene);
+                self.overlays = overlay::Overlays::default();
                 self.drc.reset();
                 self.moving = None;
                 self.view3d.reset();
@@ -475,6 +480,7 @@ impl App {
         match Scene::load_files(paths) {
             Ok(scene) => {
                 self.scene = Some(scene);
+                self.overlays = overlay::Overlays::default();
                 self.view3d.reset();
                 self.load_constraints();
                 self.selected = None;
@@ -510,6 +516,7 @@ impl App {
                     .path
                     .with_file_name(format!("{stem}-panel.{}", trace_core::file::EXTENSION));
                 self.scene = Some(Scene::from_board(path, board));
+                self.overlays = overlay::Overlays::default();
                 self.drc.reset();
                 self.moving = None;
                 self.view3d.reset();
@@ -3368,6 +3375,16 @@ impl eframe::App for App {
             self.bus_sim.show(ctx, &scene.board);
             self.via.show(ctx, &scene.board, self.imp.stackup());
             self.pairs.show(ctx, &scene.board, self.imp.stackup());
+        }
+        // Results that go on the board.
+        if let Some(o) = self.emi.overlay.take() {
+            self.overlays.set("emi", o);
+        }
+        if let Some(o) = self.thermal.overlay.take() {
+            self.overlays.set("thermal", o);
+        }
+        if let Some(o) = self.bus_sim.overlay.take() {
+            self.overlays.set("bus", o);
         }
         let emi_act = match &self.scene {
             Some(scene) => self.emi.show(ctx, &scene.board),

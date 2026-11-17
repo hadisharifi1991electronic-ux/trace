@@ -19,6 +19,8 @@ pub struct EmiWindow {
     result: Option<EmiResult>,
     save_path: String,
     note: Option<String>,
+    /// The findings for the board, when a check has run.
+    pub overlay: Option<crate::overlay::Overlay>,
 }
 
 impl Default for EmiWindow {
@@ -36,6 +38,7 @@ impl Default for EmiWindow {
             result: None,
             save_path: String::new(),
             note: None,
+            overlay: None,
         }
     }
 }
@@ -139,7 +142,9 @@ impl EmiWindow {
             if ui.button("Check").clicked() {
                 match self.setup() {
                     Ok(s) => {
-                        self.result = Some(emi::check(board, &s));
+                        let r = emi::check(board, &s);
+                        self.overlay = Some(on_board(&r, board));
+                        self.result = Some(r);
                         self.error = None;
                     }
                     Err(e) => self.error = Some(e),
@@ -285,5 +290,50 @@ impl EmiWindow {
             ui.weak(n);
         }
         act
+    }
+}
+
+fn severity_colour(s: Severity) -> Color32 {
+    match s {
+        Severity::High => Color32::from_rgb(235, 70, 50),
+        Severity::Medium => Color32::from_rgb(240, 170, 40),
+        Severity::Low => Color32::from_rgb(120, 170, 240),
+    }
+}
+
+/// The findings as markers on the board, and the nets with high
+/// findings drawn in red.
+fn on_board(r: &EmiResult, board: &Board) -> crate::overlay::Overlay {
+    use crate::overlay::{Marker, Overlay};
+    let mut nets: Vec<(u32, Color32)> = Vec::new();
+    for f in r.findings.iter().filter(|f| f.severity == Severity::High) {
+        if let Some(i) = board.nets.iter().position(|n| n.name == f.net) {
+            if !nets.iter().any(|x| x.0 == i as u32) {
+                nets.push((i as u32, Color32::from_rgba_unmultiplied(235, 70, 50, 200)));
+            }
+        }
+    }
+    Overlay {
+        title: format!("EMI ({} findings)", r.findings.len()),
+        markers: r
+            .findings
+            .iter()
+            .map(|f| Marker {
+                at: f.at,
+                color: severity_colour(f.severity),
+                label: format!("{} {}", f.kind, f.net),
+            })
+            .collect(),
+        nets,
+        image: None,
+        legend: vec![
+            (
+                severity_colour(Severity::High),
+                "high (net drawn red)".into(),
+            ),
+            (severity_colour(Severity::Medium), "medium".into()),
+            (severity_colour(Severity::Low), "low".into()),
+        ],
+        on: true,
     }
 }

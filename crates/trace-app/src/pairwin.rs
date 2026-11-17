@@ -160,7 +160,9 @@ impl PairWindow {
                 let goal = self.goal.clone();
                 let (tx, rx) = mpsc::channel();
                 let c = ctx.clone();
+                let token = crate::jobs::start(ui.ctx(), "pairs");
                 std::thread::spawn(move || {
+                    let _g = token.install();
                     let _ = tx.send(pairopt::pair_options(&l, &goal));
                     c.request_repaint();
                 });
@@ -169,6 +171,9 @@ impl PairWindow {
             }
             if self.running.is_some() {
                 ui.spinner();
+                if crate::jobs::cancel_button(ui, "pairs") {
+                    self.running = None;
+                }
                 ui.label("Solving…");
             }
         });

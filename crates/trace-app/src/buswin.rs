@@ -31,6 +31,8 @@ pub struct BusWindow {
     result: Option<BusResult>,
     save_path: String,
     note: Option<String>,
+    /// The bus's nets in pass/fail colours, when a run has finished.
+    pub overlay: Option<crate::overlay::Overlay>,
 }
 
 impl Default for BusWindow {
@@ -57,6 +59,7 @@ impl Default for BusWindow {
             result: None,
             save_path: String::new(),
             note: None,
+            overlay: None,
         }
     }
 }
@@ -71,6 +74,7 @@ impl BusWindow {
                 Ok(r) => {
                     match r {
                         Ok(res) => {
+                            self.overlay = Some(on_board(&res, board));
                             self.result = Some(res);
                             self.error = None;
                         }
@@ -238,7 +242,9 @@ impl BusWindow {
                 let b = board.clone();
                 let (tx, rx) = mpsc::channel();
                 let c = ctx.clone();
+                let token = crate::jobs::start(ui.ctx(), "bus");
                 std::thread::spawn(move || {
+                    let _g = token.install();
                     let r = bussim::run(&b, &setup, &|_, _| {});
                     let _ = tx.send(r);
                     c.request_repaint();
@@ -248,6 +254,9 @@ impl BusWindow {
             }
             if self.running.is_some() {
                 ui.spinner();
+                if crate::jobs::cancel_button(ui, "bus") {
+                    self.running = None;
+                }
                 ui.label("Simulating…");
             }
         });
@@ -472,4 +481,76 @@ fn chart(ui: &mut egui::Ui, r: &BusResult) {
         egui::FontId::proportional(11.0),
         weak,
     );
+}
+
+/// The bus's bits in green (meets timing) or red, the strobe in blue,
+/// with each bit's margin at its receiver pin.
+fn on_board(r: &BusResult, board: &Board) -> crate::overlay::Overlay {
+    use crate::overlay::{Marker, Overlay};
+    let (good, bad, strobe) = (
+        Color32::from_rgba_unmultiplied(60, 200, 120, 210),
+        Color32::from_rgba_unmultiplied(235, 70, 50, 220),
+        Color32::from_rgba_unmultiplied(80, 150, 255, 210),
+    );
+    let id = |name: &str| {
+        board
+            .nets
+            .iter()
+            .position(|n| n.name == name)
+            .map(|i| i as u32)
+    };
+    let probe = BusSetup {
+        mask: r.mask,
+        ..Default::default()
+    };
+    let pin = |p: &str| -> Option<[f64; 2]> {
+        let (des, pad) = p.split_once('.')?;
+        let c = board
+            .components
+            .iter()
+            .position(|c| c.designator.eq_ignore_ascii_case(des))? as u32;
+        board
+            .geometry
+            .pads
+            .iter()
+            .find(|q| q.component == Some(c) && q.name == pad)
+            .map(|q| [q.at.x.mil(), q.at.y.mil()])
+    };
+    let mut nets = Vec::new();
+    let mut markers = Vec::new();
+    for b in &r.bits {
+        let ok = b.passes(&probe);
+        if let Some(n) = id(&b.net) {
+            nets.push((n, if ok { good } else { bad }));
+        }
+        if let Some(at) = pin(&b.to) {
+            markers.push(Marker {
+                at,
+                color: if ok { good } else { bad },
+                label: match (b.setup, b.hold) {
+                    (Some(s), Some(h)) => format!("{} {s:+.0}/{h:+.0} ps", b.net),
+                    _ => format!("{} {:.0} ps", b.net, b.window[1] - b.window[0]),
+                },
+            });
+        }
+    }
+    if let Some(s) = &r.strobe {
+        for name in s.net.split(" / ") {
+            if let Some(n) = id(name) {
+                nets.push((n, strobe));
+            }
+        }
+    }
+    Overlay {
+        title: format!("Bus timing ({} bits)", r.bits.len()),
+        markers,
+        nets,
+        image: None,
+        legend: vec![
+            (good, "meets timing".into()),
+            (bad, "fails".into()),
+            (strobe, "strobe".into()),
+        ],
+        on: true,
+    }
 }

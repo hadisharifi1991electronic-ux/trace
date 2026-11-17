@@ -190,6 +190,13 @@ checker and simulator all read.
   its own pattern) and adds their near- and far-end crosstalk; the window
   lists them and gives the noise at the receiver and the eye without it.
   Save picture… writes it as SVG
+- see analysis results on the board: the EMI check marks each finding
+  and draws the nets with a high finding red, the thermal solve lays its
+  temperature map and each part's junction temperature over the board,
+  and the bus simulation colours each bit's net green (meets timing) or
+  red (fails). The "Results on the board" box in the corner hides or
+  removes each one. Every long job (solves, optimisers, tuners, the
+  autorouter) has a Cancel button beside its spinner
 - export ODB++ (File → Export ODB++): one `.tgz` job with every copper,
   mask, paste, silkscreen, drill (plated, non-plated, blind and buried
   spans) and mechanical layer, the board profile, both component layers,

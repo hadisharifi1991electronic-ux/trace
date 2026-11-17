@@ -111,7 +111,9 @@ impl AutoWindow {
                         let b = board.clone();
                         let (tx, rx) = channel();
                         let ctx2 = ctx.clone();
+                        let token = crate::jobs::start(ui.ctx(), "autoroute");
                         std::thread::spawn(move || {
+                            let _g = token.install();
                             let t = std::time::Instant::now();
                             let (edits, r) = autoroute(&b, &goal);
                             let took = format!("{:.1} s", t.elapsed().as_secs_f64());
@@ -141,6 +143,9 @@ impl AutoWindow {
                         Err(std::sync::mpsc::TryRecvError::Empty) => {
                             ui.horizontal(|ui| {
                                 ui.spinner();
+                                if crate::jobs::cancel_button(ui, "autoroute") {
+                                    // It stops and keeps what is done so far.
+                                }
                                 ui.label("Routing…");
                             });
                         }

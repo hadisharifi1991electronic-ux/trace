@@ -344,7 +344,9 @@ impl PowerWindow {
                 let s = setup.clone();
                 let (tx, rx) = mpsc::channel();
                 let c = ctx.clone();
+                let token = crate::jobs::start(ui.ctx(), "ir");
                 std::thread::spawn(move || {
+                    let _g = token.install();
                     let _ = tx.send(pi::solve(&b, &s));
                     c.request_repaint();
                 });
@@ -353,6 +355,9 @@ impl PowerWindow {
             }
             if self.running.is_some() {
                 ui.spinner();
+                if crate::jobs::cancel_button(ui, "ir") {
+                    self.running = None;
+                }
                 ui.label("Solving…");
             }
             if let Some((setup, Ok(r))) = &self.result {

@@ -427,7 +427,9 @@ impl ViaWindow {
                 let prog = Arc::new(Mutex::new((0.0, String::new())));
                 let p2 = prog.clone();
                 let c = ctx.clone();
+                let token = crate::jobs::start(ctx, "via-size");
                 std::thread::spawn(move || {
+                    let _g = token.install();
                     let r = viaopt::size_to(&st, &base, target, &goal, &|f, what| {
                         if let Ok(mut p) = p2.lock() {
                             *p = (f, what.to_string());
@@ -439,8 +441,11 @@ impl ViaWindow {
                 self.sized_note = None;
                 self.sizing = Some((rx, prog));
             }
-            if let Some((_, p)) = &self.sizing {
+            if let Some(p) = self.sizing.as_ref().map(|(_, p)| p.clone()) {
                 ui.spinner();
+                if crate::jobs::cancel_button(ui, "via-size") {
+                    self.sizing = None;
+                }
                 if let Ok(p) = p.lock() {
                     ui.label(format!("{:.0} %: sizing, {}", p.0 * 100.0, p.1));
                 }
@@ -460,7 +465,9 @@ impl ViaWindow {
                 let prog = Arc::new(AtomicU32::new(0));
                 let p2 = prog.clone();
                 let c = ctx.clone();
+                let token = crate::jobs::start(ctx, "via");
                 std::thread::spawn(move || {
+                    let _g = token.install();
                     let progress = |f: f64| {
                         p2.store((f * 1000.0) as u32, Ordering::Relaxed);
                     };
@@ -483,8 +490,12 @@ impl ViaWindow {
                 self.result = Some((self.setup.clone(), Err(String::new())));
                 self.running = Some((rx, prog));
             }
-            if let Some((_, p)) = &self.running {
+            if let Some(p) = self.running.as_ref().map(|(_, p)| p.clone()) {
                 ui.spinner();
+                if crate::jobs::cancel_button(ui, "via") {
+                    self.running = None;
+                    self.result = None;
+                }
                 // Steps are bounded generously, so most runs end early.
                 ui.label(format!(
                     "Solving… ({} % of the step limit)",
@@ -613,7 +624,9 @@ impl ViaWindow {
                 let prog = Arc::new(Mutex::new((0.0, String::new())));
                 let p2 = prog.clone();
                 let c = ctx.clone();
+                let token = crate::jobs::start(ctx, "via-opt");
                 std::thread::spawn(move || {
+                    let _g = token.install();
                     let r = viaopt::optimise(&st, &base, &goal, &|f, what| {
                         if let Ok(mut p) = p2.lock() {
                             *p = (f, what.to_string());
@@ -641,8 +654,11 @@ impl ViaWindow {
             );
             ui.checkbox(&mut self.opt_backdrill, "backdrill")
                 .on_hover_text("Also try backdrilling the stub away (costs a fab step)");
-            if let Some((_, p)) = &self.opt_running {
+            if let Some(p) = self.opt_running.as_ref().map(|(_, p)| p.clone()) {
                 ui.spinner();
+                if crate::jobs::cancel_button(ui, "via-opt") {
+                    self.opt_running = None;
+                }
                 if let Ok(p) = p.lock() {
                     ui.label(format!("{:.0} %: trying {}", p.0 * 100.0, p.1));
                 }

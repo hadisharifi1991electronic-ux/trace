@@ -3,6 +3,31 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.79.0 (2026-11-17)
+
+- Analysis results on the board. The EMI check, the thermal solve and
+  the bus simulation now draw their results over the board as well as
+  in their windows:
+  - EMI: a marker at each finding (red high, orange medium, blue low,
+    labelled with the kind and net) and the nets with a high finding
+    drawn red.
+  - Thermal: the temperature map of the layer picked in the window laid
+    over the board, with each part's junction temperature beside it.
+  - Bus: each bit's net green when it meets setup and hold, red when it
+    fails, the strobe blue, and the margins at the receiver pin.
+  While coloured nets are shown the rest of the board is dimmed. A
+  "Results on the board" box in the canvas's top right corner lists
+  them, with a tick to hide each and a cross to remove it; the
+  analysis windows stay on top of it. Labels that would cover another
+  are left out until you zoom in.
+- Cancel. Every long job has a "✖ Cancel" button beside its spinner:
+  via solve, via sizing, via optimiser, thermal, bus simulation, path
+  loss (and its tuner and CTLE/FFE optimiser), PDN (and its decap
+  optimiser), IR drop, impedance check, pair cross-sections, via
+  stitching and fences, the autorouter and BOM pricing. The solver
+  stops at its next check (within a second or two) and frees the CPU;
+  the autorouter keeps the nets it has already routed.
+
 ## 0.78.0 (2026-11-17)
 
 - Via sizing (`trace via --target`, the via window's Solve with a

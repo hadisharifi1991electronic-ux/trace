@@ -187,7 +187,9 @@ impl ZWindow {
                         let prog = Arc::new(Mutex::new((0.0, String::new())));
                         let p2 = prog.clone();
                         let c = ctx.clone();
+                        let token = crate::jobs::start(ui.ctx(), "zcheck");
                         std::thread::spawn(move || {
+                            let _g = token.install();
                             let r = zcheck::check(&b, &st, &goal, &|f, what| {
                                 if let Ok(mut p) = p2.lock() {
                                     *p = (f, what.to_string());
@@ -207,6 +209,9 @@ impl ZWindow {
                     if let Some((_, p)) = &self.running {
                         let (f, what) = p.lock().map(|p| p.clone()).unwrap_or_default();
                         ui.spinner();
+                        if crate::jobs::cancel_button(ui, "zcheck") {
+                            self.running = None;
+                        }
                         ui.label(format!("{:.0} %: {what}", f * 100.0));
                     }
                 });

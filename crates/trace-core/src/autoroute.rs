@@ -468,6 +468,10 @@ pub fn autoroute(board: &Board, goal: &Goal) -> (Vec<Edit>, Report) {
             std::mem::take(&mut failed)
         };
         for (net, a, b, _) in list {
+            // Cancelled: stop here and keep what is routed.
+            if crate::cancel::cancelled() {
+                break;
+            }
             let rule = rules.get(net as usize).copied().unwrap_or((None, None));
             let width = goal.width.or(rule.0).unwrap_or(base_w);
             let clearance = goal.clearance.or(rule.1).unwrap_or(base_c);

@@ -1853,6 +1853,9 @@ pub fn optimise(model: &Model, start: &[Option<CapModel>]) -> Plan {
     let mut score = score_of(&e.z);
     // 1. Values, site by site, while that lowers the worst.
     for _ in 0..4 {
+        if crate::cancel::cancelled() {
+            break;
+        }
         let mut better = false;
         for k in 0..model.decaps.len() {
             let a = fc + k;
@@ -1888,6 +1891,9 @@ pub fn optimise(model: &Model, start: &[Option<CapModel>]) -> Plan {
     // 2. Off with what is not needed, while under the target.
     if has_target && score <= 1e-9 {
         loop {
+            if crate::cancel::cancelled() {
+                break;
+            }
             let mut best: Option<(f64, usize)> = None;
             for k in 0..model.decaps.len() {
                 if caps[k].is_none() {

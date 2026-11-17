@@ -3,6 +3,19 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.77.1 (2026-11-17)
+
+- Return path (DRC and the EMI check): a track's reference is now the
+  nearest two planes on each side, not only the layers right next to
+  it, so a partly poured mixed or signal layer beside the track no
+  longer hides the solid plane beyond it. On the ADRV9026 board this
+  removes the "plane gap" alarms on L11_DSIG, whose real references
+  are L9_DGND and L13_DPWR.
+- EMI check severity follows the net's speed: a split or gap is high
+  for a fast edge (knee at 100 MHz or more, given or a clock by name),
+  medium for a pair whose speed isn't given, low for a slow net given
+  with --net; a short gap is one step less.
+
 ## 0.77.0 (2026-11-17)
 
 - EMI check (`trace emi`, Tools > Signal and power integrity > EMI

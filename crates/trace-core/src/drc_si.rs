@@ -247,6 +247,50 @@ pub(crate) fn heights(board: &Board) -> Vec<(Option<f64>, Option<f64>)> {
 
 // --------------------------------------------------------- return path
 
+/// The plane layers a track on copper layer `l` can return in: on each
+/// side, the nearest two planes (a signal layer between does not stop
+/// the field), with their distance from the layer, mil; nearest first.
+/// Two are kept so that a partly poured mixed layer next to the track
+/// does not hide the solid plane beyond it.
+pub(crate) fn plane_refs(
+    planes: &Planes,
+    geo: &[crate::impedance::LayerGeometry],
+    l: usize,
+) -> Vec<(usize, f64)> {
+    let n = planes.layers.len();
+    let mut refs: Vec<(usize, f64)> = Vec::new();
+    let gap = |k: usize, up: bool| -> f64 {
+        geo.get(k)
+            .and_then(|g| if up { g.above } else { g.below })
+            .unwrap_or(5.0)
+    };
+    let thick = |k: usize| geo.get(k).map_or(1.4, |g| g.t);
+    // Up.
+    let (mut d, mut found, mut k) = (0.0, 0, l);
+    while k > 0 && found < 2 {
+        d += gap(k, true);
+        k -= 1;
+        if planes.is_plane(k) {
+            refs.push((k, d));
+            found += 1;
+        }
+        d += thick(k);
+    }
+    // Down.
+    let (mut d, mut found, mut k) = (0.0, 0, l);
+    while k + 1 < n && found < 2 {
+        d += gap(k, false);
+        k += 1;
+        if planes.is_plane(k) {
+            refs.push((k, d));
+            found += 1;
+        }
+        d += thick(k);
+    }
+    refs.sort_by(|a, b| a.1.total_cmp(&b.1));
+    refs
+}
+
 /// The return path findings alone (for the EMI check).
 pub(crate) fn return_path_hits(board: &Board, planes: &Planes) -> Vec<Violation> {
     let mut out = Vec::new();
@@ -384,7 +428,7 @@ fn return_path(board: &Board, planes: &Planes, out: &mut Vec<Violation>) {
             }
         }
     }
-    let hs = heights(board);
+    let geo = crate::impedance::layer_geometry(&board.stackup);
     let own = Own::new(board);
     let name = |n: Option<u32>| {
         n.and_then(|n| board.nets.get(n as usize))
@@ -397,19 +441,11 @@ fn return_path(board: &Board, planes: &Planes, out: &mut Vec<Violation>) {
             continue;
         }
         let l = run.layer as usize;
-        // The planes next to the layer, nearest first.
-        let (up, down) = hs.get(l).copied().unwrap_or((None, None));
-        let mut refs: Vec<(usize, f64)> = Vec::new();
-        if l > 0 && planes.is_plane(l - 1) {
-            refs.push((l - 1, up.unwrap_or(f64::MAX)));
-        }
-        if l + 1 < n && planes.is_plane(l + 1) {
-            refs.push((l + 1, down.unwrap_or(f64::MAX)));
-        }
+        // The planes on each side of the layer, nearest first.
+        let refs = plane_refs(planes, &geo, l);
         if refs.is_empty() {
             continue;
         }
-        refs.sort_by(|a, b| a.1.total_cmp(&b.1));
         let nearest: Vec<usize> = refs
             .iter()
             .filter(|r| r.1 <= refs[0].1 + 1e-6)

@@ -440,7 +440,6 @@ pub fn check(board: &Board, setup: &EmiSetup) -> EmiResult {
         }
     }
     let planes = Planes::new(board);
-    let hs = si::heights(board);
     let geo = crate::impedance::layer_geometry(&board.stackup);
     let ncu = planes.layers.len().max(geo.len());
     let net_name = |n: u32| {
@@ -480,12 +479,24 @@ pub fn check(board: &Board, setup: &EmiSetup) -> EmiResult {
             continue;
         }
         let split = v.rule.starts_with("crosses a split");
+        // How much it matters: a fast edge (knee at 100 MHz or more,
+        // given or a clock by name) high; a pair whose speed is not
+        // given medium; a slow net given low. A short gap one step less.
+        let base = match fast.get(&net) {
+            Some((f, _)) if 0.35 / f.rise >= 100e6 => Severity::High,
+            Some(_) => Severity::Low,
+            None => Severity::Medium,
+        };
+        let severity = if split || v.found > 4.0 * v.need {
+            base
+        } else {
+            match base {
+                Severity::High => Severity::Medium,
+                _ => Severity::Low,
+            }
+        };
         findings.push(Finding {
-            severity: if split || v.found > 4.0 * v.need {
-                Severity::High
-            } else {
-                Severity::Medium
-            },
+            severity,
             kind: if split { "split" } else { "plane gap" },
             net: net_name(net),
             layer: v.layer.map(|l| layer_name(l as usize)),
@@ -506,16 +517,10 @@ pub fn check(board: &Board, setup: &EmiSetup) -> EmiResult {
     }
     // Per copper layer, the plane layers next to it, nearest first.
     let refs_of = |l: usize| -> Vec<usize> {
-        let (up, down) = hs.get(l).copied().unwrap_or((None, None));
-        let mut r: Vec<(usize, f64)> = Vec::new();
-        if l > 0 && planes.is_plane(l - 1) {
-            r.push((l - 1, up.unwrap_or(f64::MAX)));
-        }
-        if l + 1 < ncu && planes.is_plane(l + 1) {
-            r.push((l + 1, down.unwrap_or(f64::MAX)));
-        }
-        r.sort_by(|a, b| a.1.total_cmp(&b.1));
-        r.into_iter().map(|x| x.0).collect()
+        si::plane_refs(&planes, &geo, l)
+            .into_iter()
+            .map(|x| x.0)
+            .collect()
     };
     // 2. Layer changes: the layers each fast net's tracks use at a via.
     let g = &board.geometry;
@@ -695,13 +700,9 @@ pub fn check(board: &Board, setup: &EmiSetup) -> EmiResult {
             continue;
         }
         let l = *l as usize;
-        let h = refs_of(l)
+        let h = si::plane_refs(&planes, &geo, l)
             .first()
-            .map(|&r| {
-                let (up, down) = hs.get(l).copied().unwrap_or((None, None));
-                if r < l { up } else { down }.unwrap_or(5.0)
-            })
-            .unwrap_or(5.0);
+            .map_or(5.0, |r| r.1);
         let need = (5.0 * h).max(25.0);
         let (a, b) = (pt(t.start), pt(t.end));
         let len = (b[0] - a[0]).hypot(b[1] - a[1]);

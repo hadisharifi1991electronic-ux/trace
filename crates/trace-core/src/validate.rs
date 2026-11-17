@@ -471,6 +471,56 @@ pub fn via_checks(progress: &dyn Fn(f64)) -> Vec<Check> {
             at_most: false,
         });
     }
+    // Accurate mode: three grids from 2 mil, extrapolated with error
+    // bars, against a solve on a finer grid than any of them. Honest bars
+    // hold the finer answer (it is nearer the limit than the grids used).
+    let mut acc = via.clone();
+    acc.cell = 2.0;
+    acc.points = 20;
+    let tol = fdtd::Tolerance {
+        s11_db: 0.0,
+        s21_db: 0.0,
+        max_runs: 3,
+        ..fdtd::Tolerance::default()
+    };
+    let a = fdtd::converge(&st, &acc, &tol, &share(0.75, 0.85));
+    let mut finer = acc.clone();
+    finer.cell = 0.7;
+    let f = fdtd::solve_with(&st, &finer, &share(0.85, 0.95));
+    if let (Ok(a), Ok(f)) = (a, f) {
+        let b = &a.best;
+        let n = b.f.len().min(f.f.len());
+        let outside = (0..n)
+            .filter(|&k| {
+                let d11 = b.s11[k].add(f.s11[k].scale(-1.0)).abs();
+                let d21 = b.s21[k].add(f.s21[k].scale(-1.0)).abs();
+                d11 > b.err11[k] + 1e-4 || d21 > b.err21[k] + 1e-4
+            })
+            .count();
+        out.push(Check {
+            group: g,
+            name: "Accurate mode (2, 1.4, 1 mil, extrapolated): points where a 0.7 mil solve falls outside the error bars".into(),
+            reference: "honesty (the error bars must hold a finer grid's answer)",
+            want: 0.0,
+            got: 100.0 * outside as f64 / n.max(1) as f64,
+            unit: "%",
+            limit: 10.0,
+            abs: true,
+            at_most: true,
+        });
+        let q = fdtd::quality(b);
+        out.push(Check {
+            group: g,
+            name: "Accurate mode: impulse energy before t = 0".into(),
+            reference: "exact (a via is causal; band limit allows 2%)",
+            want: 0.0,
+            got: 100.0 * q.noncausal,
+            unit: "%",
+            limit: 2.0,
+            abs: true,
+            at_most: true,
+        });
+    }
     // A stub's notch, coarse and fine.
     let sb = board_of("SGSGGGGS", 12.0);
     let mut stub = ViaSetup::new(0, 2);
@@ -481,9 +531,9 @@ pub fn via_checks(progress: &dyn Fn(f64)) -> Vec<Check> {
     stub.antipad = 40.0;
     stub.return_dist = 45.0;
     stub.cell = 2.0;
-    let c = fdtd::solve_with(&sb, &stub, &share(0.75, 0.82));
+    let c = fdtd::solve_with(&sb, &stub, &share(0.95, 0.97));
     stub.cell = 1.0;
-    let f = fdtd::solve_with(&sb, &stub, &share(0.82, 1.0));
+    let f = fdtd::solve_with(&sb, &stub, &share(0.97, 1.0));
     if let (Ok(c), Ok(f)) = (c, f) {
         if let (Some(nc), Some(nf)) = (c.notch(), f.notch()) {
             out.push(Check {

@@ -749,8 +749,9 @@ pub(crate) fn placeholder(value: &str) -> bool {
         ]
         .iter()
         .any(|k| {
-            v == *k
-                || v.starts_with(k) && !v[k.len()..].starts_with(|c: char| c.is_ascii_alphabetic())
+            // "TBD0201" is a placeholder; "NC7WZ16" (a logic part) is not.
+            let next = |c: char| c.is_ascii_alphabetic() || k.len() <= 2 && c.is_ascii_digit();
+            v == *k || v.starts_with(k) && !v[k.len()..].starts_with(next)
         })
 }
 
@@ -3858,5 +3859,7 @@ mod tests {
         assert!(!placeholder("18pF"));
         assert!(!placeholder("0R"));
         assert!(!placeholder("NCP18XH103"));
+        assert!(!placeholder("NC7WV125K8X"));
+        assert!(placeholder("NC-0402"));
     }
 }

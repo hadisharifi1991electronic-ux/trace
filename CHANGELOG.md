@@ -3,6 +3,40 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.74.0 (2026-11-17)
+
+- Accurate 3D via solves (`trace via ... --accurate [dB]`, Accurate in
+  the via window): the via is solved on finer and finer grids (0.7
+  times the cell each time) until |S11| and |S21| stop moving, up to 4
+  grids and 9 M cells. When the last three grids converge steadily
+  the answer is extrapolated to a zero cell size (Richardson); every
+  frequency gets an error bar from Roache's grid convergence index
+  (1.25 times the step to the limit, or 3 times when the grids are not
+  yet converging steadily, keeping the finest grid). The table shows
+  each grid's worst S11, S21 and via impedance, then the dB range of
+  S11 and S21 per frequency.
+- Conformal metal (Dey-Mittra) is now on in every via solve: round
+  barrels, pads and antipads cut the grid cells where they really are
+  instead of in steps, and the faces they cut use only their free
+  edges and area (thin slivers borrow area so the time step stays
+  stable, at about 20% more steps). On a through via the 2 mil grid
+  went from 59.1 to 53.0 ohm and S11 at 5 GHz from -24.3 to -32.9 dB,
+  where a 0.55 mil stepped grid (20 times the time) gives 53.7 ohm and
+  -31.4 dB; the stepped grid's error on low return loss was 5 to 18 dB.
+  `--staircase` gives the old grid.
+- Every via solve ends with a physics check: passivity (|S11|^2 +
+  |S21|^2 at most 1) and causality (impulse response energy well
+  before t = 0, allowing for the band limit).
+- `trace sparam check file.sNp...`: passivity (largest singular value
+  of S at each frequency), reciprocity (Sij = Sji) and causality of
+  any Touchstone file, from Trace, a vendor or another solver.
+- `trace validate` checks that accurate mode's error bars hold a finer
+  grid's answer and that its result is causal.
+- BOM: logic parts whose value starts with NC (NC7WZ16, NC7WV125) are
+  no longer read as not connected, and passive footprint names such as
+  R0201 or C0603 at the end of an Allegro device type are dropped
+  whatever the placed footprint (R701-R703 join their E-number line).
+
 ## 0.73.0 (2026-11-17)
 
 - Rigid-flex in 3D: the 3D view gets a Fold slider (shown when the

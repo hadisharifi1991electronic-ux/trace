@@ -113,6 +113,12 @@ pub struct ViaSetup {
     /// Er and Df for every dielectric layer, in place of the stack-up's.
     pub er: Option<f64>,
     pub df: Option<f64>,
+    /// Conformal metal (Dey-Mittra): round pads, barrels and antipads cut
+    /// cells where they really are instead of in steps, so a coarse grid
+    /// lands nearer the converged answer (at 25% more time steps). On
+    /// by default: on a through via a 2 mil conformal grid gave what a
+    /// 0.55 mil stepped one did, at a twentieth of the time.
+    pub conformal: bool,
 }
 
 impl ViaSetup {
@@ -138,6 +144,7 @@ impl ViaSetup {
             rough_um: 1.0,
             er: None,
             df: None,
+            conformal: true,
         }
     }
 }
@@ -173,6 +180,10 @@ pub struct ViaResult {
     /// same S11 at low frequencies (a TDR would show about this).
     pub z_via: Option<f64>,
     pub notes: Vec<String>,
+    /// Uncertainty of S11 and S21 at each frequency (linear magnitude),
+    /// from the grid refinement of an accurate solve; empty otherwise.
+    pub err11: Vec<f64>,
+    pub err21: Vec<f64>,
 }
 
 impl ViaResult {
@@ -939,7 +950,9 @@ pub fn solve_with(
     let (dx, dy, dz) = (prim(&x), prim(&y), prim(&z));
     let (ddx, ddy, ddz) = (dual(&x), dual(&y), dual(&z));
     let dmin = |v: &[f64]| v.iter().cloned().fold(f64::MAX, f64::min);
-    let dt = 0.95
+    let conformal = setup.conformal && !thru;
+    // Corrected faces update up to 1.5 times faster than plain ones.
+    let dt = if conformal { 0.78 } else { 0.95 }
         / (C0
             * (1.0 / dmin(&dx).powi(2) + 1.0 / dmin(&dy).powi(2) + 1.0 / dmin(&dz).powi(2)).sqrt());
     // Material per cell (Er, conductivity) from the slab the cell's
@@ -998,13 +1011,43 @@ pub fn solve_with(
             }
         }
     }
+    // Round metal sits at its true edge when conformal (an edge only
+    // partly in metal stays free and its faces are corrected below).
+    let edge_r = if conformal {
+        std::env::var("FDTD_CONF_EDGE")
+            .ok()
+            .and_then(|v| v.parse::<f64>().ok())
+            .unwrap_or(0.0)
+            * d0
+    } else {
+        edge
+    };
+    // Share of the segment a to b outside metal, from 16 samples.
+    let free_of = |a: [f64; 2], b: [f64; 2], metal: &dyn Fn([f64; 2]) -> bool| -> f64 {
+        let n = 16;
+        let mut free = 0;
+        for m in 0..n {
+            let t = (m as f64 + 0.5) / n as f64;
+            if !metal([a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]) {
+                free += 1;
+            }
+        }
+        free as f64 / n as f64
+    };
+    // Whether an edge from a to b is metal: its middle when staircased,
+    // all of it when conformal.
+    let covered = |a: [f64; 2], b: [f64; 2], metal: &dyn Fn([f64; 2]) -> bool| -> bool {
+        if conformal {
+            free_of(a, b, metal) == 0.0
+        } else {
+            metal([(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0])
+        }
+    };
     // Metal: edges set to zero coefficients.
     let pec = |v: &mut Vec<f32>, w: &mut Vec<f32>, c: usize| {
         v[c] = 0.0;
         w[c] = 0.0;
     };
-    let xm = |i: usize| (x[i] + x[i + 1]) / 2.0;
-    let ym = |j: usize| (y[j] + y[j + 1]) / 2.0;
     let inside = |p: [f64; 2], cs: &[[f64; 2]], r: f64| {
         cs.iter()
             .any(|c| (p[0] - c[0]).hypot(p[1] - c[1]) <= r + 1e-9)
@@ -1013,11 +1056,12 @@ pub fn solve_with(
     let oval = setup.antipad_oval && sig.len() == 2;
     let clear = |p: [f64; 2]| {
         if oval {
-            seg_dist(p, sig[0], sig[1]) <= ra + edge + 1e-9
+            seg_dist(p, sig[0], sig[1]) <= ra + edge_r + 1e-9
         } else {
-            inside(p, &sig, ra + edge)
+            inside(p, &sig, ra + edge_r)
         }
     };
+    let solid = |p: [f64; 2]| thru || !clear(p);
     for (l, &is_plane) in planes.iter().enumerate() {
         if !is_plane {
             continue;
@@ -1025,10 +1069,10 @@ pub fn solve_with(
         let k = ksheet[l];
         for i in 0..=nx {
             for j in 0..=ny {
-                if i < nx && (thru || !clear([xm(i), y[j]])) {
+                if i < nx && covered([x[i], y[j]], [x[i + 1], y[j]], &solid) {
                     pec(&mut cax, &mut cbx, id(i, j, k));
                 }
-                if j < ny && (thru || !clear([x[i], ym(j)])) {
+                if j < ny && covered([x[i], y[j]], [x[i], y[j + 1]], &solid) {
                     pec(&mut cay, &mut cby, id(i, j, k));
                 }
             }
@@ -1040,12 +1084,13 @@ pub fn solve_with(
     pad_layers.dedup();
     for &l in pad_layers.iter().filter(|_| !thru) {
         let k = ksheet[l];
+        let on_pad = |p: [f64; 2]| inside(p, &sig, rp - edge_r);
         for i in 0..=nx {
             for j in 0..=ny {
-                if i < nx && inside([xm(i), y[j]], &sig, rp - edge) {
+                if i < nx && covered([x[i], y[j]], [x[i + 1], y[j]], &on_pad) {
                     pec(&mut cax, &mut cbx, id(i, j, k));
                 }
-                if j < ny && inside([x[i], ym(j)], &sig, rp - edge) {
+                if j < ny && covered([x[i], y[j]], [x[i], y[j + 1]], &on_pad) {
                     pec(&mut cay, &mut cby, id(i, j, k));
                 }
             }
@@ -1061,17 +1106,25 @@ pub fn solve_with(
                   cby: &mut Vec<f32>,
                   caz: &mut Vec<f32>,
                   cbz: &mut Vec<f32>| {
-        let rd = (rd - edge).max(0.0);
+        let rd = (rd - edge_r).max(0.0);
+        let metal = |p: [f64; 2]| inside(p, cs, rd);
         for i in 0..=nx {
             for j in 0..=ny {
+                // Only edges near a barrel can touch it.
+                if !inside([x[i], y[j]], cs, rd + 2.0 * dmax) {
+                    continue;
+                }
+                let ex_in = i < nx && covered([x[i], y[j]], [x[i + 1], y[j]], &metal);
+                let ey_in = j < ny && covered([x[i], y[j]], [x[i], y[j + 1]], &metal);
+                let ez_in = metal([x[i], y[j]]);
                 for k in k0..=k1 {
-                    if k < k1 && inside([x[i], y[j]], cs, rd) {
+                    if k < k1 && ez_in {
                         pec(caz, cbz, id(i, j, k));
                     }
-                    if i < nx && inside([xm(i), y[j]], cs, rd) {
+                    if ex_in {
                         pec(cax, cbx, id(i, j, k));
                     }
-                    if j < ny && inside([x[i], ym(j)], cs, rd) {
+                    if ey_in {
                         pec(cay, cby, id(i, j, k));
                     }
                 }
@@ -1117,6 +1170,8 @@ pub fn solve_with(
         near(&x, probe_at + gap),
     ];
     let mut trace_rows: Vec<[Vec<usize>; 2]> = Vec::new(); // per signal via: j nodes of each trace
+                                                           // Each trace's metal: (node level, x0, x1, y0, y1) in mil.
+    let mut rects: Vec<(usize, f64, f64, f64, f64)> = Vec::new();
     for c in &sig {
         let mut rows: [Vec<usize>; 2] = [Vec::new(), Vec::new()];
         for (t, &l) in [from, to].iter().enumerate() {
@@ -1135,6 +1190,7 @@ pub fn solve_with(
             } else {
                 (near(&x, 0.0), x_port[1])
             };
+            rects.push((k, x[i0], x[i1], y[js[0]], y[*js.last().unwrap()]));
             for i in i0..=i1 {
                 for &j in &js {
                     if i < i1 {
@@ -1257,6 +1313,194 @@ pub fn solve_with(
     let inv = |v: &[f64]| -> Vec<f32> { v.iter().map(|d| (1.0 / d) as f32).collect() };
     let (ipx, ipy, ipz) = (inv(&dx), inv(&dy), inv(&dz));
     let (idx, idy, idz) = (inv(&ddx), inv(&ddy), inv(&ddz));
+    // Conformal faces (Dey-Mittra): a face that metal cuts sees E only on
+    // the free part of its edges, over its free area. Each entry: (H
+    // component 0 x, 1 y, 2 z; cell; the extra E terms as (E component,
+    // cell, weight)), applied after the plain H update. Faces whose free
+    // area is too small for their edges stay staircased.
+    type Face = (u8, usize, Vec<(u8, usize, f32)>);
+    let mut faces: Vec<Face> = Vec::new();
+    let (mut kept, mut skipped) = (0usize, 0usize);
+    if conformal {
+        let sig_span = (ksheet[via_top], ksheet[via_bot]);
+        let ret_span = (ksheet[0], ksheet[nl - 1]);
+        let is_plane: Vec<bool> = (0..=nz)
+            .map(|k| (0..nl).any(|l| planes[l] && ksheet[l] == k))
+            .collect();
+        let is_pad: Vec<bool> = (0..=nz)
+            .map(|k| pad_layers.iter().any(|&l| ksheet[l] == k))
+            .collect();
+        let rd_c = (rd - edge_r).max(0.0);
+        let rp_c = rp - edge_r;
+        let has_ret = !ret.is_empty();
+        let metal_v = |k: usize, p: [f64; 2]| -> bool {
+            k >= sig_span.0 && k < sig_span.1 && inside(p, &sig, rd_c)
+                || has_ret && k >= ret_span.0 && k < ret_span.1 && inside(p, &ret, rd_c)
+        };
+        let metal_h = |k: usize, p: [f64; 2]| -> bool {
+            is_plane[k] && !clear(p)
+                || is_pad[k] && inside(p, &sig, rp_c)
+                || k >= sig_span.0 && k <= sig_span.1 && inside(p, &sig, rd_c)
+                || has_ret && k >= ret_span.0 && k <= ret_span.1 && inside(p, &ret, rd_c)
+                || rects.iter().any(|r| {
+                    r.0 == k
+                        && p[0] >= r.1 - 1e-9
+                        && p[0] <= r.2 + 1e-9
+                        && p[1] >= r.3 - 1e-9
+                        && p[1] <= r.4 + 1e-9
+                })
+        };
+        let level = |k: usize| {
+            is_plane[k]
+                || is_pad[k]
+                || k >= sig_span.0 && k <= sig_span.1
+                || has_ret && k >= ret_span.0 && k <= ret_span.1
+        };
+        let reach = core + dmax;
+        let ia = x.partition_point(|&v| v < -reach).saturating_sub(1).max(1);
+        let ib = x.partition_point(|&v| v <= reach).min(nx);
+        let ja = y
+            .partition_point(|&v| v < -reach - half_pair)
+            .saturating_sub(1)
+            .max(1);
+        let jb = y.partition_point(|&v| v <= reach + half_pair).min(ny);
+        // (E component, cell, free share, sign, plain weight 1/d).
+        type Side = (u8, usize, f64, f64, f32);
+        let mut push = |comp: u8, c: usize, af: f64, sides: [Side; 4]| {
+            let most = sides.iter().map(|e| e.2).fold(0.0, f64::max);
+            if most <= 0.0 || af >= 0.999 && sides.iter().all(|e| e.2 >= 0.999) {
+                return;
+            }
+            // A sliver (little free area beside a long free edge) would
+            // need a shorter time step: it borrows area up to the stable
+            // ratio instead.
+            let af = if most / af.max(1e-9) > 1.5 {
+                skipped += 1;
+                most / 1.5
+            } else {
+                af
+            };
+            let list: Vec<(u8, usize, f32)> = sides
+                .iter()
+                .filter(|e| e.2 > 0.0 && (e.2 / af - 1.0).abs() > 1e-6)
+                .map(|e| (e.0, e.1, (e.3 * (e.2 / af - 1.0)) as f32 * e.4))
+                .collect();
+            if !list.is_empty() {
+                kept += 1;
+                faces.push((comp, c, list));
+            }
+        };
+        let free_v = |k: usize, p: [f64; 2]| if metal_v(k, p) { 0.0 } else { 1.0 };
+        for k in 0..=nz {
+            let lk = level(k);
+            let lk1 = k < nz && level(k + 1);
+            for i in ia..ib {
+                for j in ja..jb {
+                    let (x0, x1, y0, y1) = (x[i], x[i + 1], y[j], y[j + 1]);
+                    // Hz (i+½, j+½, k).
+                    if lk && k >= 1 && k < nz {
+                        let m = |p: [f64; 2]| metal_h(k, p);
+                        let mut a = 0;
+                        for u in 0..6 {
+                            for v in 0..6 {
+                                let px = x0 + (x1 - x0) * (u as f64 + 0.5) / 6.0;
+                                let py = y0 + (y1 - y0) * (v as f64 + 0.5) / 6.0;
+                                if !m([px, py]) {
+                                    a += 1;
+                                }
+                            }
+                        }
+                        push(
+                            2,
+                            id(i, j, k),
+                            a as f64 / 36.0,
+                            [
+                                (0, id(i, j, k), free_of([x0, y0], [x1, y0], &m), 1.0, ipy[j]),
+                                (
+                                    0,
+                                    id(i, j + 1, k),
+                                    free_of([x0, y1], [x1, y1], &m),
+                                    -1.0,
+                                    ipy[j],
+                                ),
+                                (
+                                    1,
+                                    id(i, j, k),
+                                    free_of([x0, y0], [x0, y1], &m),
+                                    -1.0,
+                                    ipx[i],
+                                ),
+                                (
+                                    1,
+                                    id(i + 1, j, k),
+                                    free_of([x1, y0], [x1, y1], &m),
+                                    1.0,
+                                    ipx[i],
+                                ),
+                            ],
+                        );
+                    }
+                    if k >= nz || !(lk || lk1) {
+                        continue;
+                    }
+                    let mh0 = |p: [f64; 2]| metal_h(k, p);
+                    let mh1 = |p: [f64; 2]| metal_h(k + 1, p);
+                    let mv = |p: [f64; 2]| metal_v(k, p);
+                    // Hx (i, j+½, k+½).
+                    push(
+                        0,
+                        id(i, j, k),
+                        free_of([x0, y0], [x0, y1], &mv),
+                        [
+                            (
+                                1,
+                                id(i, j, k),
+                                free_of([x0, y0], [x0, y1], &mh0),
+                                1.0,
+                                ipz[k],
+                            ),
+                            (
+                                1,
+                                id(i, j, k + 1),
+                                free_of([x0, y0], [x0, y1], &mh1),
+                                -1.0,
+                                ipz[k],
+                            ),
+                            (2, id(i, j, k), free_v(k, [x0, y0]), -1.0, ipy[j]),
+                            (2, id(i, j + 1, k), free_v(k, [x0, y1]), 1.0, ipy[j]),
+                        ],
+                    );
+                    // Hy (i+½, j, k+½).
+                    push(
+                        1,
+                        id(i, j, k),
+                        free_of([x0, y0], [x1, y0], &mv),
+                        [
+                            (
+                                0,
+                                id(i, j, k),
+                                free_of([x0, y0], [x1, y0], &mh0),
+                                -1.0,
+                                ipz[k],
+                            ),
+                            (
+                                0,
+                                id(i, j, k + 1),
+                                free_of([x0, y0], [x1, y0], &mh1),
+                                1.0,
+                                ipz[k],
+                            ),
+                            (2, id(i, j, k), free_v(k, [x0, y0]), 1.0, ipx[i]),
+                            (2, id(i + 1, j, k), free_v(k, [x1, y0]), -1.0, ipx[i]),
+                        ],
+                    );
+                }
+            }
+        }
+        notes.push(format!(
+            "conformal metal: {kept} faces cut where the round shapes really are ({skipped} slivers given a little extra area)"
+        ));
+    }
     let ch = (dt / MU0) as f32;
     // Excitation: a Gaussian down 20 dB at fmax.
     let tau = (10.0f64.ln()).sqrt() / (std::f64::consts::PI * setup.fmax_ghz * 1e9);
@@ -1343,6 +1587,21 @@ pub fn solve_with(
         update_h(
             &k3, &mut hx, &mut hy, &mut hz, &mut ph, &ex, &ey, &ez, chunk,
         );
+        for (comp, c, list) in &faces {
+            let mut acc = 0.0f32;
+            for &(ec, e, w) in list {
+                acc += w * match ec {
+                    0 => ex[e],
+                    1 => ey[e],
+                    _ => ez[e],
+                };
+            }
+            match comp {
+                0 => hx[*c] -= ch * acc,
+                1 => hy[*c] -= ch * acc,
+                _ => hz[*c] -= ch * acc,
+            }
+        }
         t_h += tq.elapsed().as_secs_f64();
         // Sample I (at time (n + ½) dt).
         for (s, pr) in probes.iter().enumerate() {
@@ -1687,6 +1946,8 @@ pub fn solve_with(
         power,
         z_via,
         notes,
+        err11: Vec::new(),
+        err21: Vec::new(),
     })
 }
 
@@ -1744,6 +2005,366 @@ pub fn check_mesh(
         d_s11_db: d11,
         d_s21_db: d21,
     })
+}
+
+/// How close an accurate solve must get.
+#[derive(Clone, Copy, Debug)]
+pub struct Tolerance {
+    /// Largest change in |S11| between the last two grids, dB (where
+    /// |S11| is above -40 dB).
+    pub s11_db: f64,
+    /// Largest change in |S21|, dB.
+    pub s21_db: f64,
+    /// Most cells the finest grid may have.
+    pub max_cells: usize,
+    /// Most grids to solve.
+    pub max_runs: usize,
+}
+
+impl Default for Tolerance {
+    fn default() -> Self {
+        Tolerance {
+            s11_db: 1.0,
+            s21_db: 0.05,
+            max_cells: 9_000_000,
+            max_runs: 4,
+        }
+    }
+}
+
+/// An accurate solve: the grids solved, and the result extrapolated to
+/// a zero cell size with its uncertainty.
+#[derive(Clone, Debug)]
+pub struct Converged {
+    pub runs: Vec<ViaResult>,
+    pub best: ViaResult,
+    /// The convergence order seen on the last three grids, if steady.
+    pub order: Option<f64>,
+    pub converged: bool,
+    /// Changes between the last two grids, dB.
+    pub d_s11_db: f64,
+    pub d_s21_db: f64,
+}
+
+impl Converged {
+    pub fn verdict(&self) -> String {
+        let mut out = String::new();
+        for r in &self.runs {
+            let n = r.f.len();
+            let worst = r.s11.iter().map(|s| s.db()).fold(f64::MIN, f64::max);
+            out.push_str(&format!(
+                "  grid {:.2} mil, {:.2} M cells: worst S11 {:.1} dB, S21 {:.3} dB at {:.1} GHz{}\n",
+                r.cell,
+                r.cells as f64 / 1e6,
+                worst,
+                r.s21[n - 1].db(),
+                r.f[n - 1],
+                r.z_via.map_or(String::new(), |z| format!(", via {z:.1} ohm"))
+            ));
+        }
+        out.push_str(&format!(
+            "  |S11| moved {:.2} dB and |S21| {:.3} dB between the last two; {}; {}",
+            self.d_s11_db,
+            self.d_s21_db,
+            if self.converged {
+                "converged"
+            } else {
+                "NOT converged within the limits, so the error bars are wide"
+            },
+            match self.order {
+                Some(p) => format!("extrapolated to zero cell size (order {p:.1})"),
+                None =>
+                    "the finest grid is kept (the changes are not yet shrinking steadily)".into(),
+            }
+        ));
+        out
+    }
+}
+
+/// Largest change in |S11| (where above -40 dB) and |S21| between two
+/// results, dB.
+fn moved(a: &ViaResult, b: &ViaResult) -> (f64, f64) {
+    let (mut d11, mut d21) = (0.0f64, 0.0f64);
+    for k in 0..a.f.len().min(b.f.len()) {
+        let (x, y) = (a.s11[k].db(), b.s11[k].db());
+        if x.max(y) > -40.0 {
+            d11 = d11.max((x - y).abs());
+        }
+        d21 = d21.max((a.s21[k].db() - b.s21[k].db()).abs());
+    }
+    (d11, d21)
+}
+
+/// The convergence order p from three grids h1 > h2 > h3, solving
+/// (h1^p - h2^p) / (h2^p - h3^p) = e12 / e23; None when the changes do
+/// not shrink like a power of the cell (the grids are not yet in the
+/// asymptotic range).
+fn order(h: [f64; 3], e12: f64, e23: f64) -> Option<f64> {
+    if e23 <= 1e-12 || e12 <= 1e-12 {
+        return None;
+    }
+    let want = e12 / e23;
+    let f = |p: f64| (h[0].powf(p) - h[1].powf(p)) / (h[1].powf(p) - h[2].powf(p)) - want;
+    let (mut a, mut b) = (0.5, 3.0);
+    if f(a) * f(b) > 0.0 {
+        return None;
+    }
+    for _ in 0..60 {
+        let m = (a + b) / 2.0;
+        if f(a) * f(m) <= 0.0 {
+            b = m;
+        } else {
+            a = m;
+        }
+    }
+    Some((a + b) / 2.0)
+}
+
+/// Solves on finer and finer grids (0.7 times each step) until S11 and
+/// S21 stop moving by more than `tol`, then extrapolates the last ones
+/// to a zero cell size (Richardson) and gives each frequency an error
+/// bar: how far the finest grid is from that limit.
+pub fn converge(
+    stackup: &Stackup,
+    setup: &ViaSetup,
+    tol: &Tolerance,
+    progress: &dyn Fn(f64),
+) -> Result<Converged, String> {
+    let mut runs: Vec<ViaResult> = Vec::new();
+    let mut s = setup.clone();
+    let mut converged = false;
+    let (mut d11, mut d21) = (f64::MAX, f64::MAX);
+    // Each grid costs about 2.9 times the last (and steps 1.4 times).
+    let weights = [1.0, 4.0, 12.0, 35.0, 100.0, 290.0];
+    let total: f64 = weights[..tol.max_runs.min(6)].iter().sum();
+    let mut done = 0.0;
+    while runs.len() < tol.max_runs.max(2) {
+        let w = weights[runs.len().min(5)] / total;
+        let r = solve_with(stackup, &s, &|p| progress((done + w * p).min(1.0)))?;
+        done += w;
+        if let Some(prev) = runs.last() {
+            if prev.f.len() != r.f.len() {
+                return Err("the grids gave different frequency points".into());
+            }
+            let (a, b) = moved(prev, &r);
+            d11 = a;
+            d21 = b;
+        }
+        let next_cells = (r.cells as f64 * 2.9) as usize;
+        let cell = r.cell;
+        runs.push(r);
+        if runs.len() >= 2 && d11 <= tol.s11_db && d21 <= tol.s21_db {
+            converged = true;
+            if runs.len() >= 3 {
+                break;
+            }
+        }
+        if next_cells > tol.max_cells || cell * 0.7 < 0.2 {
+            break;
+        }
+        s.cell = cell * 0.7;
+    }
+    progress(1.0);
+    let n = runs.len();
+    let last = runs[n - 1].clone();
+    if n < 2 {
+        return Ok(Converged {
+            best: last,
+            runs,
+            order: None,
+            converged: false,
+            d_s11_db: f64::NAN,
+            d_s21_db: f64::NAN,
+        });
+    }
+    let (a2, a3) = (&runs[n - 2], &runs[n - 1]);
+    let rms = |x: &ViaResult, y: &ViaResult| -> f64 {
+        let m = x.f.len();
+        let mut sum = 0.0;
+        for k in 0..m {
+            sum += x.s11[k].add(y.s11[k].scale(-1.0)).abs().powi(2)
+                + x.s21[k].add(y.s21[k].scale(-1.0)).abs().powi(2);
+        }
+        (sum / m.max(1) as f64).sqrt()
+    };
+    let fitted = if n >= 3 {
+        let a1 = &runs[n - 3];
+        order([a1.cell, a2.cell, a3.cell], rms(a1, a2), rms(a2, a3))
+    } else {
+        None
+    };
+    // Roache's grid convergence index: with an order seen on three grids
+    // extrapolate (S(0) = S3 + (S3 - S2) / (r^p - 1)) and take 1.25 times
+    // the step to the limit as the error; otherwise keep the finest grid
+    // and take 3 times its first-order distance to the limit.
+    let r = a2.cell / a3.cell;
+    let (p, fs, extrapolate) = match fitted {
+        Some(p) => (p, 1.25, true),
+        None => (1.0, 3.0, false),
+    };
+    let g = 1.0 / (r.powf(p) - 1.0);
+    let mut best = last.clone();
+    let ext = |x: Cx, y: Cx| {
+        if extrapolate {
+            y.add(y.add(x.scale(-1.0)).scale(g))
+        } else {
+            y
+        }
+    };
+    best.err11 = Vec::with_capacity(best.f.len());
+    best.err21 = Vec::with_capacity(best.f.len());
+    let mut power = 0.0f64;
+    for k in 0..best.f.len() {
+        let s11 = ext(a2.s11[k], a3.s11[k]);
+        let s21 = ext(a2.s21[k], a3.s21[k]);
+        let e11 = fs * g * a3.s11[k].add(a2.s11[k].scale(-1.0)).abs();
+        let e21 = fs * g * a3.s21[k].add(a2.s21[k].scale(-1.0)).abs();
+        best.err11.push(e11);
+        best.err21.push(e21);
+        power = power.max(s11.abs().powi(2) + s21.abs().powi(2));
+        best.s11[k] = s11;
+        best.s21[k] = s21;
+    }
+    if power > 1.0 {
+        let sc = 1.0 / power.sqrt();
+        for k in 0..best.f.len() {
+            best.s11[k] = best.s11[k].scale(sc);
+            best.s21[k] = best.s21[k].scale(sc);
+        }
+    }
+    best.notes.retain(|n| !n.starts_with("the grid gave up to"));
+    best.notes.push(format!(
+        "accurate solve: {} grids down to {:.2} mil, {}{}",
+        n,
+        a3.cell,
+        match fitted {
+            Some(p) => format!("extrapolated to zero cell size (order {p:.1})"),
+            None => "finest grid kept (changes not yet shrinking steadily)".into(),
+        },
+        if converged {
+            ""
+        } else {
+            "; not converged within the limits"
+        }
+    ));
+    Ok(Converged {
+        runs,
+        best,
+        order: fitted,
+        converged,
+        d_s11_db: d11,
+        d_s21_db: d21,
+    })
+}
+
+/// A dB value and its range from an uncertainty in the linear magnitude.
+pub fn db_range(s: Cx, err: f64) -> (f64, f64, f64) {
+    let m = s.abs();
+    let db = |x: f64| 20.0 * x.max(1e-9).log10();
+    (db(m), db((m - err).max(m * 1e-3)), db(m + err))
+}
+
+/// How well an S-parameter set behaves physically.
+#[derive(Clone, Debug)]
+pub struct Quality {
+    /// Largest |S11|^2 + |S21|^2 (a passive two-port stays at or below 1).
+    pub max_power: f64,
+    /// Share of the impulse response's energy before t = 0 (a causal
+    /// network has none; a few percent comes from the band limit).
+    pub noncausal: f64,
+}
+
+impl Quality {
+    pub fn passive(&self) -> bool {
+        self.max_power <= 1.001
+    }
+
+    pub fn causal(&self) -> bool {
+        self.noncausal <= 0.02
+    }
+
+    pub fn summary(&self) -> String {
+        format!(
+            "passivity: max |S11|^2+|S21|^2 = {:.4} ({}); causality: {:.2} % of the impulse response before t = 0 ({})",
+            self.max_power,
+            if self.passive() { "passive" } else { "NOT passive" },
+            self.noncausal * 100.0,
+            if self.causal() { "causal" } else { "NOT causal" }
+        )
+    }
+}
+
+/// Energy of a band-limited response well before t = 0: the response on a
+/// uniform grid from DC (extrapolated) to fmax, windowed, transformed to
+/// time over twice the record (so a causal response's tail and its
+/// non-causal part are apart).
+pub fn noncausal_share(f_ghz: &[f64], s: &[Cx]) -> f64 {
+    let n = f_ghz.len();
+    if n < 8 {
+        return 0.0;
+    }
+    let fmax = f_ghz[n - 1];
+    let m = 4 * n;
+    // Uniform samples k * fmax / n, k = 0..n, by linear interpolation.
+    let at = |f: f64| -> Cx {
+        if f <= f_ghz[0] {
+            // Towards DC the response turns real.
+            let t = (f / f_ghz[0]).clamp(0.0, 1.0);
+            let s0 = Cx::new(s[0].re, 0.0);
+            return s0.add(s[0].add(s0.scale(-1.0)).scale(t));
+        }
+        let i = f_ghz.partition_point(|&x| x < f).min(n - 1).max(1);
+        let (fa, fb) = (f_ghz[i - 1], f_ghz[i]);
+        let t = ((f - fa) / (fb - fa).max(1e-12)).clamp(0.0, 1.0);
+        s[i - 1].add(s[i].add(s[i - 1].scale(-1.0)).scale(t))
+    };
+    let samples: Vec<Cx> = (0..=n)
+        .map(|k| {
+            let f = fmax * k as f64 / n as f64;
+            // Half-Hann taper to zero at fmax.
+            let w = 0.5 * (1.0 + (std::f64::consts::PI * k as f64 / n as f64).cos());
+            at(f).scale(w)
+        })
+        .collect();
+    // h(t_j) = Re sum_k c_k S_k e^{j 2 pi k j / m}, Hermitian spectrum.
+    let mut before = 0.0;
+    let mut all = 0.0;
+    for j in 0..m {
+        let mut v = samples[0].re;
+        for (k, sk) in samples.iter().enumerate().skip(1) {
+            let ph = std::f64::consts::TAU * (k * j) as f64 / m as f64;
+            v += 2.0 * (sk.re * ph.cos() - sk.im * ph.sin());
+        }
+        let e = v * v;
+        all += e;
+        // The last quarter of the record is t < 0; the band limit smears
+        // a response by about 1/fmax each way, so only what is more than
+        // 4/fmax early counts.
+        let early = (m - j) as f64 * n as f64 / (m as f64 * fmax);
+        if j >= m * 3 / 4 && early >= 4.0 / fmax {
+            before += e;
+        }
+    }
+    if all <= 0.0 {
+        0.0
+    } else {
+        before / all
+    }
+}
+
+/// Passivity and causality of a two-port's S11 and S21.
+pub fn quality(r: &ViaResult) -> Quality {
+    let max_power = r
+        .s11
+        .iter()
+        .zip(&r.s21)
+        .map(|(a, b)| a.abs().powi(2) + b.abs().powi(2))
+        .fold(0.0, f64::max);
+    let noncausal = noncausal_share(&r.f, &r.s21).max(noncausal_share(&r.f, &r.s11));
+    Quality {
+        max_power,
+        noncausal,
+    }
 }
 
 /// Grid sizes and update coefficients for the field updates.
@@ -2193,6 +2814,35 @@ pub fn stub_resonance_ghz(len: f64, er: f64) -> f64 {
 mod tests {
     use super::*;
     use crate::{Length, StackLayer};
+
+    #[test]
+    fn delay_is_causal_and_advance_is_not() {
+        let f: Vec<f64> = (1..=200).map(|k| k as f64 * 0.1).collect();
+        let tau = 1.0; // ns
+        let ph = |f: f64, sign: f64| {
+            let a = sign * std::f64::consts::TAU * f * tau;
+            Cx::new(0.9 * a.cos(), 0.9 * a.sin())
+        };
+        let delay: Vec<Cx> = f.iter().map(|&x| ph(x, -1.0)).collect();
+        let advance: Vec<Cx> = f.iter().map(|&x| ph(x, 1.0)).collect();
+        let d = noncausal_share(&f, &delay);
+        let a = noncausal_share(&f, &advance);
+        assert!(d < 0.01, "delay {d}");
+        assert!(a > 0.5, "advance {a}");
+    }
+
+    #[test]
+    fn order_is_found() {
+        let h: [f64; 3] = [2.0, 1.4, 0.98];
+        for p in [1.0, 2.0] {
+            let e12 = h[0].powf(p) - h[1].powf(p);
+            let e23 = h[1].powf(p) - h[2].powf(p);
+            assert!((order(h, e12, e23).unwrap() - p).abs() < 1e-6);
+        }
+        // Not shrinking like a power of the cell.
+        assert_eq!(order(h, 100.0, 1.0), None);
+        assert_eq!(order(h, 1.0, 1.0), None);
+    }
 
     /// A board of equal cores, Er 3.6, no loss; `kinds` names each copper
     /// layer: 'S' signal, 'G' plane.

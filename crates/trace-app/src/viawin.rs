@@ -46,6 +46,8 @@ pub struct ViaWindow {
     own_mat: bool,
     er: f64,
     df: f64,
+    /// Solve on finer grids until converged, with error bars.
+    accurate: bool,
 }
 
 impl Default for ViaWindow {
@@ -73,6 +75,7 @@ impl Default for ViaWindow {
             own_mat: false,
             er: 4.0,
             df: 0.02,
+            accurate: false,
         }
     }
 }
@@ -432,17 +435,39 @@ impl ViaWindow {
                     ui.label(format!("{:.0} %: sizing, {}", p.0 * 100.0, p.1));
                 }
             }
+            if !self.to_target {
+                ui.checkbox(&mut self.accurate, "Accurate").on_hover_text(
+                    "Solves on finer and finer grids until the S-parameters stop moving, \
+                     extrapolates to a zero cell size and gives every point an error bar \
+                     (several minutes; the plain solve can be several dB optimistic on \
+                     return loss below about -35 dB)",
+                );
+            }
             if !self.to_target && ui.add_enabled(ok, egui::Button::new("Solve")).clicked() {
                 let st = stackup.clone();
                 let setup = self.setup.clone();
+                let accurate = self.accurate;
                 let (tx, rx) = mpsc::channel();
                 let prog = Arc::new(AtomicU32::new(0));
                 let p2 = prog.clone();
                 let c = ctx.clone();
                 std::thread::spawn(move || {
-                    let r = fdtd::solve_with(&st, &setup, &|f| {
+                    let progress = |f: f64| {
                         p2.store((f * 1000.0) as u32, Ordering::Relaxed);
-                    });
+                    };
+                    let r = if accurate {
+                        fdtd::converge(&st, &setup, &fdtd::Tolerance::default(), &progress).map(
+                            |c| {
+                                let mut best = c.best.clone();
+                                for (k, line) in c.verdict().lines().enumerate() {
+                                    best.notes.insert(k, line.trim().to_string());
+                                }
+                                best
+                            },
+                        )
+                    } else {
+                        fdtd::solve_with(&st, &setup, &progress)
+                    };
                     let _ = tx.send(r);
                     c.request_repaint();
                 });
@@ -522,6 +547,23 @@ impl ViaWindow {
             );
         }
         ui.weak(format!("{} cells, {} time steps", r.cells, r.steps));
+        if r.err11.len() == r.f.len() && !r.f.is_empty() {
+            // The error bar at the worst return loss and at the top.
+            let n = r.f.len() - 1;
+            let (_, a, b) = fdtd::db_range(r.s11[worst], r.err11[worst]);
+            let (_, c, d) = fdtd::db_range(r.s21[n], r.err21[n]);
+            ui.label(format!(
+                "Error bars: worst {kind}11 between {a:.1} and {b:.1} dB; {kind}21 at {:.1} GHz between {c:.3} and {d:.3} dB",
+                r.f[n]
+            ));
+        }
+        let q = fdtd::quality(r);
+        let col = if q.passive() && q.causal() {
+            Color32::from_rgb(120, 190, 120)
+        } else {
+            Color32::from_rgb(230, 110, 90)
+        };
+        ui.colored_label(col, q.summary());
         for n in &r.notes {
             ui.weak(n);
         }

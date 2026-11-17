@@ -344,13 +344,27 @@ fn strip_footprint(code: &str, footprint: &str) -> String {
         let fits = !fp.is_empty()
             && (last.contains(&fp)
                 || head.len() >= 3 && fp.starts_with(&head)
-                || fp.contains(&last));
+                || fp.contains(&last))
+            || package_like(&head);
         if !fits {
             break;
         }
         fields.pop();
     }
     fields.join(",").trim().to_string()
+}
+
+/// A passive's package name such as R0201, C0603 or CAP402: a part
+/// letter and then a three- or four-digit size.
+fn package_like(s: &str) -> bool {
+    let letters = s.chars().take_while(|c| c.is_ascii_alphabetic()).count();
+    let digits = s[letters..]
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .count();
+    ["R", "C", "L", "D", "FB", "CAP", "RES", "IND", "LED"].contains(&&s[..letters])
+        && (3..=4).contains(&digits)
+        && s.len() == letters + digits
 }
 
 /// Pairs of parts stacked on the same pads as alternatives: two or more
@@ -1545,6 +1559,11 @@ mod tests {
             strip_footprint("CAP_SM-10UF,E007143,C0603-(C0603L),C0603", "C0603L"),
             "CAP_SM-10UF,E007143"
         );
+        assert_eq!(
+            strip_footprint("RES_SM-0,E004015,R0201-(C0201-2),R0201", "C0201-2"),
+            "RES_SM-0,E004015"
+        );
+        assert_eq!(strip_footprint("REG,LM317", "TO220"), "REG,LM317");
         assert_eq!(
             strip_footprint("RES_100K_1/16W_1%_0402_402_100K", "402"),
             "RES_100K_1/16W_1%_0402_402_100K"

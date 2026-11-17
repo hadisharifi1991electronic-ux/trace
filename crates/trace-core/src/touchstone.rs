@@ -143,6 +143,143 @@ impl Network {
     }
 }
 
+/// How physical an N-port's data is: passivity (the largest singular
+/// value of S, at most 1), reciprocity (S_ij = S_ji) and causality (no
+/// impulse response well before t = 0).
+#[derive(Clone, Debug)]
+pub struct Checks {
+    /// Largest singular value of S and where, GHz.
+    pub max_gain: f64,
+    pub gain_at: f64,
+    /// Points where S is not passive.
+    pub active_points: usize,
+    /// Largest |S_ij - S_ji| and its ports (1-based).
+    pub asymmetry: f64,
+    pub asym_ports: (usize, usize),
+    /// Largest share of an entry's impulse energy before t = 0, its ports.
+    pub noncausal: f64,
+    pub noncausal_ports: (usize, usize),
+}
+
+impl Checks {
+    pub fn passive(&self) -> bool {
+        self.max_gain <= 1.0005
+    }
+    pub fn reciprocal(&self) -> bool {
+        self.asymmetry <= 0.01
+    }
+    pub fn causal(&self) -> bool {
+        self.noncausal <= 0.02
+    }
+    pub fn report(&self) -> String {
+        let ok = |b: bool| if b { "ok" } else { "FAILS" };
+        format!(
+            "Passivity: {} (largest singular value {:.4} at {:.2} GHz{})\n\
+             Reciprocity: {} (largest |Sij - Sji| {:.4}, S{}{})\n\
+             Causality: {} ({:.2} % of S{}{}'s impulse response before t = 0)",
+            ok(self.passive()),
+            self.max_gain,
+            self.gain_at,
+            if self.active_points > 0 {
+                format!(", {} points above 1", self.active_points)
+            } else {
+                String::new()
+            },
+            ok(self.reciprocal()),
+            self.asymmetry,
+            self.asym_ports.0,
+            self.asym_ports.1,
+            ok(self.causal()),
+            self.noncausal * 100.0,
+            self.noncausal_ports.0,
+            self.noncausal_ports.1,
+        )
+    }
+}
+
+/// The largest singular value of an n by n matrix (row by row), by power
+/// iteration on S^H S.
+pub fn max_singular(s: &[Cx], n: usize) -> f64 {
+    if n == 0 {
+        return 0.0;
+    }
+    let at = |i: usize, j: usize| s[i * n + j];
+    let conj = |c: Cx| Cx::new(c.re, -c.im);
+    let mut v: Vec<Cx> = (0..n).map(|i| Cx::new(1.0, 0.1 * i as f64)).collect();
+    let mut lambda = 0.0;
+    for _ in 0..100 {
+        // w = S v, u = S^H w.
+        let w: Vec<Cx> = (0..n)
+            .map(|i| (0..n).fold(Cx::default(), |a, j| a.add(at(i, j).mul(v[j]))))
+            .collect();
+        let u: Vec<Cx> = (0..n)
+            .map(|j| (0..n).fold(Cx::default(), |a, i| a.add(conj(at(i, j)).mul(w[i]))))
+            .collect();
+        let norm = u.iter().map(|c| c.abs().powi(2)).sum::<f64>().sqrt();
+        let vn = v.iter().map(|c| c.abs().powi(2)).sum::<f64>().sqrt();
+        if norm < 1e-30 || vn < 1e-30 {
+            return 0.0;
+        }
+        let next = norm / vn;
+        v = u.iter().map(|c| c.scale(1.0 / norm)).collect();
+        if (next - lambda).abs() < 1e-12 * next.max(1.0) {
+            lambda = next;
+            break;
+        }
+        lambda = next;
+    }
+    lambda.sqrt()
+}
+
+impl Network {
+    /// Passivity, reciprocity and causality.
+    pub fn checks(&self) -> Checks {
+        let n = self.ports;
+        let mut c = Checks {
+            max_gain: 0.0,
+            gain_at: 0.0,
+            active_points: 0,
+            asymmetry: 0.0,
+            asym_ports: (1, 1),
+            noncausal: 0.0,
+            noncausal_ports: (1, 1),
+        };
+        for (k, m) in self.s.iter().enumerate() {
+            let g = max_singular(m, n);
+            if g > 1.0005 {
+                c.active_points += 1;
+            }
+            if g > c.max_gain {
+                c.max_gain = g;
+                c.gain_at = self.f[k];
+            }
+            for i in 0..n {
+                for j in i + 1..n {
+                    let d = m[i * n + j].add(m[j * n + i].scale(-1.0)).abs();
+                    if d > c.asymmetry {
+                        c.asymmetry = d;
+                        c.asym_ports = (i + 1, j + 1);
+                    }
+                }
+            }
+        }
+        for i in 0..n {
+            for j in 0..n {
+                let col: Vec<Cx> = self.s.iter().map(|m| m[i * n + j]).collect();
+                if col.iter().all(|x| x.abs() < 1e-4) {
+                    continue;
+                }
+                let q = crate::fdtd::noncausal_share(&self.f, &col);
+                if q > c.noncausal {
+                    c.noncausal = q;
+                    c.noncausal_ports = (i + 1, j + 1);
+                }
+            }
+        }
+        c
+    }
+}
+
 pub fn gamma_to_z(g: Cx, z0: f64) -> Cx {
     let one = Cx::new(1.0, 0.0);
     one.add(g).div(one.add(g.scale(-1.0))).scale(z0)
@@ -224,6 +361,38 @@ mod tests {
         let s = m.at(1.5).unwrap();
         assert!((s[1].abs() - 10f64.powf(-1.0 / 20.0)).abs() < 1e-9);
         assert!((s[3].db() + 30.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn checks_find_gain_and_asymmetry() {
+        // A lossless thru is passive, reciprocal and causal.
+        let mut text = String::from("# GHz S RI R 50\n");
+        for k in 1..=100 {
+            let f = k as f64 * 0.2;
+            let ph = -std::f64::consts::TAU * f * 0.2;
+            text += &format!(
+                "{f} 0 0 {} {} {} {} 0 0\n",
+                ph.cos(),
+                ph.sin(),
+                ph.cos(),
+                ph.sin()
+            );
+        }
+        let c = parse(&text, 2).unwrap().checks();
+        assert!(
+            c.passive() && c.reciprocal() && c.causal(),
+            "{}",
+            c.report()
+        );
+        assert!((c.max_gain - 1.0).abs() < 1e-6);
+        // A gain of 1.2 in S21 only.
+        let m = [
+            Cx::new(0.0, 0.0),
+            Cx::new(0.5, 0.0),
+            Cx::new(1.2, 0.0),
+            Cx::new(0.0, 0.0),
+        ];
+        assert!((max_singular(&m, 2) - 1.2).abs() < 1e-9);
     }
 
     #[test]

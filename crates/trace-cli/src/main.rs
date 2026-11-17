@@ -135,6 +135,10 @@ USAGE:
                                                 pitch unless --free-pitch; it also tries smaller pads (unless
                                                 --keep-pad) and, with --try-backdrill, removing the stub.
                                                 --check solves again on a finer grid and says if it converged;
+                                                --accurate [dB] refines the grid until |S21| moves less than dB
+                                                (0.05), extrapolates to a zero cell size and gives error bars;
+                                                every solve ends with a passivity and causality check;
+                                                round metal is conformal (--staircase for the old stepped grid);
                                                 --target Z sizes the antipad (then the drill) for that via
                                                 impedance within the --fab limits; with --fab, --optimise also
                                                 tries drills in range and counts the through loss
@@ -144,6 +148,8 @@ USAGE:
     trace cascade <load.s1p> [stage.s2p | --line Z@len@Eeff[@dB/in]]... [--ref R] [--step GHz]
                                                 Return loss into a chain of two-ports (vias from trace via, lines)
                                                 ending in a load such as a chip's port model, input side first
+    trace sparam check <file.sNp>...           Passivity, reciprocity and causality of any Touchstone file (from
+                                                Trace, a vendor or another solver); exits 1 if one fails
     trace stitch <board> <net> <out.tracepcb> [--grid 100mil] [--stagger] [--via 16/8] [--layers 1-4]
               [--clearance C] [--edge 20mil] [--area x0,y0,x1,y1]
                                                 Stitch a net's pours and planes with vias on a grid, each clear
@@ -321,6 +327,7 @@ fn main() -> ExitCode {
         ["stackup", file] => stackup(file, None),
         ["stackup", file, out] => stackup(file, Some(out)),
         ["cascade", load, rest @ ..] => cascade(load, rest),
+        ["sparam", "check", files @ ..] if !files.is_empty() => sparam_check(files),
         ["stubs", file] => stubs(file, None),
         ["stubs", file, out] => stubs(file, Some(out)),
         ["convert", file, out] => convert(file, out),
@@ -2022,6 +2029,29 @@ fn pairsize(file: &str, layer: &str, rest: &[&str]) -> Res {
     Ok(())
 }
 
+fn sparam_check(files: &[&str]) -> Res {
+    let mut bad = false;
+    for f in files {
+        let n = trace_core::touchstone::read(Path::new(f))?;
+        let c = n.checks();
+        println!(
+            "{f}: {} ports, {} points, {:.3} to {:.3} GHz",
+            n.ports,
+            n.f.len(),
+            n.f.first().copied().unwrap_or(0.0),
+            n.f.last().copied().unwrap_or(0.0)
+        );
+        for line in c.report().lines() {
+            println!("  {line}");
+        }
+        bad |= !(c.passive() && c.causal());
+    }
+    if bad {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 fn cascade(load: &str, rest: &[&str]) -> Res {
     use trace_core::fdtd::Cx;
     use trace_core::touchstone::{self, Network};
@@ -2888,6 +2918,7 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     let mut optimise: Option<f64> = None;
     let mut free_pitch = false;
     let (mut try_backdrill, mut keep_pad, mut check) = (false, false, false);
+    let mut accurate: Option<fdtd::Tolerance> = None;
     let mut fab: Option<trace_core::viaopt::FabLimits> = None;
     let mut target: Option<f64> = None;
     let mut feed: Option<f64> = None;
@@ -2911,7 +2942,19 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
             "--try-backdrill" => try_backdrill = true,
             "--keep-pad" => keep_pad = true,
             "--check" => check = true,
+            "--accurate" => {
+                let mut t = fdtd::Tolerance::default();
+                // An optional tolerance: --accurate 0.02 (|S21| dB).
+                if let Some(x) = it.clone().next().and_then(|x| x.parse::<f64>().ok()) {
+                    it.next();
+                    t.s21_db = x;
+                    t.s11_db = (x * 20.0).max(0.25);
+                }
+                accurate = Some(t);
+            }
             "--lossless" => v.metal_loss = false,
+            "--conformal" => v.conformal = true,
+            "--staircase" => v.conformal = false,
             "--rough" => {
                 let x = it.next().ok_or("--rough needs um")?;
                 v.rough_um = x
@@ -3146,7 +3189,12 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
             eprint!("\r  solving… {pc}%");
         }
     };
-    let r = if check {
+    let r = if let Some(tol) = &accurate {
+        let c = fdtd::converge(&b.stackup, &v, tol, &progress)?;
+        eprintln!();
+        println!("Accurate solve:\n{}", c.verdict());
+        c.best
+    } else if check {
         let mc = fdtd::check_mesh(&b.stackup, &v, &progress)?;
         eprintln!();
         println!("Grid check: {}", mc.verdict());
@@ -3188,15 +3236,24 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
         "deg"
     );
     let n = r.f.len();
+    let ranged = r.err11.len() == n && r.err21.len() == n;
     for k in (0..n).filter(|k| (k + 1) % (n / 16).max(1) == 0) {
         println!(
-            "  {:>7.2}  {:>9.2}  {:>9.3}  {:>9.1}",
+            "  {:>7.2}  {:>9.2}  {:>9.3}  {:>9.1}{}",
             r.f[k],
             r.s11[k].db(),
             r.s21[k].db(),
-            r.s21[k].deg()
+            r.s21[k].deg(),
+            if ranged {
+                let (_, a, b) = fdtd::db_range(r.s11[k], r.err11[k]);
+                let (_, c, d) = fdtd::db_range(r.s21[k], r.err21[k]);
+                format!("   S11 {a:.1} to {b:.1}, S21 {c:.3} to {d:.3}")
+            } else {
+                String::new()
+            }
         );
     }
+    println!("Physics check: {}", fdtd::quality(&r).summary());
     if let Some((f, db)) = r.notch() {
         println!("Stub resonance: {kind}21 dips to {db:.1} dB at {f:.2} GHz");
     }

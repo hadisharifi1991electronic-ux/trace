@@ -310,6 +310,8 @@ trace pdn board.brd VDD_SOC --amps 3 --optimise [--add 2] [--die-c 20n] [--csv z
 trace via board.PcbDoc 1 7 --returns 2@30mil via.s2p via.svg   3D full-wave via solve: S-parameters, stub resonance
 trace via board.PcbDoc 1 7 --pair 40 --optimise 10 best.s2p   tune a pair's antipad (round or oval) and return vias and pads (--free-pitch: the pitch too; --try-backdrill)
 trace via board.PcbDoc 1 7 --check   solve on two grids and say whether the result converged
+trace via board.PcbDoc 1 7 --accurate   refine the grid until converged, extrapolate, S11/S21 with error bars, passivity and causality
+trace sparam check vendor.s4p via.s2p   passivity, reciprocity and causality of any Touchstone file
 trace zcheck board.PcbDoc --diff "USB*=90" --rule "*RF*=50" report.csv   every controlled trace and via kind against its target impedance
 trace path board.brd J401.1 U101.A5 --model "C3?=cap.s2p" --model T301=balun.s3p path.s2p path.svg   whole-path loss: every trace, via and part between two pins cascaded (IL/RL, Touchstone)
 trace path board.brd J301 --load chip.s1p --tune 1-6 --fit "C30?" tuned.s2p   choose E12 L/C for the empty (TBD/DNI) match sites for the best return loss into the chip

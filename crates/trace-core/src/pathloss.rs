@@ -740,7 +740,7 @@ fn freed(opt: &Options, des: &str) -> bool {
 
 /// A value that says the part is not chosen or not fitted: TBD, DNI,
 /// DNP, NC, N/A, empty.
-fn placeholder(value: &str) -> bool {
+pub(crate) fn placeholder(value: &str) -> bool {
     let v = value.trim().to_ascii_uppercase();
     v.is_empty()
         || [

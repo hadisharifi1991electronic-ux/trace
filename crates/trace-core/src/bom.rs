@@ -124,6 +124,7 @@ pub enum Flag {
     Generic,
     OneSource,
     Consolidate,
+    Alternate,
 }
 
 /// How much a flag matters.
@@ -149,18 +150,20 @@ impl Flag {
             Flag::Generic => "generic part",
             Flag::OneSource => "one source",
             Flag::Consolidate => "could share a part number",
+            Flag::Alternate => "alternative footprint left off",
         }
     }
 
     pub fn level(self) -> Level {
         match self {
-            Flag::NoPartNumber | Flag::Obsolete | Flag::OutOfStock | Flag::FootprintConflict => {
-                Level::Error
-            }
-            Flag::LastTimeBuy | Flag::Nrnd | Flag::LowStock | Flag::NoData | Flag::NoPrice => {
-                Level::Warning
-            }
-            Flag::Generic | Flag::OneSource | Flag::Consolidate => Level::Info,
+            Flag::NoPartNumber | Flag::Obsolete | Flag::OutOfStock => Level::Error,
+            Flag::LastTimeBuy
+            | Flag::Nrnd
+            | Flag::LowStock
+            | Flag::NoData
+            | Flag::NoPrice
+            | Flag::FootprintConflict => Level::Warning,
+            Flag::Generic | Flag::OneSource | Flag::Consolidate | Flag::Alternate => Level::Info,
         }
     }
 }
@@ -182,7 +185,9 @@ pub struct Line {
     pub mpn: String,
     pub manufacturer: String,
     pub description: String,
+    /// The footprints its parts use, joined.
     pub footprint: String,
+    pub footprints: Vec<String>,
     /// The part number is only the library's code for the part (Allegro
     /// device type, library reference), not a maker's number.
     pub code: bool,
@@ -225,6 +230,9 @@ pub struct Bom {
     pub not_fitted: Vec<String>,
     /// Parts not bought: no pads, no designator, or marked not for BOM.
     pub left_out: Vec<String>,
+    /// Footprints stacked on the same pads as alternatives: (the one
+    /// counted, the one left off).
+    pub stacked: Vec<(String, String)>,
     /// Boards the quantities and stock are for.
     pub boards: u64,
     /// Variant the BOM is for ("" = as designed).
@@ -294,10 +302,108 @@ fn marked_not_fitted(c: &Component) -> bool {
         .unwrap_or("")
         .trim()
         .to_ascii_uppercase();
-    matches!(
-        v.as_str(),
-        "DNP" | "DNI" | "NF" | "NOT FITTED" | "NOPOP" | "DNF"
-    )
+    matches!(v.as_str(), "NOT FITTED" | "DNF") || !v.is_empty() && crate::pathloss::placeholder(&v)
+}
+
+/// A value that is a maker's part number rather than "10uF" or "4.7K":
+/// letters and digits, no spaces, and not a number with a unit.
+fn part_number_like(v: &str) -> bool {
+    let v = v.trim();
+    if v.len() < 6 || v.contains(char::is_whitespace) {
+        return false;
+    }
+    let digits = v.chars().filter(char::is_ascii_digit).count();
+    let letters = v.chars().filter(char::is_ascii_alphabetic).count();
+    if letters == 0 {
+        return digits >= 8 && digits == v.len();
+    }
+    if digits < 2 || letters < 2 {
+        return false;
+    }
+    if v.starts_with(|c: char| c.is_ascii_digit()) {
+        let rest = v.trim_start_matches(|c: char| c.is_ascii_digit() || c == '.');
+        if !rest.chars().any(|c| c.is_ascii_digit()) || rest.contains([',', '/', '%']) {
+            return false;
+        }
+    }
+    true
+}
+
+/// A library code without its footprint tail: Allegro device types end
+/// in the footprint ("CAP,0.1UF,E011567,C0201-C0201" and
+/// "...,E011567,C0201-(C0201-2),C0201" are one part).
+fn strip_footprint(code: &str, footprint: &str) -> String {
+    let fp = footprint.trim().to_ascii_uppercase();
+    let mut fields: Vec<&str> = code.split(',').collect();
+    while fields.len() > 1 {
+        let last = fields[fields.len() - 1]
+            .trim()
+            .to_ascii_uppercase()
+            .replace(['(', ')'], "");
+        let head = last.split('-').next().unwrap_or("").to_string();
+        let fits = !fp.is_empty()
+            && (last.contains(&fp)
+                || head.len() >= 3 && fp.starts_with(&head)
+                || fp.contains(&last));
+        if !fits {
+            break;
+        }
+        fields.pop();
+    }
+    fields.join(",").trim().to_string()
+}
+
+/// Pairs of parts stacked on the same pads as alternatives: two or more
+/// pads of one sit on pads of the other (same layer, centres closer
+/// than half the larger pad).
+fn stacked_pairs(board: &Board) -> Vec<(usize, usize)> {
+    let g = &board.geometry;
+    let cell = 40.0;
+    let cell_of = |p: &crate::Point| {
+        (
+            (p.x.mil() / cell).floor() as i64,
+            (p.y.mil() / cell).floor() as i64,
+        )
+    };
+    let mut grid: HashMap<(i64, i64), Vec<usize>> = HashMap::new();
+    for (i, p) in g.pads.iter().enumerate() {
+        if p.component.is_some() {
+            grid.entry(cell_of(&p.at)).or_default().push(i);
+        }
+    }
+    let mut count: HashMap<(usize, usize), usize> = HashMap::new();
+    for (i, p) in g.pads.iter().enumerate() {
+        let Some(ca) = p.component else { continue };
+        let k = cell_of(&p.at);
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                for &j in grid.get(&(k.0 + dx, k.1 + dy)).into_iter().flatten() {
+                    let q = &g.pads[j];
+                    let Some(cb) = q.component else { continue };
+                    if j <= i || ca == cb || p.layer != q.layer {
+                        continue;
+                    }
+                    let r = 0.5
+                        * p.size_x
+                            .mil()
+                            .max(p.size_y.mil())
+                            .max(q.size_x.mil())
+                            .max(q.size_y.mil());
+                    let d = (p.at.x.mil() - q.at.x.mil()).hypot(p.at.y.mil() - q.at.y.mil());
+                    if d < r {
+                        *count
+                            .entry((ca.min(cb) as usize, ca.max(cb) as usize))
+                            .or_default() += 1;
+                    }
+                }
+            }
+        }
+    }
+    count
+        .into_iter()
+        .filter(|(_, n)| *n >= 2)
+        .map(|(k, _)| k)
+        .collect()
 }
 
 /// A part number field holding no part number.
@@ -373,6 +479,41 @@ pub fn build(board: &Board) -> Bom {
         variant: crate::variant::name(board).to_string(),
         ..Bom::default()
     };
+    // Footprints stacked as alternatives: count one of each group (a
+    // capacitor before an inductor before a resistor, else the first
+    // designator), the parts not fitted aside.
+    let fitted = |i: usize| !off.contains(&i) && !marked_not_fitted(&parts[i]);
+    let mut dropped: HashMap<usize, usize> = HashMap::new();
+    {
+        let rank = |i: usize| {
+            let d = parts[i].designator.to_ascii_uppercase();
+            let kind = match prefix(&d).as_str() {
+                "C" => 0,
+                "L" => 1,
+                "R" => 2,
+                _ => 3,
+            };
+            (kind, d)
+        };
+        let mut pairs = stacked_pairs(board);
+        pairs.retain(|&(a, b)| fitted(a) && fitted(b));
+        pairs.sort_by(|x, y| {
+            let kx = rank(x.0).min(rank(x.1));
+            let ky = rank(y.0).min(rank(y.1));
+            kx.0.cmp(&ky.0)
+                .then_with(|| crate::variant::natural(&kx.1, &ky.1))
+        });
+        for (a, b) in pairs {
+            if dropped.contains_key(&a) || dropped.contains_key(&b) {
+                continue;
+            }
+            let (ra, rb) = (rank(a), rank(b));
+            let a_first =
+                ra.0 < rb.0 || ra.0 == rb.0 && crate::variant::natural(&ra.1, &rb.1).is_le();
+            let (keep, drop) = if a_first { (a, b) } else { (b, a) };
+            dropped.insert(drop, keep);
+        }
+    }
     type Key = (String, String, String, String);
     let mut groups: BTreeMap<Key, Line> = BTreeMap::new();
     for (i, c) in parts.iter().enumerate() {
@@ -395,8 +536,13 @@ pub fn build(board: &Board) -> Bom {
             }
             continue;
         }
-        if off.contains(&i) || marked_not_fitted(c) {
+        if !fitted(i) {
             bom.not_fitted.push(d.to_string());
+            continue;
+        }
+        if let Some(&k) = dropped.get(&i) {
+            bom.stacked
+                .push((parts[k].designator.clone(), d.to_string()));
             continue;
         }
         let mut code = false;
@@ -416,28 +562,42 @@ pub fn build(board: &Board) -> Bom {
             if placeholder(&mpn) {
                 mpn.clear();
             }
+            mpn = strip_footprint(&mpn, &c.footprint);
             code = !mpn.is_empty();
         }
         let value = get(&["Value", "Comment"]);
+        // A value that is itself a maker's number (ADRV9025BBCZ) stands
+        // in for a missing one.
+        if (mpn.is_empty() || code) && part_number_like(&value) {
+            mpn = value.clone();
+            code = false;
+        }
         let maker = get(&MAKER_KEYS);
         let k = (
             key(&mpn),
             maker.to_ascii_uppercase(),
             value.clone(),
-            c.footprint.clone(),
+            if mpn.is_empty() {
+                c.footprint.clone()
+            } else {
+                String::new()
+            },
         );
         let line = groups.entry(k).or_insert_with(|| Line {
             value,
             mpn,
             manufacturer: maker,
             description: get(&["Description"]),
-            footprint: c.footprint.clone(),
             code,
             alternates: alternates(c),
             ..Line::default()
         });
         line.designators.push(d.to_string());
         line.parts.push(i);
+        if !line.footprints.contains(&c.footprint) {
+            line.footprints.push(c.footprint.clone());
+            line.footprint = line.footprints.join(", ");
+        }
     }
     let mut lines: Vec<Line> = groups.into_values().collect();
     for l in &mut lines {
@@ -681,16 +841,10 @@ pub fn parts_csv(text: &str, source: &str) -> Result<Vec<PartData>, String> {
 pub fn check(bom: &mut Bom, db: &Db, boards: u64) {
     bom.boards = boards.max(1);
     let n = bom.boards;
-    // Part number on several footprints.
-    let mut fps: HashMap<String, HashSet<String>> = HashMap::new();
+    let stacked = bom.stacked.clone();
     // Lines alike in value and footprint but with other part numbers.
     let mut alike: HashMap<(String, String), usize> = HashMap::new();
     for l in &bom.lines {
-        if !l.mpn.is_empty() {
-            fps.entry(key(&l.mpn))
-                .or_default()
-                .insert(l.footprint.clone());
-        }
         if !l.value.is_empty() {
             *alike
                 .entry((l.value.to_ascii_lowercase(), l.footprint.clone()))
@@ -719,14 +873,26 @@ pub fn check(bom: &mut Bom, db: &Db, boards: u64) {
                 ),
             );
         }
-        if fps.get(&key(&l.mpn)).is_some_and(|f| f.len() > 1) {
+        if !l.code && l.footprints.len() > 1 {
             add(
                 Flag::FootprintConflict,
                 format!(
-                    "{} is used on {} footprints",
+                    "{} is used on {} footprints: {}",
                     l.mpn,
-                    fps[&key(&l.mpn)].len()
+                    l.footprints.len(),
+                    l.footprint
                 ),
+            );
+        }
+        let alts: Vec<String> = stacked
+            .iter()
+            .filter(|(k, _)| l.designators.contains(k))
+            .map(|(k, d)| format!("{d} (on {k}'s pads)"))
+            .collect();
+        if !alts.is_empty() {
+            add(
+                Flag::Alternate,
+                format!("alternative footprints left off: {}", alts.join(", ")),
             );
         }
         if alike
@@ -964,6 +1130,18 @@ impl Bom {
                 "Not bought ({}: fiducials, drawings, marked no BOM): {}",
                 self.left_out.len(),
                 self.left_out.join(" ")
+            );
+        }
+        if !self.stacked.is_empty() {
+            let _ = writeln!(
+                o,
+                "Alternative footprints on the same pads, left off ({}): {}",
+                self.stacked.len(),
+                self.stacked
+                    .iter()
+                    .map(|(k, d)| format!("{d} (for {k})"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
             );
         }
         let with = self.lines.iter().filter(|l| l.data.is_some()).count();
@@ -1347,6 +1525,30 @@ mod tests {
         )
         .is_err());
         assert!(mouser_body(&["A".into(), "B".into()]).contains("A|B"));
+    }
+
+    #[test]
+    fn values_and_codes() {
+        assert!(part_number_like("ADRV9025BBCZ"));
+        assert!(part_number_like("2450BL15B200E"));
+        assert!(part_number_like("0451350403"));
+        assert!(part_number_like("U.FL-R-SMT-1(01)"));
+        assert!(!part_number_like("10uF"));
+        assert!(!part_number_like("2.2uH,1.3A"));
+        assert!(!part_number_like("47OHM"));
+        assert!(!part_number_like("100nF/50V"));
+        assert_eq!(
+            strip_footprint("CAP_SM-0.1UF,6.3V,10,E011567,C0201-C0201", "C0201"),
+            "CAP_SM-0.1UF,6.3V,10,E011567"
+        );
+        assert_eq!(
+            strip_footprint("CAP_SM-10UF,E007143,C0603-(C0603L),C0603", "C0603L"),
+            "CAP_SM-10UF,E007143"
+        );
+        assert_eq!(
+            strip_footprint("RES_100K_1/16W_1%_0402_402_100K", "402"),
+            "RES_100K_1/16W_1%_0402_402_100K"
+        );
     }
 
     #[test]

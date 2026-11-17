@@ -3,6 +3,27 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.73.0 (2026-11-17)
+
+- Rigid-flex in 3D: the 3D view gets a Fold slider (shown when the
+  board has bends) that bends the flex at each bend by a share of its
+  angle, up to the full angle. The board is split into pieces at the
+  bend areas; the largest piece stays put and each piece beyond a bend
+  turns with it, through chains of bends. A bend curves over its area
+  (radius = width / angle) with the board, copper, silk and parts on it
+  cut into strips along the fold line, so it bends smoothly. Without a
+  set fold line, a long narrow bend area folds about its long side.
+- BOM on Allegro and ADI-style boards (tested on the ADRV9026 EVB):
+  parts valued TBD, DNI, DNP, NC and the like are not fitted;
+  footprints stacked on the same pads as alternatives are counted once
+  (a capacitor before an inductor before a resistor, else the first
+  designator) and the others listed; the footprint tail of an Allegro
+  device type is dropped so one part code on footprint variants is one
+  line; a value that is itself a maker's part number (ADRV9025BBCZ,
+  2450BL15B200E) is used as the part number, so it can be looked up.
+  BOM lines now hold one part number over all its footprints, and a
+  part number on two footprints is a warning, not an error.
+
 ## 0.72.0 (2026-11-17)
 
 - Bill of materials with part data (Reports > Bill of materials with

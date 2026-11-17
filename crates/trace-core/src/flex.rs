@@ -12,6 +12,7 @@
 
 use crate::{Board, LayerKind, LayerRef, Length, Point};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::fmt::Write;
 
 /// An area of the board with its own layers.
@@ -153,6 +154,34 @@ pub fn fold_axis(board: &Board, b: &Bend) -> Option<[f64; 2]> {
         }
     }
     longest_side(b)
+}
+
+/// The line the board folds about in 3D: as set, else along a long
+/// narrow bend area (the usual strip across the flex), else as
+/// [`fold_axis`].
+pub fn fold_line(board: &Board, b: &Bend) -> Option<[f64; 2]> {
+    if b.axis_deg.is_some() {
+        return fold_axis(board, b);
+    }
+    if let Some(d) = longest_side(b) {
+        let n = [-d[1], d[0]];
+        let span = |v: [f64; 2]| {
+            let us: Vec<f64> = b
+                .area
+                .iter()
+                .map(|p| {
+                    let q = pt(p);
+                    q[0] * v[0] + q[1] * v[1]
+                })
+                .collect();
+            us.iter().copied().fold(f64::MIN, f64::max)
+                - us.iter().copied().fold(f64::MAX, f64::min)
+        };
+        if span(d) >= 1.5 * span(n) {
+            return Some(d);
+        }
+    }
+    fold_axis(board, b)
 }
 
 fn longest_side(b: &Bend) -> Option<[f64; 2]> {
@@ -578,6 +607,463 @@ pub fn rect(x0: f64, y0: f64, x1: f64, y1: f64) -> Vec<Point> {
     ]
 }
 
+/// A rigid motion in 3D (mil): p -> m p + t.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Affine {
+    pub m: [[f64; 3]; 3],
+    pub t: [f64; 3],
+}
+
+impl Affine {
+    pub const ID: Affine = Affine {
+        m: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        t: [0.0; 3],
+    };
+
+    pub fn vec(&self, v: [f64; 3]) -> [f64; 3] {
+        let m = &self.m;
+        [
+            m[0][0] * v[0] + m[0][1] * v[1] + m[0][2] * v[2],
+            m[1][0] * v[0] + m[1][1] * v[1] + m[1][2] * v[2],
+            m[2][0] * v[0] + m[2][1] * v[1] + m[2][2] * v[2],
+        ]
+    }
+
+    pub fn apply(&self, p: [f64; 3]) -> [f64; 3] {
+        let v = self.vec(p);
+        [v[0] + self.t[0], v[1] + self.t[1], v[2] + self.t[2]]
+    }
+
+    /// self after other: p -> self(other(p)).
+    pub fn after(&self, o: &Affine) -> Affine {
+        let col = |j: usize| self.vec([o.m[0][j], o.m[1][j], o.m[2][j]]);
+        let (c0, c1, c2) = (col(0), col(1), col(2));
+        Affine {
+            m: [
+                [c0[0], c1[0], c2[0]],
+                [c0[1], c1[1], c2[1]],
+                [c0[2], c1[2], c2[2]],
+            ],
+            t: self.apply(o.t),
+        }
+    }
+}
+
+/// One bend as folded: its frame on the flat board and its angle.
+#[derive(Clone, Debug)]
+struct FoldBend {
+    /// The bend's start line (where it leaves its parent), a point on it.
+    c0: [f64; 2],
+    /// Unit normal across the bend, away from the parent side.
+    n: [f64; 2],
+    /// Width across the bend.
+    w: f64,
+    /// Signed fold angle, radians (positive folds toward the top side).
+    theta: f64,
+    parent: usize,
+}
+
+impl FoldBend {
+    /// Where (u across from c0, z) goes in the bend's (n, z) plane, and
+    /// the slope angle there.
+    fn at(&self, u: f64, z: f64) -> (f64, f64, f64) {
+        let th = self.theta.abs();
+        let sg = if self.theta < 0.0 { -1.0 } else { 1.0 };
+        let zm = z * sg;
+        if th < 1e-9 {
+            return (u, z, 0.0);
+        }
+        let r = self.w / th;
+        let (un, zn, phi) = if u <= 0.0 {
+            (u, zm, 0.0)
+        } else if u < self.w {
+            let phi = th * u / self.w;
+            ((r - zm) * phi.sin(), r - (r - zm) * phi.cos(), phi)
+        } else {
+            let t = u - self.w;
+            let (s, c) = th.sin_cos();
+            (r * s + t * c - zm * s, r - r * c + t * s + zm * c, th)
+        };
+        (un, zn * sg, phi * sg)
+    }
+
+    /// The motion of a point at (x, y, z) on the flat board.
+    fn map(&self, p: [f64; 3]) -> ([f64; 3], f64) {
+        let rel = [p[0] - self.c0[0], p[1] - self.c0[1]];
+        let u = rel[0] * self.n[0] + rel[1] * self.n[1];
+        let along = [rel[0] - u * self.n[0], rel[1] - u * self.n[1]];
+        let (un, zn, phi) = self.at(u, p[2]);
+        (
+            [
+                self.c0[0] + along[0] + un * self.n[0],
+                self.c0[1] + along[1] + un * self.n[1],
+                zn,
+            ],
+            phi,
+        )
+    }
+
+    /// The rigid motion of everything beyond the bend.
+    fn beyond(&self) -> Affine {
+        // Images of the origin and the unit axes under the far-side map.
+        let far = self.w * 4.0 + 1.0;
+        let base = [
+            self.c0[0] + self.n[0] * far,
+            self.c0[1] + self.n[1] * far,
+            0.0,
+        ];
+        let o = self.map(base).0;
+        let img = |v: [f64; 3]| {
+            let q = self.map([base[0] + v[0], base[1] + v[1], base[2] + v[2]]).0;
+            [q[0] - o[0], q[1] - o[1], q[2] - o[2]]
+        };
+        let (ex, ey, ez) = (
+            img([1.0, 0.0, 0.0]),
+            img([0.0, 1.0, 0.0]),
+            img([0.0, 0.0, 1.0]),
+        );
+        let m = [
+            [ex[0], ey[0], ez[0]],
+            [ex[1], ey[1], ez[1]],
+            [ex[2], ey[2], ez[2]],
+        ];
+        let lin = Affine { m, t: [0.0; 3] };
+        let mb = lin.vec(base);
+        Affine {
+            m,
+            t: [o[0] - mb[0], o[1] - mb[1], o[2] - mb[2]],
+        }
+    }
+
+    /// Rotation by phi about the fold line (for normals).
+    fn turn(&self, phi: f64) -> Affine {
+        let d = [-self.n[1], self.n[0], 0.0];
+        let (s, c) = phi.sin_cos();
+        // Rodrigues about d, sign so that +phi turns n toward +z.
+        let k = [-d[0], -d[1], -d[2]];
+        let mut m = [[0.0; 3]; 3];
+        for (i, row) in m.iter_mut().enumerate() {
+            for (j, v) in row.iter_mut().enumerate() {
+                let id = if i == j { 1.0 } else { 0.0 };
+                let kk = k[i] * k[j];
+                let cross = match (i, j) {
+                    (0, 1) => -k[2],
+                    (0, 2) => k[1],
+                    (1, 0) => k[2],
+                    (1, 2) => -k[0],
+                    (2, 0) => -k[1],
+                    (2, 1) => k[0],
+                    _ => 0.0,
+                };
+                *v = c * id + s * cross + (1.0 - c) * kk;
+            }
+        }
+        Affine { m, t: [0.0; 3] }
+    }
+}
+
+/// The board folded at its bends: which piece of the board each point
+/// is on, and how each piece moves. The largest piece stays put.
+#[derive(Clone, Debug)]
+pub struct Fold {
+    cell: f64,
+    x0: f64,
+    y0: f64,
+    nx: usize,
+    ny: usize,
+    /// Per cell: region (>= 0) or bend (-1 - index).
+    label: Vec<i32>,
+    regions: Vec<Affine>,
+    bends: Vec<Option<FoldBend>>,
+}
+
+impl Fold {
+    fn cell_of(&self, x: f64, y: f64) -> usize {
+        let i = (((x - self.x0) / self.cell).floor().max(0.0) as usize).min(self.nx - 1);
+        let j = (((y - self.y0) / self.cell).floor().max(0.0) as usize).min(self.ny - 1);
+        j * self.nx + i
+    }
+
+    /// Where a point of the flat board (mil, z up from the board's middle)
+    /// goes, and the turn to apply to normals there.
+    pub fn map(&self, p: [f64; 3]) -> ([f64; 3], Affine) {
+        let l = self.label[self.cell_of(p[0], p[1])];
+        if l >= 0 {
+            let a = &self.regions[l as usize];
+            return (a.apply(p), Affine { t: [0.0; 3], ..*a });
+        }
+        let Some(b) = &self.bends[(-1 - l) as usize] else {
+            return (p, Affine::ID);
+        };
+        let parent = &self.regions[b.parent];
+        let (q, phi) = b.map(p);
+        let turn = b.turn(phi);
+        (
+            parent.apply(q),
+            Affine {
+                t: [0.0; 3],
+                ..*parent
+            }
+            .after(&turn),
+        )
+    }
+
+    /// Lines to cut the board's triangles along so they bend smoothly:
+    /// (point, unit normal) of each, `per` across each bend.
+    pub fn cuts(&self, per: usize) -> Vec<([f64; 2], [f64; 2])> {
+        let mut out = Vec::new();
+        for b in self.bends.iter().flatten() {
+            for k in 0..=per {
+                let u = b.w * k as f64 / per as f64;
+                out.push(([b.c0[0] + b.n[0] * u, b.c0[1] + b.n[1] * u], b.n));
+            }
+        }
+        out
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bends.iter().all(Option::is_none)
+    }
+}
+
+/// Folds the board's bends by `amount` (0 flat, 1 their full angle).
+pub fn fold(board: &Board, amount: f64) -> Option<Fold> {
+    if board.bends.is_empty() {
+        return None;
+    }
+    let outline: Vec<[f64; 2]> = board.geometry.outline.iter().map(pt).collect();
+    if outline.len() < 3 {
+        return None;
+    }
+    let (mut x0, mut y0, mut x1, mut y1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+    for p in &outline {
+        x0 = x0.min(p[0]);
+        y0 = y0.min(p[1]);
+        x1 = x1.max(p[0]);
+        y1 = y1.max(p[1]);
+    }
+    let cell = ((x1 - x0).max(y1 - y0) / 700.0).max(2.0);
+    let (nx, ny) = (
+        ((x1 - x0) / cell).ceil() as usize + 1,
+        ((y1 - y0) / cell).ceil() as usize + 1,
+    );
+    // Board cells by scanline crossings of the outline.
+    let mut on = vec![false; nx * ny];
+    for j in 0..ny {
+        let y = y0 + (j as f64 + 0.5) * cell;
+        let mut xs: Vec<f64> = Vec::new();
+        for i in 0..outline.len() {
+            let (a, c) = (outline[i], outline[(i + 1) % outline.len()]);
+            if (a[1] > y) != (c[1] > y) {
+                xs.push(a[0] + (y - a[1]) / (c[1] - a[1]) * (c[0] - a[0]));
+            }
+        }
+        xs.sort_by(f64::total_cmp);
+        for pair in xs.chunks(2) {
+            if let [a, c] = pair {
+                let i0 = ((a - x0) / cell - 0.5).ceil().max(0.0) as usize;
+                let i1 = (((c - x0) / cell - 0.5).floor().max(-1.0) + 1.0) as usize;
+                for i in i0..i1.min(nx) {
+                    on[j * nx + i] = true;
+                }
+            }
+        }
+    }
+    const NONE: i32 = i32::MIN;
+    let mut label = vec![NONE; nx * ny];
+    for (k, b) in board.bends.iter().enumerate() {
+        if b.area.len() < 3 {
+            continue;
+        }
+        let r = &b.area;
+        let (mut bx0, mut by0, mut bx1, mut by1) = (f64::MAX, f64::MAX, f64::MIN, f64::MIN);
+        for p in r.iter().map(pt) {
+            bx0 = bx0.min(p[0]);
+            by0 = by0.min(p[1]);
+            bx1 = bx1.max(p[0]);
+            by1 = by1.max(p[1]);
+        }
+        let i0 = ((bx0 - x0) / cell).floor().max(0.0) as usize;
+        let j0 = ((by0 - y0) / cell).floor().max(0.0) as usize;
+        let i1 = (((bx1 - x0) / cell).ceil() as usize).min(nx - 1);
+        let j1 = (((by1 - y0) / cell).ceil() as usize).min(ny - 1);
+        for j in j0..=j1 {
+            for i in i0..=i1 {
+                let c = [x0 + (i as f64 + 0.5) * cell, y0 + (j as f64 + 0.5) * cell];
+                if on[j * nx + i] && inside(r, c) {
+                    label[j * nx + i] = -1 - k as i32;
+                }
+            }
+        }
+    }
+    // Pieces: connected board cells outside the bends.
+    let mut sizes: Vec<usize> = Vec::new();
+    let mut seeds: Vec<usize> = Vec::new();
+    for start in 0..nx * ny {
+        if !on[start] || label[start] != NONE {
+            continue;
+        }
+        let id = sizes.len() as i32;
+        let mut stack = vec![start];
+        label[start] = id;
+        let mut n = 0;
+        while let Some(c) = stack.pop() {
+            n += 1;
+            let (i, j) = (c % nx, c / nx);
+            let mut push = |q: usize| {
+                if on[q] && label[q] == NONE {
+                    label[q] = id;
+                    stack.push(q);
+                }
+            };
+            if i > 0 {
+                push(c - 1);
+            }
+            if i + 1 < nx {
+                push(c + 1);
+            }
+            if j > 0 {
+                push(c - nx);
+            }
+            if j + 1 < ny {
+                push(c + nx);
+            }
+        }
+        sizes.push(n);
+        seeds.push(start);
+    }
+    if sizes.is_empty() {
+        return None;
+    }
+    // Which pieces touch which bend, and the pieces' centroids.
+    let nb = board.bends.len();
+    let mut touch: Vec<HashMap<usize, usize>> = vec![HashMap::new(); nb];
+    let mut sum = vec![[0.0f64; 2]; sizes.len()];
+    for c in 0..nx * ny {
+        let l = label[c];
+        if l >= 0 {
+            let (i, j) = (c % nx, c / nx);
+            sum[l as usize][0] += x0 + (i as f64 + 0.5) * cell;
+            sum[l as usize][1] += y0 + (j as f64 + 0.5) * cell;
+            continue;
+        }
+        if l == NONE {
+            continue;
+        }
+        let b = (-1 - l) as usize;
+        let (i, j) = (c % nx, c / nx);
+        let mut look = |q: usize| {
+            if label[q] >= 0 {
+                *touch[b].entry(label[q] as usize).or_default() += 1;
+            }
+        };
+        if i > 0 {
+            look(c - 1);
+        }
+        if i + 1 < nx {
+            look(c + 1);
+        }
+        if j > 0 {
+            look(c - nx);
+        }
+        if j + 1 < ny {
+            look(c + nx);
+        }
+    }
+    let cen: Vec<[f64; 2]> = sum
+        .iter()
+        .zip(&sizes)
+        .map(|(s, &n)| [s[0] / n as f64, s[1] / n as f64])
+        .collect();
+    // Tree from the largest piece outward through the bends.
+    let root = (0..sizes.len()).max_by_key(|&k| sizes[k]).unwrap_or(0);
+    let mut regions: Vec<Option<Affine>> = vec![None; sizes.len()];
+    regions[root] = Some(Affine::ID);
+    let mut bends: Vec<Option<FoldBend>> = vec![None; nb];
+    let mut queue = std::collections::VecDeque::from([root]);
+    while let Some(r) = queue.pop_front() {
+        let here = regions[r].unwrap_or(Affine::ID);
+        for (k, b) in board.bends.iter().enumerate() {
+            if bends[k].is_some() || !touch[k].contains_key(&r) {
+                continue;
+            }
+            let Some(d) = fold_line(board, b) else {
+                continue;
+            };
+            let mut n = [-d[1], d[0]];
+            let c = centroid(&b.area);
+            // Parent on the low side of n.
+            if (cen[r][0] - c[0]) * n[0] + (cen[r][1] - c[1]) * n[1] > 0.0 {
+                n = [-n[0], -n[1]];
+            }
+            let us: Vec<f64> = b
+                .area
+                .iter()
+                .map(|p| {
+                    let q = pt(p);
+                    (q[0] - c[0]) * n[0] + (q[1] - c[1]) * n[1]
+                })
+                .collect();
+            let lo = us.iter().copied().fold(f64::MAX, f64::min);
+            let hi = us.iter().copied().fold(f64::MIN, f64::max);
+            let fb = FoldBend {
+                c0: [c[0] + n[0] * lo, c[1] + n[1] * lo],
+                n,
+                w: (hi - lo).max(1.0),
+                theta: b.angle_deg.to_radians() * amount,
+                parent: r,
+            };
+            let beyond = here.after(&fb.beyond());
+            for &q in touch[k].keys() {
+                if regions[q].is_none() {
+                    regions[q] = Some(beyond);
+                    queue.push_back(q);
+                }
+            }
+            bends[k] = Some(fb);
+        }
+    }
+    // Cells off the board take the nearest piece's label, so part bodies
+    // over the edge move with it.
+    let mut frontier: Vec<usize> = (0..nx * ny).filter(|&c| label[c] != NONE).collect();
+    while !frontier.is_empty() {
+        let mut next = Vec::new();
+        for &c in &frontier {
+            let (i, j) = (c % nx, c / nx);
+            let l = label[c];
+            for q in [
+                (i > 0).then(|| c - 1),
+                (i + 1 < nx).then(|| c + 1),
+                (j > 0).then(|| c - nx),
+                (j + 1 < ny).then(|| c + nx),
+            ]
+            .into_iter()
+            .flatten()
+            {
+                if label[q] == NONE {
+                    label[q] = l;
+                    next.push(q);
+                }
+            }
+        }
+        frontier = next;
+    }
+    let _ = seeds;
+    Some(Fold {
+        cell,
+        x0,
+        y0,
+        nx,
+        ny,
+        label,
+        regions: regions
+            .into_iter()
+            .map(|r| r.unwrap_or(Affine::ID))
+            .collect(),
+        bends,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -706,5 +1192,45 @@ mod tests {
         b.bends[0].radius = Length::from_mil(50.0);
         let issues = check(&b, &Limits::default());
         assert!(issues.is_empty(), "{}", report(&b, &issues));
+    }
+
+    #[test]
+    fn folds_a_strip() {
+        let mut b = Board::default();
+        b.geometry.outline = rect(0.0, 0.0, 1000.0, 100.0);
+        b.bends.push(Bend {
+            name: "B1".into(),
+            area: rect(600.0, 0.0, 700.0, 100.0),
+            radius: Length::from_mil(60.0),
+            angle_deg: 90.0,
+            dynamic: false,
+            axis_deg: Some(90.0),
+        });
+        let f = fold(&b, 1.0).unwrap();
+        // The big piece stays.
+        assert_eq!(f.map([100.0, 50.0, 0.0]).0, [100.0, 50.0, 0.0]);
+        let r = 100.0 / std::f64::consts::FRAC_PI_2;
+        let (q, _) = f.map([1000.0, 50.0, 0.0]);
+        assert!((q[0] - (600.0 + r)).abs() < 1e-6, "{q:?}");
+        assert!((q[2] - (r + 300.0)).abs() < 1e-6, "{q:?}");
+        // The bend's middle is on the arc and the far end continues it.
+        let (m, _) = f.map([650.0, 50.0, 0.0]);
+        let ctr = [600.0, r];
+        let d = ((m[0] - ctr[0]).powi(2) + (m[2] - ctr[1]).powi(2)).sqrt();
+        assert!((d - r).abs() < 1e-6);
+        let (e1, _) = f.map([700.0, 50.0, 0.0]);
+        let (e2, _) = f.map([701.0, 50.0, 0.0]);
+        assert!((e2[2] - e1[2] - 1.0).abs() < 1e-3 && (e2[0] - e1[0]).abs() < 1e-3);
+        // Normals beyond turn from up to across.
+        let (_, t) = f.map([900.0, 50.0, 0.0]);
+        let nrm = t.vec([0.0, 0.0, 1.0]);
+        assert!((nrm[0] + 1.0).abs() < 1e-6, "{nrm:?}");
+        let (_, t) = f.map([699.0, 50.0, 0.0]);
+        let nrm = t.vec([0.0, 0.0, 1.0]);
+        assert!(nrm[0] < -0.9, "{nrm:?}");
+        // Flat when not folded.
+        let f0 = fold(&b, 0.0).unwrap();
+        let (q, _) = f0.map([1000.0, 50.0, 3.0]);
+        assert!((q[0] - 1000.0).abs() < 1e-6 && (q[2] - 3.0).abs() < 1e-6);
     }
 }

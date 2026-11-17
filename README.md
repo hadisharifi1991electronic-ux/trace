@@ -55,7 +55,8 @@ checker and simulator all read.
 - lay out rigid-flex boards (Design → Rigid-flex zones and bends…): zones
   with their own layers (flex, rigid, stiffened), bends with radius,
   angle and fold line, read from ODB++ too, and the IPC-2223 flex checks
-  (vias and parts in flex, bend radius, tracks across bends)
+  (vias and parts in flex, bend radius, tracks across bends); the 3D
+  view folds the flex at its bends (Fold slider)
 - open fabrication data: a folder or `.zip` of Gerber and drill files, several
   files at once, or an ODB++ job (`.tgz`, `.zip` or folder). Each file's layer
   is recognised automatically and the board is rebuilt with copper, holes,

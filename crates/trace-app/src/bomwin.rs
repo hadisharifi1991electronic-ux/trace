@@ -313,12 +313,14 @@ impl BomWindow {
                     ))
                     .strong(),
                 );
-                if !b.not_fitted.is_empty() || !b.left_out.is_empty() {
+                if !b.not_fitted.is_empty() || !b.left_out.is_empty() || !b.stacked.is_empty() {
+                    let alts: Vec<String> = b.stacked.iter().map(|(_, d)| d.clone()).collect();
                     ui.label(
                         RichText::new(format!(
-                            "Not fitted: {}   Not bought: {}",
+                            "Not fitted: {}   Not bought: {}   Alternative footprints left off: {}",
                             bom::trim_list(&b.not_fitted, 80),
-                            bom::trim_list(&b.left_out, 80)
+                            bom::trim_list(&b.left_out, 80),
+                            bom::trim_list(&alts, 80)
                         ))
                         .small(),
                     );

@@ -241,6 +241,8 @@ pub struct Options {
     pub mask: MaskColor,
     pub parts: bool,
     pub silk: bool,
+    /// Rigid-flex bends folded this far, percent of their angle.
+    pub fold: u8,
 }
 
 impl Default for Options {
@@ -249,6 +251,7 @@ impl Default for Options {
             mask: MaskColor::Green,
             parts: true,
             silk: true,
+            fold: 0,
         }
     }
 }
@@ -459,7 +462,92 @@ pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
         let placed = place_models(&mut bld, scene, t, models);
         bld.m.parts = placed.len() + bodies(&mut bld, scene, t, &placed);
     }
+    if opt.fold > 0 {
+        if let Some(f) = trace_core::flex::fold(board, opt.fold as f64 / 100.0) {
+            fold_mesh(&mut bld, &f);
+        }
+    }
     bld.m
+}
+
+/// Bends the mesh at the board's bends: cuts the triangles along lines
+/// across each bend so it curves, then moves every vertex.
+fn fold_mesh(bld: &mut Builder, f: &trace_core::flex::Fold) {
+    let (cx, cy) = (bld.cx as f64, bld.cy as f64);
+    let k = MM_PER_MIL as f64;
+    let to_mil = |p: [f32; 3]| [p[0] as f64 / k + cx, p[1] as f64 / k + cy, p[2] as f64 / k];
+    let m = &mut bld.m;
+    for (o, n) in f.cuts(16) {
+        let side = |v: &Vert| {
+            let q = to_mil(v.p);
+            (q[0] - o[0]) * n[0] + (q[1] - o[1]) * n[1]
+        };
+        let mut idx = Vec::with_capacity(m.idx.len());
+        let old = std::mem::take(&mut m.idx);
+        for t in old.chunks_exact(3) {
+            let d = [
+                side(&m.verts[t[0] as usize]),
+                side(&m.verts[t[1] as usize]),
+                side(&m.verts[t[2] as usize]),
+            ];
+            let eps = 1e-6;
+            if d.iter().all(|&x| x >= -eps) || d.iter().all(|&x| x <= eps) {
+                idx.extend_from_slice(t);
+                continue;
+            }
+            let mut lo: Vec<u32> = Vec::with_capacity(4);
+            let mut hi: Vec<u32> = Vec::with_capacity(4);
+            for e in 0..3 {
+                let (a, b) = (t[e], t[(e + 1) % 3]);
+                let (da, db) = (d[e], d[(e + 1) % 3]);
+                if da <= 0.0 {
+                    lo.push(a);
+                }
+                if da >= 0.0 {
+                    hi.push(a);
+                }
+                if (da < 0.0 && db > 0.0) || (da > 0.0 && db < 0.0) {
+                    let s = (da / (da - db)) as f32;
+                    let (va, vb) = (m.verts[a as usize], m.verts[b as usize]);
+                    let lerp = |x: f32, y: f32| x + (y - x) * s;
+                    let v = Vert {
+                        p: [
+                            lerp(va.p[0], vb.p[0]),
+                            lerp(va.p[1], vb.p[1]),
+                            lerp(va.p[2], vb.p[2]),
+                        ],
+                        c: va.c,
+                        n: va.n,
+                    };
+                    m.verts.push(v);
+                    let i = (m.verts.len() - 1) as u32;
+                    lo.push(i);
+                    hi.push(i);
+                }
+            }
+            for poly in [lo, hi] {
+                for i in 1..poly.len().saturating_sub(1) {
+                    idx.extend_from_slice(&[poly[0], poly[i], poly[i + 1]]);
+                }
+            }
+        }
+        m.idx = idx;
+    }
+    for v in &mut m.verts {
+        let (q, turn) = f.map(to_mil(v.p));
+        v.p = [
+            ((q[0] - cx) * k) as f32,
+            ((q[1] - cy) * k) as f32,
+            (q[2] * k) as f32,
+        ];
+        let nn = turn.vec([
+            v.n[0] as f64 / 127.0,
+            v.n[1] as f64 / 127.0,
+            v.n[2] as f64 / 127.0,
+        ]);
+        let q8 = |x: f64| (x * 127.0).round().clamp(-127.0, 127.0) as i8;
+        v.n = [q8(nn[0]), q8(nn[1]), q8(nn[2]), v.n[3]];
+    }
 }
 
 /// Face (+1 top, -1 bottom), shape, size x and y, rotation and outline.
@@ -1013,7 +1101,7 @@ fn start_loader(models: &[trace_core::Model3d]) -> Arc<Loader> {
 pub struct View3d {
     pub camera: Camera,
     pub options: Options,
-    built: Option<(Options, bool)>,
+    built: Option<(Options, bool, u64)>,
     loader: Option<Arc<Loader>>,
     models: Option<Arc<Vec<Option<Arc<trace_step::Mesh>>>>>,
     model_count: usize,
@@ -1229,7 +1317,23 @@ pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
         }
     }
     let with_models = v.models.is_some();
-    if v.built != Some((v.options, with_models)) {
+    let bends = &scene.board.bends;
+    let fold_sig = if v.options.fold == 0 || bends.is_empty() {
+        0
+    } else {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for b in bends {
+            b.angle_deg.to_bits().hash(&mut h);
+            b.axis_deg.map(f64::to_bits).hash(&mut h);
+            for p in &b.area {
+                p.x.mil().to_bits().hash(&mut h);
+                p.y.mil().to_bits().hash(&mut h);
+            }
+        }
+        h.finish() | 1
+    };
+    if v.built != Some((v.options, with_models, fold_sig)) {
         let first = v.built.is_none();
         let none: Vec<Option<Arc<trace_step::Mesh>>> = Vec::new();
         let models = v.models.clone();
@@ -1246,7 +1350,7 @@ pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
         if let Ok(mut s) = v.shared.lock() {
             s.upload = Some(mesh);
         }
-        v.built = Some((v.options, with_models));
+        v.built = Some((v.options, with_models, fold_sig));
     }
 
     let (rect, resp) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -1349,6 +1453,7 @@ pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
     }
 
     // Options in the corner.
+    let g_bends = &scene.board.bends;
     let mut opt = v.options;
     egui::Area::new(egui::Id::new("view3d_opts"))
         .fixed_pos(rect.left_top() + egui::vec2(10.0, 10.0))
@@ -1368,6 +1473,13 @@ pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
                     ui.checkbox(&mut opt.parts, "Parts");
                     ui.checkbox(&mut opt.silk, "Silkscreen");
                 });
+                if !g_bends.is_empty() {
+                    ui.horizontal(|ui| {
+                        ui.label("Fold");
+                        ui.add(egui::Slider::new(&mut opt.fold, 0..=100).suffix(" %"))
+                            .on_hover_text("Rigid-flex: bend the flex at its bends, by this share of each bend's angle");
+                    });
+                }
                 ui.label(
                     RichText::new(
                         "Drag to turn, right-drag to pan, scroll to zoom.\nT top, B flip over, F or double-click to reset.",

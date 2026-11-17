@@ -692,6 +692,15 @@ impl App {
         ) {
             self.export_pairs();
         }
+        if item(
+            ui,
+            has,
+            "Bill of materials with part data…",
+            "",
+            "Parts by part number with lifecycle, stock and price; obsolete, out of stock and missing part numbers",
+        ) {
+            self.bom.open = true;
+        }
         if item(ui, has, "Design rule violations", "", "") {
             self.drc.open = true;
         }

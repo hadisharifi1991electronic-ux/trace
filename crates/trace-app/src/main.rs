@@ -4,6 +4,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod autowin;
+mod bomwin;
 mod canvas;
 mod clearwin;
 mod cm;
@@ -143,6 +144,7 @@ pub struct App {
     zcheck: zwin::ZWindow,
     pathloss: pathwin::PathWindow,
     compare: comparewin::CompareWindow,
+    pub(crate) bom: bomwin::BomWindow,
     pub(crate) flex: flexwin::FlexWindow,
     pairs: pairwin::PairWindow,
     stitch: stitchwin::StitchWindow,
@@ -241,6 +243,11 @@ impl App {
             zcheck: zwin::ZWindow::default(),
             pathloss: pathwin::PathWindow::default(),
             compare: comparewin::CompareWindow::default(),
+            bom: bomwin::BomWindow::with_key(
+                cc.storage
+                    .and_then(|s| s.get_string(bomwin::STORE_KEY))
+                    .unwrap_or_default(),
+            ),
             flex: flexwin::FlexWindow::default(),
             pairs: pairwin::PairWindow::default(),
             stitch: stitchwin::StitchWindow::default(),
@@ -3409,6 +3416,15 @@ impl eframe::App for App {
         if let Some((label, edits)) = tidied {
             self.apply_edits(&label, edits);
         }
+        let bommed = self
+            .scene
+            .as_ref()
+            .and_then(|scene| self.bom.show(ctx, &scene.board));
+        if let Some(bomwin::BomAct::Select(parts, first)) = bommed {
+            self.edit.sel.clear();
+            self.edit.sel.parts = parts.into_iter().collect();
+            self.select_part(&first, true);
+        }
         let flexed = self
             .scene
             .as_ref()
@@ -3533,6 +3549,7 @@ impl eframe::App for App {
             .map(|p| p.display().to_string())
             .collect();
         storage.set_string(RECENT_KEY, list.join("\n"));
+        storage.set_string(bomwin::STORE_KEY, self.bom.mouser_key.clone());
         storage.set_string(cm::STORE_KEY, self.cm.to_store());
         storage.set_string(imp::STORE_KEY, self.imp.to_store());
         storage.set_string(symlib::STORE_KEY, self.schem.libs.to_store());

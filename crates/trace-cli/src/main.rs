@@ -89,6 +89,19 @@ USAGE:
                                                 widest worst case eye. --xtalk: nets beside the path's traces
                                                 switch too (near or far end, whichever is worse), in the eye and
                                                 as each one's worst case closure.
+    trace bom <board> [--boards N] [--parts parts.csv]... [--mouser KEY] [--refresh] [--no-cache]
+              [--template parts.csv] [bom.csv|report.txt]
+                                                BOM with part data: lines by part number, value and footprint
+                                                (variant and DNP parts left off), joined with each part
+                                                number's lifecycle, stock, price breaks and datasheet from
+                                                parts files (CSV: MPN, Manufacturer, Lifecycle, Stock,
+                                                Price@1, Price@100 ...), the cache of earlier lookups, or the
+                                                Mouser Search API (--mouser KEY or MOUSER_API_KEY; free key
+                                                from mouser.com/api-hub). Flags obsolete, end of life and NRND
+                                                parts, too little stock for N boards, no part number, a part
+                                                number on two footprints, lines that could share a part, one
+                                                source; costs per board and for N. --template writes a parts
+                                                file to fill in. Exits 1 on errors.
     trace flex <board> [--radius [B1=]MIL] [--dynamic] [--keepout 30] [--angle 10] [report.txt]
                                                 rigid-flex: zones with their layers and thickness, bends with
                                                 their least radius (IPC-2223: 6/12/24x the flex, 100x dynamic),
@@ -286,6 +299,7 @@ fn main() -> ExitCode {
         ["path" | "pathloss", file, rest @ ..] => path_cmd(file, rest),
         ["compare" | "diff", a, b, rest @ ..] => compare_cmd(a, b, rest),
         ["flex", file, rest @ ..] => flex_cmd(file, rest),
+        ["bom", file, rest @ ..] => bom_cmd(file, rest),
         ["pairsize", file, layer, rest @ ..] => pairsize(file, layer, rest),
         ["validate", rest @ ..] => validate(rest),
         ["stitch", file, net, out, rest @ ..] => stitch_cmd(file, net, out, rest),
@@ -2614,6 +2628,100 @@ fn compare_cmd(a: &str, b: &str, rest: &[&str]) -> Res {
     } else {
         std::process::exit(1)
     }
+}
+
+fn bom_cmd(file: &str, rest: &[&str]) -> Res {
+    use trace_core::bom;
+    let mut boards = 1u64;
+    let mut files: Vec<&str> = Vec::new();
+    let mut key = std::env::var("MOUSER_API_KEY").ok();
+    let (mut refresh, mut cache, mut template, mut out) = (false, true, None, None);
+    let mut i = 0;
+    while i < rest.len() {
+        let next = |n: &str| rest.get(i + 1).copied().ok_or(format!("{n} needs a value"));
+        match rest[i] {
+            "--boards" => {
+                boards = next("--boards")?.parse()?;
+                i += 1;
+            }
+            "--parts" => {
+                files.push(next("--parts")?);
+                i += 1;
+            }
+            "--mouser" => {
+                key = Some(next("--mouser")?.to_string());
+                i += 1;
+            }
+            "--template" => {
+                template = Some(next("--template")?);
+                i += 1;
+            }
+            "--refresh" => refresh = true,
+            "--no-cache" => cache = false,
+            x if x.starts_with("--") => return Err(format!("unknown option {x}").into()),
+            x => out = Some(x),
+        }
+        i += 1;
+    }
+    let b = board(file)?;
+    let mut b0 = bom::build(&b);
+    let mut db = if cache {
+        bom::load_cache()
+    } else {
+        bom::Db::default()
+    };
+    for f in &files {
+        let text = std::fs::read_to_string(f)?;
+        let name = std::path::Path::new(f)
+            .file_name()
+            .map_or(f.to_string(), |n| n.to_string_lossy().to_string());
+        let n = db.add(bom::parts_csv(&text, &name)?);
+        eprintln!("{n} part numbers from {f}");
+    }
+    if let Some(k) = key.filter(|k| !k.trim().is_empty()) {
+        let want = bom::to_look_up(&b0, &db, refresh);
+        if !want.is_empty() {
+            eprintln!("Looking up {} part numbers at Mouser...", want.len());
+            let (got, notes) = bom::mouser_fetch(&k, &want, &bom::today(), |d, n| {
+                eprintln!("  {d}/{n}");
+            })?;
+            for n in &notes {
+                eprintln!("  {n}");
+            }
+            let mut fetched = bom::Db::default();
+            fetched.add(got);
+            if cache {
+                let mut c = bom::load_cache();
+                c.add(fetched.parts.values().cloned().collect());
+                bom::save_cache(&c)?;
+            }
+            db.add(fetched.parts.into_values().collect());
+        }
+    }
+    bom::check(&mut b0, &db, boards);
+    let text = b0.report();
+    print!("{text}");
+    if let Some(t) = template {
+        std::fs::write(t, b0.parts_template())?;
+        println!("Wrote {t}");
+    }
+    if let Some(o) = out {
+        let body = if o.to_ascii_lowercase().ends_with(".csv") {
+            b0.csv()
+        } else {
+            text
+        };
+        std::fs::write(o, body)?;
+        println!("Wrote {o}");
+    }
+    if b0
+        .lines
+        .iter()
+        .any(|l| l.worst() == Some(bom::Level::Error))
+    {
+        std::process::exit(1)
+    }
+    Ok(())
 }
 
 fn zcheck_cmd(file: &str, rest: &[&str]) -> Res {

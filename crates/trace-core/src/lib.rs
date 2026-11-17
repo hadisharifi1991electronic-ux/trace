@@ -8,6 +8,7 @@ pub mod autoroute;
 pub mod backdrill;
 pub mod board;
 pub mod body;
+pub mod bom;
 pub mod bus;
 pub mod clear3d;
 pub mod compare;

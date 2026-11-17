@@ -3,6 +3,35 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.72.0 (2026-11-17)
+
+- Bill of materials with part data (Reports > Bill of materials with
+  part data…, `trace bom board [--boards N] [--parts file.csv]
+  [--mouser KEY] [bom.csv|report.txt]`). Parts are grouped by part
+  number, maker, value and footprint for the active variant; parts
+  left off by the variant or marked DNP/DNI/not fitted, fiducials,
+  drawings and parts marked no BOM are listed apart, and parts without
+  pads stay in when they have a part number (cables, screws, boxes).
+  Allegro boards, which carry no maker's part number, use the device
+  type as a library code. Each part number is joined with its
+  lifecycle, stock, price breaks, currency, datasheet and replacement
+  from parts files (any CSV with an MPN column and Manufacturer,
+  Lifecycle, Stock, Price or Price@1/Price@100 ... columns, such as a
+  distributor's export; "Save parts file" writes one to fill in), from
+  earlier lookups (kept in Trace\parts-cache.json under AppData), or
+  from the Mouser Search API with your own free key (looked up ten at a
+  time through the system's curl, within Mouser's 30 a minute). The
+  checks: no part number, obsolete, end of life, not recommended for
+  new designs, less stock than N boards need (and under five times),
+  one part number on two footprints, lines alike in value and
+  footprint under other part numbers, library codes instead of makers'
+  numbers, and ICs with only one maker's number. Cost per board and
+  for N boards at the matching price break. The window filters to the
+  lines with problems, selects a line's parts on the board, links the
+  part page and datasheet, and saves the BOM, a report or the parts
+  file. The Mouser lookup could not be tried against Mouser from the
+  build machine; its answer format is tested.
+
 ## 0.71.0 (2026-11-15)
 
 - Rigid-flex stack-ups (Design > Rigid-flex zones and bends…, `trace

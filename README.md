@@ -47,6 +47,11 @@ checker and simulator all read.
   part (U1B) joins the first placed part still missing it. Update PCB adds
   it to the board when its footprint is on the board, in the open
   footprint library or in an open `.IntLib`
+- check the bill of materials (Reports → Bill of materials with part
+  data…): each part number's lifecycle, stock and price from a parts
+  file or a Mouser lookup (your own free API key), with obsolete, end of
+  life and short-stock parts, missing part numbers and the cost for N
+  boards
 - lay out rigid-flex boards (Design → Rigid-flex zones and bends…): zones
   with their own layers (flex, rigid, stiffened), bends with radius,
   angle and fold line, read from ODB++ too, and the IPC-2223 flex checks
@@ -312,6 +317,7 @@ trace path board.brd U5.A3 J2.1 --eye 16 --eq auto --eye-svg eye.svg   the same 
 trace path board.brd HDMI_D1_P --eye 3.4 --xtalk   the eye with the nets beside the path switching too (NEXT/FEXT closure per net)
 trace compare old.PcbDoc new.PcbDoc changes.csv   design compare: parts, nets (renamed, pins joined or left), routing per net, classes, pairs, rules, stack-up
 trace flex board.tgz --radius B1=120 flex.txt   rigid-flex: zones and their layers, bend radius (IPC-2223), vias, parts, corners and stacked tracks in bends
+trace bom board.PcbDoc --boards 50 --parts parts.csv --mouser KEY bom.csv   BOM with lifecycle, stock and price per part number; obsolete, short stock, missing part numbers, cost for 50 boards
 trace via board.PcbDoc 1 7 --target 50 --fab drill=8-16,ring=4,antipad=20-70   size the via to 50 ohm within the fab limits (add --optimise 10 for best RL+IL)
 trace pairsize board.PcbDoc 3 --zdiff 100 --ghz 8   every width and gap for 100 ohm on a layer, ranked by loss
 trace cascade chip.s1p via.s2p --line 50@500@3.4   return loss into vias and lines ending in a chip's port model

@@ -125,7 +125,7 @@ USAGE:
                                                 a failure
     trace emi <board> [--net CLK=25MHz@2ns,3.3V]... [--no-auto] [--clock 50MHz@1ns,3.3V] [--signal ..] [--ibis ..]
               [--cable J1=1m] [--rail VCC=1A@100MHz] [--map near.svg] [--quick]
-              [--limit fcc-b|fcc-a|cispr-b|cispr-a] [--margin 6] [spectrum.svg] [findings.csv] [report.txt]
+              [--limit cispr-b|cispr-a|fcc-b|fcc-a] [--margin 6] [spectrum.svg] [findings.csv] [report.txt]
                                                 board-level EMI check of the fast nets (clocks found by name,
                                                 the nets given, every pair): tracks over plane gaps or splits,
                                                 layer changes with no return via or capacitor near, fast tracks
@@ -133,7 +133,8 @@ USAGE:
                                                 lambda/20, and each clock's radiation (differential-mode loop,
                                                 Ott) against the FCC or CISPR 32 limit; then the EMI simulation:
                                                 every net and pair as a source (IBIS --ibis U1=f.ibs, given
-                                                --signal NET=12Gbps@30ps,0.8V | 125MHz | 2.4GHz,0dBm, else a
+                                                --signal NET=12Gbps@30ps,0.8V | 125MHz | 2.4GHz,0dBm, or a whole
+                                                kind: class:rf|lo|serdes|lvds|clock|cmos=..., else a
                                                 default for its kind), radiated by its outer traces (loops with
                                                 the wave's phase, worst direction), by the cables on the
                                                 connectors (common mode, --cable J1=2m), by the power planes'

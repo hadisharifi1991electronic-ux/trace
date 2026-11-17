@@ -25,7 +25,7 @@
 //! line while the edge travels): harmonic n of a 50 % duty clock has
 //! I·|sinc(nπ/2)|·|sinc(nπ f tr)|. Nets inside the board, between two
 //! planes, are taken not to radiate this way. Cables, the usual largest
-//! source (common mode), are not modelled: the margin here is the
+//! source (common mode), are left to the EMI simulation (`sim`): the margin here is the
 //! board's own.
 
 use crate::drc::si::{self, Planes};
@@ -242,7 +242,7 @@ impl Default for EmiSetup {
             auto_freq: 50e6,
             auto_rise: 1e-9,
             auto_volts: 3.3,
-            limit: Limit::FccB,
+            limit: Limit::CisprB,
             margin_db: 6.0,
         }
     }
@@ -1001,7 +1001,7 @@ pub fn check(board: &Board, setup: &EmiSetup) -> EmiResult {
         ));
     }
     notes.push(
-        "the emission is the board's own (differential mode); cables on its connectors usually radiate more (common mode) and are not modelled"
+        "this estimate is the clocks' own traces (differential mode); the EMI simulation below adds every net, the cables on the connectors (common mode), the power planes and the decoupling loops"
             .into(),
     );
     EmiResult {

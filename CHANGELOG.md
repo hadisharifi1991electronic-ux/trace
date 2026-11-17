@@ -3,6 +3,25 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.80.1 (2026-11-17)
+
+- The EMI check and simulation judge against CISPR 32 class B by
+  default (10 m below 1 GHz, 3 m above), as Hadi's boards need; FCC
+  limits stay one choice away (`--limit fcc-b`).
+- EMI simulation fixes from the first runs on the ADRV9026 and DAC39RF12
+  boards:
+  - Only parts with pads on a signal net count as connectors with a
+    cable, and connector words are matched whole: a hot-surface logo
+    ("IEC_HotSurface_Small") was taken for an SMA and given a 1 m cable.
+  - Sources can be given for a whole kind of net:
+    `--signal class:lo=3.5GHz,-6dBm`, `class:rf`, `class:serdes`,
+    `class:lvds`, `class:clock`, `class:cmos` (a net's own line still
+    wins). The same lines work in the EMI window's Sources box.
+  - RF defaults by role: an LO or a transmitter's output 0 dBm, a
+    receiver's input (RX, ORX) −20 dBm.
+  - The layout check's own radiation note no longer says cables are
+    not modelled.
+
 ## 0.80.0 (2026-11-17)
 
 - Field maps from the 3D solver. The via and pair solve can now keep

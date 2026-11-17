@@ -12,7 +12,9 @@
 //! - SerDes pairs (JESD, GT, PCIe, SFP…): PRBS at 12 Gb/s, 0.8 V, 30 ps;
 //! - LVDS clocks (CLK, SYSREF pairs) at the name's frequency or 250 MHz;
 //!   other LVDS pairs: PRBS at 800 Mb/s, 0.35 V, 300 ps;
-//! - RF and LO pairs and nets: a 0 dBm tone at 3.5 GHz;
+//! - RF and LO pairs and nets: a tone at the name's frequency or 3.5 GHz,
+//!   0 dBm for an LO or a transmitter's output, −20 dBm for a receiver's
+//!   input (RX, ORX);
 //! - other single-ended nets (CMOS data and control): PRBS at 50 Mb/s,
 //!   3.3 V, 2 ns.
 //!
@@ -185,7 +187,32 @@ impl SignalSpec {
         Ok(out)
     }
 
+    /// A whole kind of net: "class:rf", "class:serdes", "class:lvds",
+    /// "class:clock", "class:cmos" (also "class:lo", the RF nets named LO).
+    fn matches_kind(&self, kind: Kind, name: &str) -> bool {
+        let Some(c) = self
+            .pattern
+            .to_ascii_lowercase()
+            .strip_prefix("class:")
+            .map(str::to_string)
+        else {
+            return false;
+        };
+        match c.as_str() {
+            "rf" => kind == Kind::Rf,
+            "lo" => kind == Kind::Rf && rf_role(name) == RfRole::Lo,
+            "serdes" | "cml" => kind == Kind::SerDes,
+            "lvds" => matches!(kind, Kind::Lvds | Kind::LvdsClock),
+            "clock" | "clk" => matches!(kind, Kind::Clock | Kind::LvdsClock),
+            "cmos" | "data" => kind == Kind::Cmos,
+            _ => false,
+        }
+    }
+
     fn matches(&self, name: &str) -> bool {
+        if self.pattern.to_ascii_lowercase().starts_with("class:") {
+            return false;
+        }
         if self.pattern.contains(['*', '?']) {
             crate::constraints::glob(&self.pattern, name)
         } else {
@@ -246,7 +273,7 @@ pub struct SimSetup {
 impl Default for SimSetup {
     fn default() -> Self {
         SimSetup {
-            limit: Limit::FccB,
+            limit: Limit::CisprB,
             margin_db: 6.0,
             signals: Vec::new(),
             ibis: Vec::new(),
@@ -401,6 +428,31 @@ fn kind_of(name: &str, pair: bool) -> Kind {
         return Kind::Rf;
     }
     Kind::Cmos
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RfRole {
+    /// A local oscillator: 0 dBm.
+    Lo,
+    /// A transmitter's output: 0 dBm.
+    Out,
+    /// A receiver's input (RX, ORX): −20 dBm.
+    In,
+}
+
+fn rf_role(name: &str) -> RfRole {
+    let u = name.to_ascii_uppercase();
+    let toks: Vec<&str> = u.split(|c: char| !c.is_ascii_alphanumeric()).collect();
+    if toks
+        .iter()
+        .any(|t| t.starts_with("LO") || t.ends_with("LO"))
+    {
+        RfRole::Lo
+    } else if u.contains("RX") || u.contains("_IN") || u.contains("ANT") {
+        RfRole::In
+    } else {
+        RfRole::Out
+    }
 }
 
 fn defaults(kind: Kind, name: &str) -> (f64, f64, f64) {
@@ -651,7 +703,25 @@ fn add_db(a: f64, b: f64) -> f64 {
 /// what it is, length m. Optical cages and test points carry none.
 fn connectors(board: &Board, given: &[(String, f64)]) -> Vec<(String, String, f64)> {
     let mut out = Vec::new();
-    for c in &board.components {
+    // Each part's pads: how many, and whether any is on a signal net.
+    let mut pads: HashMap<u32, (usize, bool)> = HashMap::new();
+    for p in &board.geometry.pads {
+        if let Some(ci) = p.component {
+            let e = pads.entry(ci).or_default();
+            e.0 += 1;
+            if let Some(n) = p.net {
+                let nm = board.nets.get(n as usize).map_or("", |x| x.name.as_str());
+                if !is_ground(nm) {
+                    e.1 = true;
+                }
+            }
+        }
+    }
+    for (ci, c) in board.components.iter().enumerate() {
+        // Logos, fiducials, mounting holes: no pads on a signal net.
+        if !pads.get(&(ci as u32)).is_some_and(|p| p.0 >= 2 && p.1) {
+            continue;
+        }
         let d = c.designator.to_ascii_uppercase();
         let text = format!(
             "{} {} {}",
@@ -667,7 +737,23 @@ fn connectors(board: &Board, given: &[(String, f64)]) -> Vec<(String, String, f6
             .unwrap_or("")
         )
         .to_ascii_uppercase();
-        let has = |ks: &[&str]| ks.iter().any(|k| text.contains(k));
+        // Whole words (or a word's start before a digit or dash), so
+        // "SMALL" is not an SMA.
+        let words: Vec<&str> = text
+            .split(|ch: char| !(ch.is_ascii_alphanumeric() || ch == '.' || ch == '-'))
+            .filter(|w| !w.is_empty())
+            .collect();
+        let has = |ks: &[&str]| {
+            ks.iter().any(|k| {
+                words.iter().any(|w| {
+                    w.starts_with(k)
+                        && w[k.len()..]
+                            .chars()
+                            .next()
+                            .is_none_or(|ch| !ch.is_ascii_alphabetic() || k.ends_with('-'))
+                })
+            })
+        };
         let is_conn = d.starts_with('J') && !d.starts_with("JP")
             || d.starts_with("CN")
             || d.starts_with('P') && d[1..].chars().all(|c| c.is_ascii_digit()) && d.len() > 1;
@@ -827,7 +913,10 @@ pub fn simulate(
         let mut origin = "default for its kind".to_string();
         let mut assumed = true;
         if kind == Kind::Rf {
-            swing = 0.0;
+            swing = match rf_role(&nm) {
+                RfRole::Lo | RfRole::Out => 0.0,
+                RfRole::In => -20.0,
+            };
         }
         // IBIS for the driver's part.
         let (_, comp, pin) = driver_of(pos);
@@ -859,6 +948,7 @@ pub fn simulate(
             .signals
             .iter()
             .find(|s| s.matches(&nm) || s.matches(&name(pos)))
+            .or_else(|| setup.signals.iter().find(|s| s.matches_kind(kind, &nm)))
         {
             if let Some(r) = sp.rate {
                 freq = r;

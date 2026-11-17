@@ -45,7 +45,7 @@ impl Default for EmiWindow {
             auto_mhz: 50.0,
             auto_ns: 1.0,
             auto_v: 3.3,
-            limit: Limit::FccB,
+            limit: Limit::CisprB,
             margin: 6.0,
             error: None,
             result: None,

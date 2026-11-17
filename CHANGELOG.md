@@ -3,6 +3,18 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.80.2 (2026-11-17)
+
+- EMI simulation, cables: every connector with a cable is now driven,
+  not only the longest one. A net drives each cable fully when it runs
+  beside that connector and half from across the board, and the cable
+  that radiates most for it is the one reported. Cable lengths by kind:
+  power jacks and terminals (or a small connector on a supply net)
+  1.5 m, Ethernet 2 m, USB, video and RF test coax (SMA, 2.92 mm, BNC)
+  1 m, U.FL and MMCX pigtails 0.1 m, a mated FMC board 0.15 m, headers
+  0.3 m, optical cages none; `--cable J1=2m` overrides. The choke fix
+  goes on the cable named.
+
 ## 0.80.1 (2026-11-17)
 
 - The EMI check and simulation judge against CISPR 32 class B by

@@ -37,8 +37,13 @@
 //! 2. *Cables* (common mode, current driven; Hockanson et al., IEEE
 //!    Trans. EMC 1996): a net's return current crossing the plane drops
 //!    V = jω L_ext I, L_ext ≈ μ0 Σ(l·h) / (π W) for a board W wide. That
-//!    voltage drives the cables on the connectors against the board as a
-//!    monopole of the longest cable's length L (Ott eq. 12-7, 150 Ω):
+//!    voltage drives each connector's cable against the board as a
+//!    monopole of the cable's length L (Ott eq. 12-7, 150 Ω), fully when
+//!    the net runs beside the connector and half from across the board
+//!    (0.5 + 0.5 e^{−d / (diagonal/4)}); the cable radiating most for each
+//!    net is kept. Cable lengths by kind: power 1.5 m, Ethernet 2 m, USB,
+//!    video and RF test coax 1 m, U.FL/MMCX pigtails 0.1 m, a mated FMC
+//!    board 0.15 m, headers 0.3 m, optical cages none (`--cable J1=2m`):
 //!    E = 1.257e-6 f I_cm L / r, L no more than λ/π (resonance).
 //! 3. *Plane cavity*: each power plane's impedance from the PDN model
 //!    (its cavity, decoupling capacitors and regulator, so its
@@ -699,20 +704,49 @@ fn add_db(a: f64, b: f64) -> f64 {
     10.0 * (10f64.powf(a / 10.0) + 10f64.powf(b / 10.0)).log10()
 }
 
-/// The connectors and the cable each is taken to carry: designator,
-/// what it is, length m. Optical cages and test points carry none.
-fn connectors(board: &Board, given: &[(String, f64)]) -> Vec<(String, String, f64)> {
+/// A connector and the cable it is taken to carry.
+#[derive(Clone, Debug)]
+struct Conn {
+    des: String,
+    what: String,
+    /// Cable length, m.
+    len: f64,
+    /// Where it is (its pads' centre), mil.
+    at: [f64; 2],
+}
+
+fn power_name(nm: &str) -> bool {
+    let u = nm.to_ascii_uppercase();
+    crate::pdn::volts_in_name(&u).is_some()
+        || [
+            "VIN", "VCC", "VDD", "PWR", "POWER", "VBUS", "VBAT", "+12", "+5", "12V", "5V", "24V",
+        ]
+        .iter()
+        .any(|k| u.contains(k))
+}
+
+/// The connectors and the cable each is taken to carry. Optical cages
+/// carry none; logos and holes (no pad on a signal net) are not
+/// connectors.
+fn connectors(board: &Board, given: &[(String, f64)]) -> Vec<Conn> {
     let mut out = Vec::new();
-    // Each part's pads: how many, and whether any is on a signal net.
-    let mut pads: HashMap<u32, (usize, bool)> = HashMap::new();
+    // Each part's pads: how many, whether any is on a signal net,
+    // whether any is on a supply, and their centre.
+    let mut pads: HashMap<u32, (usize, bool, bool, [f64; 2])> = HashMap::new();
     for p in &board.geometry.pads {
         if let Some(ci) = p.component {
             let e = pads.entry(ci).or_default();
             e.0 += 1;
+            let q = pt(p.at);
+            e.3[0] += q[0];
+            e.3[1] += q[1];
             if let Some(n) = p.net {
                 let nm = board.nets.get(n as usize).map_or("", |x| x.name.as_str());
                 if !is_ground(nm) {
                     e.1 = true;
+                }
+                if power_name(nm) {
+                    e.2 = true;
                 }
             }
         }
@@ -760,10 +794,18 @@ fn connectors(board: &Board, given: &[(String, f64)]) -> Vec<(String, String, f6
         if !is_conn && !has(&["SMA", "USB", "RJ45", "FMC", "HDMI", "CONN"]) {
             continue;
         }
+        let info = pads[&(ci as u32)];
         let (what, len) = if has(&["SFP", "QSFP"]) {
             ("optical cage", 0.0)
-        } else if has(&["SMA", "SMP", "MMCX", "U.FL", "COAX", "BNC"]) {
-            ("coax", 1.0)
+        } else if has(&["U.FL", "UFL", "MMCX", "MHF", "IPEX", "W.FL"]) {
+            // Inside the box, to an antenna or module: a short pigtail.
+            ("coax pigtail", 0.1)
+        } else if has(&["SMA", "SMP", "2.92", "K-", "BNC", "COAX", "N-"]) {
+            ("RF coax (test cable)", 1.0)
+        } else if has(&["JACK", "BARREL", "DCJ", "PJ-", "TERMINAL", "PHOENIX"])
+            || info.2 && info.0 <= 6
+        {
+            ("power cable", 1.5)
         } else if has(&["USB"]) {
             ("USB cable", 1.0)
         } else if has(&["RJ45", "ETH", "MAGJACK"]) {
@@ -782,7 +824,13 @@ fn connectors(board: &Board, given: &[(String, f64)]) -> Vec<(String, String, f6
             .find(|(g, _)| g.eq_ignore_ascii_case(&c.designator))
             .map_or(len, |g| g.1);
         if len > 0.0 {
-            out.push((c.designator.clone(), what.to_string(), len));
+            let n = info.0.max(1) as f64;
+            out.push(Conn {
+                des: c.designator.clone(),
+                what: what.to_string(),
+                len,
+                at: [info.3[0] / n, info.3[1] / n],
+            });
         }
     }
     out
@@ -1080,13 +1128,19 @@ pub fn simulate(
         return Err("no routed signal nets".into());
     }
     let conns = connectors(board, &setup.cables);
-    let cable = conns.iter().max_by(|a, b| a.2.total_cmp(&b.2)).cloned();
-    match &cable {
-        Some((d, w, l)) => notes.push(format!(
-            "common mode: {} connectors; the longest antenna is {d} ({w}, {l:.2} m), driven by the board's ground noise",
-            conns.len()
-        )),
-        None => notes.push("no connectors found: no cable common mode counted".into()),
+    let diag = (bx[1] - bx[0]).hypot(bx[3] - bx[2]).max(100.0);
+    if conns.is_empty() {
+        notes.push("no connectors found: no cable common mode counted".into());
+    } else {
+        notes.push(format!(
+            "common mode: {} connectors with cables ({}); each net drives the one that radiates most for it, more strongly the nearer the net runs to it",
+            conns.len(),
+            conns
+                .iter()
+                .map(|c| format!("{} {} {:.2} m", c.des, c.what, c.len))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
     }
     let dirs = [directions(1.0), directions(-1.0)];
     // Per signal: contributions (traces, cable). In parallel.
@@ -1123,7 +1177,19 @@ pub fn simulate(
             _ => 0.0,
         };
         let mut tr = vec![-200.0; n];
-        let mut cb = vec![-200.0; n];
+        let mut cbs = vec![vec![-200.0; n]; conns.len()];
+        let centre = {
+            let all: Vec<&Seg> = gp
+                .segs
+                .iter()
+                .chain(gn.iter().flat_map(|g| g.segs.iter()))
+                .collect();
+            let w: f64 = all.iter().map(|g| g.len).sum::<f64>().max(1e-12);
+            [
+                all.iter().map(|g| g.mid[0] * g.len).sum::<f64>() / w / MIL,
+                all.iter().map(|g| g.mid[1] * g.len).sum::<f64>() / w / MIL,
+            ]
+        };
         let lext = l_ext(&gp.segs, width)
             + gn.as_ref().map_or(0.0, |g| l_ext(&g.segs, width))
                 * if s.neg.is_some() { 0.0 } else { 1.0 };
@@ -1156,7 +1222,7 @@ pub fn simulate(
                 }
             } / r;
             tr[b] = add_db(tr[b], db_uv(e));
-            if let Some((_, _, len)) = &cable {
+            if !conns.is_empty() {
                 // Common-mode drive: a single net's return current; a
                 // pair's is its imbalance and skew share of it.
                 let icm = match &gn {
@@ -1175,10 +1241,36 @@ pub fn simulate(
                     lext
                 };
                 let v = 2.0 * PI * f * l * icm;
-                let ec = v * cable_e_per_v(f, *len, if tweak.choke { 600.0 } else { 0.0 }) / r;
-                cb[b] = add_db(cb[b], db_uv(ec));
+                for (ci, c) in conns.iter().enumerate() {
+                    // The ground noise reaches a cable more fully the
+                    // nearer the net runs to it (half of it from across
+                    // the board).
+                    let d = (centre[0] - c.at[0]).hypot(centre[1] - c.at[1]);
+                    let near = 0.5 + 0.5 * (-d / (0.25 * diag)).exp();
+                    let z = if tweak.choke && Some(ci) == tweak.conn {
+                        600.0
+                    } else {
+                        0.0
+                    };
+                    let ec = v * near * cable_e_per_v(f, c.len, z) / r;
+                    cbs[ci][b] = add_db(cbs[ci][b], db_uv(ec));
+                }
             }
         }
+        // The cable that radiates most for this net.
+        let best = (0..conns.len()).max_by(|&a, &b| {
+            let pk = |k: usize| {
+                cbs[k]
+                    .iter()
+                    .zip(&limit)
+                    .map(|(d, l)| d - l)
+                    .fold(f64::MIN, f64::max)
+            };
+            pk(a).total_cmp(&pk(b))
+        });
+        let cb = best
+            .map(|k| cbs[k].clone())
+            .unwrap_or_else(|| vec![-200.0; n]);
         let peak = tr
             .iter()
             .zip(&limit)
@@ -1191,9 +1283,9 @@ pub fn simulate(
                 mechanism: Mechanism::Trace,
                 db: tr,
             },
-            cable.as_ref().map(|c| Contribution {
+            best.map(|k| Contribution {
                 source: s.name.clone(),
-                mechanism: Mechanism::Cable(c.0.clone()),
+                mechanism: Mechanism::Cable(conns[k].des.clone()),
                 db: cb,
             }),
             peak,
@@ -1399,6 +1491,7 @@ pub fn simulate(
                     try_fix(
                         Tweak {
                             choke: true,
+                            conn: conns.iter().position(|c| &c.des == j),
                             ..Default::default()
                         },
                         format!("common-mode choke or ferrite (600 Ω) on the cable at {j}"),
@@ -1488,7 +1581,10 @@ pub fn simulate(
         total,
         contributions,
         signals,
-        connectors: conns,
+        connectors: conns
+            .iter()
+            .map(|c| (c.des.clone(), c.what.clone(), c.len))
+            .collect(),
         fixes,
         worst: (freqs[wk], wm),
         map,
@@ -1502,6 +1598,8 @@ struct Tweak {
     matched: bool,
     slow: bool,
     choke: bool,
+    /// The connector the choke goes on.
+    conn: Option<usize>,
 }
 
 /// The cavity edge and decoupling loops of one rail.

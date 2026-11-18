@@ -597,6 +597,9 @@ impl App {
                 if item(ui, true, "Path loss…", "", "The routed path between two pins, traces, vias and parts cascaded: insertion and return loss to your GHz, Touchstone") {
                     self.pathloss.open = true;
                 }
+                if item(ui, true, "RF report…", "", "Every RF path from the coaxial connectors to the chips: insertion and return loss in the band, where each reflects and loses most") {
+                    self.rf.open = true;
+                }
             });
         });
         ui.separator();

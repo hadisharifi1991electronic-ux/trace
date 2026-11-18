@@ -3,6 +3,41 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.83.0 (2026-11-18)
+
+- Whole-board RF report (Tools > Signal and power integrity > RF report…,
+  `trace rf`): every RF path on the board in one run. Each coaxial
+  connector's signal pin (SMA, U.FL, MMCX, SMP and the like by name, or
+  any connector whose one signal pin sits among ground pins, as a maker's
+  part number often hides the SMA) starts a path, followed as the Path
+  loss does it through series parts and baluns to the farthest chip pin.
+  - Each kind of via is solved in 3D once for the whole board (the solves
+    are shared between paths); `--quick-vias` for the coaxial estimate.
+  - Paths are named from their nets (the chip end's named net first) and
+    sorted by class: RX, ORX, TX, LO, clock, other RF. A path between two
+    connectors is reported once.
+  - Chip port models per path: `--load PATTERN=chip.s1p` (repeatable),
+    the pattern matched against the end pin (U101.H17), its net, the
+    path's name or its class (`--load "RX*=ADRV902x_RX2_RX3_SEDZ.s1p"`).
+    Where one matches, the return loss is judged into the chip.
+  - Judged in the band (`--band 0.5-6`): the worst return loss from the
+    bottom against the goal (`--rl 10`), and the insertion loss at the
+    top against a budget when one is given (`--il-budget 2`). Each path
+    lists the sections that reflect most (impedance against 50 Ω, or
+    100 Ω in a pair, on runs long enough to matter, vias and parts) and
+    those that lose most, so a path to check says where to start.
+  - Output: a table (IL at points in the band, worst RL, length, vias,
+    parts, pass or CHECK) with each path's detail and notes, CSV, one
+    chart of every path's IL and RL coloured by class, and with
+    `--out DIR` each path's Touchstone and plot. `--only J3*` for some
+    connectors, `--from PIN` for starts that are not on a connector.
+    Exits 1 when a path needs a look.
+  - The window runs it in the background with a cancel button, shows
+    the table, and a path's detail with its reflections and losses (click
+    to show them on the board); "Open in Path loss…" takes the path, its
+    band and its chip model to the Path loss window for the section
+    table, the tuner and the eye.
+
 ## 0.82.1 (2026-11-18)
 
 - Thermal package guesses, from the ADRV9026 rerun (an LDO came out the

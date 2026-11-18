@@ -46,6 +46,7 @@ pub mod place;
 pub mod pour;
 pub mod query;
 pub mod reuse;
+pub mod rfreport;
 pub mod route;
 pub mod sch_edit;
 pub mod schematic;

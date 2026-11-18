@@ -340,6 +340,7 @@ trace path board.brd J301 --load chip.s1p --tune 1-6 --fit "C30?" tuned.s2p   ch
 trace path board.brd U5.A3 J2.1 --eye 10 --amp 0.8 --eye-svg eye.svg   PRBS eye at the far end from the path's pulse response: height, width, jitter, worst case
 trace path board.brd U5.A3 J2.1 --eye 16 --eq auto --eye-svg eye.svg   the same with transmit FFE and receive CTLE picked for the widest worst case eye
 trace path board.brd HDMI_D1_P --eye 3.4 --xtalk   the eye with the nets beside the path switching too (NEXT/FEXT closure per net)
+trace rf board.brd --band 0.5-6 --load "RX*=rx_port.s1p" --out rf   whole-board RF report: every coax connector path to its chip, IL/RL per path in one table, where each reflects and loses most
 trace compare old.PcbDoc new.PcbDoc changes.csv   design compare: parts, nets (renamed, pins joined or left), routing per net, classes, pairs, rules, stack-up
 trace flex board.tgz --radius B1=120 flex.txt   rigid-flex: zones and their layers, bend radius (IPC-2223), vias, parts, corners and stacked tracks in bends
 trace bom board.PcbDoc --boards 50 --parts parts.csv --mouser KEY bom.csv   BOM with lifecycle, stock and price per part number; obsolete, short stock, missing part numbers, cost for 50 boards

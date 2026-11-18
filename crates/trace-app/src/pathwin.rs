@@ -82,6 +82,26 @@ fn pick(filter: &[&str]) -> Option<std::path::PathBuf> {
 }
 
 impl PathWindow {
+    /// Opens with a path from the RF report.
+    pub fn load_path(
+        &mut self,
+        from: String,
+        to: String,
+        band: (f64, f64),
+        load: Option<(String, Result<Network, String>)>,
+    ) {
+        self.from = from;
+        self.to = to;
+        self.fmin = band.0;
+        self.ghz = band.1;
+        self.band = band;
+        if load.is_some() {
+            self.load = load;
+        }
+        self.last = None;
+        self.open = true;
+    }
+
     /// Returns a spot (mil) and its text to show on the board.
     pub fn show(
         &mut self,

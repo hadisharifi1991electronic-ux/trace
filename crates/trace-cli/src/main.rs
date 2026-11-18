@@ -89,6 +89,20 @@ USAGE:
                                                 widest worst case eye. --xtalk: nets beside the path's traces
                                                 switch too (near or far end, whichever is worse), in the eye and
                                                 as each one's worst case closure.
+    trace rf <board> [--band 0.5-6] [--points 200] [--quick-vias] [--model PATTERN=file.sNp]
+             [--load PATTERN=chip.s1p]... [--rl 10] [--il-budget DB] [--only J3*] [--from PIN]...
+             [--fit PATTERN] [--df 0.02] [--out DIR] [report.txt] [report.csv] [report.svg]
+                                                whole-board RF report: every coaxial connector's signal pin (SMA,
+                                                U.FL, MMCX..., or a connector with one signal pin among ground
+                                                pins) followed through series parts and baluns to the farthest
+                                                chip pin, as trace path does, each kind of via solved in 3D once.
+                                                Paths named and sorted by their nets (RX, ORX, TX, LO, clock);
+                                                IL at points in the band, worst RL from its bottom (into a chip
+                                                model where --load PATTERN matches the end pin, its net, the
+                                                path or its class), the sections that reflect and lose most.
+                                                --rl: return loss goal; --il-budget: IL limit at the top.
+                                                --out DIR: report, CSV, chart, and each path's .s2p and .svg.
+                                                Exits 1 when a path needs a look
     trace bom <board> [--boards N] [--parts parts.csv]... [--mouser KEY] [--refresh] [--no-cache]
               [--template parts.csv] [bom.csv|report.txt]
                                                 BOM with part data: lines by part number, value and footprint
@@ -365,6 +379,7 @@ fn main() -> ExitCode {
         ["via", file, from, to, rest @ ..] => via(file, from, to, rest),
         ["zcheck", file, rest @ ..] => zcheck_cmd(file, rest),
         ["path" | "pathloss", file, rest @ ..] => path_cmd(file, rest),
+        ["rf" | "rfreport", file, rest @ ..] => rf_cmd(file, rest),
         ["compare" | "diff", a, b, rest @ ..] => compare_cmd(a, b, rest),
         ["flex", file, rest @ ..] => flex_cmd(file, rest),
         ["thermal", file, rest @ ..] => thermal_cmd(file, rest),
@@ -2629,6 +2644,167 @@ fn path_cmd(file: &str, rest: &[&str]) -> Res {
         };
         std::fs::write(o, text)?;
         println!("Wrote {o}");
+    }
+    Ok(())
+}
+
+fn rf_cmd(file: &str, rest: &[&str]) -> Res {
+    use trace_core::rfreport::{self, Setup, Status};
+    use trace_core::touchstone;
+    let b = board(file)?;
+    let mut setup = Setup::default();
+    let mut outs: Vec<&str> = Vec::new();
+    let mut dir: Option<&str> = None;
+    let mut i = 0;
+    while i < rest.len() {
+        let next = |i: usize| -> Result<&str, String> {
+            rest.get(i + 1)
+                .copied()
+                .ok_or_else(|| format!("{} needs a value", rest[i]))
+        };
+        match rest[i] {
+            "--band" => {
+                let v = next(i)?.trim_end_matches("GHz");
+                let (a, z) = v
+                    .split_once('-')
+                    .ok_or_else(|| format!("{v}: give LOW-HIGH in GHz, such as 0.5-6"))?;
+                setup.band = (a.parse()?, z.parse()?);
+                if setup.band.1 <= setup.band.0 {
+                    return Err("--band: the top must be above the bottom".into());
+                }
+                i += 1;
+            }
+            "--ghz" => {
+                setup.band.1 = next(i)?.trim_end_matches("GHz").parse()?;
+                i += 1;
+            }
+            "--fmin" => {
+                setup.band.0 = next(i)?.trim_end_matches("GHz").parse()?;
+                i += 1;
+            }
+            "--points" => {
+                setup.points = next(i)?.parse()?;
+                i += 1;
+            }
+            "--quick-vias" | "--no-vias" => setup.vias_3d = false,
+            "--df" => {
+                setup.tan_d = next(i)?.parse()?;
+                i += 1;
+            }
+            "--rl" => {
+                setup.rl_goal = next(i)?.trim_end_matches("dB").parse::<f64>()?.abs();
+                i += 1;
+            }
+            "--il-budget" => {
+                setup.il_budget = Some(next(i)?.trim_end_matches("dB").parse::<f64>()?.abs());
+                i += 1;
+            }
+            "--only" => {
+                setup
+                    .only
+                    .extend(next(i)?.split(',').map(|s| s.trim().to_string()));
+                i += 1;
+            }
+            "--from" => {
+                setup.extra.push(next(i)?.to_string());
+                i += 1;
+            }
+            "--fit" => {
+                setup.fit.push(next(i)?.to_string());
+                i += 1;
+            }
+            "--model" | "--load" => {
+                let a = next(i)?;
+                let (pat, f) = a
+                    .split_once('=')
+                    .ok_or_else(|| format!("{a}: give PATTERN=file.sNp"))?;
+                let n = touchstone::read(std::path::Path::new(f))?;
+                let name = std::path::Path::new(f)
+                    .file_name()
+                    .map_or(f.to_string(), |x| x.to_string_lossy().to_string());
+                println!(
+                    "{} {pat}: {name} ({} port(s), {:.3}-{:.3} GHz)",
+                    if rest[i] == "--load" { "Load" } else { "Model" },
+                    n.ports,
+                    n.f.first().unwrap_or(&0.0),
+                    n.f.last().unwrap_or(&0.0)
+                );
+                if rest[i] == "--load" {
+                    setup.loads.push((pat.to_string(), name, n));
+                } else {
+                    setup.models.push((pat.to_string(), n));
+                }
+                i += 1;
+            }
+            "--out" => {
+                dir = Some(next(i)?);
+                i += 1;
+            }
+            a if a.starts_with("--") => return Err(format!("unknown option {a}").into()),
+            a => outs.push(a),
+        }
+        i += 1;
+    }
+    let t = std::time::Instant::now();
+    let last = std::cell::Cell::new(String::new());
+    let prog = |p: f64, what: &str| {
+        if what != last.take().as_str() {
+            eprintln!("  {:3.0} % {what}", p * 100.0);
+        }
+        last.set(what.to_string());
+    };
+    let rep = rfreport::run(&b, &b.stackup, &setup, &prog)?;
+    let text = rep.text();
+    print!("{text}");
+    println!("({:.0} s)", t.elapsed().as_secs_f64());
+    let title = format!(
+        "RF paths of {}",
+        std::path::Path::new(file)
+            .file_name()
+            .map_or(file.to_string(), |n| n.to_string_lossy().to_string())
+    );
+    let write = |o: &str, body: String| -> Res {
+        std::fs::write(o, body)?;
+        println!("Wrote {o}");
+        Ok(())
+    };
+    for o in &outs {
+        let lo = o.to_ascii_lowercase();
+        if lo.ends_with(".svg") {
+            write(o, rep.svg(&title))?;
+        } else if lo.ends_with(".csv") {
+            write(o, rep.csv())?;
+        } else {
+            write(o, text.clone())?;
+        }
+    }
+    if let Some(d) = dir {
+        let d = std::path::Path::new(d);
+        std::fs::create_dir_all(d)?;
+        let at = |n: &str| d.join(n).to_string_lossy().to_string();
+        write(&at("rf-report.txt"), text.clone())?;
+        write(&at("rf-report.csv"), rep.csv())?;
+        write(&at("rf-report.svg"), rep.svg(&title))?;
+        for p in &rep.paths {
+            if let Ok(r) = &p.report {
+                let stem = p.file_stem();
+                std::fs::write(d.join(format!("{stem}.s2p")), r.touchstone())?;
+                std::fs::write(
+                    d.join(format!("{stem}.svg")),
+                    r.svg(&format!(
+                        "{} {}: {} to {}",
+                        p.class.name(),
+                        p.name,
+                        r.start,
+                        r.end
+                    )),
+                )?;
+            }
+        }
+        println!("Wrote each path's .s2p and .svg to {}", d.display());
+    }
+    if rep.paths.iter().any(|p| p.status != Status::Pass) {
+        std::process::exit(1);
     }
     Ok(())
 }

@@ -29,6 +29,7 @@ mod pdnwin;
 mod placing;
 mod power;
 mod reusewin;
+mod rfwin;
 mod router;
 mod scene;
 mod schview;
@@ -153,6 +154,7 @@ pub struct App {
     via: viawin::ViaWindow,
     zcheck: zwin::ZWindow,
     pathloss: pathwin::PathWindow,
+    rf: rfwin::RfWindow,
     compare: comparewin::CompareWindow,
     pub(crate) bom: bomwin::BomWindow,
     pub(crate) flex: flexwin::FlexWindow,
@@ -256,6 +258,7 @@ impl App {
             via: viawin::ViaWindow::default(),
             zcheck: zwin::ZWindow::default(),
             pathloss: pathwin::PathWindow::default(),
+            rf: rfwin::RfWindow::default(),
             compare: comparewin::CompareWindow::default(),
             bom: bomwin::BomWindow::with_key(
                 cc.storage
@@ -3418,6 +3421,31 @@ impl eframe::App for App {
                 if let Some(scene) = &self.scene {
                     self.via.load(&scene.board, setup, target);
                 }
+            }
+            None => {}
+        }
+        let rf_act = match &self.scene {
+            Some(scene) => self.rf.show(ctx, &scene.board, self.imp.stackup()),
+            None => None,
+        };
+        match rf_act {
+            Some(rfwin::RfAct::Show(net, at, text)) => {
+                let p = [at[0] as f32, at[1] as f32];
+                if let Some(n) = net {
+                    self.select_net(n, false);
+                }
+                self.focus = Some(Focus::Point(p, 3.0));
+                self.needs_fit = false;
+                self.marker = Some(p);
+                self.message = Some((text, false));
+            }
+            Some(rfwin::RfAct::Open {
+                from,
+                to,
+                band,
+                load,
+            }) => {
+                self.pathloss.load_path(from, to, band, load);
             }
             None => {}
         }

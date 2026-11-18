@@ -2457,7 +2457,22 @@ pub fn run(
     opt: &Options,
     progress: &dyn Fn(f64, &str),
 ) -> Result<Report, String> {
-    let p = prepare(board, stackup, opt, progress)?;
+    run_shared(board, stackup, opt, &mut ViaCache::new(), progress)
+}
+
+/// 3D via solves by kind, kept between paths (the whole-board RF report
+/// solves each kind of via once).
+pub type ViaCache = HashMap<String, Result<fdtd::ViaResult, String>>;
+
+/// As [`run`], with via solves taken from and added to `vias`.
+pub fn run_shared(
+    board: &Board,
+    stackup: &Stackup,
+    opt: &Options,
+    vias: &mut ViaCache,
+    progress: &dyn Fn(f64, &str),
+) -> Result<Report, String> {
+    let p = prepare_with(board, stackup, opt, vias, progress)?;
     progress(0.95, "cascading");
     let r = finish(&p, &p.built);
     progress(1.0, "done");
@@ -2469,6 +2484,16 @@ fn prepare(
     board: &Board,
     stackup: &Stackup,
     opt: &Options,
+    progress: &dyn Fn(f64, &str),
+) -> Result<Prepared, String> {
+    prepare_with(board, stackup, opt, &mut ViaCache::new(), progress)
+}
+
+fn prepare_with(
+    board: &Board,
+    stackup: &Stackup,
+    opt: &Options,
+    vias: &mut ViaCache,
     progress: &dyn Fn(f64, &str),
 ) -> Result<Prepared, String> {
     progress(0.0, "finding the path");
@@ -3021,7 +3046,7 @@ fn prepare(
         f: f.clone(),
         partner: partner.clone(),
         ground: ground.clone(),
-        vias: HashMap::new(),
+        vias: std::mem::take(vias),
         notes: Vec::new(),
         progress,
         via_kinds,
@@ -3044,6 +3069,7 @@ fn prepare(
         }
     }
     rep.notes.append(&mut ctx.notes);
+    *vias = std::mem::take(&mut ctx.vias);
     for (el, d) in &merged {
         if let El::Line { net, .. } = el {
             let v = (*net, if *d { partner.get(net).copied() } else { None });
@@ -3517,7 +3543,7 @@ pub fn tune(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     fn close(a: Cx, b: Cx) -> bool {
@@ -3585,7 +3611,7 @@ mod tests {
     }
 
     /// A 50 Ω microstrip from J1 through C1 to U1, with a via on the way.
-    fn board() -> Board {
+    pub(crate) fn board() -> Board {
         use crate::{Component, Length, Net, Pad, PadShape, Point, Track};
         let mut b = Board {
             stackup: crate::stackfile::parse(

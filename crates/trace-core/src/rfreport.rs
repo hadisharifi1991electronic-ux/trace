@@ -841,8 +841,9 @@ pub fn run(
         let mut term = None;
         let mut corr = 0.0;
         let top = setup.band.1;
-        // A twentieth of a wavelength at the top, in the board, mil.
-        let short = 299_792_458.0 / (top * 1e9) / 25.4e-6 / 20.0 / 1.9;
+        // A tenth of a wavelength at the top, in the board, mil: closer
+        // than that the line between termination and chip barely turns.
+        let short = 299_792_458.0 / (top * 1e9) / 25.4e-6 / 10.0 / 1.9;
         if let Ok(rep) = &r {
             let t = termination(rep, board);
             if let Some(t) = &t {

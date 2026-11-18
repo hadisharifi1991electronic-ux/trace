@@ -48,6 +48,10 @@ const PARAMETER: i64 = 41;
 const PARAMETER_SET: i64 = 43;
 const IMPLEMENTATION: i64 = 45;
 const NOTE: i64 = 209;
+const HARNESS_CONNECTOR: i64 = 215;
+const HARNESS_ENTRY: i64 = 216;
+const HARNESS_TYPE: i64 = 217;
+const SIGNAL_HARNESS: i64 = 218;
 const BLANKET: i64 = 225;
 const HYPERLINK: i64 = 226;
 
@@ -89,12 +93,16 @@ pub fn read_schdoc(path: impl AsRef<Path>) -> Result<Sheet> {
     let mut sheet = read_records(&records, name, &file_name);
     // Blankets (dashed outlines that apply directives to an area) are kept
     // in a side stream.
+    // Harnesses are there too.
     if let Some(extra) = c.stream("/Additional")? {
-        for r in split_sch(&extra) {
-            let SchRecord::Text(p) = r else { continue };
+        let recs = to_props(&split_sch(&extra));
+        for p in &recs {
             if p.int("RECORD") == Some(BLANKET) {
-                sheet.drawing.shapes.push(blanket(&p));
+                sheet.drawing.shapes.push(blanket(p));
             }
+        }
+        if harnesses(&recs, &mut sheet.drawing) {
+            sheet.drawing.connect();
         }
     }
     // Embedded pictures, matched to their records by file name.
@@ -119,6 +127,56 @@ pub fn read_schdoc(path: impl AsRef<Path>) -> Result<Sheet> {
         }
     }
     Ok(sheet)
+}
+
+/// Harness connectors (with their entries and type) and signal
+/// harnesses from `recs`, where an owner index counts from the record
+/// after the first. Whether there were any.
+pub(crate) fn harnesses(recs: &[Props], d: &mut Drawing) -> bool {
+    let mut at_rec: HashMap<usize, usize> = HashMap::new();
+    let before = (d.harnesses.len(), d.signal_harnesses.len());
+    for (k, p) in recs.iter().enumerate() {
+        match p.int("RECORD") {
+            Some(HARNESS_CONNECTOR) => {
+                let a = at(p);
+                let size = [len(p, "XSIZE"), len(p, "YSIZE")];
+                at_rec.insert(k, d.harnesses.len());
+                d.harnesses.push(trace_core::Harness {
+                    min: [a[0], a[1] - size[1]],
+                    max: [a[0] + size[0], a[1]],
+                    kind: String::new(),
+                    primary: len(p, "PRIMARYCONNECTIONPOSITION"),
+                    entries: Vec::new(),
+                });
+            }
+            Some(SIGNAL_HARNESS) => d.signal_harnesses.push(points(p)),
+            _ => {}
+        }
+    }
+    for p in recs {
+        let kind = p.int("RECORD");
+        if !matches!(kind, Some(HARNESS_ENTRY) | Some(HARNESS_TYPE)) {
+            continue;
+        }
+        let Some(&h) = p
+            .int("OWNERINDEX")
+            .and_then(|o| at_rec.get(&((o + 1) as usize)))
+        else {
+            continue;
+        };
+        let c = &mut d.harnesses[h];
+        if kind == Some(HARNESS_TYPE) {
+            c.kind = p.str("TEXT");
+        } else {
+            c.entries.push(trace_core::HarnessEntry {
+                name: p.str("NAME"),
+                side: if p.int("SIDE") == Some(1) { 1 } else { 0 },
+                dist: p.int("DISTANCEFROMTOP").unwrap_or(0) as f64 * 100.0
+                    + p.int("DISTANCEFROMTOP_FRAC1").unwrap_or(0) as f64 / 10000.0,
+            });
+        }
+    }
+    (d.harnesses.len(), d.signal_harnesses.len()) != before
 }
 
 /// A blanket: a dashed outline that applies directives to an area.
@@ -859,35 +917,24 @@ fn read_records(records: &[SchRecord], name: String, file_name: &str) -> Sheet {
                 };
                 b.shape(k, g, p, rec(p) == Some(PIECHART));
             }
-            Some(WIRE) | Some(BUS) => {
+            Some(WIRE) => {
                 let pts = points(p);
-                let wire = rec(p) == Some(WIRE);
                 let wi = b.d.wires.len() as u32;
                 b.d.shapes.push(SchShape {
                     geom: SchGeom::Line(pts.clone()),
-                    width: if wire {
-                        line_width(p).max(10.0)
-                    } else {
-                        line_width(p).max(30.0)
-                    },
+                    width: line_width(p).max(10.0),
                     stroke: Some(color(p, "COLOR", 0x800000)),
                     fill: None,
                     dashed: false,
                     part: None,
-                    wire: wire.then_some(wi),
+                    wire: Some(wi),
                     tag: None,
                 });
-                if wire {
-                    b.d.wires.push(pts);
-                } else {
-                    b.d.buses.push(pts);
-                }
+                b.d.wires.push(pts);
             }
-            Some(BUS_ENTRY) => {
-                let c = color(p, "COLOR", 0x800000);
-                b.d.buses.push(vec![at(p), corner(p)]);
-                b.line(k, vec![at(p), corner(p)], line_width(p).max(10.0), c);
-            }
+            // Buses and their entries are drawn from the sheet's lists.
+            Some(BUS) => b.d.buses.push(points(p)),
+            Some(BUS_ENTRY) => b.d.bus_entries.push([at(p), corner(p)]),
             Some(JUNCTION) => {
                 let c = at(p);
                 b.d.junctions.push(c);
@@ -1027,6 +1074,9 @@ fn read_records(records: &[SchRecord], name: String, file_name: &str) -> Sheet {
             },
         });
     }
+    // Harnesses, in sheets saved as text (binary sheets keep them in
+    // the Additional stream).
+    harnesses(&recs, &mut b.d);
     sheet.net_labels.sort();
     sheet.net_labels.dedup();
     sheet.power_ports.sort();
@@ -1558,7 +1608,7 @@ fn text_frame(b: &mut Builder, k: usize, p: &Props) {
 
 #[path = "sch_write.rs"]
 mod write;
-pub use write::{power_port_drawing, write_schdoc, POWER_STYLES};
+pub use write::{port_drawing, power_port_drawing, write_schdoc, POWER_STYLES};
 
 #[cfg(test)]
 mod tests {

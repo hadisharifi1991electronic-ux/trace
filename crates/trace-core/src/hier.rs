@@ -20,7 +20,7 @@
 //! drawn on two sheets (a multi-part component) joins the nets of its pins.
 
 use crate::annotate::unannotated;
-use crate::schematic::{Drawing, Pt, TagKind};
+use crate::schematic::{bus_members, Drawing, Pt, TagKind};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 
@@ -293,6 +293,11 @@ impl Dsu {
     }
 }
 
+/// The harness bundle tag `t` of sheet `d` is on.
+fn bundle_of(d: &Drawing, t: u32) -> Option<&crate::schematic::Bundle> {
+    d.bundles.iter().find(|b| b.tags.contains(&t))
+}
+
 /// Sheet nesting deeper than this is taken for a loop.
 const MAX_DEPTH: usize = 32;
 
@@ -394,6 +399,23 @@ pub fn join(sheets: &[&Drawing], names: Option<&[&str]>, scope: Scope) -> Joined
             v
         })
         .collect();
+    // Each sheet's nets by the names its labels, power ports and ports
+    // give them, for bus members.
+    let named: Vec<HashMap<String, usize>> = sheets
+        .iter()
+        .map(|d| {
+            let mut m = HashMap::new();
+            for (ni, net) in d.nets.iter().enumerate() {
+                for &t in &net.tags {
+                    let tag = &d.tags[t as usize];
+                    if tag.kind != TagKind::SheetEntry && !tag.text.trim().is_empty() {
+                        m.entry(tag.text.trim().to_ascii_uppercase()).or_insert(ni);
+                    }
+                }
+            }
+            m
+        })
+        .collect();
     let mut dsu = Dsu((0..total).collect());
     let mut global: HashMap<String, usize> = HashMap::new();
     let mut by_global = |dsu: &mut Dsu, text: &str, g: usize| {
@@ -432,6 +454,22 @@ pub fn join(sheets: &[&Drawing], names: Option<&[&str]>, scope: Scope) -> Joined
                 // Labels, ports and power ports share names, as Altium
                 // joins a label to the power net it names.
                 by_global(&mut dsu, &tag.text, first[ii] + ni);
+                if tag.kind == TagKind::Port {
+                    // A bus or harness port carries its members too.
+                    if let Some(ms) = bus_members(tag.text.trim()) {
+                        for m in ms {
+                            if let Some(&n) = named[s].get(&m.to_ascii_uppercase()) {
+                                by_global(&mut dsu, &m, first[ii] + n);
+                            }
+                        }
+                    }
+                    if let Some(b) = bundle_of(sheets[s], t as u32) {
+                        for (m, n) in &b.members {
+                            let q = format!("{}.{m}", tag.text.trim());
+                            by_global(&mut dsu, &q, first[ii] + *n as usize);
+                        }
+                    }
+                }
             }
         }
     }
@@ -490,6 +528,28 @@ pub fn join(sheets: &[&Drawing], names: Option<&[&str]>, scope: Scope) -> Joined
                         let b = net_of_tag[c][p];
                         if a != usize::MAX && b != usize::MAX {
                             dsu.join(first[pi] + a, first[ci] + b);
+                        }
+                        // A harness: its members, entry name by entry name.
+                        if let (Some(ba), Some(bb)) = (
+                            bundle_of(sheets[s], t as u32),
+                            bundle_of(sheets[c], p as u32),
+                        ) {
+                            for (m, na) in &ba.members {
+                                if let Some((_, nb)) =
+                                    bb.members.iter().find(|x| x.0.eq_ignore_ascii_case(m))
+                                {
+                                    dsu.join(first[pi] + *na as usize, first[ci] + *nb as usize);
+                                }
+                            }
+                        }
+                    }
+                    // A bus: D[0..7] carries D0 to D7, each by its name.
+                    if let Some(ms) = bus_members(tag.text.trim()) {
+                        for m in ms {
+                            let k = m.to_ascii_uppercase();
+                            if let (Some(&na), Some(&nb)) = (named[s].get(&k), named[c].get(&k)) {
+                                dsu.join(first[pi] + na, first[ci] + nb);
+                            }
                         }
                     }
                 }
@@ -598,6 +658,19 @@ pub fn net_names(sheets: &[&Drawing], j: &Joined) -> Vec<Option<String>> {
                         tag.text.clone()
                     } else {
                         format!("{}_{}", tag.text, inst.suffix)
+                    };
+                    best[pn] = Some((k, name));
+                }
+            }
+            // A harness member with no name of its own: bundle.entry.
+            if let (false, Some(n)) = (net.harness.is_empty(), &net.name) {
+                order += 1;
+                let k = (4, depth[ii], order);
+                if best[pn].as_ref().is_none_or(|b| k < b.0) {
+                    let name = if inst.suffix.is_empty() {
+                        n.clone()
+                    } else {
+                        format!("{n}_{}", inst.suffix)
                     };
                     best[pn] = Some((k, name));
                 }
@@ -799,6 +872,157 @@ mod tests {
             name: "Repeat(CH,1,3)".into(),
         };
         assert_eq!(rep.channels(), ["CH1", "CH2", "CH3"]);
+    }
+
+    /// A top sheet with a sheet symbol, and a child, each with one part
+    /// pin per signal: the child gets its signals through a bus port
+    /// D[0..1] and a harness port SPI1 (MOSI, SCK).
+    fn bus_and_harness_project() -> Vec<Drawing> {
+        use crate::schematic::Harness;
+        let mut top = Drawing::default();
+        let mut child = Drawing::default();
+        // Top: R1 on D0, R2 on D1 (labels on wires), entry D[0..1] on a
+        // bus; R3 on MOSI, R4 on SCK through a harness connector whose
+        // signal harness runs to entry SPI1.
+        for (i, (d, name)) in [(0.0, "D0"), (100.0, "D1")].into_iter().enumerate() {
+            top.pins.push(pin([-500.0, d], i as u32));
+            top.wires.push(vec![[-500.0, d], [-300.0, d]]);
+            top.tags.push(tag([-400.0, d], name, TagKind::Label));
+        }
+        top.buses.push(vec![[-200.0, 0.0], [100.0, 0.0]]);
+        top.tags
+            .push(tag([100.0, 0.0], "D[0..1]", TagKind::SheetEntry));
+        let mut h = Harness::new([-900.0, 400.0], "SPI", &["MOSI", "SCK"], true);
+        h.max[0] = -800.0;
+        for (i, e) in h.entries.clone().iter().enumerate() {
+            let at = h.entry_at(e);
+            top.pins.push(pin([at[0] - 200.0, at[1]], 2 + i as u32));
+            top.wires.push(vec![[at[0] - 200.0, at[1]], at]);
+        }
+        let b = h.bundle_at();
+        top.harnesses.push(h);
+        top.signal_harnesses.push(vec![b, [100.0, b[1]]]);
+        top.tags
+            .push(tag([100.0, b[1]], "SPI1", TagKind::SheetEntry));
+        top.links.push(SheetLink {
+            min: [100.0, -100.0],
+            max: [400.0, 500.0],
+            file: "Child.SchDoc".into(),
+            name: "U_Child".into(),
+        });
+        for (i, d) in ["R1", "R2", "R3", "R4"].iter().enumerate() {
+            let _ = i;
+            top.parts.push(SchPart {
+                designator: d.to_string(),
+                ..Default::default()
+            });
+        }
+        // Child: R5 on D0, R6 on D1; R7 on MOSI, R8 on SCK, the harness
+        // entries in the other order, to SPI1 straight on the connector.
+        for (i, (d, name)) in [(0.0, "D1"), (100.0, "D0")].into_iter().enumerate() {
+            child.pins.push(pin([500.0, d], i as u32));
+            child.wires.push(vec![[500.0, d], [300.0, d]]);
+            child.tags.push(tag([400.0, d], name, TagKind::Label));
+        }
+        child.buses.push(vec![[0.0, 0.0], [200.0, 0.0]]);
+        child.tags.push(tag([0.0, 0.0], "D[0..1]", TagKind::Port));
+        let h = Harness::new([800.0, 400.0], "SPI", &["SCK", "MOSI"], false);
+        for (i, e) in h.entries.clone().iter().enumerate() {
+            let at = h.entry_at(e);
+            child.pins.push(pin([at[0] + 200.0, at[1]], 2 + i as u32));
+            child.wires.push(vec![at, [at[0] + 200.0, at[1]]]);
+        }
+        let b = h.bundle_at();
+        child.harnesses.push(h);
+        child.tags.push(NetTag {
+            at: vec![[b[0] - 400.0, b[1]], b],
+            ..tag(b, "SPI1", TagKind::Port)
+        });
+        for d in ["R6", "R5", "R8", "R7"] {
+            child.parts.push(SchPart {
+                designator: d.to_string(),
+                ..Default::default()
+            });
+        }
+        top.connect();
+        child.connect();
+        vec![top, child]
+    }
+
+    #[test]
+    fn bus_and_harness_members_join_across_sheets() {
+        let p = bus_and_harness_project();
+        assert_eq!(p[0].bundles.len(), 1);
+        assert_eq!(p[0].bundles[0].name, "SPI1");
+        assert_eq!(p[1].bundles[0].members.len(), 2);
+        let refs: Vec<&Drawing> = p.iter().collect();
+        let names = ["Top.SchDoc", "Child.SchDoc"];
+        for scope in [Scope::Hierarchical, Scope::Strict, Scope::Automatic] {
+            let nets = crate::eco::netlist_in(&refs, Some(&names), scope);
+            let net_with = |d: &str| {
+                nets.iter()
+                    .find(|n| n.pins.iter().any(|p| p.0 == d))
+                    .unwrap_or_else(|| panic!("no net with {d}"))
+            };
+            assert_eq!(
+                net_with("R1"),
+                net_with("R5"),
+                "D0 through the bus ({scope:?})"
+            );
+            assert_eq!(
+                net_with("R2"),
+                net_with("R6"),
+                "D1 through the bus ({scope:?})"
+            );
+            assert_ne!(net_with("R1"), net_with("R2"));
+            assert_eq!(
+                net_with("R3"),
+                net_with("R7"),
+                "MOSI through the harness ({scope:?})"
+            );
+            assert_eq!(
+                net_with("R4"),
+                net_with("R8"),
+                "SCK through the harness ({scope:?})"
+            );
+            assert_ne!(net_with("R3"), net_with("R4"));
+            assert_eq!(net_with("R3").name.as_deref(), Some("SPI1.MOSI"));
+        }
+    }
+
+    #[test]
+    fn flat_bus_and_harness_ports_join_by_name() {
+        let mut p = bus_and_harness_project();
+        // No sheet symbol: two flat sheets joined by their ports.
+        p[0].links.clear();
+        for t in &mut p[0].tags {
+            if t.kind == TagKind::SheetEntry {
+                t.kind = TagKind::Port;
+            }
+        }
+        p[0].connect();
+        let refs: Vec<&Drawing> = p.iter().collect();
+        let names = ["Top.SchDoc", "Child.SchDoc"];
+        let nets = crate::eco::netlist_in(&refs, Some(&names), Scope::Flat);
+        let net_with = |d: &str| {
+            nets.iter()
+                .find(|n| n.pins.iter().any(|p| p.0 == d))
+                .unwrap()
+        };
+        assert_eq!(net_with("R1"), net_with("R5"));
+        assert_eq!(net_with("R2"), net_with("R6"));
+        assert_eq!(net_with("R3"), net_with("R7"));
+        assert_eq!(net_with("R4"), net_with("R8"));
+        assert_ne!(net_with("R3"), net_with("R4"));
+    }
+
+    #[test]
+    fn bus_names_expand() {
+        use crate::schematic::bus_members;
+        assert_eq!(bus_members("D[0..3]").unwrap(), ["D0", "D1", "D2", "D3"]);
+        assert_eq!(bus_members("A[2..0]_N").unwrap(), ["A2_N", "A1_N", "A0_N"]);
+        assert!(bus_members("CLK").is_none());
+        assert!(bus_members("X[a..b]").is_none());
     }
 
     #[test]

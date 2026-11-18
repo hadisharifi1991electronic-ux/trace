@@ -52,7 +52,9 @@ pub fn sheet_svg(sheet: &Sheet) -> String {
             base64(&im.data)
         );
     }
-    for sh in &d.shapes {
+    // Buses and harnesses are drawn from their lists.
+    let (xs, xt) = d.bus_harness_graphics();
+    for sh in d.shapes.iter().chain(xs.iter()) {
         let stroke = sh
             .stroke
             .map(|c| {
@@ -120,7 +122,7 @@ pub fn sheet_svg(sheet: &Sheet) -> String {
             }
         };
     }
-    for t in &d.texts {
+    for t in d.texts.iter().chain(xt.iter()) {
         let anchor = ["start", "middle", "end"][(t.just % 3) as usize];
         let base = ["text-after-edge", "central", "text-before-edge"][(t.just / 3).min(2) as usize];
         let (x, yy) = (t.at[0], y(t.at[1]));

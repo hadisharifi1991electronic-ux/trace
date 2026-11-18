@@ -18,6 +18,10 @@ pub struct SchSel {
     pub tags: Vec<usize>,
     pub junctions: Vec<usize>,
     pub no_erc: Vec<usize>,
+    pub buses: Vec<usize>,
+    pub bus_entries: Vec<usize>,
+    pub harnesses: Vec<usize>,
+    pub signal_harnesses: Vec<usize>,
 }
 
 impl SchSel {
@@ -31,6 +35,10 @@ impl SchSel {
             + self.tags.len()
             + self.junctions.len()
             + self.no_erc.len()
+            + self.buses.len()
+            + self.bus_entries.len()
+            + self.harnesses.len()
+            + self.signal_harnesses.len()
     }
 
     pub fn part(i: usize) -> SchSel {
@@ -71,6 +79,10 @@ impl SchSel {
         flip(&mut self.tags, &other.tags);
         flip(&mut self.junctions, &other.junctions);
         flip(&mut self.no_erc, &other.no_erc);
+        flip(&mut self.buses, &other.buses);
+        flip(&mut self.bus_entries, &other.bus_entries);
+        flip(&mut self.harnesses, &other.harnesses);
+        flip(&mut self.signal_harnesses, &other.signal_harnesses);
     }
 
     /// Adds what `other` holds.
@@ -87,6 +99,10 @@ impl SchSel {
         join(&mut self.tags, &other.tags);
         join(&mut self.junctions, &other.junctions);
         join(&mut self.no_erc, &other.no_erc);
+        join(&mut self.buses, &other.buses);
+        join(&mut self.bus_entries, &other.bus_entries);
+        join(&mut self.harnesses, &other.harnesses);
+        join(&mut self.signal_harnesses, &other.signal_harnesses);
     }
 
     /// Whether everything `other` holds is in.
@@ -96,6 +112,16 @@ impl SchSel {
             && other.tags.iter().all(|i| self.tags.contains(i))
             && other.junctions.iter().all(|i| self.junctions.contains(i))
             && other.no_erc.iter().all(|i| self.no_erc.contains(i))
+            && other.buses.iter().all(|i| self.buses.contains(i))
+            && other
+                .bus_entries
+                .iter()
+                .all(|i| self.bus_entries.contains(i))
+            && other.harnesses.iter().all(|i| self.harnesses.contains(i))
+            && other
+                .signal_harnesses
+                .iter()
+                .all(|i| self.signal_harnesses.contains(i))
     }
 
     /// Drops indices the drawing no longer has.
@@ -105,6 +131,11 @@ impl SchSel {
         self.tags.retain(|&i| i < d.tags.len());
         self.junctions.retain(|&i| i < d.junctions.len());
         self.no_erc.retain(|&i| i < d.no_erc.len());
+        self.buses.retain(|&i| i < d.buses.len());
+        self.bus_entries.retain(|&i| i < d.bus_entries.len());
+        self.harnesses.retain(|&i| i < d.harnesses.len());
+        self.signal_harnesses
+            .retain(|&i| i < d.signal_harnesses.len());
     }
 }
 
@@ -227,6 +258,32 @@ impl Drawing {
         sel.no_erc = (0..self.no_erc.len())
             .filter(|&i| inside(&self.no_erc[i]))
             .collect();
+        let line_hit = |w: &[Pt]| {
+            if touching {
+                w.windows(2).any(|s| segment_meets_box(s[0], s[1], lo, hi))
+            } else {
+                w.iter().all(inside)
+            }
+        };
+        sel.buses = (0..self.buses.len())
+            .filter(|&i| line_hit(&self.buses[i]))
+            .collect();
+        sel.bus_entries = (0..self.bus_entries.len())
+            .filter(|&i| line_hit(&self.bus_entries[i]))
+            .collect();
+        sel.signal_harnesses = (0..self.signal_harnesses.len())
+            .filter(|&i| line_hit(&self.signal_harnesses[i]))
+            .collect();
+        sel.harnesses = (0..self.harnesses.len())
+            .filter(|&i| {
+                let h = &self.harnesses[i];
+                if touching {
+                    h.min[0] <= hi[0] && h.max[0] >= lo[0] && h.min[1] <= hi[1] && h.max[1] >= lo[1]
+                } else {
+                    inside(&h.min) && inside(&h.max)
+                }
+            })
+            .collect();
         sel
     }
 
@@ -240,6 +297,10 @@ impl Drawing {
                 .collect(),
             junctions: (0..self.junctions.len()).collect(),
             no_erc: (0..self.no_erc.len()).collect(),
+            buses: (0..self.buses.len()).collect(),
+            bus_entries: (0..self.bus_entries.len()).collect(),
+            harnesses: (0..self.harnesses.len()).collect(),
+            signal_harnesses: (0..self.signal_harnesses.len()).collect(),
         }
     }
 
@@ -279,6 +340,21 @@ impl Drawing {
                 .iter()
                 .filter_map(|&j| self.no_erc.get(j).copied()),
         );
+        for &b in &sel.buses {
+            pts.extend(self.buses.get(b).into_iter().flatten().copied());
+        }
+        for &b in &sel.bus_entries {
+            pts.extend(self.bus_entries.get(b).into_iter().flatten().copied());
+        }
+        for &b in &sel.signal_harnesses {
+            pts.extend(self.signal_harnesses.get(b).into_iter().flatten().copied());
+        }
+        for &h in &sel.harnesses {
+            if let Some(h) = self.harnesses.get(h) {
+                pts.push(h.min);
+                pts.push(h.max);
+            }
+        }
         let first = *pts.first()?;
         Some(pts.iter().fold((first, first), |(lo, hi), p| {
             (
@@ -298,9 +374,17 @@ impl Drawing {
         ))
     }
 
-    /// Moves, turns or mirrors a selection. Wires that are not selected
-    /// but end on what moves stretch to follow, bending to stay square.
+    /// Moves, turns or mirrors a selection, dragging: wires that are not
+    /// selected but end on what moves stretch to follow, bending to stay
+    /// square.
     pub fn xf_sel(&mut self, sel: &SchSel, xf: Xf) {
+        self.xf_sel_mode(sel, xf, true);
+    }
+
+    /// Moves, turns or mirrors a selection. With `drag` the wiring stays
+    /// connected (Altium's Drag); without, only the selection moves and
+    /// its connections break where they leave it (Altium's Move).
+    pub fn xf_sel_mode(&mut self, sel: &SchSel, xf: Xf, drag: bool) {
         let mut moves: Vec<(Pt, Pt)> = Vec::new();
         for &i in &sel.parts {
             if i < self.parts.len() {
@@ -310,7 +394,8 @@ impl Drawing {
         // A selected wire's end on the pin of a part that stays keeps
         // hold of it: the wire bends back to the pin.
         let stays = |d: &Drawing, p: Pt| {
-            d.pins
+            drag && d
+                .pins
                 .iter()
                 .any(|q| !sel.parts.contains(&(q.part as usize)) && same(q.at, p))
         };
@@ -392,7 +477,72 @@ impl Drawing {
             }
             self.no_erc[m] = to;
         }
-        self.drag_ends(&moves, &sel.wires);
+        // Buses, bus entries and signal harnesses move whole.
+        for &b in &sel.buses {
+            if let Some(line) = self.buses.get_mut(b) {
+                line.iter_mut().for_each(|p| *p = xf.apply(*p));
+            }
+        }
+        for &b in &sel.bus_entries {
+            if let Some(e) = self.bus_entries.get_mut(b) {
+                e.iter_mut().for_each(|p| *p = xf.apply(*p));
+            }
+        }
+        for &b in &sel.signal_harnesses {
+            if let Some(line) = self.signal_harnesses.get_mut(b) {
+                for e in [0, line.len().saturating_sub(1)] {
+                    moves.push((line[e], xf.apply(line[e])));
+                }
+                line.iter_mut().for_each(|p| *p = xf.apply(*p));
+            }
+        }
+        // Harness connectors keep reading upright, as ports do: a turn
+        // only carries them round; mirrors swap their sides.
+        for &h in &sel.harnesses {
+            let Some(c) = self.harnesses.get(h).cloned() else {
+                continue;
+            };
+            let mut n = c.clone();
+            let height = c.max[1] - c.min[1];
+            let (a, b) = (xf.apply(c.min), xf.apply(c.max));
+            let (lo, hi) = (
+                [a[0].min(b[0]), a[1].min(b[1])],
+                [a[0].max(b[0]), a[1].max(b[1])],
+            );
+            match xf {
+                Xf::Turn(_) => {
+                    let mid = xf.apply([(c.min[0] + c.max[0]) / 2.0, (c.min[1] + c.max[1]) / 2.0]);
+                    let (w2, h2) = ((c.max[0] - c.min[0]) / 2.0, height / 2.0);
+                    n.min = [mid[0] - w2, mid[1] - h2];
+                    n.max = [mid[0] + w2, mid[1] + h2];
+                }
+                Xf::MirrorX(_) => {
+                    (n.min, n.max) = (lo, hi);
+                    n.entries
+                        .iter_mut()
+                        .for_each(|e| e.side = 1 - e.side.min(1));
+                }
+                Xf::MirrorY(_) => {
+                    (n.min, n.max) = (lo, hi);
+                    n.entries.iter_mut().for_each(|e| e.dist = height - e.dist);
+                    n.primary = height - c.primary;
+                }
+                Xf::Shift(_) => (n.min, n.max) = (lo, hi),
+            }
+            for (e, ne) in c.entries.iter().zip(&n.entries) {
+                moves.push((c.entry_at(e), n.entry_at(ne)));
+            }
+            moves.push((c.bundle_at(), n.bundle_at()));
+            self.harnesses[h] = n;
+        }
+        if drag {
+            self.drag_ends(&moves, &sel.wires);
+            for (i, line) in self.signal_harnesses.iter_mut().enumerate() {
+                if !sel.signal_harnesses.contains(&i) {
+                    crate::sch_edit::drag_line_ends(line, &moves);
+                }
+            }
+        }
         let mut near: Vec<Pt> = moves.iter().flat_map(|&(a, b)| [a, b]).collect();
         near.dedup_by(|a, b| same(*a, *b));
         self.fix_junctions(&near);
@@ -565,6 +715,26 @@ impl Drawing {
             }
             self.delete_wire(w);
         }
+        for b in down(&sel.buses) {
+            if b < self.buses.len() {
+                self.buses.remove(b);
+            }
+        }
+        for b in down(&sel.bus_entries) {
+            if b < self.bus_entries.len() {
+                self.bus_entries.remove(b);
+            }
+        }
+        for b in down(&sel.harnesses) {
+            if b < self.harnesses.len() {
+                self.harnesses.remove(b);
+            }
+        }
+        for b in down(&sel.signal_harnesses) {
+            if b < self.signal_harnesses.len() {
+                self.signal_harnesses.remove(b);
+            }
+        }
         for p in down(&sel.parts) {
             near.extend(
                 self.pins
@@ -678,6 +848,26 @@ impl Sheet {
         }
         o.junctions = dots;
         o.no_erc = crosses;
+        o.buses = sel
+            .buses
+            .iter()
+            .filter_map(|&i| d.buses.get(i).cloned())
+            .collect();
+        o.bus_entries = sel
+            .bus_entries
+            .iter()
+            .filter_map(|&i| d.bus_entries.get(i).copied())
+            .collect();
+        o.harnesses = sel
+            .harnesses
+            .iter()
+            .filter_map(|&i| d.harnesses.get(i).cloned())
+            .collect();
+        o.signal_harnesses = sel
+            .signal_harnesses
+            .iter()
+            .filter_map(|&i| d.signal_harnesses.get(i).cloned())
+            .collect();
         o.connect();
         out
     }
@@ -696,6 +886,12 @@ impl Sheet {
             self.drawing.texts.len() as u32,
         );
         let (j0, m0) = (self.drawing.junctions.len(), self.drawing.no_erc.len());
+        let (b0, e0, h0, s0) = (
+            self.drawing.buses.len(),
+            self.drawing.bus_entries.len(),
+            self.drawing.harnesses.len(),
+            self.drawing.signal_harnesses.len(),
+        );
         for s in &clip.symbols {
             let mut s = s.clone();
             if let Some(n) = names.get(&s.designator) {
@@ -748,6 +944,20 @@ impl Sheet {
         dr.junctions
             .extend(c.junctions.iter().map(|&p| xf.apply(p)));
         dr.no_erc.extend(c.no_erc.iter().map(|&p| xf.apply(p)));
+        let line = |v: &Vec<Pt>| v.iter().map(|&p| xf.apply(p)).collect::<Vec<Pt>>();
+        dr.buses.extend(c.buses.iter().map(line));
+        dr.signal_harnesses
+            .extend(c.signal_harnesses.iter().map(line));
+        dr.bus_entries.extend(
+            c.bus_entries
+                .iter()
+                .map(|e| [xf.apply(e[0]), xf.apply(e[1])]),
+        );
+        dr.harnesses.extend(c.harnesses.iter().map(|h| Harness {
+            min: xf.apply(h.min),
+            max: xf.apply(h.max),
+            ..h.clone()
+        }));
         // New designators, drawn texts too.
         for k in 0..c.parts.len() {
             let i = p0 as usize + k;
@@ -762,6 +972,10 @@ impl Sheet {
             tags: (t0 as usize..dr.tags.len()).collect(),
             junctions: (j0..dr.junctions.len()).collect(),
             no_erc: (m0..dr.no_erc.len()).collect(),
+            buses: (b0..dr.buses.len()).collect(),
+            bus_entries: (e0..dr.bus_entries.len()).collect(),
+            harnesses: (h0..dr.harnesses.len()).collect(),
+            signal_harnesses: (s0..dr.signal_harnesses.len()).collect(),
         };
         let mut near: Vec<Pt> = dr.pins[dr.pins.len() - c.pins.len()..]
             .iter()
@@ -992,5 +1206,134 @@ mod tests {
             .shapes
             .iter()
             .any(|sh| sh.stroke == Some(NO_ERC_COLOR)));
+    }
+
+    #[test]
+    fn move_breaks_connections_and_drag_keeps_them() {
+        // Move: R2 goes, the wires stay where they were.
+        let mut s = sheet();
+        s.drawing
+            .xf_sel_mode(&SchSel::part(1), Xf::Shift([0.0, 300.0]), false);
+        let d = &s.drawing;
+        assert_eq!(d.pins[2].at, [800.0, 300.0]);
+        assert_eq!(d.wires[0], vec![[200.0, 0.0], [800.0, 0.0]]);
+        assert_eq!(d.wires[1], vec![[1200.0, 0.0], [1600.0, 0.0]]);
+        let net = d.nets.iter().find(|n| n.wires.contains(&0)).unwrap();
+        assert_eq!(net.pins, vec![1], "R2 left the net");
+        // Drag: the wires bend to follow, square.
+        let mut s = sheet();
+        s.drawing
+            .xf_sel_mode(&SchSel::part(1), Xf::Shift([0.0, 300.0]), true);
+        let d = &s.drawing;
+        assert_eq!(d.wires[0].last(), Some(&[800.0, 300.0]));
+        assert_eq!(d.wires[1].first(), Some(&[1200.0, 300.0]));
+        assert!(d.wires.iter().all(|w| w
+            .windows(2)
+            .all(|p| p[0][0] == p[1][0] || p[0][1] == p[1][1])));
+        let net = d.nets.iter().find(|n| n.wires.contains(&0)).unwrap();
+        let mut pins = net.pins.clone();
+        pins.sort();
+        assert_eq!(pins, vec![1, 2]);
+    }
+
+    #[test]
+    fn dragging_a_wire_segment_keeps_its_ends() {
+        let mut s = sheet();
+        // R1 to R2 the long way round: down, across, up.
+        let d = &mut s.drawing;
+        d.delete_wire(0);
+        let w = d
+            .add_wire(vec![
+                [200.0, 0.0],
+                [200.0, -300.0],
+                [800.0, -300.0],
+                [800.0, 0.0],
+            ])
+            .unwrap();
+        // A branch tees onto the bottom run.
+        let t = d.add_wire(vec![[500.0, -300.0], [500.0, -600.0]]).unwrap();
+        assert_eq!(d.junctions, vec![[500.0, -300.0]]);
+        // The bottom run drags only up and down, however the pointer goes.
+        d.drag_segment(w, 1, [70.0, -200.0]);
+        assert_eq!(
+            d.wires[w],
+            vec![[200.0, 0.0], [200.0, -500.0], [800.0, -500.0], [800.0, 0.0]]
+        );
+        assert_eq!(d.wires[t][0], [500.0, -500.0], "the branch follows");
+        assert_eq!(d.junctions, vec![[500.0, -500.0]]);
+        // An end segment on a pin keeps the pin with a new leg.
+        d.drag_segment(w, 0, [-100.0, 0.0]);
+        assert_eq!(d.wires[w][0], [200.0, 0.0]);
+        assert_eq!(d.wires[w][1], [100.0, 0.0]);
+        let net = d
+            .nets
+            .iter()
+            .find(|n| n.wires.contains(&(w as u32)))
+            .unwrap();
+        let mut pins = net.pins.clone();
+        pins.sort();
+        assert_eq!(pins, vec![1, 2]);
+        assert!(d.wires[w]
+            .windows(2)
+            .all(|p| p[0][0] == p[1][0] || p[0][1] == p[1][1]));
+    }
+
+    #[test]
+    fn harness_moves_with_its_wires_and_buses_copy() {
+        let mut s = sheet();
+        let d = &mut s.drawing;
+        let h = d.add_harness(Harness::new([2000.0, 400.0], "I2C", &["SDA", "SCL"], true));
+        let e = d.harnesses[h].entry_at(&d.harnesses[h].entries[0]);
+        let w = d.add_wire(vec![[e[0] - 300.0, e[1]], e]).unwrap();
+        let b = d.harnesses[h].bundle_at();
+        let sh = d.add_signal_harness(vec![b, [b[0] + 500.0, b[1]]]).unwrap();
+        let sel = SchSel {
+            harnesses: vec![h],
+            ..Default::default()
+        };
+        d.xf_sel(&sel, Xf::Shift([0.0, 200.0]));
+        let e2 = d.harnesses[h].entry_at(&d.harnesses[h].entries[0]);
+        assert_eq!(e2, [e[0], e[1] + 200.0]);
+        assert_eq!(d.wires[w].last(), Some(&e2), "the wire follows its entry");
+        assert_eq!(d.signal_harnesses[sh][0], d.harnesses[h].bundle_at());
+        // Mirrored, the entries go to the other edge.
+        let c = d.sel_centre(&sel).unwrap();
+        d.xf_sel(&sel, Xf::MirrorX(c[0]));
+        assert!(d.harnesses[h].entries_right());
+        // A bus and an entry copy and paste with the rest.
+        let bus = d.add_bus(vec![[0.0, -1000.0], [1000.0, -1000.0]]).unwrap();
+        d.add_bus_entry([100.0, -1000.0], [200.0, -900.0]);
+        let sel = d.select_box([-100.0, -1100.0], [1100.0, -800.0], false);
+        assert_eq!(sel.buses, vec![bus]);
+        assert_eq!(sel.bus_entries, vec![0]);
+        let clip = s.clip(&sel);
+        let new = s.paste_clip(&clip, [0.0, -500.0], &HashMap::new());
+        assert_eq!(new.buses, vec![1]);
+        assert_eq!(
+            s.drawing.bus_entries[1],
+            [[100.0, -1500.0], [200.0, -1400.0]]
+        );
+        s.drawing.delete_sel(&new);
+        assert_eq!(s.drawing.buses.len(), 1);
+    }
+
+    #[test]
+    fn bus_breakout_names_every_member() {
+        let mut s = sheet();
+        let d = &mut s.drawing;
+        let b = d.add_bus(vec![[0.0, 1000.0], [1000.0, 1000.0]]).unwrap();
+        let n = d.bus_breakout(b, "D[0..3]", [100.0, 1000.0], 100.0, 300.0, false);
+        assert_eq!(n, 4);
+        assert_eq!(d.bus_entries.len(), 4);
+        assert_eq!(d.bus_entries[0], [[100.0, 1000.0], [200.0, 1100.0]]);
+        for m in ["D0", "D1", "D2", "D3", "D[0..3]"] {
+            assert!(d.tags.iter().any(|t| t.text == m), "{m}");
+        }
+        let d3 = d
+            .nets
+            .iter()
+            .find(|n| n.name.as_deref() == Some("D3"))
+            .unwrap();
+        assert_eq!(d3.wires.len(), 1);
     }
 }

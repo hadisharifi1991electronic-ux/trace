@@ -255,3 +255,115 @@ fn edited_schematic_sheets_write_their_edits() {
     let text = String::from_utf8_lossy(&std::fs::read(&out).unwrap()).into_owned();
     assert!(text.contains("NAME=Tolerance"));
 }
+
+/// A sheet with a bus D[0..1] and its entries, and a harness connector
+/// SPI (MOSI, SCK) whose signal harness runs to a harness port.
+fn bus_sheet(dir: &std::path::Path) -> std::path::PathBuf {
+    let path = dir.join("bus.SchDoc");
+    let mut data = text_record(
+        "|HEADER=Protel for Windows - Schematic Capture Binary File Version 5.0|WEIGHT=9",
+    );
+    for r in [
+        "|RECORD=31|FONTIDCOUNT=1|SIZE1=10|FONTNAME1=Times New Roman|SHEETSTYLE=0|AREACOLOR=16317695|SYSTEMFONT=1",
+        "|RECORD=26|LOCATIONCOUNT=2|X1=100|Y1=400|X2=300|Y2=400|COLOR=8388608|LINEWIDTH=2",
+        "|RECORD=37|LOCATION.X=120|LOCATION.Y=400|CORNER.X=130|CORNER.Y=410|COLOR=8388608|LINEWIDTH=1",
+        "|RECORD=37|LOCATION.X=140|LOCATION.Y=400|CORNER.X=150|CORNER.Y=410|COLOR=8388608|LINEWIDTH=1",
+        "|RECORD=27|LOCATIONCOUNT=2|X1=130|Y1=410|X2=130|Y2=450|COLOR=8388608|LINEWIDTH=1",
+        "|RECORD=27|LOCATIONCOUNT=2|X1=150|Y1=410|X2=150|Y2=450|COLOR=8388608|LINEWIDTH=1",
+        "|RECORD=25|LOCATION.X=130|LOCATION.Y=420|TEXT=D0|FONTID=1|COLOR=128",
+        "|RECORD=25|LOCATION.X=150|LOCATION.Y=420|TEXT=D1|FONTID=1|COLOR=128",
+        "|RECORD=25|LOCATION.X=200|LOCATION.Y=400|TEXT=D[0..1]|FONTID=1|COLOR=128",
+        "|RECORD=27|LOCATIONCOUNT=2|X1=400|Y1=290|X2=500|Y2=290|COLOR=8388608|LINEWIDTH=1",
+        "|RECORD=27|LOCATIONCOUNT=2|X1=400|Y1=280|X2=500|Y2=280|COLOR=8388608|LINEWIDTH=1",
+        "|RECORD=18|LOCATION.X=640|LOCATION.Y=285|WIDTH=50|HEIGHT=10|NAME=SPI1|HARNESSTYPE=SPI|STYLE=3|IOTYPE=0|ALIGNMENT=0|COLOR=128|AREACOLOR=8454143|TEXTCOLOR=128",
+    ] {
+        data.extend(text_record(r));
+    }
+    let mut extra =
+        text_record("|HEADER=Protel for Windows - Schematic Capture Binary File Version 5.0");
+    for r in [
+        "|RECORD=215|LOCATION.X=500|LOCATION.Y=300|XSIZE=60|YSIZE=30|PRIMARYCONNECTIONPOSITION=15|COLOR=8388736|AREACOLOR=16767708|LINEWIDTH=1|UNIQUEID=HARNESSA",
+        "|RECORD=216|OWNERINDEX=0|SIDE=0|DISTANCEFROMTOP=1|NAME=MOSI|COLOR=8388736|AREACOLOR=16767708|TEXTCOLOR=8388736|TEXTFONTID=1|UNIQUEID=ENTRYAAA",
+        "|RECORD=216|OWNERINDEX=0|SIDE=0|DISTANCEFROMTOP=2|NAME=SCK|COLOR=8388736|AREACOLOR=16767708|TEXTCOLOR=8388736|TEXTFONTID=1|UNIQUEID=ENTRYBBB",
+        "|RECORD=217|OWNERINDEX=0|LOCATION.X=500|LOCATION.Y=302|TEXT=SPI|COLOR=8388736|FONTID=1",
+        "|RECORD=218|LOCATIONCOUNT=2|X1=560|Y1=285|X2=640|Y2=285|COLOR=8388736|LINEWIDTH=2|UNIQUEID=SIGNALHA",
+    ] {
+        extra.extend(text_record(r));
+    }
+    write_cfb(&path, &[("/FileHeader", data), ("/Additional", extra)]);
+    path
+}
+
+#[test]
+fn buses_and_harnesses_read_and_write() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = bus_sheet(dir.path());
+    let sheet = trace_altium::read_schdoc(&path).unwrap();
+    let d = &sheet.drawing;
+    assert_eq!(d.buses, vec![vec![[1000.0, 4000.0], [3000.0, 4000.0]]]);
+    assert_eq!(d.bus_entries.len(), 2);
+    assert_eq!(d.harnesses.len(), 1);
+    let h = &d.harnesses[0];
+    assert_eq!(h.kind, "SPI");
+    assert_eq!((h.min, h.max), ([5000.0, 2700.0], [5600.0, 3000.0]));
+    assert_eq!(h.entries.len(), 2);
+    assert_eq!(h.entry_at(&h.entries[1]), [5000.0, 2800.0]);
+    assert_eq!(h.bundle_at(), [5600.0, 2850.0]);
+    assert_eq!(d.signal_harnesses.len(), 1);
+    // The wires on the entries are SPI1.MOSI and SPI1.SCK.
+    let names: Vec<_> = d.nets.iter().filter_map(|n| n.name.clone()).collect();
+    for n in ["SPI1.MOSI", "SPI1.SCK", "D0", "D1"] {
+        assert!(names.iter().any(|x| x == n), "{n} in {names:?}");
+    }
+    assert_eq!(d.bundles.len(), 1);
+
+    for original in [Some(path.as_path()), None] {
+        let out = dir.path().join("out.SchDoc");
+        std::fs::write(&out, trace_altium::write_schdoc(&sheet, original).unwrap()).unwrap();
+        let back = trace_altium::read_schdoc(&out).unwrap();
+        let b = &back.drawing;
+        assert_eq!(b.buses, d.buses, "original {original:?}");
+        assert_eq!(b.bus_entries, d.bus_entries);
+        assert_eq!(b.harnesses, d.harnesses);
+        assert_eq!(b.signal_harnesses, d.signal_harnesses);
+        let text = String::from_utf8_lossy(&std::fs::read(&out).unwrap()).into_owned();
+        assert!(text.contains("HARNESSTYPE=SPI"));
+        if original.is_some() {
+            assert_eq!(json(&back), json(&sheet));
+            assert!(text.contains("UNIQUEID=HARNESSA") && text.contains("UNIQUEID=SIGNALHA"));
+        }
+    }
+
+    // Edited: moved, a second connector, a new bus.
+    let mut sheet = sheet;
+    let sel = trace_core::sch_select::SchSel {
+        harnesses: vec![0],
+        signal_harnesses: vec![0],
+        ..Default::default()
+    };
+    sheet
+        .drawing
+        .xf_sel(&sel, trace_core::sch_edit::Xf::Shift([0.0, -1000.0]));
+    sheet.drawing.add_harness(trace_core::Harness::new(
+        [8000.0, 3000.0],
+        "I2C",
+        &["SDA", "SCL"],
+        false,
+    ));
+    sheet
+        .drawing
+        .add_bus(vec![[0.0, 0.0], [0.0, 1000.0], [500.0, 1000.0]]);
+    let out = dir.path().join("edited.SchDoc");
+    std::fs::write(
+        &out,
+        trace_altium::write_schdoc(&sheet, Some(&path)).unwrap(),
+    )
+    .unwrap();
+    let back = trace_altium::read_schdoc(&out).unwrap();
+    assert_eq!(back.drawing.harnesses, sheet.drawing.harnesses);
+    assert_eq!(back.drawing.buses, sheet.drawing.buses);
+    assert_eq!(
+        back.drawing.signal_harnesses,
+        sheet.drawing.signal_harnesses
+    );
+}

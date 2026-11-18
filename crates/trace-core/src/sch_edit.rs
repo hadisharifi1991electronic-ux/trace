@@ -8,6 +8,10 @@ use crate::schematic::*;
 /// How close two points must be to count as the same, in mil.
 const TOL: f64 = 1.0;
 
+/// The colours Altium draws signal harnesses and harness connectors in.
+pub const HARNESS_LINE: Rgb = [128, 0, 128];
+pub const HARNESS_FILL: Rgb = [220, 218, 255];
+
 /// Altium's default wire colour (dark blue) and width.
 pub const WIRE_COLOR: Rgb = [0, 0, 128];
 const WIRE_WIDTH: f64 = 10.0;
@@ -34,6 +38,56 @@ pub(crate) fn inside_segment(p: Pt, a: Pt, b: Pt) -> bool {
     }
     let (qx, qy) = (a[0] + t * dx - p[0], a[1] + t * dy - p[1]);
     qx * qx + qy * qy <= TOL * TOL
+}
+
+/// Moves the ends of `line` sitting on `from` points to the matching `to`
+/// points, bending the last segment so it stays square. Whether it
+/// changed.
+pub(crate) fn drag_line_ends(line: &mut Vec<Pt>, moves: &[(Pt, Pt)]) -> bool {
+    let mut changed = false;
+    for end in [false, true] {
+        if line.len() < 2 {
+            continue;
+        }
+        let k = if end { line.len() - 1 } else { 0 };
+        let Some(&(_, to)) = moves.iter().find(|(a, _)| same(*a, line[k])) else {
+            continue;
+        };
+        let next = if end { line[k - 1] } else { line[1] };
+        let old = line[k];
+        line[k] = to;
+        // The corner that keeps the run along its old direction.
+        let corner = if (next[1] - old[1]).abs() <= TOL {
+            [to[0], next[1]]
+        } else {
+            [next[0], to[1]]
+        };
+        if !same(corner, to) && !same(corner, next) {
+            if end {
+                line.insert(k, corner);
+            } else {
+                line.insert(1, corner);
+            }
+        }
+        changed = true;
+    }
+    changed
+}
+
+/// Drops repeated points and middle points of straight runs.
+pub(crate) fn tidy_line(line: &mut Vec<Pt>) {
+    line.dedup_by(|a, b| same(*a, *b));
+    let mut i = 1;
+    while i + 1 < line.len() {
+        let (a, b, c) = (line[i - 1], line[i], line[i + 1]);
+        let cross = (b[0] - a[0]) * (c[1] - b[1]) - (b[1] - a[1]) * (c[0] - b[0]);
+        let dot = (b[0] - a[0]) * (c[0] - b[0]) + (b[1] - a[1]) * (c[1] - b[1]);
+        if cross.abs() < 1e-6 && dot >= 0.0 {
+            line.remove(i);
+        } else {
+            i += 1;
+        }
+    }
 }
 
 /// Snaps a point to a grid.
@@ -141,6 +195,97 @@ impl Xf {
 }
 
 impl Drawing {
+    /// What the buses, bus entries, harness connectors and signal
+    /// harnesses look like, drawn from their lists: shapes and texts to
+    /// draw over the sheet.
+    pub fn bus_harness_graphics(&self) -> (Vec<SchShape>, Vec<SchText>) {
+        let line = |pts: Vec<Pt>, width: f64, c: Rgb| SchShape {
+            geom: SchGeom::Line(pts),
+            width,
+            stroke: Some(c),
+            fill: None,
+            dashed: false,
+            part: None,
+            wire: None,
+            tag: None,
+        };
+        let text = |at: Pt, t: &str, just: u8, c: Rgb| SchText {
+            at,
+            text: t.to_string(),
+            size: 80.0,
+            color: c,
+            rot: 0,
+            just,
+            bold: false,
+            italic: false,
+            wrap: None,
+            part: None,
+        };
+        let mut shapes = Vec::new();
+        let mut texts = Vec::new();
+        for b in &self.buses {
+            shapes.push(line(b.clone(), 30.0, WIRE_COLOR));
+        }
+        for e in &self.bus_entries {
+            shapes.push(line(e.to_vec(), WIRE_WIDTH, WIRE_COLOR));
+        }
+        for sh in &self.signal_harnesses {
+            shapes.push(line(sh.clone(), 40.0, HARNESS_LINE));
+        }
+        for h in &self.harnesses {
+            let (x0, x1, top, bot) = (h.min[0], h.max[0], h.max[1], h.min[1]);
+            let y = h.max[1] - h.primary;
+            let tip = 50.0_f64.min((x1 - x0) / 3.0);
+            let body = if h.entries_right() {
+                vec![
+                    [x1, top],
+                    [x0 + tip, top],
+                    [x0, y],
+                    [x0 + tip, bot],
+                    [x1, bot],
+                ]
+            } else {
+                vec![
+                    [x0, top],
+                    [x1 - tip, top],
+                    [x1, y],
+                    [x1 - tip, bot],
+                    [x0, bot],
+                ]
+            };
+            shapes.push(SchShape {
+                geom: SchGeom::Poly(body),
+                width: WIRE_WIDTH,
+                stroke: Some(HARNESS_LINE),
+                fill: Some(HARNESS_FILL),
+                dashed: false,
+                part: None,
+                wire: None,
+                tag: None,
+            });
+            for e in &h.entries {
+                let at = h.entry_at(e);
+                let inward = if e.side == 1 { -1.0 } else { 1.0 };
+                shapes.push(line(
+                    vec![at, [at[0] + 40.0 * inward, at[1]]],
+                    WIRE_WIDTH,
+                    HARNESS_LINE,
+                ));
+                let just = if e.side == 1 { 5 } else { 3 };
+                texts.push(text(
+                    [at[0] + 60.0 * inward, at[1]],
+                    &e.name,
+                    just,
+                    HARNESS_LINE,
+                ));
+            }
+            if !h.kind.is_empty() {
+                texts.push(text([x0, top + 20.0], &h.kind, 0, HARNESS_LINE));
+            }
+        }
+        (shapes, texts)
+    }
+
     /// Puts part `i` through `xf` with its graphics, text and pins; wires
     /// that end on its pins follow.
     fn map_part(&mut self, i: usize, xf: Xf) {
@@ -180,38 +325,206 @@ impl Drawing {
             if skip.contains(&w) {
                 continue;
             }
-            let mut changed = false;
-            for end in [false, true] {
-                let wire = &mut self.wires[w];
-                if wire.len() < 2 {
-                    continue;
-                }
-                let k = if end { wire.len() - 1 } else { 0 };
-                let Some(&(_, to)) = moves.iter().find(|(a, _)| same(*a, wire[k])) else {
-                    continue;
-                };
-                let next = if end { wire[k - 1] } else { wire[1] };
-                let old = wire[k];
-                wire[k] = to;
-                // The corner that keeps the run along its old direction.
-                let corner = if (next[1] - old[1]).abs() <= TOL {
-                    [to[0], next[1]]
-                } else {
-                    [next[0], to[1]]
-                };
-                if !same(corner, to) && !same(corner, next) {
-                    if end {
-                        wire.insert(k, corner);
-                    } else {
-                        wire.insert(1, corner);
-                    }
-                }
-                changed = true;
-            }
-            if changed {
+            if drag_line_ends(&mut self.wires[w], moves) {
                 self.sync_wire(w);
             }
         }
+    }
+
+    /// Drags segment `k` of wire `w` (from point k to k+1) by `d`, as
+    /// Altium drags a wire segment: a level or upright segment moves only
+    /// across itself, its neighbours stretch to follow, and an end that
+    /// was connected keeps its place with a new leg back to it. Wires that
+    /// end on the segment follow it.
+    pub fn drag_segment(&mut self, w: usize, k: usize, d: Pt) {
+        let Some(wire) = self.wires.get(w) else {
+            return;
+        };
+        if k + 1 >= wire.len() {
+            return;
+        }
+        let (a, b) = (wire[k], wire[k + 1]);
+        let d = if (a[1] - b[1]).abs() <= TOL {
+            [0.0, d[1]]
+        } else if (a[0] - b[0]).abs() <= TOL {
+            [d[0], 0.0]
+        } else {
+            d
+        };
+        if d == [0.0, 0.0] {
+            return;
+        }
+        let mv = |p: Pt| [p[0] + d[0], p[1] + d[1]];
+        // Tees and wire ends on the segment go with it.
+        let mut moves: Vec<(Pt, Pt)> = Vec::new();
+        for (oi, o) in self.wires.iter().enumerate() {
+            if oi == w {
+                continue;
+            }
+            for &e in [o.first(), o.last()].into_iter().flatten() {
+                if same(e, a) || same(e, b) || inside_segment(e, a, b) {
+                    moves.push((e, mv(e)));
+                }
+            }
+        }
+        let held = |dr: &Drawing, p: Pt| {
+            dr.pins.iter().any(|q| same(q.at, p))
+                || dr.tags.iter().any(|t| t.at.iter().any(|&x| same(x, p)))
+                || dr
+                    .harnesses
+                    .iter()
+                    .any(|h| h.entries.iter().any(|e| same(h.entry_at(e), p)))
+                || dr
+                    .bus_entries
+                    .iter()
+                    .any(|e| same(e[0], p) || same(e[1], p))
+        };
+        let last = wire.len() - 1;
+        let keep_start = k == 0 && held(self, a);
+        let keep_end = k + 1 == last && held(self, b);
+        let wire = &mut self.wires[w];
+        wire[k] = mv(a);
+        wire[k + 1] = mv(b);
+        if keep_end {
+            wire.push(b);
+        }
+        if keep_start {
+            wire.insert(0, a);
+        }
+        tidy_line(wire);
+        self.sync_wire(w);
+        self.drag_ends(&moves, &[w]);
+        let near: Vec<Pt> = [a, b, mv(a), mv(b)]
+            .into_iter()
+            .chain(moves.iter().flat_map(|m| [m.0, m.1]))
+            .collect();
+        self.fix_junctions(&near);
+        self.connect();
+    }
+
+    /// Drags corner or end `k` of wire `w` by `d`: the segments either
+    /// side stretch to it. Other wires ending there go along.
+    pub fn drag_vertex(&mut self, w: usize, k: usize, d: Pt) {
+        let Some(&p) = self.wires.get(w).and_then(|x| x.get(k)) else {
+            return;
+        };
+        let to = [p[0] + d[0], p[1] + d[1]];
+        self.wires[w][k] = to;
+        tidy_line(&mut self.wires[w]);
+        self.sync_wire(w);
+        self.drag_ends(&[(p, to)], &[w]);
+        self.fix_junctions(&[p, to]);
+        self.connect();
+    }
+
+    /// Adds a bus through `pts`. Returns its index.
+    pub fn add_bus(&mut self, pts: Vec<Pt>) -> Option<usize> {
+        let mut pts = pts;
+        pts.dedup_by(|a, b| same(*a, *b));
+        if pts.len() < 2 {
+            return None;
+        }
+        self.buses.push(pts);
+        Some(self.buses.len() - 1)
+    }
+
+    /// Adds a bus entry from `on_bus` out to `to`. Returns its index.
+    pub fn add_bus_entry(&mut self, on_bus: Pt, to: Pt) -> usize {
+        self.bus_entries.push([on_bus, to]);
+        self.connect();
+        self.bus_entries.len() - 1
+    }
+
+    /// Adds a harness connector. Returns its index.
+    pub fn add_harness(&mut self, h: Harness) -> usize {
+        self.harnesses.push(h);
+        self.connect();
+        self.harnesses.len() - 1
+    }
+
+    /// Adds a signal harness through `pts`. Returns its index.
+    pub fn add_signal_harness(&mut self, pts: Vec<Pt>) -> Option<usize> {
+        let mut pts = pts;
+        pts.dedup_by(|a, b| same(*a, *b));
+        if pts.len() < 2 {
+            return None;
+        }
+        self.signal_harnesses.push(pts);
+        self.connect();
+        Some(self.signal_harnesses.len() - 1)
+    }
+
+    /// Lays out a bus breakout: for each member of `name` (D[0..7]), a
+    /// bus entry off bus `b` every `pitch` mil from `start` along it, a
+    /// wire `len` mil on from the entry and a net label naming the
+    /// member, plus a label naming the bus. Entries lean towards +x and
+    /// +y unless `flip`. Returns how many members it placed.
+    pub fn bus_breakout(
+        &mut self,
+        b: usize,
+        name: &str,
+        start: Pt,
+        pitch: f64,
+        len: f64,
+        flip: bool,
+    ) -> usize {
+        let Some(members) = bus_members(name) else {
+            return 0;
+        };
+        let Some(bus) = self.buses.get(b).cloned() else {
+            return 0;
+        };
+        // The bus segment `start` is on, and its direction.
+        let Some(seg) = bus
+            .windows(2)
+            .find(|s| inside_segment(start, s[0], s[1]) || same(start, s[0]) || same(start, s[1]))
+        else {
+            return 0;
+        };
+        let len_ab = ((seg[1][0] - seg[0][0]).powi(2) + (seg[1][1] - seg[0][1]).powi(2)).sqrt();
+        if len_ab < TOL {
+            return 0;
+        }
+        let dir = [
+            (seg[1][0] - seg[0][0]) / len_ab,
+            (seg[1][1] - seg[0][1]) / len_ab,
+        ];
+        // Out from the bus on the side `flip` picks, leaning along it.
+        let s = if flip { -1.0 } else { 1.0 };
+        let n = [-dir[1] * s, dir[0] * s];
+        for (i, m) in members.iter().enumerate() {
+            let on = [
+                start[0] + dir[0] * pitch * i as f64,
+                start[1] + dir[1] * pitch * i as f64,
+            ];
+            let e = [
+                on[0] + (n[0] + dir[0]) * 100.0,
+                on[1] + (n[1] + dir[1]) * 100.0,
+            ];
+            self.bus_entries.push([on, e]);
+            let out = [e[0] + n[0] * len, e[1] + n[1] * len];
+            self.add_wire(vec![e, out]);
+            // On the wire a little way out, along it as Altium writes
+            // labels on upright wires.
+            let at = [e[0] + n[0] * 50.0, e[1] + n[1] * 50.0];
+            let t = self.add_label(at, m);
+            if n[0].abs() < 0.5 {
+                if let Some(g) = self.tags[t]
+                    .graphic
+                    .and_then(|g| self.texts.get_mut(g as usize))
+                {
+                    g.rot = 1;
+                    // Ends at the wire start on wires running down.
+                    if n[1] < 0.0 {
+                        g.just = 2;
+                    }
+                }
+            }
+        }
+        let at = [bus[0][0], bus[0][1]];
+        self.add_label(at, name);
+        self.connect();
+        members.len()
     }
 
     /// Redraws wire `w` from its points.

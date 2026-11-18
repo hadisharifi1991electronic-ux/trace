@@ -95,13 +95,141 @@ pub struct Drawing {
     /// Sheet symbols: the box and the file of the sheet they stand for.
     #[serde(default)]
     pub links: Vec<SheetLink>,
-    /// Buses and bus entries, as polylines (wires ending on them are
-    /// joined to the bus).
+    /// Buses, as polylines. A bus draws a bundle of nets; its members
+    /// connect by their own names (D0..D7 under a D[0..7] label), never
+    /// through the bus itself.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub buses: Vec<Vec<Pt>>,
+    /// Bus entries: the short 45 degree strokes from a bus to a wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub bus_entries: Vec<[Pt; 2]>,
+    /// Harness connectors: boxes whose entries gather signals into one
+    /// signal harness.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harnesses: Vec<Harness>,
+    /// Signal harnesses: the thick lines that carry a harness between
+    /// connectors, ports and sheet entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub signal_harnesses: Vec<Vec<Pt>>,
+    /// Harness bundles found by `Drawing::connect`.
+    #[serde(skip)]
+    pub bundles: Vec<Bundle>,
     /// No-ERC markers: pins and wires they sit on are not checked.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub no_erc: Vec<Pt>,
+}
+
+/// A harness connector: a box with named entries on one edge, and the
+/// point on the other edge where a signal harness carries them all away.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Harness {
+    pub min: Pt,
+    pub max: Pt,
+    /// The harness type it defines (USB, SPI...).
+    pub kind: String,
+    /// How far below the top edge the signal harness attaches, in mil.
+    pub primary: f64,
+    pub entries: Vec<HarnessEntry>,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct HarnessEntry {
+    pub name: String,
+    /// 1 on the right edge, 0 on the left.
+    pub side: u8,
+    /// Below the top edge, in mil.
+    pub dist: f64,
+}
+
+impl Harness {
+    /// Where entry `e` connects: on its edge, `dist` below the top.
+    pub fn entry_at(&self, e: &HarnessEntry) -> Pt {
+        let x = if e.side == 1 {
+            self.max[0]
+        } else {
+            self.min[0]
+        };
+        [x, self.max[1] - e.dist]
+    }
+
+    /// Whether the entries sit on the right edge (most of them do).
+    pub fn entries_right(&self) -> bool {
+        let right = self.entries.iter().filter(|e| e.side == 1).count();
+        right * 2 > self.entries.len()
+    }
+
+    /// Where the signal harness attaches: the edge away from the entries.
+    pub fn bundle_at(&self) -> Pt {
+        let x = if self.entries_right() {
+            self.min[0]
+        } else {
+            self.max[0]
+        };
+        [x, self.max[1] - self.primary]
+    }
+
+    /// A connector of type `kind` with its top-left corner at `top_left`
+    /// and one entry per name on its right edge (on the left when
+    /// `left`), 100 mil apart, sized as Altium places them.
+    pub fn new(top_left: Pt, kind: &str, names: &[&str], left: bool) -> Harness {
+        let n = names.len().max(1) as f64;
+        let h = 100.0 * (n + 1.0);
+        let w = names.iter().map(|s| s.len()).max().unwrap_or(4).max(4) as f64 * 60.0 + 100.0;
+        let w = (w / 100.0).ceil() * 100.0;
+        Harness {
+            min: [top_left[0], top_left[1] - h],
+            max: [top_left[0] + w, top_left[1]],
+            kind: kind.to_string(),
+            primary: (h / 2.0 / 100.0).round() * 100.0,
+            entries: names
+                .iter()
+                .enumerate()
+                .map(|(i, s)| HarnessEntry {
+                    name: s.to_string(),
+                    side: if left { 0 } else { 1 },
+                    dist: 100.0 * (i as f64 + 1.0),
+                })
+                .collect(),
+        }
+    }
+}
+
+/// A harness bundle on one sheet: the connectors, signal harnesses and
+/// the ports, sheet entries and labels they touch.
+#[derive(Clone, Debug, Default)]
+pub struct Bundle {
+    /// Its name: a port's, a sheet entry's or a label's on it, else the
+    /// first connector's harness type.
+    pub name: String,
+    pub harnesses: Vec<u32>,
+    /// Ports, sheet entries and labels on it.
+    pub tags: Vec<u32>,
+    /// Each entry name and the sheet net it is on.
+    pub members: Vec<(String, u32)>,
+}
+
+/// The member names of a bus name: `D[0..7]` gives D0 to D7 and
+/// `A[3..0]B` gives A3B down to A0B. None for a plain name.
+pub fn bus_members(name: &str) -> Option<Vec<String>> {
+    let open = name.find('[')?;
+    let close = open + name[open..].find(']')?;
+    let (a, b) = name[open + 1..close].split_once("..")?;
+    let (a, b): (i64, i64) = (a.trim().parse().ok()?, b.trim().parse().ok()?);
+    if (a - b).abs() > 4096 {
+        return None;
+    }
+    let (pre, post) = (&name[..open], &name[close + 1..]);
+    let range: Vec<i64> = if a <= b {
+        (a..=b).collect()
+    } else {
+        (b..=a).rev().collect()
+    };
+    Some(
+        range
+            .into_iter()
+            .map(|i| format!("{pre}{i}{post}"))
+            .collect(),
+    )
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -397,6 +525,9 @@ pub struct SchNet {
     pub wires: Vec<u32>,
     pub pins: Vec<u32>,
     pub tags: Vec<u32>,
+    /// Harness entries on it: (connector, entry).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub harness: Vec<[u32; 2]>,
 }
 
 fn on_segment(p: Pt, a: Pt, b: Pt, tol: f64) -> bool {
@@ -441,9 +572,17 @@ impl Drawing {
         // apart where they meet; grids are 10 mil or more.
         const TOL: f64 = 1.0;
         let (nw, np, nt) = (self.wires.len(), self.pins.len(), self.tags.len());
-        let mut d = Dsu((0..nw + np + nt).collect());
+        // Harness entries, one element each after the tags.
+        let ents: Vec<[u32; 2]> = self
+            .harnesses
+            .iter()
+            .enumerate()
+            .flat_map(|(h, c)| (0..c.entries.len()).map(move |e| [h as u32, e as u32]))
+            .collect();
+        let mut d = Dsu((0..nw + np + nt + ents.len()).collect());
         let pin = |i: usize| nw + i;
         let tag = |i: usize| nw + np + i;
+        let ent = |i: usize| nw + np + nt + i;
         let on_wire = |p: Pt, w: &[Pt]| w.windows(2).any(|s| on_segment(p, s[0], s[1], TOL));
         // Points that join whatever wire they touch.
         let mut points: Vec<(Pt, usize)> = Vec::new();
@@ -460,6 +599,10 @@ impl Drawing {
             for &p in &t.at {
                 points.push((p, tag(i)));
             }
+        }
+        for (i, &[h, e]) in ents.iter().enumerate() {
+            let c = &self.harnesses[h as usize];
+            points.push((c.entry_at(&c.entries[e as usize]), ent(i)));
         }
         let junction_wires: Vec<Vec<usize>> = self
             .junctions
@@ -530,6 +673,32 @@ impl Drawing {
                 }
             }
         }
+        // Harness bundles: entries of one name on connectors that one
+        // signal harness ties together are one net.
+        let mut bundles = self.find_bundles();
+        for b in &bundles {
+            let mut by: std::collections::HashMap<String, usize> = Default::default();
+            for &h in &b.harnesses {
+                for e in 0..self.harnesses[h as usize].entries.len() {
+                    let Some(i) = ents.iter().position(|x| *x == [h, e as u32]) else {
+                        continue;
+                    };
+                    let k = self.harnesses[h as usize].entries[e]
+                        .name
+                        .trim()
+                        .to_ascii_uppercase();
+                    if k.is_empty() {
+                        continue;
+                    }
+                    match by.get(&k) {
+                        Some(&o) => d.join(ent(i), o),
+                        None => {
+                            by.insert(k, ent(i));
+                        }
+                    }
+                }
+            }
+        }
         let mut index: std::collections::HashMap<usize, usize> = Default::default();
         let mut nets: Vec<SchNet> = Vec::new();
         let mut net_of = |d: &mut Dsu, i: usize, nets: &mut Vec<SchNet>| {
@@ -551,6 +720,10 @@ impl Drawing {
             let n = net_of(&mut d, tag(t), &mut nets);
             nets[n].tags.push(t as u32);
         }
+        for (i, &he) in ents.iter().enumerate() {
+            let n = net_of(&mut d, ent(i), &mut nets);
+            nets[n].harness.push(he);
+        }
         for n in &mut nets {
             let rank = |k: TagKind| match k {
                 TagKind::Power => 0,
@@ -566,7 +739,138 @@ impl Drawing {
                 .min_by_key(|t| rank(t.kind))
                 .map(|t| t.text.clone());
         }
+        // Each bundle's members, and a name for harness nets with none:
+        // bundle.entry, as Altium names them.
+        for b in &mut bundles {
+            for &h in &b.harnesses {
+                for (e, en) in self.harnesses[h as usize].entries.iter().enumerate() {
+                    let Some(ni) = nets.iter().position(|n| n.harness.contains(&[h, e as u32]))
+                    else {
+                        continue;
+                    };
+                    if !b.members.iter().any(|m| m.0.eq_ignore_ascii_case(&en.name)) {
+                        b.members.push((en.name.clone(), ni as u32));
+                    }
+                    if nets[ni].name.is_none() && !b.name.is_empty() && !en.name.is_empty() {
+                        nets[ni].name = Some(format!("{}.{}", b.name, en.name));
+                    }
+                }
+            }
+        }
+        self.bundles = bundles;
         self.nets = nets;
+    }
+
+    /// The sheet's harness bundles: connectors, signal harnesses and the
+    /// ports, sheet entries and labels that touch them, grouped by where
+    /// they meet. Members are left for `connect` to fill.
+    pub fn find_bundles(&self) -> Vec<Bundle> {
+        const TOL: f64 = 1.0;
+        let (nh, ns) = (self.harnesses.len(), self.signal_harnesses.len());
+        if nh == 0 && ns == 0 {
+            return Vec::new();
+        }
+        let mut d = Dsu((0..nh + ns + self.tags.len()).collect());
+        let on = |p: Pt, line: &[Pt]| line.windows(2).any(|s| on_segment(p, s[0], s[1], TOL));
+        let bundle_pts: Vec<[Pt; 2]> = self
+            .harnesses
+            .iter()
+            .map(|h| {
+                let y = h.max[1] - h.primary;
+                [[h.min[0], y], [h.max[0], y]]
+            })
+            .collect();
+        for (si, line) in self.signal_harnesses.iter().enumerate() {
+            let s = nh + si;
+            let ends = [line.first().copied(), line.last().copied()];
+            for (h, pts) in bundle_pts.iter().enumerate() {
+                // The connector's own side first: the edge away from its
+                // entries; either edge will do for files that differ.
+                if pts.iter().any(|&p| on(p, line))
+                    || ends
+                        .iter()
+                        .flatten()
+                        .any(|&e| pts.iter().any(|&p| same(p, e, TOL)))
+                {
+                    d.join(h, s);
+                }
+            }
+            for (oi, other) in self.signal_harnesses.iter().enumerate().skip(si + 1) {
+                let touch = |a: &[Pt], b: &[Pt]| {
+                    [a.first(), a.last()]
+                        .into_iter()
+                        .flatten()
+                        .any(|&e| on(e, b))
+                };
+                if touch(line, other) || touch(other, line) {
+                    d.join(s, nh + oi);
+                }
+            }
+            for (t, tag) in self.tags.iter().enumerate() {
+                if tag.kind == TagKind::Power {
+                    continue;
+                }
+                if tag.at.iter().any(|&p| on(p, line)) {
+                    d.join(s, nh + ns + t);
+                }
+            }
+        }
+        // A harness port straight on a connector, with no line between.
+        for (h, pts) in bundle_pts.iter().enumerate() {
+            for (t, tag) in self.tags.iter().enumerate() {
+                if matches!(tag.kind, TagKind::Port | TagKind::SheetEntry)
+                    && tag.at.iter().any(|&a| pts.iter().any(|&p| same(p, a, TOL)))
+                {
+                    d.join(h, nh + ns + t);
+                }
+            }
+        }
+        // Groups with a connector or a signal harness are bundles.
+        let mut groups: std::collections::HashMap<usize, (Bundle, bool)> = Default::default();
+        let mut order = Vec::new();
+        for i in 0..nh + ns + self.tags.len() {
+            let r = d.find(i);
+            let (b, real) = groups.entry(r).or_insert_with(|| {
+                order.push(r);
+                (Bundle::default(), false)
+            });
+            if i < nh {
+                b.harnesses.push(i as u32);
+                *real = true;
+            } else if i < nh + ns {
+                *real = true;
+            } else {
+                b.tags.push((i - nh - ns) as u32);
+            }
+        }
+        let mut out = Vec::new();
+        for r in order {
+            let Some((mut b, true)) = groups.remove(&r) else {
+                continue;
+            };
+            let rank = |k: TagKind| match k {
+                TagKind::Port => 0,
+                TagKind::SheetEntry => 1,
+                TagKind::Label => 2,
+                TagKind::Power => 3,
+            };
+            b.name = b
+                .tags
+                .iter()
+                .map(|&t| &self.tags[t as usize])
+                .filter(|t| !t.text.trim().is_empty())
+                .min_by_key(|t| rank(t.kind))
+                .map(|t| t.text.trim().to_string())
+                .or_else(|| {
+                    b.harnesses
+                        .iter()
+                        .map(|&h| self.harnesses[h as usize].kind.trim().to_string())
+                        .find(|k| !k.is_empty())
+                })
+                .unwrap_or_default();
+            out.push(b);
+        }
+        out
     }
 }
 

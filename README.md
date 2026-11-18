@@ -27,7 +27,10 @@ checker and simulator all read.
   project: flat, hierarchical, strict hierarchical or global). A sheet
   placed by several sheet symbols, or by a Repeat(CH,1,4) one, is a
   multi-channel sheet: each copy's parts are named R1_CH1, R1_CH2 and so on
-- edit the schematic: drag parts (their wires follow), Space turns, X / Y
+- edit the schematic: drag parts (their wires follow, or tick "Move
+  breaks wires" for Altium's Move; Ctrl at the start of a drag does the
+  other one), drag a wire by a segment or corner (its ends stay put),
+  Space turns, X / Y
   mirror, Delete removes; drag on the empty sheet for a selection box
   (left to right: inside, right to left: touching), Shift or Ctrl+click
   to add, Ctrl+A for all, and drag, turn, mirror or delete the selection
@@ -36,7 +39,12 @@ checker and simulator all read.
   W draws wires (click the corners, end on a pin or wire; junctions come
   and go by themselves), N places net labels, G places power ports (GND,
   +3V3... in Altium's symbol styles), and the No ERC tool marks pins left
-  open on purpose; change a part's designator or value in the side
+  open on purpose; B draws buses, Bus entry places 45 degree entries and
+  Break out lays out an entry, wire and label per member of D[0..7];
+  Harness places harness connectors (type and entries), Signal harness
+  joins them to ports, sheet entries or other connectors, and Port places
+  ports; bus members join across sheets through a D[0..7] port, harness
+  members as SPI1.MOSI through a harness port; change a part's designator or value in the side
   panel; Ctrl+Z / Ctrl+Y undo and redo. Save (Ctrl+S) writes a Trace
   schematic (`.tracesch`) next to the project, which opening the
   `.PrjPcb` picks up again. Save as Altium… writes every sheet back as an
@@ -664,8 +672,10 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   solver such as Polar Si9000.
 - Schematic pins stored as binary records are given to the part before
   them; the text form is exact. The schematic viewer uses one font for all
-  text, so Altium's bold, italic and font faces are not shown. Signal
-  harnesses are drawn as lines without their connectors' labels.
+  text, so Altium's bold, italic and font faces are not shown. Harness
+  connectors are drawn in Trace's own style; harness definition files
+  (`.Harness`) are not read, so a harness's members are its connectors'
+  entries.
 - Schematic nets are joined within a sheet (wires, labels, power ports,
   ports); across sheets they are matched to the board through part pins.
 - Update PCB and the ERC join the sheets as the project's net identifier

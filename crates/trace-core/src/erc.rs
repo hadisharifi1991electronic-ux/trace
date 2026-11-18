@@ -476,6 +476,12 @@ pub fn check_with(sheets: &[&Sheet], names: &[&str], scope: Scope) -> Vec<Issue>
                     || d.buses
                         .iter()
                         .any(|bus| bus.windows(2).any(|seg| on_segment(end, seg[0], seg[1])))
+                    || d.bus_entries
+                        .iter()
+                        .any(|e| same(e[0], end) || same(e[1], end))
+                    || d.harnesses
+                        .iter()
+                        .any(|h| h.entries.iter().any(|e| same(h.entry_at(e), end)))
                     || marked(d, end)
                     || d.links.iter().any(|l| {
                         end[0] >= l.min[0] - TOL

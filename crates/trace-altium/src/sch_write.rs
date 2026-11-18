@@ -356,6 +356,26 @@ pub fn power_port_drawing(at: Pt, text: &str, style: i64, orient: i64) -> Drawin
     draw(None, |b, k| power_port(b, k, &props))
 }
 
+/// A port naming net `name` at `at` (its left end), `width` mil long,
+/// drawn as Altium draws it, pointing both ways. The drawing holds the
+/// port's tag, outline and name.
+pub fn port_drawing(at: Pt, name: &str, width: f64) -> Drawing {
+    let mut r = Rec::new(PORT);
+    r.set("OWNERPARTID", "-1")
+        .at(at)
+        .set("NAME", name.to_string())
+        .len("WIDTH", width)
+        .len("HEIGHT", 100.0)
+        .set("STYLE", "3")
+        .set("ALIGNMENT", "0")
+        .set("TEXTFONTID", "1")
+        .set("COLOR", "128")
+        .set("AREACOLOR", "8454143")
+        .set("TEXTCOLOR", "128");
+    let props = r.props();
+    draw(None, |b, k| port(b, k, &props))
+}
+
 /// Draws one record with the reader's own code.
 fn draw(part: Option<u32>, f: impl FnOnce(&mut Builder, usize)) -> Drawing {
     let recs: Vec<Props> = Vec::new();
@@ -601,6 +621,8 @@ struct Kept {
     tags: Vec<bool>,
     links: Vec<bool>,
     no_erc: Vec<bool>,
+    buses: Vec<bool>,
+    bus_entries: Vec<bool>,
 }
 
 impl Kept {
@@ -611,6 +633,8 @@ impl Kept {
             tags: vec![false; d.tags.len()],
             links: vec![false; d.links.len()],
             no_erc: vec![false; d.no_erc.len()],
+            buses: vec![false; d.buses.len()],
+            bus_entries: vec![false; d.bus_entries.len()],
         }
     }
 
@@ -634,6 +658,19 @@ impl Kept {
             |a: &[Pt], b: &[Pt]| a.len() == b.len() && a.iter().zip(b).all(|(p, q)| close(*p, *q));
         let (mut w, mut j, mut t, mut l) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
         let mut x = Vec::new();
+        let (mut bs, mut be) = (Vec::new(), Vec::new());
+        for gb in &g.buses {
+            if !pick(&self.buses, &mut bs, &d.buses, |x| same_pts(x, gb)) {
+                return false;
+            }
+        }
+        for ge in &g.bus_entries {
+            if !pick(&self.bus_entries, &mut be, &d.bus_entries, |x| {
+                same_pts(x, ge)
+            }) {
+                return false;
+            }
+        }
         for gx in &g.no_erc {
             if !pick(&self.no_erc, &mut x, &d.no_erc, |m| close(*m, *gx)) {
                 return false;
@@ -677,6 +714,12 @@ impl Kept {
         }
         for i in x {
             self.no_erc[i] = true;
+        }
+        for i in bs {
+            self.buses[i] = true;
+        }
+        for i in be {
+            self.bus_entries[i] = true;
         }
         true
     }
@@ -808,7 +851,11 @@ pub fn write_schdoc(sheet: &Sheet, original: Option<&Path>) -> Result<Vec<u8>> {
                 _ => {}
             }
             let g = o.draw(&o.tree(k, [0.0, 0.0], 1 + np)).drawing;
-            if g.shapes.is_empty() && g.texts.is_empty() {
+            if g.shapes.is_empty()
+                && g.texts.is_empty()
+                && g.buses.is_empty()
+                && g.bus_entries.is_empty()
+            {
                 continue;
             }
             let Some(found) = pool.find(&g) else { continue };
@@ -1296,6 +1343,30 @@ pub fn write_schdoc(sheet: &Sheet, original: Option<&Path>) -> Result<Vec<u8>> {
         body.push(r);
     }
 
+    for (bi, bus) in d.buses.iter().enumerate() {
+        if kept.buses[bi] {
+            continue;
+        }
+        let mut r = Rec::new(BUS);
+        r.set("OWNERPARTID", "-1")
+            .points(bus)
+            .set("LINEWIDTH", "2")
+            .set("COLOR", "8388608");
+        body.push(r);
+    }
+    for (ei, e) in d.bus_entries.iter().enumerate() {
+        if kept.bus_entries[ei] {
+            continue;
+        }
+        let mut r = Rec::new(BUS_ENTRY);
+        r.set("OWNERPARTID", "-1")
+            .at(e[0])
+            .corner(e[1])
+            .set("LINEWIDTH", "1")
+            .set("COLOR", "8388608");
+        body.push(r);
+    }
+
     // ---- net tags ---------------------------------------------------------
     let mut sheet_boxes: Vec<(usize, Pt, Pt)> = Vec::new();
     for (li, link) in d.links.iter().enumerate() {
@@ -1416,7 +1487,13 @@ pub fn write_schdoc(sheet: &Sheet, original: Option<&Path>) -> Result<Vec<u8>> {
                 body.push(r);
             }
             TagKind::Power => body.push(power_rec(&mut pool, &mut fonts, tag, loc)),
-            TagKind::Port => body.push(port_rec(&mut pool, &mut fonts, tag)),
+            TagKind::Port => {
+                let mut r = port_rec(&mut pool, &mut fonts, tag);
+                if let Some(kind) = harness_type_of(d, ti) {
+                    r.set("HARNESSTYPE", kind);
+                }
+                body.push(r);
+            }
             TagKind::SheetEntry => {
                 let near = |a: f64, b: f64| (a - b).abs() < 0.01;
                 let within = |v: f64, lo: f64, hi: f64| v >= lo - 0.01 && v <= hi + 0.01;
@@ -1641,6 +1718,12 @@ pub fn write_schdoc(sheet: &Sheet, original: Option<&Path>) -> Result<Vec<u8>> {
         storage.extend(((e.len() as u32) | 0x0100_0000).to_le_bytes());
         storage.extend(e);
     }
+    let first = extra.len();
+    extra.extend(harness_recs(
+        d,
+        orig.as_ref().map(|o| o.additional.as_slice()),
+        first,
+    ));
     let mut additional =
         framed(b"|HEADER=Protel for Windows - Schematic Capture Binary File Version 5.0");
     for r in &extra {
@@ -1653,6 +1736,135 @@ pub fn write_schdoc(sheet: &Sheet, original: Option<&Path>) -> Result<Vec<u8>> {
     cf.create_stream("/Additional")?.write_all(&additional)?;
     cf.flush()?;
     Ok(cf.into_inner().into_inner())
+}
+
+/// The harness type a port's or sheet entry's bundle carries: the type
+/// of the first harness connector on it.
+fn harness_type_of(d: &Drawing, tag: usize) -> Option<String> {
+    let b = d.bundles.iter().find(|b| b.tags.contains(&(tag as u32)))?;
+    b.harnesses
+        .iter()
+        .filter_map(|&h| d.harnesses.get(h as usize))
+        .map(|h| h.kind.trim().to_string())
+        .find(|k| !k.is_empty())
+}
+
+/// The sheet's harness connectors (with their entries and type) and
+/// signal harnesses, as records of the Additional stream that follow
+/// `first` records there. A connector or line the original file had in
+/// the same place keeps its colours, fonts and id.
+fn harness_recs(d: &Drawing, old: Option<&[Props]>, first: usize) -> Vec<Rec> {
+    let old = old.unwrap_or(&[]);
+    let kind = |p: &Props| p.int("RECORD");
+    let mut out: Vec<Rec> = Vec::new();
+    let children = |k: usize, want: i64| -> Vec<&Props> {
+        old.iter()
+            .filter(|c| {
+                kind(c) == Some(want) && c.int("OWNERINDEX").map(|o| (o + 1) as usize) == Some(k)
+            })
+            .collect()
+    };
+    let mut used = vec![false; old.len()];
+    for (hi, h) in d.harnesses.iter().enumerate() {
+        let top_left = [h.min[0], h.max[1]];
+        let size = [h.max[0] - h.min[0], h.max[1] - h.min[1]];
+        let found = (0..old.len()).find(|&k| {
+            !used[k] && kind(&old[k]) == Some(HARNESS_CONNECTOR) && close(at(&old[k]), top_left)
+        });
+        let mut r = match found {
+            Some(k) => {
+                used[k] = true;
+                Rec::from_props(&old[k])
+            }
+            None => {
+                let mut r = Rec::new(HARNESS_CONNECTOR);
+                r.set("OWNERPARTID", "-1")
+                    .set("COLOR", "8388736")
+                    .set("AREACOLOR", "16767708")
+                    .set("LINEWIDTH", "1")
+                    .set("UNIQUEID", unique_id(9000 + hi as u64));
+                r
+            }
+        };
+        r.remove("OWNERINDEX");
+        r.at(top_left)
+            .len("XSIZE", size[0])
+            .len("YSIZE", size[1])
+            .len("PRIMARYCONNECTIONPOSITION", h.primary)
+            .set("INDEXINSHEET", "-1");
+        // The record's place in the stream (owners count from 0 after
+        // the stream's header record).
+        let own = first + out.len();
+        out.push(r);
+        let old_entries = found
+            .map(|k| children(k, HARNESS_ENTRY))
+            .unwrap_or_default();
+        for (ei, e) in h.entries.iter().enumerate() {
+            let mut r = match old_entries.iter().find(|p| p.str("NAME") == e.name) {
+                Some(p) => Rec::from_props(p),
+                None => {
+                    let mut r = Rec::new(HARNESS_ENTRY);
+                    r.set("OWNERPARTID", "-1")
+                        .set("COLOR", "8388736")
+                        .set("AREACOLOR", "16767708")
+                        .set("TEXTCOLOR", "8388736")
+                        .set("TEXTFONTID", "1")
+                        .set("TEXTSTYLE", "Full")
+                        .set("UNIQUEID", unique_id(9500 + hi as u64 * 64 + ei as u64));
+                    r
+                }
+            };
+            let units = (e.dist / 100.0).floor();
+            let frac = ((e.dist - units * 100.0) * 10_000.0).round() as i64;
+            r.remove("DISTANCEFROMTOP_FRAC1");
+            r.set("OWNERINDEX", own.to_string())
+                .set("SIDE", e.side.to_string())
+                .set("DISTANCEFROMTOP", (units as i64).to_string())
+                .set("NAME", e.name.clone());
+            if frac != 0 {
+                r.set("DISTANCEFROMTOP_FRAC1", frac.to_string());
+            }
+            out.push(r);
+        }
+        let old_type = found.and_then(|k| children(k, HARNESS_TYPE).into_iter().next());
+        let mut t = match old_type {
+            Some(p) => Rec::from_props(p),
+            None => {
+                let mut t = Rec::new(HARNESS_TYPE);
+                t.set("OWNERPARTID", "-1")
+                    .set("COLOR", "8388736")
+                    .set("FONTID", "1")
+                    .set("UNIQUEID", unique_id(9900 + hi as u64));
+                t
+            }
+        };
+        t.set("OWNERINDEX", own.to_string())
+            .set("TEXT", h.kind.clone())
+            .at([h.min[0], h.max[1] + 20.0]);
+        out.push(t);
+    }
+    for (si, line) in d.signal_harnesses.iter().enumerate() {
+        let found = (0..old.len()).find(|&k| {
+            !used[k] && kind(&old[k]) == Some(SIGNAL_HARNESS) && same_pts(&points(&old[k]), line)
+        });
+        let mut r = match found {
+            Some(k) => {
+                used[k] = true;
+                Rec::from_props(&old[k])
+            }
+            None => {
+                let mut r = Rec::new(SIGNAL_HARNESS);
+                r.set("OWNERPARTID", "-1")
+                    .set("COLOR", "8388736")
+                    .set("LINEWIDTH", "2")
+                    .set("UNIQUEID", unique_id(9950 + si as u64));
+                r
+            }
+        };
+        r.points(line);
+        out.push(r);
+    }
+    out
 }
 
 /// Location, orientation, justification, font and colour of a text.

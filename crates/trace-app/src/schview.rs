@@ -12,7 +12,7 @@ use std::sync::mpsc::{channel, Receiver};
 use trace_core::eco::{Change, PartInfo, Plan, Sources};
 use trace_core::footprint::{designator_prefix, next_designator, Footprint};
 use trace_core::hier::{self, Scope};
-use trace_core::sch_edit::{snap, Xf, WIRE_COLOR};
+use trace_core::sch_edit::{snap, Xf, HARNESS_LINE, WIRE_COLOR};
 use trace_core::sch_select::SchSel;
 use trace_core::schematic::{Pt, TagKind};
 use trace_core::{Drawing, SavedSheet, SchFile, SchGeom, Sheet};
@@ -66,6 +66,27 @@ fn hit_sel(d: &Drawing, boxes: &[[f32; 4]], p: [f64; 2], tol: f64) -> SchSel {
     if let Some(i) = part_at(d, p) {
         return SchSel::part(i);
     }
+    if let Some(h) = d.harnesses.iter().position(|h| {
+        p[0] >= h.min[0] - tol
+            && p[0] <= h.max[0] + tol
+            && p[1] >= h.min[1] - tol
+            && p[1] <= h.max[1] + tol
+    }) {
+        return SchSel {
+            harnesses: vec![h],
+            ..Default::default()
+        };
+    }
+    if let Some(e) = d
+        .bus_entries
+        .iter()
+        .position(|e| seg_dist(p, e[0], e[1]) < tol)
+    {
+        return SchSel {
+            bus_entries: vec![e],
+            ..Default::default()
+        };
+    }
     if let Some(m) = d.no_erc.iter().position(|&a| near(a, tol * 2.0)) {
         return SchSel {
             no_erc: vec![m],
@@ -82,6 +103,23 @@ fn hit_sel(d: &Drawing, boxes: &[[f32; 4]], p: [f64; 2], tol: f64) -> SchSel {
     if let Some(j) = d.junctions.iter().position(|&a| near(a, tol * 2.0)) {
         return SchSel {
             junctions: vec![j],
+            ..Default::default()
+        };
+    }
+    let on_line = |w: &Vec<[f64; 2]>, t: f64| w.windows(2).any(|s| seg_dist(p, s[0], s[1]) < t);
+    if let Some(b) = d
+        .signal_harnesses
+        .iter()
+        .position(|w| on_line(w, tol * 2.0))
+    {
+        return SchSel {
+            signal_harnesses: vec![b],
+            ..Default::default()
+        };
+    }
+    if let Some(b) = d.buses.iter().position(|w| on_line(w, tol * 1.5)) {
+        return SchSel {
+            buses: vec![b],
             ..Default::default()
         };
     }
@@ -146,6 +184,16 @@ pub enum SchTool {
     Power,
     /// Places No ERC markers.
     NoErc,
+    /// Draws buses (thick lines carrying D[0..7] and the like).
+    Bus,
+    /// Places 45 degree bus entries on a bus (Space turns them).
+    BusEntry,
+    /// Places harness connectors.
+    Harness,
+    /// Draws signal harnesses between connectors, ports and sheet entries.
+    SignalHarness,
+    /// Places ports, for nets, buses and harnesses that leave the sheet.
+    Port,
 }
 
 /// An edit worked out while drawing, made once the drawing is done with.
@@ -165,6 +213,14 @@ enum Act {
     Power([f64; 2]),
     NoErc([f64; 2]),
     Wire(Vec<[f64; 2]>),
+    Bus(Vec<[f64; 2]>),
+    SignalHarness(Vec<[f64; 2]>),
+    BusEntry([f64; 2]),
+    Harness([f64; 2]),
+    Port([f64; 2]),
+    /// Drags a wire's segment (or corner, when true) by the whole drag so
+    /// far, from the sheet as it was when the drag began.
+    DragWire(usize, usize, bool, [f64; 2]),
     Label([f64; 2], String),
     /// Takes back a symbol that was being placed.
     CancelPlace,
@@ -286,6 +342,25 @@ pub struct Schematics {
     /// The dragged part follows the pointer until a click drops it (a
     /// symbol just taken from a library).
     floating: bool,
+    /// Dragging moves without wires following (Altium's Move) instead of
+    /// with them (Drag). Ctrl at the start of a drag does the other one.
+    pub move_breaks: bool,
+    /// Whether the drag going on drags (wires follow).
+    drag_keeps: bool,
+    /// A wire segment (or corner) being dragged: wire, segment or point,
+    /// corner, where the drag began.
+    wire_drag: Option<(usize, usize, bool, [f64; 2])>,
+    /// Bus entry tool: quarter turns of the entry, from up and right.
+    entry_turn: u8,
+    /// Harness connector tool: its type and entries.
+    harness_kind: String,
+    harness_entries: String,
+    harness_left: bool,
+    /// Port tool: its name.
+    port_name: String,
+    /// Bus breakout: the members' bus name, and which side.
+    breakout_name: String,
+    breakout_flip: bool,
 }
 
 /// The drawing to keep as the board's match: no pictures.
@@ -313,8 +388,14 @@ fn part_at(d: &Drawing, p: [f64; 2]) -> Option<usize> {
 /// The point on the wire nearest `p`, if one runs within `catch`: on the
 /// grid along the wire where that stays on it.
 fn on_wire_near(d: &Drawing, p: [f64; 2], catch: f64) -> Option<[f64; 2]> {
+    on_line_near(&d.wires, p, catch)
+}
+
+/// The nearest point on one of `lines` within `catch` of `p`, on the
+/// grid along level and upright runs.
+fn on_line_near(lines: &[Vec<[f64; 2]>], p: [f64; 2], catch: f64) -> Option<[f64; 2]> {
     let mut best: Option<([f64; 2], f64)> = None;
-    for w in &d.wires {
+    for w in lines {
         for s in w.windows(2) {
             let dist = seg_dist(p, s[0], s[1]);
             if dist < catch && best.is_none_or(|b| dist < b.1) {
@@ -777,7 +858,9 @@ impl Schematics {
             saved_to: Some(path.to_path_buf()),
             ..Default::default()
         };
-        for s in f.sheets {
+        for mut s in f.sheets {
+            // Harness bundles are worked out, not saved.
+            s.sheet.drawing.connect();
             let file = dir.join(&s.file);
             self.slots.push(Slot {
                 name: file
@@ -1449,6 +1532,11 @@ impl Schematics {
                     "No ERC",
                     "Click a pin or wire to mark it as left open on purpose: the ERC does not check it",
                 ),
+                (
+                    SchTool::Port,
+                    "Port",
+                    "Click a wire, bus or signal harness end to place a port that carries it to other sheets",
+                ),
             ] {
                 if ui
                     .selectable_label(self.tool == t, name)
@@ -1460,6 +1548,79 @@ impl Schematics {
                 }
             }
         });
+        ui.horizontal(|ui| {
+            for (t, name, tip) in [
+                (
+                    SchTool::Bus,
+                    "Bus",
+                    "Draw a bus: click each corner, double-click or Esc to end (B). Name it with a net label like D[0..7]; its members join by their own labels D0..D7.",
+                ),
+                (
+                    SchTool::BusEntry,
+                    "Bus entry",
+                    "Click a bus to place a 45 degree entry; Space turns it",
+                ),
+                (
+                    SchTool::Harness,
+                    "Harness",
+                    "Place a harness connector: its type and entries below, click for its top-left corner",
+                ),
+                (
+                    SchTool::SignalHarness,
+                    "Signal harness",
+                    "Draw a signal harness from a connector to a port, sheet entry or another connector (double-click or Esc ends)",
+                ),
+            ] {
+                if ui
+                    .selectable_label(self.tool == t, name)
+                    .on_hover_text(tip)
+                    .clicked()
+                {
+                    self.tool = t;
+                    self.wire_pts.clear();
+                }
+            }
+        });
+        ui.checkbox(&mut self.move_breaks, "Move breaks wires")
+            .on_hover_text("Off: dragging parts keeps their wires connected, rubber-banded (Altium's Drag). On: they move alone and the wires stay (Altium's Move). Ctrl at the start of a drag does the other one.");
+        if self.tool == SchTool::Harness {
+            if self.harness_kind.is_empty() {
+                self.harness_kind = "SPI".into();
+                self.harness_entries = "MOSI, MISO, SCK, CS".into();
+            }
+            ui.horizontal(|ui| {
+                ui.label("Type");
+                ui.add(egui::TextEdit::singleline(&mut self.harness_kind).desired_width(90.0));
+                ui.checkbox(&mut self.harness_left, "Entries on the left");
+            });
+            ui.horizontal(|ui| {
+                ui.label("Entries");
+                ui.add(egui::TextEdit::singleline(&mut self.harness_entries).desired_width(200.0));
+            });
+        }
+        if self.tool == SchTool::Port {
+            if self.port_name.is_empty() {
+                self.port_name = "PORT".into();
+            }
+            ui.horizontal(|ui| {
+                ui.label("Name");
+                ui.add(egui::TextEdit::singleline(&mut self.port_name).desired_width(120.0));
+            });
+            ui.label(
+                RichText::new("On a bus name it D[0..7]; on a signal harness its name names the harness (SPI1.MOSI).")
+                    .weak()
+                    .small(),
+            );
+        }
+        if self.tool == SchTool::BusEntry {
+            let way =
+                ["up right", "up left", "down left", "down right"][self.entry_turn as usize % 4];
+            ui.label(
+                RichText::new(format!("Leans {way}: Space turns it."))
+                    .weak()
+                    .small(),
+            );
+        }
         if self.tool == SchTool::Power {
             if self.power_net.is_empty() {
                 self.power_net = "GND".into();
@@ -1513,6 +1674,14 @@ impl Schematics {
                 (s.tags.len(), "label or port", "labels and ports"),
                 (s.junctions.len(), "junction", "junctions"),
                 (s.no_erc.len(), "No ERC marker", "No ERC markers"),
+                (s.buses.len(), "bus", "buses"),
+                (s.bus_entries.len(), "bus entry", "bus entries"),
+                (s.harnesses.len(), "harness connector", "harness connectors"),
+                (
+                    s.signal_harnesses.len(),
+                    "signal harness",
+                    "signal harnesses",
+                ),
             ] {
                 if n > 0 {
                     what.push(format!("{n} {}", if n == 1 { one } else { many }));
@@ -1577,6 +1746,121 @@ impl Schematics {
             if del {
                 self.edit(|s| s.drawing.delete_sel(&sel));
                 self.pick_sel(SchSel::default());
+            }
+        }
+        // One bus: break it out into named members.
+        if self.sel.len() == 1 && self.sel.buses.len() == 1 {
+            let b = self.sel.buses[0];
+            ui.label(RichText::new("Bus").strong());
+            if self.breakout_name.is_empty() {
+                self.breakout_name = "D[0..7]".into();
+            }
+            let mut go = false;
+            ui.horizontal(|ui| {
+                ui.label("Members");
+                ui.add(egui::TextEdit::singleline(&mut self.breakout_name).desired_width(100.0));
+                ui.checkbox(&mut self.breakout_flip, "Other side");
+                go = ui
+                    .button("Break out")
+                    .on_hover_text("An entry, a wire and a net label per member, 100 mil apart from the bus's start, and a label naming the bus")
+                    .clicked();
+            });
+            if go {
+                match trace_core::bus_members(self.breakout_name.trim()) {
+                    Some(m) => {
+                        let (name, flip) =
+                            (self.breakout_name.trim().to_string(), self.breakout_flip);
+                        let cur = self.current;
+                        let start = self
+                            .slots
+                            .get(cur)
+                            .and_then(|s| s.sheet.as_ref())
+                            .and_then(|s| s.drawing.buses.get(b))
+                            .and_then(|bus| {
+                                let (a, c) = (bus[0], bus[1]);
+                                let l = (c[0] - a[0]).hypot(c[1] - a[1]);
+                                (l > 0.0).then(|| {
+                                    [
+                                        a[0] + (c[0] - a[0]) / l * 100.0,
+                                        a[1] + (c[1] - a[1]) / l * 100.0,
+                                    ]
+                                })
+                            });
+                        if let Some(start) = start {
+                            let mut n = 0;
+                            self.edit(|s| {
+                                n = s.drawing.bus_breakout(b, &name, start, 100.0, 300.0, flip)
+                            });
+                            self.note = Some(format!("Broke out {n} of {} members.", m.len()));
+                        }
+                    }
+                    None => self.note = Some("Write the members as a range, like D[0..7].".into()),
+                }
+            }
+        }
+        // One harness connector: its type and entries.
+        if self.sel.len() == 1 && self.sel.harnesses.len() == 1 {
+            let h = self.sel.harnesses[0];
+            let cur = self.current;
+            let now = self
+                .slots
+                .get(cur)
+                .and_then(|s| s.sheet.as_ref())
+                .and_then(|s| s.drawing.harnesses.get(h).cloned());
+            if let Some(c) = now {
+                ui.label(RichText::new("Harness connector").strong());
+                if self.edit_for != Some((cur, usize::MAX - h)) {
+                    self.edit_for = Some((cur, usize::MAX - h));
+                    self.harness_kind = c.kind.clone();
+                    self.harness_entries = c
+                        .entries
+                        .iter()
+                        .map(|e| e.name.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ");
+                }
+                let mut apply = false;
+                ui.horizontal(|ui| {
+                    ui.label("Type");
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut self.harness_kind).desired_width(90.0),
+                    );
+                    apply |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                });
+                ui.horizontal(|ui| {
+                    ui.label("Entries");
+                    let r = ui.add(
+                        egui::TextEdit::singleline(&mut self.harness_entries).desired_width(200.0),
+                    );
+                    apply |= r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    apply |= ui.button("Apply").clicked();
+                });
+                if apply {
+                    let names: Vec<String> = self
+                        .harness_entries
+                        .split([',', ';'])
+                        .map(|x| x.trim().to_string())
+                        .filter(|x| !x.is_empty())
+                        .collect();
+                    let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+                    let top_left = [c.min[0], c.max[1]];
+                    let mut n = trace_core::Harness::new(
+                        top_left,
+                        self.harness_kind.trim(),
+                        &refs,
+                        !c.entries_right(),
+                    );
+                    // Keep its size when the entries still fit.
+                    if n.max[1] - n.min[1] <= c.max[1] - c.min[1] {
+                        n.min[1] = c.min[1];
+                        n.primary = c.primary;
+                    }
+                    n.max[0] = n.max[0].max(c.max[0]);
+                    self.edit(|s| {
+                        s.drawing.harnesses[h] = n;
+                        s.drawing.connect();
+                    });
+                }
             }
         }
         if ui
@@ -2003,8 +2287,38 @@ impl Schematics {
                 let p = [b[0] as f64, b[1] as f64];
                 let tol = (5.0 / self.view.scale as f64).max(8.0);
                 let hit = hit_sel(&sheet.drawing, &self.slots[cur].boxes, p, tol);
+                let ctrl = ui.input(|i| i.modifiers.command);
+                self.drag_keeps = self.move_breaks == ctrl;
+                // A wire on its own drags by the segment (or corner) taken
+                // hold of, the rest of the wiring staying connected.
+                let lone_wire = hit.wires.len() == 1
+                    && hit.len() == 1
+                    && (self.sel.is_empty() || self.sel == hit);
                 if hit.is_empty() {
                     self.boxing = Some(p);
+                } else if lone_wire {
+                    let w = hit.wires[0];
+                    let pts = &sheet.drawing.wires[w];
+                    let corner = pts
+                        .iter()
+                        .position(|q| (q[0] - p[0]).hypot(q[1] - p[1]) < tol * 1.5);
+                    let seg = pts
+                        .windows(2)
+                        .enumerate()
+                        .min_by(|a, b| {
+                            seg_dist(p, a.1[0], a.1[1]).total_cmp(&seg_dist(p, b.1[0], b.1[1]))
+                        })
+                        .map(|(k, _)| k)
+                        .unwrap_or(0);
+                    set_sel!(self, hit);
+                    self.undo.push(vec![(cur, sheet.clone())]);
+                    self.redo.clear();
+                    self.wire_drag = Some(match corner {
+                        Some(k) => (w, k, true, snap(p, GRID)),
+                        None => (w, seg, false, snap(p, GRID)),
+                    });
+                    self.drag = Some(snap(p, GRID));
+                    self.sel_net = None;
                 } else {
                     if !self.sel.holds(&hit) {
                         set_sel!(self, hit);
@@ -2029,6 +2343,7 @@ impl Schematics {
         }
         if !resp.dragged() && !resp.drag_started() && !self.floating {
             self.drag = None;
+            self.wire_drag = None;
         }
         if ui.input(|i| i.key_pressed(egui::Key::F)) && !ui.ctx().wants_keyboard_input() {
             self.needs_fit = true;
@@ -2141,8 +2456,17 @@ impl Schematics {
             }
         }
         let px = |w: f64| ((w as f32) * view.scale).max(1.0);
-        for (si, sh) in d.shapes.iter().enumerate() {
-            if !overlaps(slot.boxes[si], vis) {
+        // Buses, harnesses and their kin are drawn from their lists.
+        let (xs, xt) = d.bus_harness_graphics();
+        let all_shapes = d
+            .shapes
+            .iter()
+            .enumerate()
+            .map(|(i, s)| (slot.boxes.get(i).copied(), s))
+            .chain(xs.iter().map(|s| (None, s)));
+        for (bx, sh) in all_shapes {
+            let bx = bx.unwrap_or_else(|| shape_box(&sh.geom, sh.width));
+            if !overlaps(bx, vis) {
                 continue;
             }
             let mut stroke = sh
@@ -2236,7 +2560,7 @@ impl Schematics {
             }
         }
         // Text, skipped when too small to read.
-        for t in &d.texts {
+        for t in d.texts.iter().chain(xt.iter()) {
             let size = t.size as f32 * view.scale;
             if size < 3.5 {
                 continue;
@@ -2296,6 +2620,44 @@ impl Schematics {
             .iter()
             .filter_map(|&j| d.no_erc.get(j))
             .for_each(ring);
+        let sel_line = |pts: &[[f64; 2]]| {
+            let pts: Vec<Pos2> = pts
+                .iter()
+                .map(|p| view.to_screen(p[0] as f32, p[1] as f32))
+                .collect();
+            painter.add(Shape::line(pts, sel_stroke));
+        };
+        for b in self.sel.buses.iter().filter_map(|&b| d.buses.get(b)) {
+            sel_line(b);
+        }
+        for e in self
+            .sel
+            .bus_entries
+            .iter()
+            .filter_map(|&b| d.bus_entries.get(b))
+        {
+            sel_line(e);
+        }
+        for b in self
+            .sel
+            .signal_harnesses
+            .iter()
+            .filter_map(|&b| d.signal_harnesses.get(b))
+        {
+            sel_line(b);
+        }
+        for h in self
+            .sel
+            .harnesses
+            .iter()
+            .filter_map(|&h| d.harnesses.get(h))
+        {
+            let r = Rect::from_two_pos(
+                view.to_screen(h.min[0] as f32 - 30.0, h.min[1] as f32 - 30.0),
+                view.to_screen(h.max[0] as f32 + 30.0, h.max[1] as f32 + 30.0),
+            );
+            painter.rect_filled(r, 2.0, HIGHLIGHT.gamma_multiply(0.25));
+        }
         // The selection box being drawn.
         if let (Some(a), Some(b)) = (
             self.boxing,
@@ -2333,11 +2695,32 @@ impl Schematics {
                 .iter()
                 .map(|pin| pin.at)
                 .chain(d.wires.iter().flat_map(|w| [w[0], w[w.len() - 1]]))
+                .chain(d.harnesses.iter().flat_map(|h| {
+                    h.entries
+                        .iter()
+                        .map(|e| h.entry_at(e))
+                        .chain([h.bundle_at()])
+                        .collect::<Vec<_>>()
+                }))
+                .chain(
+                    d.signal_harnesses
+                        .iter()
+                        .flat_map(|w| [w[0], w[w.len() - 1]]),
+                )
+                .chain(d.bus_entries.iter().flat_map(|e| [e[0], e[1]]))
                 .map(|q| (q, (q[0] - p[0]).hypot(q[1] - p[1])))
                 .filter(|(_, dist)| *dist < catch)
                 .min_by(|a, b| a.1.total_cmp(&b.1))
                 .map(|(q, _)| q)
+                .or_else(|| {
+                    if matches!(self.tool, SchTool::BusEntry | SchTool::Bus | SchTool::Label) {
+                        on_line_near(&d.buses, p, catch.max(30.0))
+                    } else {
+                        None
+                    }
+                })
                 .or_else(|| on_wire_near(d, p, catch))
+                .or_else(|| on_line_near(&d.signal_harnesses, p, catch))
                 // On a pin's line: its free end, where things connect.
                 .or_else(|| {
                     d.pins
@@ -2349,7 +2732,15 @@ impl Schematics {
         });
         let on_pin = snapped.is_some_and(|c| d.pins.iter().any(|pin| pin.at == c));
         let wire_color = rgb(WIRE_COLOR);
-        if self.tool == SchTool::Wire {
+        if matches!(
+            self.tool,
+            SchTool::Wire | SchTool::Bus | SchTool::SignalHarness
+        ) {
+            let (w, col) = match self.tool {
+                SchTool::Bus => (30.0, wire_color),
+                SchTool::SignalHarness => (40.0, rgb(HARNESS_LINE)),
+                _ => (10.0, wire_color),
+            };
             if let (Some(&last), Some(c)) = (self.wire_pts.last(), snapped) {
                 let mut pts = self.wire_pts.clone();
                 pts.push([c[0], last[1]]);
@@ -2358,7 +2749,58 @@ impl Schematics {
                     .iter()
                     .map(|p| view.to_screen(p[0] as f32, p[1] as f32))
                     .collect();
-                painter.add(Shape::line(pts, Stroke::new(px(10.0).max(2.0), wire_color)));
+                painter.add(Shape::line(pts, Stroke::new(px(w).max(2.0), col)));
+            }
+        }
+        if self.tool == SchTool::BusEntry {
+            if let Some(c) = snapped {
+                let (dx, dy) = [
+                    (100.0, 100.0),
+                    (-100.0, 100.0),
+                    (-100.0, -100.0),
+                    (100.0, -100.0),
+                ][self.entry_turn as usize % 4];
+                painter.line_segment(
+                    [
+                        view.to_screen(c[0] as f32, c[1] as f32),
+                        view.to_screen((c[0] + dx) as f32, (c[1] + dy) as f32),
+                    ],
+                    Stroke::new(px(10.0).max(2.0), wire_color.gamma_multiply(0.7)),
+                );
+            }
+        }
+        if self.tool == SchTool::Harness {
+            if let Some(c) = snapped {
+                let names: Vec<String> = self
+                    .harness_entries
+                    .split([',', ';'])
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect();
+                let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+                let mut g = Drawing::default();
+                g.harnesses.push(trace_core::Harness::new(
+                    c,
+                    &self.harness_kind,
+                    &refs,
+                    self.harness_left,
+                ));
+                let (sh, _) = g.bus_harness_graphics();
+                paint_ghost(
+                    &painter,
+                    view,
+                    &Drawing {
+                        shapes: sh,
+                        ..Default::default()
+                    },
+                    rgb(HARNESS_LINE),
+                );
+            }
+        }
+        if self.tool == SchTool::Port {
+            if let Some(c) = snapped {
+                let g = trace_altium::port_drawing(c, self.port_name.trim(), 500.0);
+                paint_ghost(&painter, view, &g, rgb([128, 0, 0]));
             }
         }
         if self.tool == SchTool::Power {
@@ -2378,10 +2820,7 @@ impl Schematics {
                 paint_ghost(&painter, view, &g, Color32::RED);
             }
         }
-        if matches!(
-            self.tool,
-            SchTool::Wire | SchTool::Label | SchTool::Power | SchTool::NoErc
-        ) {
+        if self.tool != SchTool::Select {
             if let Some(c) = snapped {
                 let at = view.to_screen(c[0] as f32, c[1] as f32);
                 let r = 6.0;
@@ -2511,6 +2950,54 @@ impl Schematics {
                         }
                     }
                 }
+                SchTool::Bus | SchTool::SignalHarness => {
+                    if resp.double_clicked() {
+                        if self.wire_pts.len() >= 2 {
+                            let pts = std::mem::take(&mut self.wire_pts);
+                            act = Some(if self.tool == SchTool::Bus {
+                                Act::Bus(pts)
+                            } else {
+                                Act::SignalHarness(pts)
+                            });
+                        }
+                    } else if resp.clicked() {
+                        match self.wire_pts.last().copied() {
+                            None => self.wire_pts.push(c),
+                            Some(last) => {
+                                let corner = [c[0], last[1]];
+                                if corner != last && corner != c {
+                                    self.wire_pts.push(corner);
+                                }
+                                if c != last {
+                                    self.wire_pts.push(c);
+                                }
+                            }
+                        }
+                    }
+                }
+                SchTool::BusEntry => {
+                    if resp.clicked() {
+                        let on_bus = d
+                            .buses
+                            .iter()
+                            .any(|b| b.windows(2).any(|s| seg_dist(c, s[0], s[1]) < 0.6));
+                        if on_bus {
+                            act = Some(Act::BusEntry(c));
+                        } else {
+                            self.note = Some("Click on a bus to place an entry.".into());
+                        }
+                    }
+                }
+                SchTool::Harness => {
+                    if resp.clicked() {
+                        act = Some(Act::Harness(c));
+                    }
+                }
+                SchTool::Port => {
+                    if resp.clicked() {
+                        act = Some(Act::Port(c));
+                    }
+                }
                 SchTool::Label => {
                     if resp.clicked() {
                         self.label_at = Some(c);
@@ -2528,7 +3015,18 @@ impl Schematics {
                     }
                 }
                 SchTool::Select => {
-                    if let Some(last) = self.drag {
+                    if let Some((w, k, corner, from)) = self.wire_drag {
+                        let g = snap(p, GRID);
+                        if Some(g) != self.drag {
+                            act = Some(Act::DragWire(
+                                w,
+                                k,
+                                corner,
+                                [g[0] - from[0], g[1] - from[1]],
+                            ));
+                            self.drag = Some(g);
+                        }
+                    } else if let Some(last) = self.drag {
                         let g = snap(p, GRID);
                         if g != last {
                             act = Some(Act::Move([g[0] - last[0], g[1] - last[1]]));
@@ -2710,6 +3208,10 @@ impl Schematics {
             if n {
                 self.tool = SchTool::Label;
             }
+            if ui.input(|i| i.key_pressed(egui::Key::B)) {
+                self.tool = SchTool::Bus;
+                self.wire_pts.clear();
+            }
             if ui.input(|i| i.key_pressed(egui::Key::P)) {
                 self.libs.open = true;
             }
@@ -2721,14 +3223,21 @@ impl Schematics {
             } else if esc {
                 self.boxing = None;
                 if self.wire_pts.len() >= 2 {
-                    act = Some(Act::Wire(std::mem::take(&mut self.wire_pts)));
+                    let pts = std::mem::take(&mut self.wire_pts);
+                    act = Some(match self.tool {
+                        SchTool::Bus => Act::Bus(pts),
+                        SchTool::SignalHarness => Act::SignalHarness(pts),
+                        _ => Act::Wire(pts),
+                    });
                 } else {
                     self.wire_pts.clear();
                     self.tool = SchTool::Select;
                 }
             }
             if space {
-                if self.tool == SchTool::Power {
+                if self.tool == SchTool::BusEntry {
+                    self.entry_turn = (self.entry_turn + 1) % 4;
+                } else if self.tool == SchTool::Power {
                     self.power_orient = (self.power_orient + 1).rem_euclid(4);
                 } else if !self.sel.is_empty() {
                     act = Some(Act::Xf(XfKind::Turn));
@@ -2858,10 +3367,81 @@ impl Schematics {
             Some(Act::Move(dv)) => {
                 // One undo step covers the whole drag.
                 let sel = self.sel.clone();
+                let keep = self.drag_keeps || self.floating;
                 if let Some(s) = self.slots.get_mut(cur).and_then(|s| s.sheet.as_mut()) {
-                    s.drawing.xf_sel(&sel, Xf::Shift(dv));
+                    s.drawing.xf_sel_mode(&sel, Xf::Shift(dv), keep);
                 }
                 self.after_edit(cur);
+            }
+            Some(Act::DragWire(w, k, corner, dv)) => {
+                // Worked again from the sheet as the drag found it, so a
+                // leg added on the way is not added twice.
+                let start = self
+                    .undo
+                    .last()
+                    .and_then(|g| g.iter().find(|(i, _)| *i == cur))
+                    .map(|(_, s)| s.clone());
+                if let (Some(mut s), Some(slot)) = (start, self.slots.get_mut(cur)) {
+                    if corner {
+                        s.drawing.drag_vertex(w, k, dv);
+                    } else {
+                        s.drawing.drag_segment(w, k, dv);
+                    }
+                    slot.sheet = Some(s);
+                }
+                self.after_edit(cur);
+            }
+            Some(Act::Bus(pts)) => {
+                self.edit(|s| {
+                    s.drawing.add_bus(pts);
+                });
+            }
+            Some(Act::SignalHarness(pts)) => {
+                self.edit(|s| {
+                    s.drawing.add_signal_harness(pts);
+                });
+            }
+            Some(Act::BusEntry(at)) => {
+                let (dx, dy) = [
+                    (100.0, 100.0),
+                    (-100.0, 100.0),
+                    (-100.0, -100.0),
+                    (100.0, -100.0),
+                ][self.entry_turn as usize % 4];
+                self.edit(|s| {
+                    s.drawing.add_bus_entry(at, [at[0] + dx, at[1] + dy]);
+                });
+            }
+            Some(Act::Harness(at)) => {
+                let names: Vec<String> = self
+                    .harness_entries
+                    .split([',', ';'])
+                    .map(|x| x.trim().to_string())
+                    .filter(|x| !x.is_empty())
+                    .collect();
+                let refs: Vec<&str> = names.iter().map(String::as_str).collect();
+                let h = trace_core::Harness::new(
+                    at,
+                    self.harness_kind.trim(),
+                    &refs,
+                    self.harness_left,
+                );
+                self.edit(|s| {
+                    s.drawing.add_harness(h);
+                });
+                self.note = Some(
+                    "Placed. Draw a signal harness from its open side to a port or sheet entry."
+                        .into(),
+                );
+            }
+            Some(Act::Port(at)) => {
+                let name = self.port_name.trim().to_string();
+                if !name.is_empty() {
+                    let g = trace_altium::port_drawing(at, &name, 500.0);
+                    self.edit(|s| {
+                        s.drawing.add_drawn_tag(&g);
+                    });
+                }
             }
             Some(Act::Xf(kind)) => {
                 let sel = self.sel.clone();

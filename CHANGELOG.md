@@ -3,6 +3,49 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.87.0 (2026-11-18)
+
+Schematic Drag and Move, buses and signal harnesses, as in Altium:
+
+- Drag or Move: dragging parts keeps their wires connected, rubber-banded
+  and bent square (Altium's Drag). Tick "Move breaks wires" in the side
+  panel for Altium's Move, where only the selection moves and the wires
+  stay; Ctrl at the start of a drag does the other one.
+- Wires drag by the piece taken hold of: a level or upright segment moves
+  only across itself with its neighbours stretching, a corner moves
+  freely, and an end on a pin keeps the pin with a new leg back to it.
+  Wires teeing onto the segment follow, junctions come and go.
+- Buses: B (or the Bus tool) draws a bus; Bus entry places 45 degree
+  entries (Space turns them). Select a bus and Break out lays out, for
+  D[0..7], an entry, a wire and a net label per member (100 mil apart,
+  labels written along upright wires) and a label naming the bus.
+  As in Altium a bus carries nothing itself: its members join by their
+  own labels, and a port or sheet entry named D[0..7] joins D0 to D7 on
+  the sheet below to D0 to D7 above (flat projects: ports of that name).
+- Signal harnesses: the Harness tool places a harness connector of a
+  type (SPI) with its entries (MOSI, MISO, SCK, CS) on the left or right;
+  Signal harness draws the thick line from its open side to a port, a
+  sheet entry or another connector; the Port tool places ports. Wires on
+  the entries are the harness's members: connectors joined by a signal
+  harness join entry by entry, a harness port joins the connector on the
+  sheet entry above, and the nets are named SPI1.MOSI and so on. Select a
+  connector to change its type and entries.
+- Buses, bus entries, connectors and signal harnesses select, box-select,
+  move, turn, mirror, copy, paste and delete with everything else; a
+  moved connector drags its wires and signal harness with it.
+- Altium sheets: buses (record 26) and bus entries (37) are read and
+  written; harness connectors, entries, types and signal harnesses
+  (215 to 218) are read from and written to the Additional stream, keeping
+  the colours and ids of those already in the file; a new port on a
+  signal harness is written with its harness type.
+- The ERC no longer takes a wire ending on a bus entry or harness entry
+  for a loose end. Sheets drawn as SVG (`trace convert`) show buses and
+  harnesses.
+- Tested by reading back Altium sheets with a bus breakout and a harness
+  (every net the same after writing, with and without the original file)
+  and with a two-sheet project joining D[0..1] and SPI1 through the
+  hierarchy in hierarchical, strict and flat scopes.
+
 ## 0.86.0 (2026-11-18)
 
 Push-and-shove routing that moves more than one track:

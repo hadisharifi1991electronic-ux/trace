@@ -31,6 +31,7 @@ mod power;
 mod reusewin;
 mod rfwin;
 mod router;
+mod rulewin;
 mod scene;
 mod schview;
 mod shapetool;
@@ -158,6 +159,7 @@ pub struct App {
     compare: comparewin::CompareWindow,
     pub(crate) bom: bomwin::BomWindow,
     pub(crate) flex: flexwin::FlexWindow,
+    pub(crate) rules_win: rulewin::RulesWindow,
     pairs: pairwin::PairWindow,
     stitch: stitchwin::StitchWindow,
     tidy: tidywin::TidyWindow,
@@ -266,6 +268,7 @@ impl App {
                     .unwrap_or_default(),
             ),
             flex: flexwin::FlexWindow::default(),
+            rules_win: rulewin::RulesWindow::default(),
             pairs: pairwin::PairWindow::default(),
             stitch: stitchwin::StitchWindow::default(),
             tidy: tidywin::TidyWindow::default(),
@@ -287,6 +290,17 @@ impl App {
         };
         if let Some(f) = start_file {
             app.open(f);
+        }
+        // `TRACE_OPEN=rules[:kind]` opens the rules editor at start (for
+        // screenshots and tests).
+        if let Ok(w) = std::env::var("TRACE_OPEN") {
+            if let Some(rest) = w.strip_prefix("rules") {
+                let kind = rest.strip_prefix(':').filter(|k| !k.is_empty());
+                app.rules_win.open_at(kind);
+                if let (Some(k), Some(scene)) = (kind, app.scene.as_ref()) {
+                    app.rules_win.pick_first(&scene.board, k);
+                }
+            }
         }
         app
     }
@@ -2074,6 +2088,13 @@ impl App {
             )
             .on_hover_text(tip);
         };
+        ui.checkbox(&mut r.rule_sizes, "Rule sizes").on_hover_text(
+            "Each route starts at its net's width, clearance and via from the design rules \
+             (Design > Rules), the highest priority rule that takes the net. Off keeps the sizes typed here",
+        );
+        if let Some(note) = r.active.as_ref().and(r.rule_note.as_ref()) {
+            ui.label(RichText::new(note).weak()).on_hover_text(note);
+        }
         ui.checkbox(&mut r.pairs, "Pairs")
             .on_hover_text("Starting on a net of a differential pair routes both nets together, at the width and gap the Impedance window works out for the pair");
         let pair = r.active.as_ref().and_then(|a| {
@@ -3495,6 +3516,21 @@ impl eframe::App for App {
             self.edit.sel.clear();
             self.edit.sel.parts = parts.into_iter().collect();
             self.select_part(&first, true);
+        }
+        let ruled = self
+            .scene
+            .as_ref()
+            .and_then(|scene| self.rules_win.show(ctx, &scene.board));
+        match ruled {
+            Some(rulewin::RulesAct::Edit(label, edits)) => {
+                self.apply_edits(&label, edits);
+                self.drc.invalidate();
+            }
+            Some(rulewin::RulesAct::Select(sel, text)) => {
+                self.edit.sel = sel;
+                self.message = Some((text, false));
+            }
+            None => {}
         }
         let flexed = self
             .scene

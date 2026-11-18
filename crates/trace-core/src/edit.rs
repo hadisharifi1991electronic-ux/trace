@@ -153,6 +153,11 @@ pub enum Edit {
         after: Box<Prims>,
         area: Option<[f64; 4]>,
     },
+    /// Replaces the design rules, as the rules editor does.
+    Rules {
+        before: Vec<crate::Rule>,
+        after: Vec<crate::Rule>,
+    },
     /// Replaces the rigid-flex zones and bends.
     Flex {
         before: Box<(Vec<crate::flex::Zone>, Vec<crate::flex::Bend>)>,
@@ -199,6 +204,7 @@ impl Edit {
             Edit::RemoveVia { index, .. } => remove(&mut board.geometry.vias, *index),
             Edit::SetPolygons { after, .. } => board.geometry.polygons = after.clone(),
             Edit::Parts { after, .. } => after.put(board),
+            Edit::Rules { after, .. } => board.rules = after.clone(),
             Edit::Flex { after, .. } => {
                 board.zones = after.0.clone();
                 board.bends = after.1.clone();
@@ -303,6 +309,10 @@ impl Edit {
                 before: after.clone(),
                 after: before.clone(),
                 area: *area,
+            },
+            Edit::Rules { before, after } => Edit::Rules {
+                before: after.clone(),
+                after: before.clone(),
             },
             Edit::Flex { before, after } => Edit::Flex {
                 before: after.clone(),

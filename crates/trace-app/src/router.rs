@@ -317,6 +317,11 @@ pub struct Router {
     /// What the last update was worked out for; the same again (the
     /// cursor still) needs no new search.
     seen: Option<String>,
+    /// Each route starts at its net's width, clearance and via from the
+    /// design rules (as Altium does); off keeps the sizes typed here.
+    pub rule_sizes: bool,
+    /// The rules the sizes of the route under way came from.
+    pub rule_note: Option<String>,
 }
 
 impl Router {
@@ -349,15 +354,29 @@ impl Router {
             mode: Mode::Walkaround,
             shoved: None,
             seen: None,
+            rule_sizes: true,
+            rule_note: None,
         }
     }
 
     /// New board: sizes from its rules and vias, empty history. The corner
     /// style is kept.
     pub fn load(&mut self, board: &Board) {
-        let (corner, arc, pairs, mode) = (self.corner, self.arc, self.pairs, self.mode);
+        let (corner, arc, pairs, mode, rs) = (
+            self.corner,
+            self.arc,
+            self.pairs,
+            self.mode,
+            self.rule_sizes,
+        );
         *self = Router::new();
-        (self.corner, self.arc, self.pairs, self.mode) = (corner, arc, pairs, mode);
+        (
+            self.corner,
+            self.arc,
+            self.pairs,
+            self.mode,
+            self.rule_sizes,
+        ) = (corner, arc, pairs, mode, rs);
         self.width = route::board_width(board);
         self.clearance = route::board_clearance(board);
         self.bus_gap = self.clearance;
@@ -371,6 +390,36 @@ impl Router {
             .into_iter()
             .filter(|k| !(k.from == 0 && k.to >= n - 1))
             .collect();
+    }
+
+    /// Takes the width, clearance and via the design rules give `net` on
+    /// `layer`, when sizes follow the rules. Returns what was taken.
+    pub fn take_rules(&mut self, board: &Board, net: u32, layer: u8) -> Option<String> {
+        self.rule_note = None;
+        if !self.rule_sizes {
+            return None;
+        }
+        let s = trace_core::rules::Resolver::new(board).sizes(net, layer);
+        let mut said = Vec::new();
+        if let Some(([_, pref, _], name)) = &s.width {
+            self.width = *pref;
+            said.push(format!("width {pref:.2} mil ({name})"));
+        }
+        if let Some((gap, name)) = &s.clearance {
+            self.clearance = *gap;
+            said.push(format!("clearance {gap:.2} mil ({name})"));
+        }
+        if let Some(((d, h), name)) = &s.via {
+            (self.via_d, self.via_hole) = (*d, *h);
+            said.push(format!("via {d:.1}/{h:.1} mil ({name})"));
+        }
+        if said.is_empty() {
+            return None;
+        }
+        self.obstacles = None;
+        let note = format!("Rules: {}", said.join(", "));
+        self.rule_note = Some(note.clone());
+        Some(note)
     }
 
     /// The through via on a board of `n` copper layers, at its set size.

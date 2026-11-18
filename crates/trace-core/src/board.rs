@@ -216,7 +216,7 @@ impl Component {
 
 /// A design rule, kept close to its source so nothing is lost on import.
 /// The constraint manager maps known kinds onto typed constraints.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Rule {
     pub kind: String,
     pub name: String,

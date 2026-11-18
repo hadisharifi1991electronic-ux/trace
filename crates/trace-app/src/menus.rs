@@ -453,6 +453,15 @@ impl App {
         if item(
             ui,
             has,
+            "Rules…",
+            "",
+            "PCB Rules and Constraints Editor: clearance, width, via style, pairs, mask, plane, fab and placement rules by category, with scopes and priorities. DRC and the router follow them",
+        ) {
+            self.rules_win.open_at(None);
+        }
+        if item(
+            ui,
+            has,
             "Rules and constraints (Constraint Manager)…",
             "C",
             "Length, match, skew and via limits, by net, class and pair",

@@ -3,6 +3,49 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.88.0 (2026-11-18)
+
+Design rules editor, as Altium's PCB Rules and Constraints Editor:
+
+- Design > Rules (or Rules… in the Properties panel) lists every rule of
+  the board in a tree by category (Electrical, Routing, SMT, Mask, Plane,
+  Testpoint, Manufacturing, High Speed, Placement, Signal Integrity) and
+  kind, in priority order. 45 kinds are known with their fields; kinds
+  Trace does not know are kept under Other with all their parameters.
+- Each rule: name, comment, enabled, priority (Increase / Decrease; the
+  smallest number wins), one scope or two for rules between objects
+  (clearance, hole to hole, silk), and its constraints: lengths in mil,
+  choices, ticks, and a per-layer table for Width and Differential Pairs
+  Routing (TOPLAYER_PREFWIDTH...). "All parameters" edits the raw keys.
+- Scopes are Altium queries, checked as you type: a scope that does not
+  read is shown in red, terms Trace keeps but does not judge (IsBGA,
+  OnTopSilkscreen) in amber. Quick picks write InNet, InNetClass,
+  InDifferentialPair(Class), OnLayer, InComponent or WithinRoom; Test
+  counts the nets, tracks, vias and pads a scope takes; Select selects
+  them on the board.
+- + New rule (defaults of the kind, lowest priority), Duplicate, Delete,
+  and Add default rules for boards that have none (Allegro, Gerber),
+  sized from the board's narrowest track and most common via.
+- "Which rules apply to net" shows, for the rules as edited, the rule of
+  each kind that wins for a net, with its width per layer and pair sizes.
+- Problems (names used twice, shared priorities, lengths that do not
+  read, min above max, scopes that do not read) are listed before Apply.
+  Apply makes the change one undoable step and DRC runs again on it.
+- The interactive router starts each route at its net's rules: the
+  preferred width of the Width rule that takes it (per layer where the
+  rule says), the clearance of its Clearance rule, the via of its Routing
+  Via Style rule, and for pairs the width and gap of the Differential
+  Pairs Routing rule per layer. "Rule sizes" in the router bar turns it
+  off.
+- Saving a PcbDoc writes the rules: edits over the original's records, and
+  new kinds the file had none of from Trace's own Altium records. Boards
+  saved fresh (from Allegro, Gerbers) now carry their rules. Rule comments
+  are kept.
+- CLI: `trace rules <board>` by category with priorities and values;
+  `--net <net>` the rule that applies to a net; `--check` problems and
+  scope terms Trace does not judge; `--add <Kind> <scope> KEY=VALUE...
+  -o out.PcbDoc` and `--defaults -o out.PcbDoc` change rules from scripts.
+
 ## 0.87.0 (2026-11-18)
 
 Schematic Drag and Move, buses and signal harnesses, as in Altium:

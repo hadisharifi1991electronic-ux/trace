@@ -238,6 +238,12 @@ checker and simulator all read.
   Mask and paste follow the board's expansion rules and each pad's own
   settings (manual expansion, tenting, no paste); silkscreen text from
   Altium boards is drawn in a stroke font
+- edit the design rules (Design > Rules): Altium's rule tree by category
+  and kind, scopes checked as you type (Test counts and Select shows what
+  a scope takes), priorities, typed constraints with per-layer widths and
+  pair gaps, defaults for boards without rules, and the rule that wins for
+  any net. The router starts each route at its net's rule width,
+  clearance, via and pair sizes; rules are saved back into the PcbDoc
 - check design rules (the DRC button, or D): clearance, short circuits,
   track width and unrouted nets, from the board's own Altium rules (per
   object type, by priority, net, class, part, footprint and part class

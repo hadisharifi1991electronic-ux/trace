@@ -412,6 +412,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     } else if let Slot::Copper(layer) = app.active {
                         match route_snap(x, y, layer) {
                             Some((p, Some(net))) => {
+                                app.router.take_rules(&scene.board, net, layer);
                                 let pair = if app.router.pairs {
                                     pair_start(&app.router, &mut app.imp, scene, p, net, layer)
                                 } else {
@@ -1591,10 +1592,23 @@ fn pair_start(
     let partner = *scene.net_by_name.get(partner)?;
     let b = partner_pad(&scene.board, at, Some(partner), layer, 400.0)?;
     let fallback = (router.width, router.width.max(router.clearance));
+    // The pair's Differential Pairs Routing rule first, layer by layer;
+    // then the width and gap the Impedance window works out.
+    let rules = router
+        .rule_sizes
+        .then(|| trace_core::rules::Resolver::new(&scene.board));
     let sizes = imp
         .pair_sizes(name, scene.copper_count as usize)
         .into_iter()
-        .map(|s| s.unwrap_or(fallback))
+        .enumerate()
+        .map(|(l, s)| {
+            rules
+                .as_ref()
+                .and_then(|r| r.pair(net, l as u8))
+                .map(|(wg, _)| wg)
+                .or(s)
+                .unwrap_or(fallback)
+        })
         .collect();
     Some((
         crate::router::PairInfo {

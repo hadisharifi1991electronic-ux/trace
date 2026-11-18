@@ -233,6 +233,21 @@ pub fn parse(s: &str) -> Result<Expr, String> {
     Ok(e)
 }
 
+/// Parses without checking the words, for Altium rule scopes, which use
+/// many more than the board filter knows.
+pub fn parse_any(s: &str) -> Result<Expr, String> {
+    let t = lex(s)?;
+    if t.is_empty() {
+        return Err("the query is empty".into());
+    }
+    let mut p = Parser { t, i: 0 };
+    let e = p.or()?;
+    if p.i < p.t.len() {
+        return Err(format!("unexpected {:?} after the end", p.t[p.i]));
+    }
+    Ok(e)
+}
+
 const WORDS: &[&str] = &[
     "istrack",
     "isarc",

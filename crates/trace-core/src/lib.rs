@@ -50,6 +50,7 @@ pub mod query;
 pub mod reuse;
 pub mod rfreport;
 pub mod route;
+pub mod rules;
 pub mod sch_edit;
 pub mod sch_select;
 pub mod schematic;

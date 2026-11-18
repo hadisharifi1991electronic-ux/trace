@@ -17,7 +17,13 @@ on the board, for boards whose file has none.
 USAGE:
     trace inspect <board|file.SchDoc>           Summary of a board or sheet
     trace pairs <board> [max-skew]              Differential pair lengths and skew (default max-skew 5mil)
-    trace rules <board>                         Design rules, grouped by kind
+    trace rules <board>                         Design rules by category and kind, in priority order
+    trace rules <board> --net <net>             The rule of each kind that applies to a net
+    trace rules <board> --check                 Rule problems and scope terms Trace does not judge
+    trace rules <board> --params                Every rule with all its parameters
+    trace rules <board> --add <Kind> <scope> [KEY=VALUE]... -o <out.PcbDoc>
+                                                Adds a rule (ahead of the rules for all nets)
+    trace rules <board> --defaults -o <out.PcbDoc>  Default rules for a board that has none
     trace check <board>                         Check length, match, skew and via limits from the board's rules
     trace drc <board> [--all]                   Design rule check: clearance, shorts, width, unrouted nets,
                                                 holes, annular rings, mask slivers, silk on pads, silk to silk,
@@ -371,6 +377,50 @@ fn main() -> ExitCode {
         ["pairs", file] => pairs(file, "5mil"),
         ["pairs", file, skew] => pairs(file, skew),
         ["rules", file] => rules(file),
+        ["rules", file, "--params"] => rules_params(file),
+        ["rules", file, "--check"] => rules_check(file),
+        ["rules", file, "--net", net] => rules_net(file, net),
+        ["rules", file, "--defaults", "-o", out] => rules_edit(file, out, |b| {
+            if !b.rules.is_empty() {
+                return Err("the board has rules already".into());
+            }
+            b.rules = trace_core::rules::defaults(b);
+            Ok(format!("added {} default rules", b.rules.len()))
+        }),
+        ["rules", file, "--add", kind, scope, rest @ ..] => {
+            let (kv, out) = match rest {
+                [kv @ .., "-o", out] => (kv, *out),
+                _ => {
+                    eprint!("{USAGE}");
+                    return ExitCode::from(2);
+                }
+            };
+            rules_edit(file, out, |b| {
+                let mut r = trace_core::rules::new_rule(&b.rules, kind);
+                r.scope[0] = scope.to_string();
+                for item in kv {
+                    let (k, v) = item.split_once('=').ok_or("parameters are KEY=VALUE")?;
+                    trace_core::rules::set_param(&mut r, k, v);
+                }
+                if let Err(e) = trace_core::rules::check_scope(scope) {
+                    return Err(format!("scope does not read: {e}").into());
+                }
+                // A rule for some nets goes ahead of the rules for all.
+                if !scope.trim().eq_ignore_ascii_case("all") {
+                    for x in b
+                        .rules
+                        .iter_mut()
+                        .filter(|x| x.kind.eq_ignore_ascii_case(&r.kind))
+                    {
+                        x.priority += 1;
+                    }
+                    r.priority = 1;
+                }
+                let said = format!("added {} ({}) at priority {}", r.name, r.kind, r.priority);
+                b.rules.push(r);
+                Ok(said)
+            })
+        }
         ["check", file] => check(file),
         ["drc", file] => drc(file, 15),
         ["drc", file, "--all"] => drc(file, usize::MAX),
@@ -837,20 +887,156 @@ fn pairs(file: &str, max_skew: &str) -> Res {
 }
 
 fn rules(file: &str) -> Res {
+    use trace_core::rules;
     let b = board(file)?;
-    let mut by_kind: std::collections::BTreeMap<&str, Vec<&trace_core::Rule>> = Default::default();
-    for r in &b.rules {
-        by_kind.entry(&r.kind).or_default().push(r);
+    for cat in rules::Category::ALL {
+        let mut kinds: Vec<&str> = Vec::new();
+        for r in &b.rules {
+            if rules::category(&r.kind) == cat
+                && !kinds.iter().any(|k| k.eq_ignore_ascii_case(&r.kind))
+            {
+                kinds.push(&r.kind);
+            }
+        }
+        if kinds.is_empty() {
+            continue;
+        }
+        println!("{}", cat.label());
+        for kind in kinds {
+            let idx = rules::of_kind(&b.rules, kind);
+            let label = rules::info(kind).map_or(kind, |k| k.label);
+            println!("  {label} ({})", idx.len());
+            for i in idx {
+                let r = &b.rules[i];
+                let state = if r.enabled { "" } else { "  [disabled]" };
+                let scope = r
+                    .scope
+                    .iter()
+                    .take(if rules::info(kind).is_some_and(|k| k.binary) {
+                        2
+                    } else {
+                        1
+                    })
+                    .map(String::as_str)
+                    .collect::<Vec<_>>()
+                    .join("  |  ");
+                println!(
+                    "    {:>2} {:<30} {:<44} {}{state}",
+                    r.priority,
+                    clip(&r.name, 30),
+                    clip(&scope, 44),
+                    rules::summary(r)
+                );
+            }
+        }
     }
-    for (kind, rs) in by_kind {
-        println!("{kind} ({})", rs.len());
-        for r in rs {
-            let state = if r.enabled { "" } else { "  [disabled]" };
+    Ok(())
+}
+
+/// Scopes that do not read, terms Trace does not judge, and rule problems.
+fn rules_check(file: &str) -> Res {
+    use trace_core::rules;
+    let b = board(file)?;
+    let p = rules::problems(&b.rules);
+    for (i, what) in &p {
+        println!("{} ({}): {what}", b.rules[*i].name, b.rules[*i].kind);
+    }
+    let mut unknown: Vec<String> = Vec::new();
+    for r in &b.rules {
+        for s in &r.scope {
+            if let Ok(u) = rules::check_scope(s) {
+                for w in u {
+                    if !unknown.contains(&w) {
+                        unknown.push(w);
+                    }
+                }
+            }
+        }
+    }
+    if !unknown.is_empty() {
+        println!(
+            "Scope terms kept for Altium but not judged by Trace: {}",
+            unknown.join(", ")
+        );
+    }
+    println!("{} rules, {} problems", b.rules.len(), p.len());
+    Ok(())
+}
+
+/// Changes a board's rules and writes it as a PcbDoc (over the original's
+/// records when it is one).
+fn rules_edit(
+    file: &str,
+    out: &str,
+    f: impl FnOnce(&mut Board) -> Result<String, Box<dyn std::error::Error>>,
+) -> Res {
+    let mut b = board(file)?;
+    let said = f(&mut b)?;
+    println!("{said}");
+    let name = std::path::Path::new(out)
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if file.to_ascii_lowercase().ends_with(".pcbdoc") {
+        let (bytes, report) = trace_export::to_altium_over(std::path::Path::new(file), &b, &name)?;
+        std::fs::write(out, bytes)?;
+        println!("wrote {out} ({})", report.summary());
+        for n in &report.notes {
+            println!("  note: {n}");
+        }
+    } else {
+        std::fs::write(out, trace_export::to_altium(&b, &name)?)?;
+        println!("wrote {out}");
+    }
+    let back = trace_altium::read_pcbdoc(out)?;
+    println!("read back: {} rules", back.rules.len());
+    Ok(())
+}
+
+/// The rule of each kind that applies to one net.
+fn rules_net(file: &str, net: &str) -> Res {
+    use trace_core::rules;
+    let b = board(file)?;
+    let n = b
+        .nets
+        .iter()
+        .position(|x| x.name.eq_ignore_ascii_case(net))
+        .ok_or_else(|| format!("no net {net}"))?;
+    let r = rules::Resolver::new(&b);
+    println!(
+        "Rules that apply to {} (highest priority that takes it):",
+        b.nets[n].name
+    );
+    for (kind, name, what) in r.report(n as u32) {
+        let label = rules::info(&kind).map_or(kind.as_str(), |k| k.label);
+        println!("  {label:<30} {name:<30} {what}");
+    }
+    let copper: Vec<String> = b.stackup.copper_layers().map(|l| l.name.clone()).collect();
+    for (l, name) in copper.iter().enumerate() {
+        let w = r.width(n as u32, l as u8).map(|w| format!("{:.3}", w.0[1]));
+        let p = r
+            .pair(n as u32, l as u8)
+            .map(|((w, g), _)| format!("pair {w:.3}/{g:.3}"));
+        if w.is_some() || p.is_some() {
             println!(
-                "  {:<36} {}{state}",
-                clip(&r.name, 36),
-                r.scope.first().map(String::as_str).unwrap_or("")
+                "    {name:<16} width {}  {}",
+                w.unwrap_or_else(|| "-".into()),
+                p.unwrap_or_default()
             );
+        }
+    }
+    Ok(())
+}
+
+fn rules_params(file: &str) -> Res {
+    let b = board(file)?;
+    for r in &b.rules {
+        println!(
+            "{} | {} | en={} pri={} | {:?}",
+            r.kind, r.name, r.enabled, r.priority, r.scope
+        );
+        for (k, v) in &r.params {
+            println!("    {k}={v}");
         }
     }
     Ok(())

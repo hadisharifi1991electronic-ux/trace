@@ -2168,10 +2168,24 @@ impl<'a> Merge<'a> {
                 t.get("RULEKIND")
                     .is_some_and(|k| k.eq_ignore_ascii_case(&r.kind))
             }) else {
-                self.report.notes.push(format!(
-                    "rule {} ({}) has no like rule to copy, left out",
-                    r.name, r.kind
-                ));
+                // No rule of the kind to copy: Trace's own record of it.
+                let id = self.w.unique_id();
+                match trace_core::rules::altium_record(r, &id) {
+                    Some((kind, props)) => {
+                        let mut b = Vec::new();
+                        crate::altium::text_record(&mut b, &props);
+                        let mut one = kind.to_le_bytes().to_vec();
+                        one.extend_from_slice(&b);
+                        if let Some(rec) = split_text(&one, 2).pop() {
+                            out.push(rec);
+                            self.report.added += 1;
+                        }
+                    }
+                    None => self.report.notes.push(format!(
+                        "rule {} ({}) has no like rule to copy, left out",
+                        r.name, r.kind
+                    )),
+                }
                 continue;
             };
             let mut t = tpl.clone();
@@ -2467,6 +2481,60 @@ mod tests {
 
     fn pt(x: f64, y: f64) -> Point {
         Point::mil(x, y)
+    }
+
+    /// Rules made in Trace go out in a fresh PcbDoc and come back; edits
+    /// and new kinds are saved over the original.
+    #[test]
+    fn rules_round_trip() {
+        use trace_core::rules;
+        let mut b = Board::default();
+        for n in ["GND", "RF"] {
+            b.nets.push(Net {
+                name: n.into(),
+                ..Default::default()
+            });
+        }
+        let mut w = rules::new_rule(&b.rules, "Width");
+        w.scope[0] = "InNet('RF')".into();
+        rules::set_param(&mut w, "PREFEREDWIDTH", "12mil");
+        rules::set_param(&mut w, "COMMENT", "50 ohm feed");
+        b.rules.push(w);
+        b.rules.push(rules::new_rule(&b.rules, "Clearance"));
+        let dir = tempfile::tempdir().unwrap();
+        let orig = dir.path().join("r.PcbDoc");
+        std::fs::write(&orig, crate::to_altium(&b, "r.PcbDoc").unwrap()).unwrap();
+        let mut back = trace_altium::read_pcbdoc(&orig).unwrap();
+        assert_eq!(back.rules.len(), 2);
+        let w = back.rules.iter().find(|r| r.kind == "Width").unwrap();
+        assert_eq!(w.scope[0], "InNet('RF')");
+        assert_eq!(rules::param(w, "PREFEREDWIDTH"), Some("12mil"));
+        assert_eq!(rules::param(w, "COMMENT"), Some("50 ohm feed"));
+        assert_eq!(trace_core::route::board_clearance(&back), 8.0);
+
+        // Change the width, add a kind the file has none of, drop the clearance.
+        let i = back.rules.iter().position(|r| r.kind == "Width").unwrap();
+        rules::set_param(&mut back.rules[i], "PREFEREDWIDTH", "14mil");
+        back.rules[i].enabled = false;
+        back.rules.retain(|r| r.kind != "Clearance");
+        let mut v = rules::new_rule(&back.rules, "RoutingVias");
+        rules::set_param(&mut v, "WIDTH", "18mil");
+        back.rules.push(v);
+        let (bytes, r) = to_altium_over(&orig, &back, "r.PcbDoc").unwrap();
+        assert_eq!((r.added, r.removed), (1, 1), "{:?}", r.notes);
+        let out = dir.path().join("r2.PcbDoc");
+        std::fs::write(&out, bytes).unwrap();
+        let again = trace_altium::read_pcbdoc(&out).unwrap();
+        assert_eq!(again.rules.len(), 2);
+        let w = again.rules.iter().find(|r| r.kind == "Width").unwrap();
+        assert!(!w.enabled);
+        assert_eq!(rules::param(w, "PREFEREDWIDTH"), Some("14mil"));
+        let v = again
+            .rules
+            .iter()
+            .find(|r| r.kind == "RoutingVias")
+            .unwrap();
+        assert_eq!(rules::param(v, "WIDTH"), Some("18mil"));
     }
 
     /// A small board, saved fresh, then edited and saved over itself.

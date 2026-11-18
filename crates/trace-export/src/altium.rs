@@ -750,9 +750,10 @@ impl<'a> Writer<'a> {
         streams.push(("Pads6", n, pads));
         let (n, regions) = self.regions6(&extra_regions);
         streams.push(("Regions6", n, regions));
+        let (n, rules) = self.rules6();
+        streams.push(("Rules6", n, rules));
         for s in [
             "Classes6",
-            "Rules6",
             "Polygons6",
             "Fills6",
             "Texts6",
@@ -1093,6 +1094,22 @@ impl<'a> Writer<'a> {
                 }
             }
         }
+    }
+
+    /// The board's rules, for kinds whose record Trace knows.
+    fn rules6(&mut self) -> (u32, Vec<u8>) {
+        let mut out = Vec::new();
+        let mut n = 0;
+        for r in &self.b.rules {
+            let id = self.unique_id();
+            let Some((kind, props)) = trace_core::rules::altium_record(r, &id) else {
+                continue;
+            };
+            out.extend_from_slice(&kind.to_le_bytes());
+            text_record(&mut out, &props);
+            n += 1;
+        }
+        (n, out)
     }
 
     fn nets6(&mut self) -> (u32, Vec<u8>) {

@@ -951,7 +951,18 @@ impl App {
                 if ui.button("Layer stack…").clicked() {
                     self.imp.open = true;
                 }
-                if ui.button("Rules…").clicked() {
+                if ui
+                    .button("Rules…")
+                    .on_hover_text("PCB Rules and Constraints Editor")
+                    .clicked()
+                {
+                    self.rules_win.open_at(None);
+                }
+                if ui
+                    .button("Constraints…")
+                    .on_hover_text("Constraint Manager: lengths, matching, skew")
+                    .clicked()
+                {
                     self.cm.open = true;
                 }
                 if ui.button("Check rules").clicked() {

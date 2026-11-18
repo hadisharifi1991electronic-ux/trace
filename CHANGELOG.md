@@ -3,6 +3,17 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.81.2 (2026-11-18)
+
+- Thermal: package resistances, when not given, are guessed by package
+  kind as well as size, from typical JEDEC 2s2p datasheet values. A ball
+  grid (many round pads of one size) gets a low θJC and θJB (14 mm: about
+  1 and 4 K/W, where 0.81 guessed 8.9 and 18.4 and so ran large BGAs like
+  the ADRV9026 far too hot); an exposed-pad QFN a high θJC through the
+  mould and a low θJB (5 mm: 30 and 8); leaded parts (SOIC, QFP, SOT)
+  high both (SOIC-8: about 55 and 65). Datasheet values with
+  `--power U1=4.5W@jc0.6/jb3.9` still win.
+
 ## 0.81.1 (2026-11-18)
 
 - EMI simulation, plane cavities: below a plane pair's first resonance

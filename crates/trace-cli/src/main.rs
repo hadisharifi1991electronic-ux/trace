@@ -108,7 +108,7 @@ USAGE:
                   [--at X,Y] [--decades 3] [--sweep depth|x|y] [map.svg] [maps.gif] [temps.csv] [report.txt]
                                                 3D steady-state temperatures: board conduction from the real copper
                                                 of every layer and the via barrels, parts as JEDEC two-resistor
-                                                packages (θJC, θJB; guessed from size when not given), plate-fin
+                                                packages (θJC, θJB; guessed from package kind and size when not given), plate-fin
                                                 heatsinks with TIM and contact resistance, natural or forced
                                                 convection from correlations and radiation; Tj per part, maps per
                                                 layer, heat balance; --check solves again on a 1.5x finer grid and

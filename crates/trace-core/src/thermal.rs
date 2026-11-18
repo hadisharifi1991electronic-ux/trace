@@ -1901,16 +1901,65 @@ pub fn default_thetas(board: &Board, part: usize) -> (f64, f64) {
         .cloned()
         .fold(0.0, f64::max);
     let epad = pads.len() > 4 && biggest > 6.0 * others.max(1e-6) && biggest > 0.15 * area;
-    // θ roughly falls with the body's linear size.
-    let size = area.sqrt();
-    let jc = (120.0 / size).clamp(0.3, 60.0);
-    let jb = if epad {
-        (60.0 / size).clamp(0.5, 30.0)
+    // A ball grid: many round surface pads of one size.
+    let round = board
+        .geometry
+        .pads
+        .iter()
+        .filter(|p| p.component == Some(part as u32))
+        .filter(|p| {
+            // Round, not oblong (an oval QFP lead is Round too).
+            let (w, h) = (p.size_x.mm(), p.size_y.mm());
+            p.hole.mm() <= 0.0
+                && p.shape == crate::PadShape::Round
+                && w.max(h) < 1.25 * w.min(h).max(1e-6)
+        })
+        .count();
+    let smallest = pads.iter().cloned().fold(f64::MAX, f64::min);
+    let bga = pads.len() >= 16 && round * 10 >= pads.len() * 9 && biggest < 2.0 * smallest;
+    let kind = if bga {
+        Package::Bga
+    } else if epad {
+        Package::ExposedPad
     } else {
-        (250.0 / size).clamp(2.0, 120.0)
+        Package::Leaded
     };
     let _ = MIL_MM;
-    (jc, jb)
+    package_thetas(kind, area.sqrt())
+}
+
+/// How a package's die reaches its case and the board.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Package {
+    /// Ball grid (flip chip above about 10 mm): a thin lid or bare die on
+    /// top, hundreds of balls into the board's planes.
+    Bga,
+    /// QFN, DFN, PowerPAD: the die sits on a pad soldered to the board;
+    /// the top is mould compound.
+    ExposedPad,
+    /// SOIC, TSSOP, SOT and the rest: heat leaves through the leads.
+    Leaded,
+}
+
+/// Typical JEDEC (2s2p) θJC (to the case top) and θJB, K/W, for a body
+/// `size` mm across, fitted to datasheet values: a 14 mm flip-chip BGA
+/// about 1 and 4, a 5 mm QFN about 30 and 8, an SOIC-8 about 55 and 65.
+pub fn package_thetas(kind: Package, size: f64) -> (f64, f64) {
+    let size = size.max(0.5);
+    match kind {
+        Package::Bga => (
+            (14.0 / size).clamp(0.15, 6.0),
+            (55.0 / size).clamp(1.5, 20.0),
+        ),
+        Package::ExposedPad => (
+            (150.0 / size).clamp(5.0, 40.0),
+            (40.0 / size).clamp(1.5, 20.0),
+        ),
+        Package::Leaded => (
+            (250.0 / size).clamp(10.0, 80.0),
+            (300.0 / size).clamp(10.0, 120.0),
+        ),
+    }
 }
 
 #[cfg(test)]
@@ -1929,6 +1978,25 @@ mod tests {
         assert!(h > 4.0 && h < 12.0, "{h}");
         let h = h_plate(Air::Forced { speed: 2.0 }, 0, 100.0, 55.0, 25.0);
         assert!(h > 10.0 && h < 30.0, "{h}");
+    }
+
+    #[test]
+    fn package_guesses() {
+        let (jc, jb) = package_thetas(Package::Bga, 14.0);
+        assert!(
+            (0.7..1.3).contains(&jc) && (3.0..5.0).contains(&jb),
+            "{jc} {jb}"
+        );
+        let (jc, jb) = package_thetas(Package::ExposedPad, 5.0);
+        assert!(
+            (20.0..40.0).contains(&jc) && (5.0..12.0).contains(&jb),
+            "{jc} {jb}"
+        );
+        let (jc, jb) = package_thetas(Package::Leaded, 4.5);
+        assert!(
+            (40.0..70.0).contains(&jc) && (40.0..90.0).contains(&jb),
+            "{jc} {jb}"
+        );
     }
 
     #[test]

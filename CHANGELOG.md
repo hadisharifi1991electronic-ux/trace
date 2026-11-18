@@ -3,6 +3,37 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.88.1 (2026-11-18)
+
+RF report and path loss, from the first whole-board run on the ADRV9026
+EVB (29 paths):
+
+- Nets joined by pour alone (no tracks), such as the TX baluns' balanced
+  nets, are followed: their pads are taken as joined with no length.
+  The TX paths stopped at the balun and took it as a 0 Ω link to its
+  unused pin; they now reach the transceiver.
+- A balun reached from its unbalanced side whose two other signal nets
+  are no pair yet (unnamed nets, as on the LO baluns) makes them a pair,
+  followed on through matching parts, so the path is differential after
+  it. A balun that is the path's last part sets the end's mode too.
+- A path ends at the nearest chip pin it reaches (it took the farthest,
+  so the VCXO tune input ran back through 0 Ω links to the VCXO's own
+  output).
+- RF report:
+  - Lines with a capacitor of 1 nF or more to ground (bias, supply,
+    tune and control inputs) and power-width copper (under 25 Ω) are
+    listed as "not RF" and not judged; DC jacks (barrel, PJ-) are not
+    taken as RF connectors.
+  - A 0 Ω resistor to ground on a path is taken as an assembly option
+    not fitted, with a note (fitted, it would short the path).
+  - Resistors at the chip end (after the last series part) of about the
+    end's impedance, to ground or across the pair, are its termination:
+    with no chip model the chip is taken as high impedance behind them
+    and the return loss judged into them, and the insertion loss counts
+    the power into the termination as delivered (a 100 Ω across a
+    100 Ω pair cost 3 dB before).
+  - Path names split a balun's "A > B" nets, so RX1 is RX1_IN.
+
 ## 0.88.0 (2026-11-18)
 
 Design rules editor, as Altium's PCB Rules and Constraints Editor:

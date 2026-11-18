@@ -942,6 +942,8 @@ struct Graph {
     edges: Vec<Edge>,
     /// Pad index -> node.
     pad_node: HashMap<usize, usize>,
+    /// Nets whose pads are joined by pour alone, taken as joined.
+    poured: Vec<u32>,
 }
 
 struct Uf(Vec<usize>);
@@ -1210,6 +1212,44 @@ fn build(board: &Board, nets: &HashSet<u32>, ground: &[bool]) -> Graph {
         });
     }
     let mut uf = Uf((0..pts.len()).collect());
+    // Nets with pour and no tracks or arcs: the pour joins their pads
+    // (pads sharing a layer, or through-hole ones).
+    let mut wired: HashSet<u32> = HashSet::new();
+    for &i in &tracks {
+        wired.extend(g.tracks[i].net);
+    }
+    for &i in &arcs {
+        wired.extend(g.arcs[i].net);
+    }
+    let mut poured: Vec<u32> = Vec::new();
+    {
+        let mut by_net: BTreeMap<u32, Vec<usize>> = BTreeMap::new();
+        for &i in &pads {
+            if let Some(n) = g.pads[i].net {
+                if !wired.contains(&n) && board.nets.get(n as usize).is_some_and(|x| x.has_pour) {
+                    by_net.entry(n).or_default().push(i);
+                }
+            }
+        }
+        for (n, list) in by_net {
+            if list.len() < 2 {
+                continue;
+            }
+            let mut joined = false;
+            for x in 0..list.len() {
+                for y in x + 1..list.len() {
+                    let (a, b) = (&g.pads[list[x]], &g.pads[list[y]]);
+                    if (0..layers).any(|l| pad_on(a, l) && pad_on(b, l)) {
+                        uf.join(pad_pt[&list[x]], pad_pt[&list[y]]);
+                        joined = true;
+                    }
+                }
+            }
+            if joined {
+                poured.push(n);
+            }
+        }
+    }
     // Wire ends meeting.
     let mut by_cell: HashMap<(u32, u8, i64, i64), Vec<usize>> = HashMap::new();
     let cell = 20.0;
@@ -1416,6 +1456,7 @@ fn build(board: &Board, nets: &HashSet<u32>, ground: &[bool]) -> Graph {
         adj,
         edges: out,
         pad_node,
+        poured,
     }
 }
 
@@ -2568,7 +2609,7 @@ fn prepare_with(
             }
         }
     }
-    let implied = implicit_pairs(board, &ground, &pads_per_net, &mut partner, &mut positive);
+    let mut implied = implicit_pairs(board, &ground, &pads_per_net, &mut partner, &mut positive);
     let followable = |n: u32| {
         ground.get(n as usize) != Some(&true)
             && pads_per_net.get(n as usize).copied().unwrap_or(0) <= MAX_PADS
@@ -2599,41 +2640,93 @@ fn prepare_with(
         Some(t) => Some(to_positive(find_pins(board, t, &ground, false)?)),
         None => None,
     };
-    // Nets the path may follow: from the start's, through parts.
-    let negatives: HashSet<u32> = partner
-        .keys()
-        .copied()
-        .filter(|n| !positive.contains(n))
-        .collect();
+    // Nets the path may follow: from the start's, through parts. The
+    // start's side first: a balun reached from it whose two other
+    // signal nets are no pair yet makes them one (its balanced side,
+    // often unnamed nets), and the pair is then followed on through
+    // matching parts.
     let mut nets: HashSet<u32> = HashSet::new();
-    let mut todo: Vec<u32> = starts.iter().filter_map(|&i| g.pads[i].net).collect();
-    if let Some(e) = &ends {
-        todo.extend(e.iter().filter_map(|&i| g.pads[i].net));
-    }
     let mut by_comp: HashMap<u32, Vec<usize>> = HashMap::new();
     for (i, p) in g.pads.iter().enumerate() {
         if let Some(c) = p.component {
             by_comp.entry(c).or_default().push(i);
         }
     }
-    while let Some(n) = todo.pop() {
-        if nets.len() >= 24 || !nets.insert(n) {
-            continue;
-        }
-        for p in g.pads.iter().filter(|p| p.net == Some(n)) {
-            let Some(c) = p.component else { continue };
-            let list = &by_comp[&c];
-            let passes = list.len() == 2 || (list.len() >= 3 && is_balun(board, c as usize));
-            if !passes {
+    let mut balun_pairs: Vec<String> = Vec::new();
+    for phase in 0..2 {
+        let mut todo: Vec<u32> = if phase == 0 {
+            starts.iter().filter_map(|&i| g.pads[i].net).collect()
+        } else {
+            let mut t: Vec<u32> = nets.iter().copied().collect();
+            if let Some(e) = &ends {
+                t.extend(e.iter().filter_map(|&i| g.pads[i].net));
+            }
+            nets.clear();
+            t
+        };
+        while let Some(n) = todo.pop() {
+            if nets.len() >= 24 || !nets.insert(n) {
                 continue;
             }
-            for &q in list {
-                if let Some(m) = g.pads[q].net {
-                    if m != n && followable(m) && !negatives.contains(&m) && !nets.contains(&m) {
-                        todo.push(m);
+            for p in g.pads.iter().filter(|p| p.net == Some(n)) {
+                let Some(c) = p.component else { continue };
+                let list = &by_comp[&c];
+                let balun = list.len() >= 3 && is_balun(board, c as usize);
+                if list.len() != 2 && !balun {
+                    continue;
+                }
+                if balun && phase == 0 && !partner.contains_key(&n) {
+                    let mut other: Vec<(u32, usize)> = Vec::new();
+                    for &q in list {
+                        if let Some(m) = g.pads[q].net {
+                            if m != n
+                                && followable(m)
+                                && pads_per_net.get(m as usize).copied().unwrap_or(0) >= 2
+                                && !other.iter().any(|o| o.0 == m)
+                            {
+                                other.push((m, q));
+                            }
+                        }
+                    }
+                    if other.len() == 2
+                        && !partner.contains_key(&other[0].0)
+                        && !partner.contains_key(&other[1].0)
+                    {
+                        let (a, b) = (other[0].0, other[1].0);
+                        partner.insert(a, b);
+                        partner.insert(b, a);
+                        positive.insert(a);
+                        balun_pairs.push(format!(
+                            "{}: its balanced nets {} and {} taken as a pair",
+                            board.components[c as usize].designator,
+                            net_name(board, a),
+                            net_name(board, b)
+                        ));
+                        implied += implicit_pairs(
+                            board,
+                            &ground,
+                            &pads_per_net,
+                            &mut partner,
+                            &mut positive,
+                        );
+                    }
+                }
+                for &q in list {
+                    if let Some(m) = g.pads[q].net {
+                        let negative = partner.contains_key(&m) && !positive.contains(&m);
+                        if m != n && followable(m) && !negative && !nets.contains(&m) {
+                            todo.push(m);
+                        }
                     }
                 }
             }
+        }
+    }
+    // A negative line reached before its pair was known is not followed.
+    nets.retain(|n| !(partner.contains_key(n) && !positive.contains(n)));
+    for &i in &starts {
+        if let Some(n) = g.pads[i].net {
+            nets.insert(n);
         }
     }
     let gr = build(board, &nets, &ground);
@@ -2661,7 +2754,9 @@ fn prepare_with(
                 )
             })?,
         None => {
-            // The farthest pin reached, a chip's (4 pins or more) first.
+            // The nearest chip pin reached (a part with 4 pins or more:
+            // where the signal ends; copper on past it belongs to
+            // something else), else the farthest pin.
             let mut best: Option<(bool, f64, usize)> = None;
             for (&pi, &k) in &gr.pad_node {
                 let p = &g.pads[pi];
@@ -2672,7 +2767,16 @@ fn prepare_with(
                     l.len() >= 4 && !is_balun(board, p.component.unwrap_or(0) as usize)
                 });
                 let cand = (chip, d[k], pi);
-                if best.is_none_or(|b| (cand.0, cand.1) > (b.0, b.1)) {
+                let better = best.is_none_or(|b| {
+                    if cand.0 != b.0 {
+                        cand.0
+                    } else if chip {
+                        cand.1 < b.1
+                    } else {
+                        cand.1 > b.1
+                    }
+                });
+                if better {
                     best = Some(cand);
                 }
             }
@@ -2704,6 +2808,14 @@ fn prepare_with(
     if implied > 0 {
         rep.notes.push(format!(
             "{implied} pair(s) of unnamed nets taken as pairs: they follow a pair through matching parts on both lines"
+        ));
+    }
+    rep.notes.extend(balun_pairs);
+    if !gr.poured.is_empty() {
+        let names: Vec<String> = gr.poured.iter().map(|&n| net_name(board, n)).collect();
+        rep.notes.push(format!(
+            "{} join their pads by pour only (no tracks): taken as joined with no length",
+            names.join(", ")
         ));
     }
     let paired = |n: u32| partner.contains_key(&n) && positive.contains(&n);
@@ -2870,6 +2982,8 @@ fn prepare_with(
         diff = next_diff;
         node_items.push(items.len());
     }
+    // The mode at the end (after a balun that is the last element).
+    let end_diff = diff;
     rep.notes.extend(mode_notes);
     // Shunt parts off the path: two-pin parts with a pad on a net of the
     // path and the other to ground (or a rail, AC ground), or across the
@@ -3091,7 +3205,7 @@ fn prepare_with(
     };
     let mut built: Vec<Built> = Vec::new();
     for (i, (el, d)) in merged.iter().enumerate() {
-        let next = merged.get(i + 1).map_or(*d, |x| x.1);
+        let next = merged.get(i + 1).map_or(end_diff, |x| x.1);
         let b = match el {
             El::Line { .. } => ctx.line(el, *d),
             El::Via { .. } => ctx.via(el, *d, false),
@@ -3721,6 +3835,76 @@ pub(crate) mod tests {
         g.tracks.push(tr(1040.0, 1500.0, 1, 0));
         g.tracks.push(tr(1500.0, 2040.0, 1, 0));
         b
+    }
+
+    /// J1 to a balun T1 whose balanced nets (unnamed, joined by pour
+    /// only) run to U1.
+    #[test]
+    fn a_balun_with_poured_unnamed_balanced_nets_reaches_the_chip() {
+        let mut b = board();
+        for name in ["N_A", "N_B"] {
+            let mut n = b.nets[0].clone();
+            n.name = name.into();
+            n.has_pour = true;
+            b.nets.push(n);
+        }
+        let (na, nb) = (3u32, 4u32);
+        let mut t = b.components[1].clone();
+        t.designator = "T1".into();
+        t.params.insert("Value".into(), "2450BL15B200E".into());
+        b.components.push(t);
+        let tc = (b.components.len() - 1) as u32;
+        let g = &mut b.geometry;
+        // C1 and its second track removed: the line ends at T1 pin 1.
+        g.tracks.truncate(2);
+        g.pads.retain(|p| p.component != Some(1));
+        let template = g.pads[0].clone();
+        let mut add = |c: u32, name: &str, x: f64, y: f64, net: u32| {
+            let mut p = template.clone();
+            p.component = Some(c);
+            p.name = name.into();
+            p.net = Some(net);
+            p.at = crate::Point::mil(x, y);
+            g.pads.push(p);
+        };
+        add(tc, "1", 1000.0, 0.0, 0);
+        add(tc, "2", 1000.0, 40.0, 2);
+        add(tc, "3", 1040.0, 0.0, na);
+        add(tc, "4", 1040.0, 40.0, nb);
+        add(tc, "6", 1000.0, 80.0, 1);
+        // U1's first two pins move onto the balanced nets.
+        for p in g.pads.iter_mut().filter(|p| p.component == Some(2)) {
+            match p.name.as_str() {
+                "1" => p.net = Some(na),
+                "2" => p.net = Some(nb),
+                _ => {}
+            }
+        }
+        let opt = Options {
+            from: "J1".into(),
+            points: 20,
+            vias_3d: false,
+            ..Default::default()
+        };
+        let r = run(&b, &b.stackup, &opt, &|_, _| {}).expect("path");
+        assert_eq!(r.end, "U1.1", "{:?}", r.notes);
+        assert!(
+            r.sections.iter().any(|s| s.kind == "balun"),
+            "{:?} {:?}",
+            r.sections,
+            r.notes
+        );
+        assert!(
+            r.notes.iter().any(|n| n.contains("taken as a pair")),
+            "{:?}",
+            r.notes
+        );
+        assert!(
+            r.notes.iter().any(|n| n.contains("pour only")),
+            "{:?}",
+            r.notes
+        );
+        assert_eq!(r.z_ref, [50.0, 100.0]);
     }
 
     #[test]

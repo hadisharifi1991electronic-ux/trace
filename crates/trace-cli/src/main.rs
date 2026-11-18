@@ -2958,7 +2958,7 @@ fn lc_cmd(value: &str, rest: &[&str]) -> Res {
 }
 
 fn rf_cmd(file: &str, rest: &[&str]) -> Res {
-    use trace_core::rfreport::{self, Setup, Status};
+    use trace_core::rfreport::{self, Setup};
     use trace_core::touchstone;
     let b = board(file)?;
     let mut setup = Setup::default();
@@ -3112,7 +3112,7 @@ fn rf_cmd(file: &str, rest: &[&str]) -> Res {
         }
         println!("Wrote each path's .s2p and .svg to {}", d.display());
     }
-    if rep.paths.iter().any(|p| p.status != Status::Pass) {
+    if rep.failing() > 0 {
         std::process::exit(1);
     }
     Ok(())

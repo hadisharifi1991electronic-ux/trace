@@ -65,6 +65,9 @@ pub enum Status {
     Check,
     /// No path could be followed.
     Failed,
+    /// Not an RF path after all: a bias or control line (a large
+    /// capacitor to ground on it) or power copper. Listed, not judged.
+    NotRf,
 }
 
 impl Status {
@@ -72,6 +75,7 @@ impl Status {
         match self {
             Status::Pass => "pass",
             Status::Check => "CHECK",
+            Status::NotRf => "not RF",
             Status::Failed => "failed",
         }
     }
@@ -141,12 +145,32 @@ pub struct Path {
     pub reflections: Vec<(String, f64, [f64; 2])>,
     /// The sections that lose most at the top: (what, dB, where).
     pub losses: Vec<(String, f64, [f64; 2])>,
+    /// A termination at the chip end (resistors to ground or across the
+    /// pair, as seen by the path's mode, Ω) taken as the load: the chip
+    /// behind it is high impedance. The insertion loss then counts the
+    /// power into the termination as delivered.
+    pub termination: Option<(String, f64)>,
+    /// dB added back to |S21| for the termination's share.
+    pub il_corr_db: f64,
 }
 
 impl Path {
     /// Insertion loss at `f` GHz, dB.
     pub fn il_at(&self, f: f64) -> Option<f64> {
-        self.report.as_ref().ok().and_then(|r| r.il_at(f))
+        self.report
+            .as_ref()
+            .ok()
+            .and_then(|r| r.il_at(f))
+            .map(|d| (d - self.il_corr_db).max(0.0))
+    }
+
+    /// Insertion loss per frequency, dB (negative, as |S21|).
+    pub fn s21_db(&self) -> Vec<f64> {
+        self.report.as_ref().map_or(Vec::new(), |r| {
+            r.s.iter()
+                .map(|s| (s[2].db() + self.il_corr_db).min(0.0))
+                .collect()
+        })
     }
 
     /// The return loss judged: into the load when there is one, else
@@ -293,8 +317,16 @@ pub fn starts(board: &Board, only: &[String]) -> Vec<(String, String)> {
             text.push_str(v);
         }
         // A coaxial part by name, or one signal pin among ground pins
-        // (an SMA footprint named only by its maker's number).
-        let coax = coax_words(&text) || (signal.len() == 1 && grounds >= 2);
+        // (an SMA footprint named only by its maker's number), but not
+        // a DC jack.
+        let up = text.to_ascii_uppercase();
+        let power_jack = [
+            "JACK", "BARREL", "DCJ", "PJ-", "DC-", "TERMINAL", "PHOENIX", "BANANA",
+        ]
+        .iter()
+        .any(|k| up.contains(k))
+            && !coax_words(&text);
+        let coax = !power_jack && (coax_words(&text) || (signal.len() == 1 && grounds >= 2));
         if !coax || signal.len() != 1 {
             continue;
         }
@@ -382,10 +414,14 @@ fn stem(name: &str) -> String {
 /// The path's name and class from its nets: the chip end's named net
 /// first, then the others in order from the chip.
 fn name_path(rep: &Report, from_des: &str) -> (String, Class) {
+    // A balun's section names both its nets, "A > B".
     let mut nets: Vec<&str> = Vec::new();
     for s in rep.sections.iter().rev() {
-        if !nets.contains(&s.net.as_str()) {
-            nets.push(&s.net);
+        for n in s.net.rsplit(" > ") {
+            let n = n.trim();
+            if !n.is_empty() && !nets.contains(&n) {
+                nets.push(n);
+            }
         }
     }
     let class = nets.iter().find_map(|n| class_of(n)).unwrap_or(Class::Rf);
@@ -407,11 +443,16 @@ fn reflection(z: f64, zr: f64) -> f64 {
     ((z - zr) / (z + zr)).abs()
 }
 
-fn judge(path: &mut Path, setup: &Setup) {
+fn judge(path: &mut Path, setup: &Setup, board: &Board) {
     let Ok(rep) = &path.report else {
         path.status = Status::Failed;
         return;
     };
+    if let Some(why) = not_rf(rep, board) {
+        path.status = Status::NotRf;
+        path.findings = vec![why];
+        return;
+    }
     let top = rep.f.last().copied().unwrap_or(setup.band.1);
     // Sections that reflect: an impedance off the path's reference, on a
     // run long enough to matter (a twentieth of a wavelength at the top,
@@ -470,7 +511,7 @@ fn judge(path: &mut Path, setup: &Setup) {
         }
     }
     if let Some(b) = setup.il_budget {
-        let il = rep.il_db();
+        let il = (rep.il_db() - path.il_corr_db).max(0.0);
         if il > b {
             findings.push(format!(
                 "insertion loss {il:.2} dB at {top} GHz is over the {b:.2} dB budget"
@@ -490,6 +531,133 @@ fn judge(path: &mut Path, setup: &Setup) {
     path.findings = findings;
     path.reflections = refl;
     path.losses = loss;
+}
+
+/// The designator a section names first, and its component.
+fn section_part<'a>(board: &'a Board, what: &str) -> Option<&'a crate::Component> {
+    let des = what.split_whitespace().next()?;
+    board.components.iter().find(|c| c.designator == des)
+}
+
+fn part_value(c: &crate::Component) -> &str {
+    c.param(&["Value", "Comment", "Device Type"]).unwrap_or("")
+}
+
+fn prefix_of(des: &str) -> String {
+    des.chars()
+        .take_while(|c| c.is_ascii_alphabetic())
+        .collect::<String>()
+        .to_ascii_uppercase()
+}
+
+/// Ohms of a fitted shunt resistor section, and whether it is to ground.
+fn shunt_ohms(board: &Board, s: &crate::pathloss::Section) -> Option<(f64, bool)> {
+    if s.kind != "shunt" || s.model.starts_with("not fitted") {
+        return None;
+    }
+    let c = section_part(board, &s.what)?;
+    if prefix_of(&c.designator) != "R" {
+        return None;
+    }
+    let r = crate::pdn::parse_ohms(part_value(c))?;
+    Some((r, s.what.contains("to ground")))
+}
+
+/// Why a path is not RF, if it is not: a capacitor of 1 nF or more to
+/// ground on it (a bias, supply or control line: RF would be shorted),
+/// or copper wide enough to be power (under 25 Ω along most of it).
+fn not_rf(rep: &Report, board: &Board) -> Option<String> {
+    for s in &rep.sections {
+        if s.kind != "shunt" || !s.what.contains("to ground") || s.model.starts_with("not fitted") {
+            continue;
+        }
+        let Some(c) = section_part(board, &s.what) else {
+            continue;
+        };
+        if prefix_of(&c.designator) != "C" {
+            continue;
+        }
+        if let Some(f) = crate::pdn::parse_farads(part_value(c)) {
+            if f >= 1e-9 {
+                return Some(format!(
+                    "{} {} to ground on it: a bias, supply or control line, not an RF path",
+                    c.designator,
+                    part_value(c)
+                ));
+            }
+        }
+    }
+    let (mut low, mut all) = (0.0, 0.0);
+    for s in rep.sections.iter().filter(|s| s.kind == "trace" && !s.diff) {
+        all += s.length;
+        if s.z.is_some_and(|z| z < 25.0) {
+            low += s.length;
+        }
+    }
+    if all > 0.0 && low > 0.5 * all {
+        let z = rep
+            .sections
+            .iter()
+            .filter(|s| s.kind == "trace")
+            .filter_map(|s| s.z)
+            .fold(f64::MAX, f64::min);
+        return Some(format!(
+            "power-width copper ({z:.0} Ω along most of it), not an RF path"
+        ));
+    }
+    None
+}
+
+/// Resistors that terminate the path at its chip end: shunt resistors
+/// of 20 to 250 Ω after the last series part or balun (else after the
+/// last trace longer than 150 mil). Returns
+/// their names and the resistance the path's mode sees (a resistor to
+/// ground from one line of a pair counts twice), when that is within a
+/// factor of two of the end's reference.
+fn termination(rep: &Report, board: &Board) -> Option<(String, f64)> {
+    let from = match rep
+        .sections
+        .iter()
+        .rposition(|s| matches!(s.kind, "part" | "balun"))
+    {
+        Some(k) => k + 1,
+        None => {
+            rep.sections
+                .iter()
+                .rposition(|s| s.kind == "trace" && s.length > 150.0)?
+                + 1
+        }
+    };
+    let mut names = Vec::new();
+    let mut g = 0.0;
+    for s in &rep.sections[from..] {
+        let Some((r, to_ground)) = shunt_ohms(board, s) else {
+            continue;
+        };
+        if !(20.0..=250.0).contains(&r) {
+            continue;
+        }
+        let seen = if s.diff && to_ground { 2.0 * r } else { r };
+        g += 1.0 / seen;
+        names.push(s.what.split_whitespace().next().unwrap_or("").to_string());
+    }
+    if names.is_empty() {
+        return None;
+    }
+    let r = 1.0 / g;
+    let zr = rep.z_ref[1];
+    (r > 0.5 * zr && r < 2.0 * zr).then(|| (names.join(", "), r))
+}
+
+/// A chip input that takes no current: Γ = 1.
+fn open_load(top: f64) -> Network {
+    Network {
+        f: vec![0.0, top.max(1.0) * 1.5],
+        ports: 1,
+        z_ref: 50.0,
+        s: vec![vec![Cx::new(1.0, 0.0)], vec![Cx::new(1.0, 0.0)]],
+        comments: vec![],
+    }
 }
 
 fn load_for<'a>(
@@ -572,6 +740,34 @@ pub fn run(
                 continue;
             }
         }
+        // A 0 Ω resistor to ground on the path would short it: an
+        // assembly option, taken as not fitted.
+        let mut opt = opt;
+        let mut extra_notes = Vec::new();
+        if let Ok(rep) = &r {
+            let straps: Vec<String> = rep
+                .sections
+                .iter()
+                .filter(|s| shunt_ohms(board, s).is_some_and(|(o, g)| g && o <= 1.0))
+                .filter_map(|s| s.what.split_whitespace().next().map(String::from))
+                .collect();
+            if !straps.is_empty() {
+                opt.free.extend(straps.iter().cloned());
+                let again = pathloss::run_shared(board, stackup, &opt, &mut vias, &sub);
+                if let Err(e) = &again {
+                    if crate::cancel::is_cancel(e) {
+                        return Err(e.clone());
+                    }
+                }
+                if again.is_ok() {
+                    r = again;
+                    extra_notes.push(format!(
+                        "{} (0 Ω to ground) taken as an assembly option not fitted: fitted, it would short the path",
+                        straps.join(", ")
+                    ));
+                }
+            }
+        }
         let (name, class) = match &r {
             Ok(rep) => name_path(rep, des),
             Err(_) => (des.clone(), Class::Rf),
@@ -597,6 +793,42 @@ pub fn run(
                 }
             }
         }
+        // A termination at the chip end with no model for the chip: the
+        // chip is high impedance behind it, and the power into it is
+        // what the chip sees.
+        let mut term = None;
+        let mut corr = 0.0;
+        if let Ok(rep) = &r {
+            if let Some((names, ohms)) = termination(rep, board) {
+                let zr = rep.z_ref[1];
+                corr = 10.0 * (1.0 + zr / ohms).log10();
+                if load.is_none() {
+                    let o2 = Options {
+                        load: Some(open_load(setup.band.1)),
+                        ..opt.clone()
+                    };
+                    let again = pathloss::run_shared(board, stackup, &o2, &mut vias, &sub);
+                    if let Err(e) = &again {
+                        if crate::cancel::is_cancel(e) {
+                            return Err(e.clone());
+                        }
+                    }
+                    if again.is_ok() {
+                        r = again;
+                        load = Some(format!(
+                            "the {ohms:.0} Ω termination {names}, chip high impedance"
+                        ));
+                    }
+                }
+                extra_notes.push(format!(
+                    "{names} terminate the path at the chip ({ohms:.0} Ω as the path sees it): the insertion loss counts the power into the termination as delivered ({corr:.2} dB added back)"
+                ));
+                term = Some((names, ohms));
+            }
+        }
+        if let Ok(rep) = &mut r {
+            rep.notes.extend(extra_notes);
+        }
         let mut path = Path {
             name,
             class,
@@ -607,8 +839,10 @@ pub fn run(
             findings: Vec::new(),
             reflections: Vec::new(),
             losses: Vec::new(),
+            termination: term,
+            il_corr_db: corr,
         };
-        judge(&mut path, setup);
+        judge(&mut path, setup, board);
         out.paths.push(path);
     }
     out.paths.sort_by_key(|p| (p.class, natural(&p.name)));
@@ -680,7 +914,7 @@ impl RfReport {
     pub fn failing(&self) -> usize {
         self.paths
             .iter()
-            .filter(|p| p.status != Status::Pass)
+            .filter(|p| matches!(p.status, Status::Check | Status::Failed))
             .count()
     }
 
@@ -695,14 +929,24 @@ impl RfReport {
             .iter()
             .filter(|p| p.status == Status::Check)
             .count();
-        let failed = self.paths.len() - ok - check;
+        let not_rf = self
+            .paths
+            .iter()
+            .filter(|p| p.status == Status::NotRf)
+            .count();
+        let failed = self.paths.len() - ok - check - not_rf;
         format!(
-            "{} RF path(s), {}-{} GHz: {ok} pass, {check} to check{}; return loss goal {:.0} dB{}; {} kind(s) of via solved in 3D",
-            self.paths.len(),
+            "{} RF path(s), {}-{} GHz: {ok} pass, {check} to check{}{}; return loss goal {:.0} dB{}; {} kind(s) of via solved in 3D",
+            self.paths.len() - not_rf,
             self.band.0,
             self.band.1,
             if failed > 0 {
                 format!(", {failed} not followed")
+            } else {
+                String::new()
+            },
+            if not_rf > 0 {
+                format!(" ({not_rf} connector line(s) found not to be RF, listed apart)")
             } else {
                 String::new()
             },
@@ -872,7 +1116,11 @@ impl RfReport {
     /// Every path's insertion and return loss on one chart, coloured by
     /// class.
     pub fn svg(&self, title: &str) -> String {
-        let ok: Vec<&Path> = self.paths.iter().filter(|p| p.report.is_ok()).collect();
+        let ok: Vec<&Path> = self
+            .paths
+            .iter()
+            .filter(|p| p.report.is_ok() && p.status != Status::NotRf)
+            .collect();
         let rows = ok.len().max(1);
         let legend_h = 18.0 * rows as f64 + 20.0;
         let (w, l, r) = (980.0, 64.0, 300.0);
@@ -892,8 +1140,7 @@ impl RfReport {
         );
         let il_lo = ok
             .iter()
-            .filter_map(|p| p.report.as_ref().ok())
-            .flat_map(|r| r.s.iter().map(|s| s[2].db()))
+            .flat_map(|p| p.s21_db())
             .fold(0.0f64, f64::min)
             .max(-40.0);
         let nice = |v: f64| {
@@ -983,7 +1230,7 @@ impl RfReport {
             for (i, p) in ok.iter().enumerate() {
                 let rep = p.report.as_ref().unwrap();
                 let vals: Vec<f64> = if k == 0 {
-                    rep.s.iter().map(|s| s[2].db()).collect()
+                    p.s21_db()
                 } else {
                     rl_of(p).iter().map(|s| s.db()).collect()
                 };
@@ -1118,6 +1365,81 @@ mod tests {
         let r = run(&b, &b.stackup, &strict, &|_, _| {}).expect("report");
         assert_eq!(r.paths[0].status, Status::Check);
         assert_eq!(r.failing(), 1);
+    }
+
+    fn rx_board() -> Board {
+        let mut b = crate::pathloss::tests::board();
+        b.nets[1].name = "RX1_IN".into();
+        b.components[0].footprint = "SMA_EDGE".into();
+        b
+    }
+
+    /// Adds a two-pin part from net 1 at x to ground.
+    fn add_shunt(b: &mut Board, des: &str, value: &str, x: f64) {
+        let mut c = b.components[1].clone();
+        c.designator = des.into();
+        c.params.insert("Value".into(), value.into());
+        b.components.push(c);
+        let ci = (b.components.len() - 1) as u32;
+        let mut p = b.geometry.pads[2].clone();
+        p.component = Some(ci);
+        p.name = "1".into();
+        p.net = Some(1);
+        p.at = crate::Point::mil(x, 0.0);
+        b.geometry.pads.push(p.clone());
+        p.name = "2".into();
+        p.net = Some(2);
+        p.at = crate::Point::mil(x, 40.0);
+        b.geometry.pads.push(p);
+    }
+
+    fn one(b: &Board) -> Path {
+        let setup = Setup {
+            points: 30,
+            vias_3d: false,
+            ..Default::default()
+        };
+        let r = run(b, &b.stackup, &setup, &|_, _| {}).expect("report");
+        r.paths.into_iter().next().expect("a path")
+    }
+
+    #[test]
+    fn a_big_capacitor_to_ground_is_not_rf() {
+        let mut b = rx_board();
+        add_shunt(&mut b, "C9", "1uF", 1700.0);
+        let p = one(&b);
+        assert_eq!(p.status, Status::NotRf, "{:?}", p.findings);
+        assert!(p.findings[0].contains("C9"));
+    }
+
+    #[test]
+    fn a_zero_ohm_strap_to_ground_is_left_off() {
+        let mut b = rx_board();
+        add_shunt(&mut b, "R9", "0R", 1700.0);
+        let p = one(&b);
+        let rep = p.report.as_ref().unwrap();
+        assert!(p.il_at(3.0).unwrap() < 3.0, "{:?}", p.il_at(3.0));
+        assert!(
+            rep.notes.iter().any(|n| n.contains("R9")),
+            "{:?}",
+            rep.notes
+        );
+    }
+
+    #[test]
+    fn a_termination_at_the_chip_is_the_load() {
+        let mut b = rx_board();
+        let bare = one(&b);
+        add_shunt(&mut b, "R9", "49.9", 2000.0);
+        let p = one(&b);
+        let (names, ohms) = p.termination.clone().expect("termination");
+        assert_eq!(names, "R9");
+        assert!((ohms - 49.9).abs() < 0.1);
+        // About 3 dB split into the termination, added back.
+        assert!((p.il_corr_db - 3.0).abs() < 0.1, "{}", p.il_corr_db);
+        let (a, z) = (bare.il_at(3.0).unwrap(), p.il_at(3.0).unwrap());
+        assert!((a - z).abs() < 0.5, "{a} {z}");
+        assert!(p.load.as_deref().is_some_and(|l| l.contains("termination")));
     }
 
     #[test]

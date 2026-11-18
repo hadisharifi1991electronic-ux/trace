@@ -308,6 +308,7 @@ impl RfWindow {
                                         Status::Pass => Color32::from_rgb(90, 200, 120),
                                         Status::Check => Color32::from_rgb(235, 170, 60),
                                         Status::Failed => Color32::LIGHT_RED,
+                                        Status::NotRf => Color32::GRAY,
                                     };
                                     ui.label(RichText::new(p.status.name()).color(col).strong());
                                     ui.end_row();

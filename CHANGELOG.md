@@ -3,6 +3,44 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.85.0 (2026-11-18)
+
+Schematic editing at the level of everyday Altium work:
+
+- Select many things at once: drag on the empty sheet for a selection box
+  (left to right picks what is wholly inside, right to left what it
+  touches; blue and dashed green as on the board), Shift or Ctrl+click
+  adds or takes away, Ctrl+A selects the whole sheet, Esc clears. Parts,
+  wires, net labels, power ports, ports, junctions and No ERC markers can
+  all be picked. Panning moved to the right or middle mouse button (the
+  left still pans with the Wire, Label and other tools).
+- Drag a selection to move it as one: wires inside move whole, wires to
+  parts left behind stretch and bend square to keep hold of their pins.
+  Space turns the selection, X and Y mirror it (parts flip their pins,
+  graphics and arcs; texts stay readable), Delete removes it, all as one
+  undo step. The side panel shows what is selected with Turn, Mirror X,
+  Mirror Y, Copy and Delete buttons.
+- Copy, cut and paste (Ctrl+C, Ctrl+X, Ctrl+V), on the same sheet or
+  another: the paste follows the pointer until a click drops it (Space,
+  X and Y work while it floats, Esc takes it back). Parts get the next
+  free designators across the sheets and the board, gates of one
+  component keep sharing theirs, and the copy's wires join the copy's
+  pins. Ctrl+D duplicates a selection the same way (a single part still
+  lands beside itself).
+- Junctions look after themselves: a dot appears where a wire end, pin or
+  branch meets the middle of a wire and goes when fewer than three ways
+  meet, after moves, turns, pastes and deletes.
+- Power ports (Power port tool, or G): GND, AGND, +3V3, +5V and VCC
+  presets or any net name, in any of Altium's 11 symbol styles (bar,
+  arrow, circle, wave, power/signal ground, earth, GOST), Space turns it
+  before placing. They name the net they touch, move, turn and delete
+  with their symbol and name (deleting an Altium power port used to leave
+  its symbol behind), and Save as Altium writes them as power port
+  records.
+- No ERC markers (No ERC tool): mark a pin or wire as left open on
+  purpose so the ERC skips it; they move, copy and delete like the rest
+  and are written to the Altium sheet (new markers used to be dropped).
+
 ## 0.84.0 (2026-11-18)
 
 - Chip L/C parasitics library (`trace_core::lcparts`): the Path loss, the

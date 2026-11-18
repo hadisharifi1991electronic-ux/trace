@@ -131,6 +131,7 @@ fn blanket(p: &Props) -> SchShape {
         dashed: true,
         part: None,
         wire: None,
+        tag: None,
     }
 }
 
@@ -512,6 +513,7 @@ impl Builder<'_> {
             dashed: matches!(p.int("LINESTYLE").or(p.int("LINESTYLEEXT")), Some(1..=3)),
             part: self.part_of[k],
             wire: None,
+            tag: None,
         });
     }
 
@@ -524,6 +526,7 @@ impl Builder<'_> {
             dashed: false,
             part: self.part_of[k],
             wire: None,
+            tag: None,
         });
     }
 
@@ -872,6 +875,7 @@ fn read_records(records: &[SchRecord], name: String, file_name: &str) -> Sheet {
                     dashed: false,
                     part: None,
                     wire: wire.then_some(wi),
+                    tag: None,
                 });
                 if wire {
                     b.d.wires.push(pts);
@@ -900,6 +904,7 @@ fn read_records(records: &[SchRecord], name: String, file_name: &str) -> Sheet {
                     dashed: false,
                     part: None,
                     wire: None,
+                    tag: None,
                 });
             }
             Some(NO_ERC) => {
@@ -1061,6 +1066,7 @@ fn border(d: &mut Drawing, p: &Props) {
             dashed: false,
             part: None,
             wire: None,
+            tag: None,
         });
     };
     frame([0.0, 0.0], [w, h]);
@@ -1100,6 +1106,7 @@ fn border(d: &mut Drawing, p: &Props) {
                 dashed: false,
                 part: None,
                 wire: None,
+                tag: None,
             });
             d.shapes.push(SchShape {
                 geom: SchGeom::Line(vec![[x, h - m], [x, h]]),
@@ -1109,6 +1116,7 @@ fn border(d: &mut Drawing, p: &Props) {
                 dashed: false,
                 part: None,
                 wire: None,
+                tag: None,
             });
         }
     }
@@ -1130,6 +1138,7 @@ fn border(d: &mut Drawing, p: &Props) {
                     dashed: false,
                     part: None,
                     wire: None,
+                    tag: None,
                 });
             }
         }
@@ -1178,6 +1187,7 @@ fn pin(b: &mut Builder, k: usize, p: &Props) {
             dashed: false,
             part: Some(part),
             wire: None,
+            tag: None,
         });
     }
     if p.int("SYMBOL_INNEREDGE") == Some(3) {
@@ -1218,6 +1228,7 @@ fn power_port(b: &mut Builder, k: usize, p: &Props) {
     let style = p.int("STYLE").unwrap_or(0);
     let c = color(p, "COLOR", 0x800000);
     let text = p.str("TEXT");
+    let first_shape = b.d.shapes.len();
     b.d.tags.push(NetTag {
         at: vec![loc],
         text: text.clone(),
@@ -1320,6 +1331,7 @@ fn power_port(b: &mut Builder, k: usize, p: &Props) {
             dashed: false,
             part: None,
             wire: None,
+            tag: None,
         });
     }
     if p.bool("SHOWNETNAME") || p.get("SHOWNETNAME").is_none() {
@@ -1334,6 +1346,10 @@ fn power_port(b: &mut Builder, k: usize, p: &Props) {
         b.tag_text(tag, |b| {
             b.text(k, at, text, p.int("FONTID").unwrap_or(1), c, 0, just)
         });
+    }
+    let tag = (b.d.tags.len() - 1) as u32;
+    for s in &mut b.d.shapes[first_shape..] {
+        s.tag = Some(tag);
     }
 }
 
@@ -1390,6 +1406,7 @@ fn port(b: &mut Builder, k: usize, p: &Props) {
         dashed: false,
         part: None,
         wire: None,
+        tag: Some(b.d.tags.len() as u32),
     });
     b.d.tags.push(NetTag {
         at: vec![q(0.0, 0.0), q(w, 0.0)],
@@ -1438,6 +1455,7 @@ fn sheet_entry(b: &mut Builder, k: usize, p: &Props, min: Pt, max: Pt) {
         dashed: false,
         part: None,
         wire: None,
+        tag: None,
     });
     b.d.tags.push(NetTag {
         at: vec![edge],
@@ -1479,6 +1497,7 @@ fn param_set(b: &mut Builder, k: usize, p: &Props) {
         dashed: false,
         part: None,
         wire: None,
+        tag: None,
     });
     let name = p.str("NAME");
     if !name.eq_ignore_ascii_case("DIFFPAIR") && !p.bool("ISHIDDEN") {
@@ -1507,6 +1526,7 @@ fn text_frame(b: &mut Builder, k: usize, p: &Props) {
             dashed: false,
             part: b.part_of[k],
             wire: None,
+            tag: None,
         });
     }
     let margin = len(p, "TEXTMARGIN");
@@ -1538,7 +1558,7 @@ fn text_frame(b: &mut Builder, k: usize, p: &Props) {
 
 #[path = "sch_write.rs"]
 mod write;
-pub use write::write_schdoc;
+pub use write::{power_port_drawing, write_schdoc, POWER_STYLES};
 
 #[cfg(test)]
 mod tests {

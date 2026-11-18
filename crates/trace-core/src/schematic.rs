@@ -227,6 +227,10 @@ pub struct SchShape {
     pub part: Option<u32>,
     /// Which wire or bus this is, for highlighting a net.
     pub wire: Option<u32>,
+    /// The power port or port (`Drawing::tags`) this is the symbol of,
+    /// so it moves and goes with it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tag: Option<u32>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

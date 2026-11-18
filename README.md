@@ -27,9 +27,16 @@ checker and simulator all read.
   project: flat, hierarchical, strict hierarchical or global). A sheet
   placed by several sheet symbols, or by a Repeat(CH,1,4) one, is a
   multi-channel sheet: each copy's parts are named R1_CH1, R1_CH2 and so on
-- edit the schematic: drag parts (their wires follow), Space turns, Delete
-  removes; W draws wires (click the corners, end on a pin or wire), N
-  places net labels; change a part's designator or value in the side
+- edit the schematic: drag parts (their wires follow), Space turns, X / Y
+  mirror, Delete removes; drag on the empty sheet for a selection box
+  (left to right: inside, right to left: touching), Shift or Ctrl+click
+  to add, Ctrl+A for all, and drag, turn, mirror or delete the selection
+  as one; Ctrl+C / Ctrl+X / Ctrl+V copy, cut and paste (on any sheet,
+  with new designators), Ctrl+D duplicates; right or middle drag pans.
+  W draws wires (click the corners, end on a pin or wire; junctions come
+  and go by themselves), N places net labels, G places power ports (GND,
+  +3V3... in Altium's symbol styles), and the No ERC tool marks pins left
+  open on purpose; change a part's designator or value in the side
   panel; Ctrl+Z / Ctrl+Y undo and redo. Save (Ctrl+S) writes a Trace
   schematic (`.tracesch`) next to the project, which opening the
   `.PrjPcb` picks up again. Save as Altium… writes every sheet back as an

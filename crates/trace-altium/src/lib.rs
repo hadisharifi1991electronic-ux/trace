@@ -15,7 +15,7 @@ mod sch;
 pub use intlib::{read_intlib, IntLib};
 pub use pcb::read_pcbdoc;
 pub use pcblib::read_pcblib;
-pub use sch::{read_schdoc, read_schlib, write_schdoc};
+pub use sch::{power_port_drawing, read_schdoc, read_schlib, write_schdoc, POWER_STYLES};
 
 /// How a project's sheets join their nets: its `HierarchyMode`, or
 /// Automatic when it does not say.

@@ -14,12 +14,12 @@ const WIRE_WIDTH: f64 = 10.0;
 const LABEL_COLOR: Rgb = [128, 0, 0];
 const LABEL_SIZE: f64 = 100.0;
 
-fn same(a: Pt, b: Pt) -> bool {
+pub(crate) fn same(a: Pt, b: Pt) -> bool {
     (a[0] - b[0]).abs() <= TOL && (a[1] - b[1]).abs() <= TOL
 }
 
 /// Whether `p` lies on segment a-b away from its ends.
-fn inside_segment(p: Pt, a: Pt, b: Pt) -> bool {
+pub(crate) fn inside_segment(p: Pt, a: Pt, b: Pt) -> bool {
     if same(p, a) || same(p, b) {
         return false;
     }
@@ -41,41 +41,39 @@ pub fn snap(p: Pt, grid: f64) -> Pt {
     [(p[0] / grid).round() * grid, (p[1] / grid).round() * grid]
 }
 
-fn map_geom(g: &mut SchGeom, f: &dyn Fn(Pt) -> Pt, turn: bool) {
-    match g {
-        SchGeom::Line(v) | SchGeom::Poly(v) => v.iter_mut().for_each(|p| *p = f(*p)),
-        SchGeom::Rect { min, max, r } => {
-            let (a, b) = (f(*min), f(*max));
-            *min = [a[0].min(b[0]), a[1].min(b[1])];
-            *max = [a[0].max(b[0]), a[1].max(b[1])];
-            if turn {
-                r.swap(0, 1);
-            }
-        }
-        SchGeom::Arc { c, r, start, end } => {
-            *c = f(*c);
-            if turn {
-                r.swap(0, 1);
-                *start += 90.0;
-                *end += 90.0;
-            }
-        }
-    }
+/// A move of sheet objects: a shift, a quarter turn counter-clockwise
+/// about a point, or a mirror about a vertical (`MirrorX`, flips x) or
+/// horizontal (`MirrorY`, flips y) line.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Xf {
+    Shift(Pt),
+    Turn(Pt),
+    MirrorX(f64),
+    MirrorY(f64),
 }
 
-impl Drawing {
-    /// Puts part `i` through `f` (a shift, or a quarter turn when `turn`),
-    /// with its graphics, text and pins; wires that end on its pins follow.
-    fn map_part(&mut self, i: usize, f: &dyn Fn(Pt) -> Pt, turn: bool) {
-        let me = Some(i as u32);
-        for s in self.shapes.iter_mut().filter(|s| s.part == me) {
-            map_geom(&mut s.geom, f, turn);
+impl Xf {
+    pub fn apply(&self, p: Pt) -> Pt {
+        match *self {
+            Xf::Shift(d) => [p[0] + d[0], p[1] + d[1]],
+            Xf::Turn(c) => [c[0] - (p[1] - c[1]), c[1] + (p[0] - c[0])],
+            Xf::MirrorX(x) => [2.0 * x - p[0], p[1]],
+            Xf::MirrorY(y) => [p[0], 2.0 * y - p[1]],
         }
-        for t in self.texts.iter_mut().filter(|t| t.part == me) {
-            t.at = f(t.at);
-            if turn {
-                // Text stays readable: a half turn draws upright with the
-                // anchor on the opposite corner, as Altium does.
+    }
+
+    /// Puts a text through the move: its anchor, and its turn and
+    /// justification so it still reads left to right or bottom to top
+    /// and covers the mirrored place.
+    pub(crate) fn text(&self, t: &mut SchText) {
+        t.at = self.apply(t.at);
+        let col_flip = |j: u8| j / 3 * 3 + (2 - j % 3);
+        let row_flip = |j: u8| (2 - (j / 3).min(2)) * 3 + j % 3;
+        match self {
+            Xf::Shift(_) => {}
+            Xf::Turn(_) => {
+                // A half turn draws upright with the anchor on the
+                // opposite corner, as Altium does.
                 let r = t.rot + 1;
                 (t.rot, t.just) = if r >= 2 {
                     (r - 2, 8 - t.just)
@@ -83,27 +81,105 @@ impl Drawing {
                     (r, t.just)
                 };
             }
+            Xf::MirrorX(_) => {
+                t.just = if t.rot.is_multiple_of(2) {
+                    col_flip(t.just)
+                } else {
+                    row_flip(t.just)
+                }
+            }
+            Xf::MirrorY(_) => {
+                t.just = if t.rot.is_multiple_of(2) {
+                    row_flip(t.just)
+                } else {
+                    col_flip(t.just)
+                }
+            }
+        }
+    }
+
+    pub(crate) fn geom(&self, g: &mut SchGeom) {
+        let f = |p: Pt| self.apply(p);
+        match g {
+            SchGeom::Line(v) | SchGeom::Poly(v) => v.iter_mut().for_each(|p| *p = f(*p)),
+            SchGeom::Rect { min, max, r } => {
+                let (a, b) = (f(*min), f(*max));
+                *min = [a[0].min(b[0]), a[1].min(b[1])];
+                *max = [a[0].max(b[0]), a[1].max(b[1])];
+                if matches!(self, Xf::Turn(_)) {
+                    r.swap(0, 1);
+                }
+            }
+            SchGeom::Arc { c, r, start, end } => {
+                *c = f(*c);
+                let full = *end - *start >= 359.99;
+                match self {
+                    Xf::Shift(_) => {}
+                    Xf::Turn(_) => {
+                        r.swap(0, 1);
+                        if !full {
+                            *start += 90.0;
+                            *end += 90.0;
+                        }
+                    }
+                    Xf::MirrorX(_) if !full => {
+                        (*start, *end) = (180.0 - *end, 180.0 - *start);
+                    }
+                    Xf::MirrorY(_) if !full => {
+                        (*start, *end) = (-*end, -*start);
+                    }
+                    _ => {}
+                }
+                if !full {
+                    let span = *end - *start;
+                    *start = start.rem_euclid(360.0);
+                    *end = *start + span;
+                }
+            }
+        }
+    }
+}
+
+impl Drawing {
+    /// Puts part `i` through `xf` with its graphics, text and pins; wires
+    /// that end on its pins follow.
+    fn map_part(&mut self, i: usize, xf: Xf) {
+        let moves = self.xf_part(i, xf);
+        self.drag_ends(&moves, &[]);
+        self.connect();
+    }
+
+    /// Moves part `i` without touching wires; returns where its pins went.
+    pub(crate) fn xf_part(&mut self, i: usize, xf: Xf) -> Vec<(Pt, Pt)> {
+        let me = Some(i as u32);
+        for s in self.shapes.iter_mut().filter(|s| s.part == me) {
+            xf.geom(&mut s.geom);
+        }
+        for t in self.texts.iter_mut().filter(|t| t.part == me) {
+            xf.text(t);
         }
         let mut moves = Vec::new();
         for p in self.pins.iter_mut().filter(|p| p.part == i as u32) {
-            let to = f(p.at);
+            let to = xf.apply(p.at);
             moves.push((p.at, to));
             p.at = to;
-            p.base = f(p.base);
+            p.base = xf.apply(p.base);
         }
         if let Some(q) = self.parts.get_mut(i) {
-            let (a, b) = (f(q.min), f(q.max));
+            let (a, b) = (xf.apply(q.min), xf.apply(q.max));
             q.min = [a[0].min(b[0]), a[1].min(b[1])];
             q.max = [a[0].max(b[0]), a[1].max(b[1])];
         }
-        self.drag_ends(&moves);
-        self.connect();
+        moves
     }
 
     /// Moves wire ends sitting on `from` points to the matching `to`
     /// points, bending the last segment so wires stay square.
-    fn drag_ends(&mut self, moves: &[(Pt, Pt)]) {
+    pub(crate) fn drag_ends(&mut self, moves: &[(Pt, Pt)], skip: &[usize]) {
         for w in 0..self.wires.len() {
+            if skip.contains(&w) {
+                continue;
+            }
             let mut changed = false;
             for end in [false, true] {
                 let wire = &mut self.wires[w];
@@ -139,7 +215,7 @@ impl Drawing {
     }
 
     /// Redraws wire `w` from its points.
-    fn sync_wire(&mut self, w: usize) {
+    pub(crate) fn sync_wire(&mut self, w: usize) {
         let pts = self.wires[w].clone();
         if let Some(s) = self.shapes.iter_mut().find(|s| s.wire == Some(w as u32)) {
             s.geom = SchGeom::Line(pts);
@@ -148,7 +224,7 @@ impl Drawing {
 
     /// Moves part `i` by `d` mil, dragging the wires on its pins.
     pub fn move_part(&mut self, i: usize, d: Pt) {
-        self.map_part(i, &|p| [p[0] + d[0], p[1] + d[1]], false);
+        self.map_part(i, Xf::Shift(d));
     }
 
     /// Turns part `i` a quarter turn counter-clockwise about the middle of
@@ -159,7 +235,7 @@ impl Drawing {
             [(q.min[0] + q.max[0]) / 2.0, (q.min[1] + q.max[1]) / 2.0],
             50.0,
         );
-        self.map_part(i, &|p| [c[0] - (p[1] - c[1]), c[1] + (p[0] - c[0])], true);
+        self.map_part(i, Xf::Turn(c));
     }
 
     /// Removes part `i` and everything drawn for it. Wires to its pins stay.
@@ -243,6 +319,7 @@ impl Drawing {
             dashed: false,
             part: None,
             wire: Some(w as u32),
+            tag: None,
         });
         self.wires.push(pts);
         for d in dots {
@@ -252,7 +329,7 @@ impl Drawing {
         Some(w)
     }
 
-    fn add_junction(&mut self, at: Pt) {
+    pub(crate) fn add_junction(&mut self, at: Pt) {
         if self.junctions.iter().any(|&j| same(j, at)) {
             return;
         }
@@ -270,6 +347,7 @@ impl Drawing {
             dashed: false,
             part: None,
             wire: None,
+            tag: None,
         });
     }
 
@@ -360,10 +438,23 @@ impl Drawing {
             return;
         }
         let tag = self.tags.remove(t);
-        // A port or power port keeps its drawing; a label is only its text.
-        if let Some(g) = tag.graphic.filter(|_| tag.kind == TagKind::Label) {
+        // Its name goes with it, and the symbol of a port or power port
+        // (sheet entries stay with their sheet symbol's drawing).
+        let named = matches!(tag.kind, TagKind::Label)
+            || (matches!(tag.kind, TagKind::Power | TagKind::Port)
+                && self.shapes.iter().any(|s| s.tag == Some(t as u32)));
+        if let Some(g) = tag.graphic.filter(|_| named) {
             let keep: Vec<bool> = (0..self.texts.len()).map(|i| i != g as usize).collect();
             self.retain_texts(&keep);
+        }
+        let me = t as u32;
+        self.shapes.retain(|s| s.tag != Some(me));
+        for s in &mut self.shapes {
+            if let Some(v) = &mut s.tag {
+                if *v > me {
+                    *v -= 1;
+                }
+            }
         }
         self.connect();
     }
@@ -501,7 +592,7 @@ impl Drawing {
         let new = self.parts.len() as u32;
         let f = |p: Pt| [p[0] + d[0], p[1] + d[1]];
         self.shapes.extend(shapes.into_iter().map(|mut s| {
-            map_geom(&mut s.geom, &f, false);
+            Xf::Shift(d).geom(&mut s.geom);
             s.part = Some(new);
             s
         }));

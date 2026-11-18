@@ -12,11 +12,125 @@ use std::sync::mpsc::{channel, Receiver};
 use trace_core::eco::{Change, PartInfo, Plan, Sources};
 use trace_core::footprint::{designator_prefix, next_designator, Footprint};
 use trace_core::hier::{self, Scope};
-use trace_core::sch_edit::{snap, WIRE_COLOR};
+use trace_core::sch_edit::{snap, Xf, WIRE_COLOR};
+use trace_core::sch_select::SchSel;
 use trace_core::schematic::{Pt, TagKind};
 use trace_core::{Drawing, SavedSheet, SchFile, SchGeom, Sheet};
 
 mod erc;
+
+/// The one part, tag and wire a selection holds alone, for the side panel.
+fn singles(sel: &SchSel) -> (Option<usize>, Option<usize>, Option<usize>) {
+    let only = |v: &[usize], rest: usize| (v.len() == 1 && rest == 0).then(|| v[0]);
+    (
+        only(&sel.parts, sel.len() - sel.parts.len()),
+        only(&sel.tags, sel.len() - sel.tags.len() - sel.wires.len()),
+        only(&sel.wires, sel.len() - sel.wires.len() - sel.tags.len()),
+    )
+}
+
+/// Sets the selection field by field, so it works while a sheet is
+/// borrowed.
+macro_rules! set_sel {
+    ($s:ident, $sel:expr) => {{
+        let x = $sel;
+        ($s.sel_part, $s.sel_tag, $s.sel_wire) = singles(&x);
+        $s.sel = x;
+    }};
+}
+
+/// What a press at `p` takes hold of: a power port (by its symbol too),
+/// else a part, a wire, a junction or a No ERC marker.
+fn hit_sel(d: &Drawing, boxes: &[[f32; 4]], p: [f64; 2], tol: f64) -> SchSel {
+    let near = |a: [f64; 2], r: f64| (a[0] - p[0]).hypot(a[1] - p[1]) < r;
+    let tag = d.tags.iter().position(|t| {
+        t.kind != TagKind::SheetEntry
+            && (t.at.iter().any(|&a| near(a, tol * 2.0))
+                || (t.kind == TagKind::Port
+                    && t.at.len() == 2
+                    && seg_dist(p, t.at[0], t.at[1]) < tol * 2.0))
+    });
+    let tag = tag.or_else(|| {
+        let (x, y) = (p[0] as f32, p[1] as f32);
+        d.shapes.iter().enumerate().find_map(|(si, s)| {
+            let b = boxes.get(si)?;
+            let t = s.tag?;
+            let kind = d.tags.get(t as usize)?.kind;
+            (kind == TagKind::Power && x >= b[0] && x <= b[2] && y >= b[1] && y <= b[3])
+                .then_some(t as usize)
+        })
+    });
+    if let Some(t) = tag {
+        return SchSel::tag(t);
+    }
+    if let Some(i) = part_at(d, p) {
+        return SchSel::part(i);
+    }
+    if let Some(m) = d.no_erc.iter().position(|&a| near(a, tol * 2.0)) {
+        return SchSel {
+            no_erc: vec![m],
+            ..Default::default()
+        };
+    }
+    if let Some(w) = d
+        .wires
+        .iter()
+        .position(|w| w.windows(2).any(|s| seg_dist(p, s[0], s[1]) < tol))
+    {
+        return SchSel::wire(w);
+    }
+    if let Some(j) = d.junctions.iter().position(|&a| near(a, tol * 2.0)) {
+        return SchSel {
+            junctions: vec![j],
+            ..Default::default()
+        };
+    }
+    SchSel::default()
+}
+
+/// Draws the lines and circles of `g` as a preview in one colour.
+fn paint_ghost(painter: &egui::Painter, view: View, g: &Drawing, c: Color32) {
+    let to = |p: &[f64; 2]| view.to_screen(p[0] as f32, p[1] as f32);
+    let stroke = Stroke::new((10.0 * view.scale).max(1.5), c);
+    for s in &g.shapes {
+        match &s.geom {
+            SchGeom::Line(v) => {
+                painter.add(Shape::line(v.iter().map(to).collect(), stroke));
+            }
+            SchGeom::Poly(v) => {
+                painter.add(Shape::closed_line(v.iter().map(to).collect(), stroke));
+            }
+            SchGeom::Arc {
+                c: cc,
+                r,
+                start,
+                end,
+            } => {
+                let pts: Vec<Pos2> = arc_points(*cc, *r, *start, *end).iter().map(to).collect();
+                painter.add(Shape::line(pts, stroke));
+            }
+            SchGeom::Rect { min, max, .. } => {
+                painter.rect_stroke(Rect::from_two_pos(to(min), to(max)), 0.0, stroke);
+            }
+        }
+    }
+    for t in &g.texts {
+        let size = (t.size as f32 * view.scale).max(9.0);
+        let fx = [0.0, 0.5, 1.0][(t.just % 3) as usize];
+        let fy = [1.0, 0.5, 0.0][(t.just / 3).min(2) as usize];
+        let align = egui::Align2([
+            [egui::Align::Min, egui::Align::Center, egui::Align::Max][(fx * 2.0) as usize],
+            [egui::Align::Min, egui::Align::Center, egui::Align::Max][(fy * 2.0) as usize],
+        ]);
+        painter.text(
+            to(&t.at),
+            align,
+            &t.text,
+            FontId::proportional(size * 0.92),
+            c,
+        );
+    }
+}
 
 /// Grid the editing tools snap to, in mil.
 const GRID: f64 = 50.0;
@@ -28,16 +142,28 @@ pub enum SchTool {
     Select,
     Wire,
     Label,
+    /// Places power ports (GND, +3V3...).
+    Power,
+    /// Places No ERC markers.
+    NoErc,
 }
 
 /// An edit worked out while drawing, made once the drawing is done with.
 enum Act {
-    Move(usize, [f64; 2]),
-    Turn(usize),
-    DeletePart(usize),
+    /// Shifts the selection (one undo step covers a whole drag).
+    Move([f64; 2]),
+    /// Turns or mirrors the selection.
+    Xf(XfKind),
+    Delete,
     CopyPart(usize),
-    DeleteWire(usize),
-    DeleteTag(usize),
+    Copy,
+    Cut,
+    Paste,
+    /// Copies the selection and pastes it to follow the pointer.
+    Duplicate,
+    SelectAll,
+    Power([f64; 2]),
+    NoErc([f64; 2]),
     Wire(Vec<[f64; 2]>),
     Label([f64; 2], String),
     /// Takes back a symbol that was being placed.
@@ -45,6 +171,13 @@ enum Act {
     Undo,
     Redo,
     Save,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum XfKind {
+    Turn,
+    MirrorX,
+    MirrorY,
 }
 
 /// (designator, pad name) -> board net.
@@ -122,8 +255,19 @@ pub struct Schematics {
     pub saved_to: Option<PathBuf>,
     sel_wire: Option<usize>,
     sel_tag: Option<usize>,
-    /// A part being dragged, and the grid point it was last moved to.
-    drag: Option<(usize, [f64; 2])>,
+    /// Everything selected on the current sheet.
+    sel: SchSel,
+    /// The selection is being dragged: the grid point it was last moved to.
+    drag: Option<[f64; 2]>,
+    /// Where a selection box was started, in sheet mil.
+    boxing: Option<[f64; 2]>,
+    /// What Ctrl+C took, as a sheet of its own.
+    clip: Option<Sheet>,
+    /// The power port the Power tool places: net, Altium style, quarter
+    /// turns from pointing right.
+    power_net: String,
+    power_style: i64,
+    power_orient: i64,
     /// Points of the wire being drawn.
     wire_pts: Vec<[f64; 2]>,
     /// Where a net label goes, while its name is typed.
@@ -565,10 +709,8 @@ impl Schematics {
         self.edit(|s| made = s.place_symbol(&lib, spot, &n2));
         if let Some(n) = made {
             self.tool = SchTool::Select;
-            self.sel_part = Some(n);
-            self.sel_wire = None;
-            self.sel_tag = None;
-            self.drag = Some((n, spot));
+            self.pick_sel(SchSel::part(n));
+            self.drag = Some(spot);
             self.floating = true;
             self.note = Some(format!(
                 "Placing {name} ({}): click to drop it, Space turns it, Esc cancels.",
@@ -893,13 +1035,69 @@ impl Schematics {
         let n2 = new.clone();
         self.edit(|s| made = s.copy_part(i, d, &n2));
         if let Some(n) = made {
-            self.sel_part = Some(n);
-            self.sel_wire = None;
-            self.sel_tag = None;
+            self.pick_sel(SchSel::part(n));
             self.note = Some(format!(
                 "Copied {name} as {new}. Wire it up, then Update PCB adds it to the board."
             ));
         }
+    }
+
+    /// Selects `sel`; one part, wire or tag alone is also the one the side
+    /// panel edits.
+    fn pick_sel(&mut self, sel: SchSel) {
+        set_sel!(self, sel);
+    }
+
+    /// New designators for the parts of a clipboard sheet: the next free
+    /// ones, gates of one part sharing theirs.
+    fn paste_names(&self, clip: &Sheet, scene: Option<&Scene>) -> HashMap<String, String> {
+        let mut taken: HashSet<String> = self
+            .slots
+            .iter()
+            .filter_map(|s| s.sheet.as_ref())
+            .flat_map(|s| s.drawing.parts.iter())
+            .map(|p| p.designator.to_ascii_uppercase())
+            .collect();
+        let empty = trace_core::Board::default();
+        let board = scene.map_or(&empty, |sc| &sc.board);
+        let mut names = HashMap::new();
+        for q in &clip.drawing.parts {
+            if names.contains_key(&q.designator) {
+                continue;
+            }
+            let prefix = designator_prefix(&q.designator);
+            let prefix = if prefix.is_empty() { "U" } else { prefix };
+            let n = next_designator(board, prefix, &taken);
+            taken.insert(n.to_ascii_uppercase());
+            names.insert(q.designator.clone(), n);
+        }
+        names
+    }
+
+    /// Pastes the clipboard to follow the pointer (at `at`) until a click
+    /// drops it.
+    fn paste(&mut self, at: [f64; 2], scene: Option<&Scene>) {
+        let Some(clip) = self.clip.clone() else {
+            self.note = Some("Nothing copied yet: select something and press Ctrl+C.".into());
+            return;
+        };
+        let Some((lo, _)) = clip.drawing.sel_bounds(&clip.drawing.select_all()) else {
+            return;
+        };
+        let names = self.paste_names(&clip, scene);
+        let d = snap([at[0] - lo[0], at[1] - lo[1]], GRID);
+        let mut made = SchSel::default();
+        self.edit(|s| made = s.paste_clip(&clip, d, &names));
+        let n = made.parts.len();
+        self.pick_sel(made);
+        self.tool = SchTool::Select;
+        self.drag = Some(snap(at, GRID));
+        self.floating = true;
+        self.note = Some(if n > 0 {
+            format!("Pasted with new designators ({n} parts): click to drop, Space turns, X / Y mirror, Esc cancels.")
+        } else {
+            "Pasted: click to drop, Space turns, X / Y mirror, Esc cancels.".into()
+        });
     }
 
     /// The board now matches the sheets.
@@ -932,6 +1130,9 @@ impl Schematics {
     fn after_edit(&mut self, i: usize) {
         if let Some(s) = self.slots.get_mut(i) {
             if let Some(sheet) = &s.sheet {
+                if i == self.current {
+                    self.sel.clamp(&sheet.drawing);
+                }
                 s.boxes = sheet
                     .drawing
                     .shapes
@@ -972,9 +1173,7 @@ impl Schematics {
                 self.select_sheet(i);
             }
         }
-        self.sel_part = None;
-        self.sel_wire = None;
-        self.sel_tag = None;
+        self.pick_sel(SchSel::default());
         for i in touched {
             self.after_edit(i);
         }
@@ -985,11 +1184,10 @@ impl Schematics {
         if i < self.slots.len() && i != self.current {
             self.current = i;
             self.sel_net = None;
-            self.sel_part = None;
-            self.sel_wire = None;
-            self.sel_tag = None;
+            self.pick_sel(SchSel::default());
             self.wire_pts.clear();
             self.drag = None;
+            self.boxing = None;
             self.needs_fit = true;
         }
     }
@@ -1190,7 +1388,7 @@ impl Schematics {
                 self.select_sheet(si);
                 self.needs_fit = false;
                 self.focus = Some(b);
-                self.sel_part = Some(pi);
+                self.pick_sel(SchSel::part(pi));
                 return true;
             }
         }
@@ -1229,7 +1427,7 @@ impl Schematics {
                 (
                     SchTool::Select,
                     "Select",
-                    "Click to select, drag parts to move them",
+                    "Click to select (Shift or Ctrl+click adds), drag to move, drag on the sheet for a box (left to right: inside; right to left: touching). Right or middle drag pans.",
                 ),
                 (
                     SchTool::Wire,
@@ -1240,6 +1438,16 @@ impl Schematics {
                     SchTool::Label,
                     "Net label",
                     "Click a wire or pin to name its net (N)",
+                ),
+                (
+                    SchTool::Power,
+                    "Power port",
+                    "Click a pin or wire end to place a power port: GND, +3V3... (G; Space turns it)",
+                ),
+                (
+                    SchTool::NoErc,
+                    "No ERC",
+                    "Click a pin or wire to mark it as left open on purpose: the ERC does not check it",
                 ),
             ] {
                 if ui
@@ -1252,6 +1460,125 @@ impl Schematics {
                 }
             }
         });
+        if self.tool == SchTool::Power {
+            if self.power_net.is_empty() {
+                self.power_net = "GND".into();
+                self.power_style = 4;
+                self.power_orient = 3;
+            }
+            ui.horizontal(|ui| {
+                for (net, style, orient) in [
+                    ("GND", 4, 3),
+                    ("AGND", 5, 3),
+                    ("+3V3", 2, 1),
+                    ("+5V", 2, 1),
+                    ("VCC", 1, 1),
+                ] {
+                    if ui.selectable_label(self.power_net == net, net).clicked() {
+                        self.power_net = net.into();
+                        self.power_style = style;
+                        self.power_orient = orient;
+                    }
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Net");
+                ui.add(egui::TextEdit::singleline(&mut self.power_net).desired_width(90.0));
+                let name = trace_altium::POWER_STYLES
+                    .iter()
+                    .find(|s| s.0 == self.power_style)
+                    .map_or("Bar", |s| s.1);
+                egui::ComboBox::from_id_salt("power-style")
+                    .selected_text(name)
+                    .show_ui(ui, |ui| {
+                        for (k, n) in trace_altium::POWER_STYLES {
+                            ui.selectable_value(&mut self.power_style, k, n);
+                        }
+                    });
+            });
+            let way = ["right", "up", "left", "down"][self.power_orient.rem_euclid(4) as usize];
+            ui.label(
+                RichText::new(format!("Points {way}: Space turns it."))
+                    .weak()
+                    .small(),
+            );
+        }
+        // What is selected, and what can be done with it.
+        if self.sel.len() > 1 {
+            let s = &self.sel;
+            let mut what = Vec::new();
+            for (n, one, many) in [
+                (s.parts.len(), "part", "parts"),
+                (s.wires.len(), "wire", "wires"),
+                (s.tags.len(), "label or port", "labels and ports"),
+                (s.junctions.len(), "junction", "junctions"),
+                (s.no_erc.len(), "No ERC marker", "No ERC markers"),
+            ] {
+                if n > 0 {
+                    what.push(format!("{n} {}", if n == 1 { one } else { many }));
+                }
+            }
+            ui.label(RichText::new(format!("Selected: {}", what.join(", "))).strong());
+            let mut kind = None;
+            let mut del = false;
+            let mut copy = false;
+            ui.horizontal_wrapped(|ui| {
+                if ui.button("Turn").on_hover_text("Space").clicked() {
+                    kind = Some(Xf::Turn([0.0, 0.0]));
+                }
+                if ui
+                    .button("Mirror X")
+                    .on_hover_text("X: flip left to right")
+                    .clicked()
+                {
+                    kind = Some(Xf::MirrorX(0.0));
+                }
+                if ui
+                    .button("Mirror Y")
+                    .on_hover_text("Y: flip top to bottom")
+                    .clicked()
+                {
+                    kind = Some(Xf::MirrorY(0.0));
+                }
+                if ui
+                    .button("Copy")
+                    .on_hover_text("Ctrl+C; Ctrl+V pastes")
+                    .clicked()
+                {
+                    copy = true;
+                }
+                if ui.button("Delete").on_hover_text("Delete").clicked() {
+                    del = true;
+                }
+            });
+            let cur = self.current;
+            let sel = self.sel.clone();
+            let centre = self
+                .slots
+                .get(cur)
+                .and_then(|s| s.sheet.as_ref())
+                .and_then(|s| s.drawing.sel_centre(&sel));
+            if let (Some(k), Some(c)) = (kind, centre) {
+                let xf = match k {
+                    Xf::Turn(_) => Xf::Turn(c),
+                    Xf::MirrorX(_) => Xf::MirrorX(c[0]),
+                    _ => Xf::MirrorY(c[1]),
+                };
+                self.edit(|s| s.drawing.xf_sel(&sel, xf));
+            }
+            if copy {
+                self.clip = self
+                    .slots
+                    .get(cur)
+                    .and_then(|s| s.sheet.as_ref())
+                    .map(|s| s.clip(&sel));
+                self.note = Some("Copied: Ctrl+V pastes it here or on another sheet.".into());
+            }
+            if del {
+                self.edit(|s| s.drawing.delete_sel(&sel));
+                self.pick_sel(SchSel::default());
+            }
+        }
         if ui
             .button("Place symbol…")
             .on_hover_text("Place a new part from a symbol library (.SchLib or .IntLib) (P)")
@@ -1663,25 +1990,39 @@ impl Schematics {
                 }
             }
         }
-        // Pressing on a part with the Select tool drags it; anywhere else
-        // pans.
-        if resp.drag_started() && self.tool == SchTool::Select && !self.floating {
+        // With the Select tool, pressing on something drags it (with the
+        // rest of the selection when it is selected), and pressing on the
+        // empty sheet draws a selection box: left to right picks what is
+        // wholly inside, right to left what it touches. The right or
+        // middle button pans, and so does the left with the other tools.
+        let primary = resp.drag_started_by(egui::PointerButton::Primary);
+        if primary && self.tool == SchTool::Select && !self.floating {
             let origin = ui.input(|i| i.pointer.press_origin());
             if let Some(o) = origin {
                 let b = self.view.to_board(o);
                 let p = [b[0] as f64, b[1] as f64];
-                if let Some(i) = part_at(&sheet.drawing, p) {
+                let tol = (5.0 / self.view.scale as f64).max(8.0);
+                let hit = hit_sel(&sheet.drawing, &self.slots[cur].boxes, p, tol);
+                if hit.is_empty() {
+                    self.boxing = Some(p);
+                } else {
+                    if !self.sel.holds(&hit) {
+                        set_sel!(self, hit);
+                    }
                     self.undo.push(vec![(cur, sheet.clone())]);
                     self.redo.clear();
-                    self.drag = Some((i, snap(p, GRID)));
-                    self.sel_part = Some(i);
+                    self.drag = Some(snap(p, GRID));
                     self.sel_net = None;
-                    self.sel_wire = None;
-                    self.sel_tag = None;
                 }
             }
         }
-        if resp.dragged() && self.drag.is_none() {
+        let pan = resp.dragged_by(egui::PointerButton::Secondary)
+            || resp.dragged_by(egui::PointerButton::Middle)
+            || (resp.dragged_by(egui::PointerButton::Primary)
+                && self.drag.is_none()
+                && self.boxing.is_none()
+                && self.tool != SchTool::Select);
+        if pan {
             let d = resp.drag_delta();
             self.view.tx += d.x;
             self.view.ty += d.y;
@@ -1768,12 +2109,36 @@ impl Schematics {
                 ));
             }
         }
-        if let Some(p) = self.sel_part.and_then(|i| d.parts.get(i)) {
+        for p in self.sel.parts.iter().filter_map(|&i| d.parts.get(i)) {
             let r = Rect::from_two_pos(
                 view.to_screen(p.min[0] as f32 - 30.0, p.min[1] as f32 - 30.0),
                 view.to_screen(p.max[0] as f32 + 30.0, p.max[1] as f32 + 30.0),
             );
             shapes.push(Shape::rect_filled(r, 2.0, HIGHLIGHT.gamma_multiply(0.25)));
+        }
+        // A selected power port's symbol.
+        for &t in &self.sel.tags {
+            let mut b: Option<[f32; 4]> = None;
+            for (si, sh) in d.shapes.iter().enumerate() {
+                if sh.tag == Some(t as u32) {
+                    let x = slot.boxes[si];
+                    b = Some(b.map_or(x, |o| {
+                        [
+                            o[0].min(x[0]),
+                            o[1].min(x[1]),
+                            o[2].max(x[2]),
+                            o[3].max(x[3]),
+                        ]
+                    }));
+                }
+            }
+            if let Some(x) = b {
+                let r = Rect::from_two_pos(
+                    view.to_screen(x[0] - 20.0, x[1] - 20.0),
+                    view.to_screen(x[2] + 20.0, x[3] + 20.0),
+                );
+                shapes.push(Shape::rect_filled(r, 2.0, HIGHLIGHT.gamma_multiply(0.25)));
+            }
         }
         let px = |w: f64| ((w as f32) * view.scale).max(1.0);
         for (si, sh) in d.shapes.iter().enumerate() {
@@ -1904,20 +2269,58 @@ impl Schematics {
 
         // Selected wire and label, the wire being drawn.
         let sel_stroke = Stroke::new((30.0 * view.scale).max(4.0), HIGHLIGHT.gamma_multiply(0.5));
-        if let Some(w) = self.sel_wire.and_then(|w| d.wires.get(w)) {
+        for w in self.sel.wires.iter().filter_map(|&w| d.wires.get(w)) {
             let pts: Vec<Pos2> = w
                 .iter()
                 .map(|p| view.to_screen(p[0] as f32, p[1] as f32))
                 .collect();
             painter.add(Shape::line(pts, sel_stroke));
         }
-        if let Some(t) = self.sel_tag.and_then(|t| d.tags.get(t)) {
-            for a in &t.at {
-                painter.circle_stroke(
-                    view.to_screen(a[0] as f32, a[1] as f32),
-                    (40.0 * view.scale).max(6.0),
-                    sel_stroke,
-                );
+        let ring = |a: &[f64; 2]| {
+            painter.circle_stroke(
+                view.to_screen(a[0] as f32, a[1] as f32),
+                (40.0 * view.scale).max(6.0),
+                sel_stroke,
+            );
+        };
+        for t in self.sel.tags.iter().filter_map(|&t| d.tags.get(t)) {
+            t.at.iter().for_each(ring);
+        }
+        self.sel
+            .junctions
+            .iter()
+            .filter_map(|&j| d.junctions.get(j))
+            .for_each(ring);
+        self.sel
+            .no_erc
+            .iter()
+            .filter_map(|&j| d.no_erc.get(j))
+            .for_each(ring);
+        // The selection box being drawn.
+        if let (Some(a), Some(b)) = (
+            self.boxing,
+            resp.hover_pos().or(ui.input(|i| i.pointer.latest_pos())),
+        ) {
+            let pa = view.to_screen(a[0] as f32, a[1] as f32);
+            let r = Rect::from_two_pos(pa, b);
+            let touching = b.x < pa.x;
+            let c = if touching {
+                Color32::from_rgb(90, 200, 120)
+            } else {
+                Color32::from_rgb(90, 150, 255)
+            };
+            painter.rect_filled(r, 0.0, c.gamma_multiply(0.12));
+            if touching {
+                let pts = [
+                    r.left_top(),
+                    r.right_top(),
+                    r.right_bottom(),
+                    r.left_bottom(),
+                    r.left_top(),
+                ];
+                painter.extend(Shape::dashed_line(&pts, Stroke::new(1.0_f32, c), 6.0, 4.0));
+            } else {
+                painter.rect_stroke(r, 0.0, Stroke::new(1.0_f32, c));
             }
         }
         let pointer = resp.hover_pos().map(|p| view.to_board(p));
@@ -1958,7 +2361,27 @@ impl Schematics {
                 painter.add(Shape::line(pts, Stroke::new(px(10.0).max(2.0), wire_color)));
             }
         }
-        if matches!(self.tool, SchTool::Wire | SchTool::Label) {
+        if self.tool == SchTool::Power {
+            if let Some(c) = snapped {
+                let g = trace_altium::power_port_drawing(
+                    c,
+                    &self.power_net,
+                    self.power_style,
+                    self.power_orient,
+                );
+                paint_ghost(&painter, view, &g, rgb([128, 0, 0]));
+            }
+        }
+        if self.tool == SchTool::NoErc {
+            if let Some(c) = snapped {
+                let g = trace_core::sch_select::no_erc_drawing(c);
+                paint_ghost(&painter, view, &g, Color32::RED);
+            }
+        }
+        if matches!(
+            self.tool,
+            SchTool::Wire | SchTool::Label | SchTool::Power | SchTool::NoErc
+        ) {
             if let Some(c) = snapped {
                 let at = view.to_screen(c[0] as f32, c[1] as f32);
                 let r = 6.0;
@@ -2094,11 +2517,41 @@ impl Schematics {
                         self.label_text.clear();
                     }
                 }
+                SchTool::Power => {
+                    if resp.clicked() {
+                        act = Some(Act::Power(c));
+                    }
+                }
+                SchTool::NoErc => {
+                    if resp.clicked() {
+                        act = Some(Act::NoErc(c));
+                    }
+                }
                 SchTool::Select => {
-                    if let Some((i, last)) = self.drag {
-                        if c != last {
-                            act = Some(Act::Move(i, [c[0] - last[0], c[1] - last[1]]));
-                            self.drag = Some((i, c));
+                    if let Some(last) = self.drag {
+                        let g = snap(p, GRID);
+                        if g != last {
+                            act = Some(Act::Move([g[0] - last[0], g[1] - last[1]]));
+                            self.drag = Some(g);
+                        }
+                    }
+                    if self.boxing.is_some() && !resp.dragged() {
+                        let a = self.boxing.take().unwrap_or(p);
+                        let touching = p[0] < a[0];
+                        let mut found = d.select_box(a, p, touching);
+                        let (shift, ctrl) = ui.input(|i| (i.modifiers.shift, i.modifiers.command));
+                        if shift || ctrl {
+                            let mut all = self.sel.clone();
+                            all.add(&found);
+                            found = all;
+                        }
+                        let n = found.len();
+                        set_sel!(self, found);
+                        self.sel_net = None;
+                        if n > 1 {
+                            self.note = Some(format!(
+                                "{n} selected: drag to move, Space turns, X / Y mirror, Delete, Ctrl+C copies."
+                            ));
                         }
                     }
                     if self.floating {
@@ -2132,9 +2585,19 @@ impl Schematics {
                                 return None;
                             }
                         }
+                    } else if resp.clicked()
+                        && ui.input(|i| i.modifiers.shift || i.modifiers.command)
+                    {
+                        // Shift or Ctrl+click adds to the selection or takes away.
+                        let hit = hit_sel(d, &slot.boxes, p, tol);
+                        let mut all = self.sel.clone();
+                        all.toggle(&hit);
+                        set_sel!(self, all);
+                        self.sel_net = None;
                     } else if resp.clicked() {
-                        self.sel_wire = if hit_pin.is_none() { hit_wire } else { None };
-                        self.sel_tag = hit_tag;
+                        let hit = hit_sel(d, &slot.boxes, p, tol);
+                        let nothing = hit.is_empty();
+                        set_sel!(self, hit);
                         if let Some(n) = hit_net {
                             self.sel_net = Some(n);
                             self.sel_part = None;
@@ -2145,7 +2608,7 @@ impl Schematics {
                                 }
                             }
                         } else if let Some(i) = hit_part {
-                            self.sel_part = Some(i);
+                            set_sel!(self, SchSel::part(i));
                             self.sel_net = None;
                             let des = self.slots[cur].sheet.as_ref().unwrap().drawing.parts[i]
                                 .designator
@@ -2153,7 +2616,9 @@ impl Schematics {
                             pick = Some(Pick::Part(des));
                         } else {
                             self.sel_net = None;
-                            self.sel_part = None;
+                            if nothing {
+                                set_sel!(self, SchSel::default());
+                            }
                         }
                     }
                 }
@@ -2163,11 +2628,64 @@ impl Schematics {
         // Keys, while the pointer is over the sheet and no text is typed.
         let typing = ui.ctx().wants_keyboard_input();
         if resp.hovered() && !typing && act.is_none() {
-            let copy = ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::D));
-            if copy && self.tool == SchTool::Select {
-                if let Some(i) = self.sel_part {
-                    act = Some(Act::CopyPart(i));
-                }
+            let dup = ui.input_mut(|i| i.consume_key(egui::Modifiers::COMMAND, egui::Key::D));
+            if dup && self.tool == SchTool::Select {
+                act = match self.sel_part {
+                    Some(i) if self.sel.len() == 1 => Some(Act::CopyPart(i)),
+                    _ if !self.sel.is_empty() => Some(Act::Duplicate),
+                    _ => None,
+                };
+            }
+            // Ctrl+C, X and V come as clipboard events on most systems.
+            let (copy, cut, paste, all, mx, my, g) = ui.input_mut(|i| {
+                let mut out = (false, false, false);
+                i.events.retain(|e| match e {
+                    egui::Event::Copy => {
+                        out.0 = true;
+                        false
+                    }
+                    egui::Event::Cut => {
+                        out.1 = true;
+                        false
+                    }
+                    egui::Event::Paste(_) => {
+                        out.2 = true;
+                        false
+                    }
+                    _ => true,
+                });
+                (
+                    out.0 || i.consume_key(egui::Modifiers::COMMAND, egui::Key::C),
+                    out.1 || i.consume_key(egui::Modifiers::COMMAND, egui::Key::X),
+                    out.2 || i.consume_key(egui::Modifiers::COMMAND, egui::Key::V),
+                    i.consume_key(egui::Modifiers::COMMAND, egui::Key::A),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::X),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::Y),
+                    i.consume_key(egui::Modifiers::NONE, egui::Key::G),
+                )
+            });
+            let has = !self.sel.is_empty();
+            if copy && has {
+                act = Some(Act::Copy);
+            }
+            if cut && has && !self.floating {
+                act = Some(Act::Cut);
+            }
+            if paste && !self.floating {
+                act = Some(Act::Paste);
+            }
+            if all && !self.floating {
+                act = Some(Act::SelectAll);
+            }
+            if mx && has {
+                act = Some(Act::Xf(XfKind::MirrorX));
+            }
+            if my && has {
+                act = Some(Act::Xf(XfKind::MirrorY));
+            }
+            if g {
+                self.tool = SchTool::Power;
+                self.wire_pts.clear();
             }
             let (w, n, esc, space, del, undo, redo, save) = ui.input_mut(|i| {
                 (
@@ -2197,7 +2715,11 @@ impl Schematics {
             }
             if esc && self.floating {
                 act = Some(Act::CancelPlace);
+            } else if esc && self.tool == SchTool::Select && self.boxing.is_none() {
+                set_sel!(self, SchSel::default());
+                self.sel_net = None;
             } else if esc {
+                self.boxing = None;
                 if self.wire_pts.len() >= 2 {
                     act = Some(Act::Wire(std::mem::take(&mut self.wire_pts)));
                 } else {
@@ -2206,18 +2728,14 @@ impl Schematics {
                 }
             }
             if space {
-                if let Some(i) = self.drag.map(|d| d.0).or(self.sel_part) {
-                    act = Some(Act::Turn(i));
+                if self.tool == SchTool::Power {
+                    self.power_orient = (self.power_orient + 1).rem_euclid(4);
+                } else if !self.sel.is_empty() {
+                    act = Some(Act::Xf(XfKind::Turn));
                 }
             }
-            if del && self.tool == SchTool::Select {
-                act = if let Some(t) = self.sel_tag {
-                    Some(Act::DeleteTag(t))
-                } else if let Some(w) = self.sel_wire {
-                    Some(Act::DeleteWire(w))
-                } else {
-                    self.sel_part.map(Act::DeletePart)
-                };
+            if del && self.tool == SchTool::Select && !self.sel.is_empty() && !self.floating {
+                act = Some(Act::Delete);
             }
             if undo {
                 act = Some(Act::Undo);
@@ -2337,37 +2855,117 @@ impl Schematics {
 
         // Make the edit, now the drawing is no longer borrowed.
         match act {
-            Some(Act::Move(i, dv)) => {
+            Some(Act::Move(dv)) => {
                 // One undo step covers the whole drag.
+                let sel = self.sel.clone();
                 if let Some(s) = self.slots.get_mut(cur).and_then(|s| s.sheet.as_mut()) {
-                    s.drawing.move_part(i, dv);
+                    s.drawing.xf_sel(&sel, Xf::Shift(dv));
                 }
                 self.after_edit(cur);
-                self.sel_part = Some(i);
             }
-            Some(Act::Turn(i)) => {
-                if self.drag.is_some() {
-                    if let Some(s) = self.slots.get_mut(cur).and_then(|s| s.sheet.as_mut()) {
-                        s.drawing.turn_part(i);
+            Some(Act::Xf(kind)) => {
+                let sel = self.sel.clone();
+                let centre = self
+                    .slots
+                    .get(cur)
+                    .and_then(|s| s.sheet.as_ref())
+                    .and_then(|s| s.drawing.sel_centre(&sel));
+                if let Some(c) = centre {
+                    let xf = match kind {
+                        XfKind::Turn => Xf::Turn(c),
+                        XfKind::MirrorX => Xf::MirrorX(c[0]),
+                        XfKind::MirrorY => Xf::MirrorY(c[1]),
+                    };
+                    if self.drag.is_some() {
+                        // Part of the drag's undo step.
+                        if let Some(s) = self.slots.get_mut(cur).and_then(|s| s.sheet.as_mut()) {
+                            s.drawing.xf_sel(&sel, xf);
+                        }
+                        self.after_edit(cur);
+                    } else {
+                        self.edit(|s| s.drawing.xf_sel(&sel, xf));
                     }
-                    self.after_edit(cur);
-                } else {
-                    self.edit(|s| s.drawing.turn_part(i));
                 }
-                self.sel_part = Some(i);
             }
-            Some(Act::DeletePart(i)) => {
-                self.edit(|s| s.drawing.delete_part(i));
-                self.sel_part = None;
+            Some(Act::Delete) => {
+                let sel = self.sel.clone();
+                let n = sel.len();
+                self.edit(|s| s.drawing.delete_sel(&sel));
+                set_sel!(self, SchSel::default());
+                if n > 1 {
+                    self.note = Some(format!("Deleted {n} objects. Ctrl+Z puts them back."));
+                }
             }
             Some(Act::CopyPart(i)) => self.copy_part(i, scene),
-            Some(Act::DeleteWire(w)) => {
-                self.edit(|s| s.drawing.delete_wire(w));
-                self.sel_wire = None;
+            Some(Act::Copy) | Some(Act::Cut) | Some(Act::Duplicate) => {
+                let sel = self.sel.clone();
+                let clip = self
+                    .slots
+                    .get(cur)
+                    .and_then(|s| s.sheet.as_ref())
+                    .map(|s| s.clip(&sel));
+                if let Some(clip) = clip {
+                    let n = sel.len();
+                    self.clip = Some(clip);
+                    match act {
+                        Some(Act::Cut) => {
+                            self.edit(|s| s.drawing.delete_sel(&sel));
+                            set_sel!(self, SchSel::default());
+                            self.note = Some(format!("Cut {n} objects: Ctrl+V pastes them."));
+                        }
+                        Some(Act::Duplicate) => {
+                            let at = pointer
+                                .map(|p| [p[0] as f64, p[1] as f64])
+                                .unwrap_or([0.0, 0.0]);
+                            self.paste(at, scene);
+                        }
+                        _ => {
+                            self.note = Some(format!(
+                                "Copied {n} objects: Ctrl+V pastes them here or on another sheet."
+                            ));
+                        }
+                    }
+                }
             }
-            Some(Act::DeleteTag(t)) => {
-                self.edit(|s| s.drawing.delete_tag(t));
-                self.sel_tag = None;
+            Some(Act::Paste) => {
+                let at = pointer
+                    .map(|p| [p[0] as f64, p[1] as f64])
+                    .unwrap_or_else(|| {
+                        let c = self.view.to_board(self.view.rect.center());
+                        [c[0] as f64, c[1] as f64]
+                    });
+                self.paste(at, scene);
+            }
+            Some(Act::SelectAll) => {
+                let all = self
+                    .slots
+                    .get(cur)
+                    .and_then(|s| s.sheet.as_ref())
+                    .map(|s| s.drawing.select_all())
+                    .unwrap_or_default();
+                set_sel!(self, all);
+                self.tool = SchTool::Select;
+            }
+            Some(Act::Power(at)) => {
+                if self.power_net.trim().is_empty() {
+                    self.power_net = "GND".into();
+                }
+                let g = trace_altium::power_port_drawing(
+                    at,
+                    self.power_net.trim(),
+                    self.power_style,
+                    self.power_orient,
+                );
+                let mut made = None;
+                self.edit(|s| made = s.drawing.add_drawn_tag(&g));
+                if let Some(t) = made {
+                    set_sel!(self, SchSel::tag(t));
+                }
+            }
+            Some(Act::NoErc(at)) => {
+                self.edit(|s| {
+                    s.drawing.add_no_erc(at);
+                });
             }
             Some(Act::Wire(pts)) => {
                 self.edit(|s| {

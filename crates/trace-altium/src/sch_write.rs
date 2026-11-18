@@ -324,6 +324,38 @@ impl Fonts {
     }
 }
 
+/// The kinds of power port symbol Altium draws, by its STYLE number.
+pub const POWER_STYLES: [(i64, &str); 11] = [
+    (2, "Bar"),
+    (1, "Arrow"),
+    (0, "Circle"),
+    (3, "Wave"),
+    (4, "Power ground"),
+    (5, "Signal ground"),
+    (6, "Earth"),
+    (7, "GOST arrow"),
+    (8, "GOST power ground"),
+    (9, "GOST earth"),
+    (10, "GOST bar"),
+];
+
+/// A power port naming net `text` at `at`, drawn as Altium draws it:
+/// `style` as in [`POWER_STYLES`], `orient` quarter turns from pointing
+/// right. The drawing holds the port's tag, its symbol and its name.
+pub fn power_port_drawing(at: Pt, text: &str, style: i64, orient: i64) -> Drawing {
+    let mut r = Rec::new(POWER_PORT);
+    r.set("OWNERPARTID", "-1")
+        .at(at)
+        .set("TEXT", text.to_string())
+        .set("STYLE", style.to_string())
+        .set("ORIENTATION", orient.rem_euclid(4).to_string())
+        .set("SHOWNETNAME", "T")
+        .set("FONTID", "1")
+        .set("COLOR", "128");
+    let props = r.props();
+    draw(None, |b, k| power_port(b, k, &props))
+}
+
 /// Draws one record with the reader's own code.
 fn draw(part: Option<u32>, f: impl FnOnce(&mut Builder, usize)) -> Drawing {
     let recs: Vec<Props> = Vec::new();
@@ -568,6 +600,7 @@ struct Kept {
     junctions: Vec<bool>,
     tags: Vec<bool>,
     links: Vec<bool>,
+    no_erc: Vec<bool>,
 }
 
 impl Kept {
@@ -577,6 +610,7 @@ impl Kept {
             junctions: vec![false; d.junctions.len()],
             tags: vec![false; d.tags.len()],
             links: vec![false; d.links.len()],
+            no_erc: vec![false; d.no_erc.len()],
         }
     }
 
@@ -599,6 +633,12 @@ impl Kept {
         let same_pts =
             |a: &[Pt], b: &[Pt]| a.len() == b.len() && a.iter().zip(b).all(|(p, q)| close(*p, *q));
         let (mut w, mut j, mut t, mut l) = (Vec::new(), Vec::new(), Vec::new(), Vec::new());
+        let mut x = Vec::new();
+        for gx in &g.no_erc {
+            if !pick(&self.no_erc, &mut x, &d.no_erc, |m| close(*m, *gx)) {
+                return false;
+            }
+        }
         for gw in &g.wires {
             if !pick(&self.wires, &mut w, &d.wires, |x| same_pts(x, gw)) {
                 return false;
@@ -634,6 +674,9 @@ impl Kept {
         }
         for i in l {
             self.links[i] = true;
+        }
+        for i in x {
+            self.no_erc[i] = true;
         }
         true
     }
@@ -1224,12 +1267,30 @@ pub fn write_schdoc(sheet: &Sheet, original: Option<&Path>) -> Result<Vec<u8>> {
                 dashed: false,
                 part: None,
                 wire: None,
+                tag: None,
             })
         });
         if let Some(found) = pool.find(&g) {
             if let Some(c) = d.shapes[found.0[0]].fill {
                 r.color("COLOR", c);
             }
+            pool.take(&found);
+        }
+        body.push(r);
+    }
+
+    for (xi, &x) in d.no_erc.iter().enumerate() {
+        if kept.no_erc[xi] {
+            continue;
+        }
+        let mut r = Rec::new(NO_ERC);
+        r.set("OWNERPARTID", "-1")
+            .at(x)
+            .set("ISACTIVE", "T")
+            .set("SYMBOL", "Thin Cross")
+            .set("COLOR", "255");
+        let g = trace_core::sch_select::no_erc_drawing(x);
+        if let Some(found) = pool.find(&g) {
             pool.take(&found);
         }
         body.push(r);
@@ -1906,4 +1967,80 @@ fn shape_rec(s: &SchShape) -> Rec {
         r.set("LINESTYLE", "1");
     }
     r
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use trace_core::sch_edit::Xf;
+    use trace_core::sch_select::SchSel;
+
+    fn round_trip(sheet: &Sheet, name: &str) -> Sheet {
+        let bytes = write_schdoc(sheet, None).unwrap();
+        let p = std::env::temp_dir().join(format!("trace-{name}-{}.SchDoc", std::process::id()));
+        std::fs::write(&p, bytes).unwrap();
+        let back = crate::read_schdoc(&p).unwrap();
+        std::fs::remove_file(&p).ok();
+        back
+    }
+
+    #[test]
+    fn placed_power_ports_and_no_erc_markers_save_as_altium_records() {
+        let mut sheet = Sheet::default();
+        sheet.drawing.size = [11000.0, 8500.0];
+        sheet
+            .drawing
+            .add_wire(vec![[1000.0, 1000.0], [2000.0, 1000.0]]);
+        let gnd = power_port_drawing([1000.0, 1000.0], "GND", 4, 3);
+        let t = sheet.drawing.add_drawn_tag(&gnd).unwrap();
+        let vcc = power_port_drawing([2000.0, 1000.0], "+3V3", 2, 1);
+        let v = sheet.drawing.add_drawn_tag(&vcc).unwrap();
+        sheet.drawing.add_no_erc([3000.0, 1000.0]);
+        // The two ports name the one wire's net.
+        let net = sheet
+            .drawing
+            .nets
+            .iter()
+            .find(|n| n.tags.len() == 2)
+            .unwrap();
+        assert_eq!(net.wires, vec![0]);
+        // Turn one port and move the other with the wire.
+        let c = sheet.drawing.tags[v].at[0];
+        sheet.drawing.xf_sel(&SchSel::tag(v), Xf::Turn(c));
+        sheet.drawing.xf_sel(
+            &SchSel {
+                tags: vec![t],
+                ..Default::default()
+            },
+            Xf::Shift([0.0, -500.0]),
+        );
+        let back = round_trip(&sheet, "power");
+        let mut ports = back.power_ports.clone();
+        ports.sort();
+        assert_eq!(ports, ["+3V3", "GND"]);
+        assert_eq!(back.drawing.no_erc, vec![[3000.0, 1000.0]]);
+        // Every stroke came back as the record it was, none as loose
+        // graphics.
+        assert_eq!(back.drawing.shapes.len(), sheet.drawing.shapes.len());
+        let free = |d: &Drawing| {
+            d.shapes
+                .iter()
+                .filter(|s| s.part.is_none() && s.wire.is_none() && s.tag.is_none())
+                .count()
+        };
+        assert_eq!(free(&back.drawing), free(&sheet.drawing));
+        let turned = back.drawing.tags.iter().find(|t| t.text == "+3V3").unwrap();
+        assert_eq!(turned.at, vec![[2000.0, 1000.0]]);
+        // Deleting a port takes its symbol and name with it.
+        let n = sheet.drawing.shapes.len();
+        let texts = sheet.drawing.texts.len();
+        sheet.drawing.delete_tag(t);
+        assert!(sheet.drawing.shapes.len() < n);
+        assert_eq!(sheet.drawing.texts.len(), texts - 1);
+        assert!(sheet
+            .drawing
+            .shapes
+            .iter()
+            .all(|s| s.tag.is_none_or(|x| x == 0)));
+    }
 }

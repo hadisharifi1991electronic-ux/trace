@@ -60,6 +60,7 @@ pub mod sim;
 pub mod stackfile;
 pub mod stitch;
 pub mod swap;
+pub mod symbol;
 pub mod teardrop;
 pub mod testpoint;
 pub mod thermal;

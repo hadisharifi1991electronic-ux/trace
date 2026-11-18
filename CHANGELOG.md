@@ -3,6 +3,55 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.89.0 (2026-11-18)
+
+Schematic symbol editor, as Altium's SCH Library editor:
+
+- Symbol editor… (in the schematic panel, or Edit… beside a symbol in
+  Place symbol) opens an Altium `.SchLib`, or starts a new library. The
+  component list on the left has Find, New, Copy and Delete.
+- Draw: a canvas with the component's body and pins on a 10, 50 or
+  100 mil grid. Tools: Select (pick, drag, Space turns, Delete removes),
+  Pin (click on the body edge, Space turns it, numbers count up), Line,
+  Rectangle, Ellipse, Polygon and Text. The pin's connecting end is
+  marked with an x; hidden pins show faintly. The panel beside it edits
+  what is picked: a pin's number, name (a backslash after a letter
+  draws a bar), electrical type, direction, length, place, part,
+  description, shown name and number, hidden, negated (bubble) and clock
+  (wedge); a shape's line, colour, fill and corners; texts.
+- Parts: A, B, C… for multi-part components. "+" adds an empty part,
+  Duplicate adds one drawn like the current one with the next pin
+  numbers (supply pins keep theirs, as shared pins), Remove part. Pins and
+  graphics can sit on every part.
+- Pins: the pin table, for this part or all, with Find; number, name,
+  type, direction, length and the show/hide, bubble and clock ticks edit
+  in place; Add pin, Sort by number, remove.
+- Component: name (library reference), description, designator (U?),
+  comment, footprints (the first is used), parameters (Manufacturer,
+  Manufacturer Part Number, Datasheet…), and a list of problems: pins
+  with no number or a number used twice, pin ends off the grid, parts
+  with no pins.
+- Symbol wizard: paste a pin list (number, name, type, side; commas or
+  tabs, as copied from a datasheet table) and get a box symbol with the
+  pins on their sides, 100 mil apart, sized for the names; optionally the
+  power pins on a part of their own.
+- Save writes the `.SchLib` (the first save over a file keeps the old one
+  as `.SchLib.bak`); components not edited are written back byte for
+  byte. Saved libraries are read again for Place symbol.
+- Place puts the part shown on the current sheet. Update sheets redraws
+  every placed part of the component on the open sheets: body, pins and
+  texts from the library, placed where and how the part stands (turned
+  or mirrored, worked out from its pins), designator and value kept,
+  wires following pins that moved. One undo step.
+- CLI: `trace symwizard pins.csv NAME lib.SchLib [--split-power]` adds a
+  symbol from a pin list; `trace update-symbols sheet.SchDoc lib.SchLib
+  out.SchDoc` redraws a sheet's parts from a library.
+
+Checked on the SDR card's library: all 129 components read; ADRV9026
+(3 parts, 289 pins) written from the editor draws the same pins, shapes
+and texts as Altium's own records. Updating rx_rf.SchDoc from
+SDR_Card.SchLib redraws all 101 parts with no pin moved or lost and the
+same ERC result.
 ## 0.88.1 (2026-11-18)
 
 RF report and path loss, from the first whole-board run on the ADRV9026

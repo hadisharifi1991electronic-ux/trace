@@ -324,6 +324,12 @@ USAGE:
                                                 (for a board, its stack-up)
     trace symbols <lib.SchLib|IntLib> [out.svg] List the symbols of an Altium schematic library;
                                                 with out, draw them all as SVG
+    trace symwizard <pins.csv> <name> <lib.SchLib> [--split-power]
+                                                Lay a box symbol out from a pin list (number, name,
+                                                type, side) and add it to the library (made if new)
+    trace update-symbols <sheet.SchDoc> <lib.SchLib> <out.SchDoc>
+                                                Redraw the sheet's placed parts from the library's
+                                                components, wires following moved pins
     trace footprints <lib|board> [out]          List the footprints of a .PcbLib, .IntLib, .tracelib or board;
                                                 with out, save them as a Trace library (.tracelib)
                                                 or an Altium one (.PcbLib)
@@ -479,6 +485,9 @@ fn main() -> ExitCode {
         ["fabdrawing", file, out, "--a4"] => fab_drawing(file, out, trace_export::Paper::A4),
         ["symbols", file] => symbols(file, None),
         ["symbols", file, out] => symbols(file, Some(out)),
+        ["symwizard", pins, name, lib] => symwizard(pins, name, lib, false),
+        ["symwizard", pins, name, lib, "--split-power"] => symwizard(pins, name, lib, true),
+        ["update-symbols", sheet, lib, out] => update_symbols(sheet, lib, out),
         ["footprints", file] => footprints(file, None),
         ["footprints", file, out] => footprints(file, Some(out)),
         ["view", file] => view_board(file, None),
@@ -498,6 +507,75 @@ fn main() -> ExitCode {
 }
 
 type Res = Result<(), Box<dyn std::error::Error>>;
+
+/// Adds a box symbol laid out from a pin list to a `.SchLib`.
+fn symwizard(pins: &str, name: &str, lib: &str, split: bool) -> Res {
+    let text = std::fs::read_to_string(pins)?;
+    let list = trace_core::symbol::parse_pin_list(&text);
+    if list.is_empty() {
+        return Err("no pins in the list".into());
+    }
+    let mut def = trace_core::symbol::SymbolDef::from_pin_list(name, &list);
+    if split {
+        def.split_power_part();
+    }
+    let mut file = if std::path::Path::new(lib).exists() {
+        trace_altium::read_schlib_file(lib)?
+    } else {
+        let stem = std::path::Path::new(lib)
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        trace_altium::SchLibFile::new(&stem)
+    };
+    for p in def.problems() {
+        println!("  check: {p}");
+    }
+    file.symbols.retain(|d| !d.name.eq_ignore_ascii_case(name));
+    file.symbols.push(def);
+    std::fs::write(lib, file.write()?)?;
+    let d = file.symbols.last().unwrap();
+    println!(
+        "{lib}: {name} with {} pins on {} part(s); {} components in the library",
+        d.pins.len(),
+        d.parts,
+        file.symbols.len()
+    );
+    Ok(())
+}
+
+/// Redraws a sheet's placed parts from a library.
+fn update_symbols(sheet: &str, lib: &str, out: &str) -> Res {
+    let mut s = trace_altium::read_schdoc(sheet)?;
+    let file = trace_altium::read_schlib_file(lib)?;
+    let mut total = 0;
+    for i in 0..file.symbols.len() {
+        let parts = file.lib_symbols(i);
+        let rep = s.update_from_library(&parts);
+        if rep.updated.is_empty() {
+            continue;
+        }
+        total += rep.updated.len();
+        println!(
+            "  {:<24} {} part(s): {}; wires moved on {} pin(s){}",
+            file.symbols[i].name,
+            rep.updated.len(),
+            rep.updated.join(" "),
+            rep.wires_moved,
+            if rep.lost_pins.is_empty() {
+                String::new()
+            } else {
+                format!("; pins gone: {}", rep.lost_pins.join(" "))
+            }
+        );
+    }
+    std::fs::write(
+        out,
+        trace_altium::write_schdoc(&s, Some(std::path::Path::new(sheet)))?,
+    )?;
+    println!("{out}: {total} part(s) redrawn");
+    Ok(())
+}
 
 /// Lists the symbols of a `.SchLib`; with `out`, draws them all on one
 /// SVG sheet.

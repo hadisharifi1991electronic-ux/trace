@@ -1610,6 +1610,10 @@ fn text_frame(b: &mut Builder, k: usize, p: &Props) {
 mod write;
 pub use write::{port_drawing, power_port_drawing, write_schdoc, POWER_STYLES};
 
+#[path = "schlib.rs"]
+mod schlib;
+pub use schlib::{read_schlib_file, SchLibFile};
+
 #[cfg(test)]
 mod tests {
     use super::*;

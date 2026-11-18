@@ -53,6 +53,14 @@ checker and simulator all read.
   hidden parameters, footprint models and all. Update PCB… lists what the edits change on the
   board (pins moving between nets, renamed nets and parts) and carries
   them over in one undoable step; pours are poured again
+- draw and edit library symbols: Symbol editor… opens a `.SchLib` (or a
+  new library) with a canvas for the body and pins (pin, line, rectangle,
+  ellipse, polygon and text tools), a pin table (number, name, electrical
+  type, direction, length, hidden, bubble, clock), parts A, B… for
+  multi-part components, the component's designator, comment, footprints
+  and parameters, and a wizard that lays a box symbol out from a pasted
+  pin list. Save writes the `.SchLib`; Update sheets redraws the placed
+  parts from the edited component, wires following moved pins
 - place new parts from symbol libraries: Place symbol… (or P) opens an
   Altium `.SchLib` or integrated library `.IntLib` (the libraries an Altium project lists open by
   themselves, and opened ones are remembered). Find a symbol by name or
@@ -374,6 +382,8 @@ trace cascade chip.s1p via.s2p --line 50@500@3.4   return loss into vias and lin
 trace stackup board.brd stack.txt   the board's stack-up as text; edit it, then any command takes --stackup stack.txt
 trace validate                   accuracy checks of every solver against exact answers and finer grids
 trace symbols lib.SchLib [out.svg]     list a schematic library's (or IntLib's) symbols; draw them all as SVG
+trace symwizard pins.csv NAME lib.SchLib [--split-power]   add a box symbol laid out from a pin list
+trace update-symbols sheet.SchDoc lib.SchLib out.SchDoc    redraw a sheet's placed parts from a library
 trace footprints lib.PcbLib [out]   list a library's (or a board's) footprints; save as .tracelib or .PcbLib
 ```
 

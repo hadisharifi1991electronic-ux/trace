@@ -339,6 +339,8 @@ pub struct Schematics {
     note: Option<String>,
     /// Symbol libraries, for placing new parts.
     pub libs: crate::symlib::Libraries,
+    /// The symbol library editor.
+    pub symedit: crate::symedit::SymEditor,
     /// The dragged part follows the pointer until a click drops it (a
     /// symbol just taken from a library).
     floating: bool,
@@ -773,6 +775,75 @@ impl Schematics {
         let Some(lib) = self.libs.symbol(at).cloned() else {
             return;
         };
+        self.place_lib(lib, scene);
+    }
+
+    /// What the symbol editor asked for.
+    pub fn symbol_act(&mut self, act: crate::symedit::SymAct, scene: Option<&Scene>) {
+        use crate::symedit::SymAct;
+        match act {
+            SymAct::Saved(p) => {
+                if let Err(e) = self.libs.load(&p) {
+                    self.symedit.note = Some(format!("Saved, but could not read it back: {e}"));
+                }
+            }
+            SymAct::Place(lib) => {
+                self.place_lib(*lib, scene);
+                if let Some(n) = &self.note {
+                    self.symedit.note = Some(n.clone());
+                }
+            }
+            SymAct::Update(parts) => {
+                let mut step = Vec::new();
+                let mut done: Vec<String> = Vec::new();
+                let mut moved = 0;
+                let mut lost: Vec<String> = Vec::new();
+                for i in 0..self.slots.len() {
+                    let Some(sheet) = self.slots[i].sheet.as_mut() else {
+                        continue;
+                    };
+                    let before = sheet.clone();
+                    let rep = sheet.update_from_library(&parts);
+                    if rep.updated.is_empty() {
+                        continue;
+                    }
+                    step.push((i, before));
+                    done.extend(rep.updated);
+                    moved += rep.wires_moved;
+                    lost.extend(rep.lost_pins);
+                }
+                let name = parts.first().map(|p| p.name.clone()).unwrap_or_default();
+                let text = if step.is_empty() {
+                    format!("No placed {name} on the open sheets.")
+                } else {
+                    let changed: Vec<usize> = step.iter().map(|s| s.0).collect();
+                    self.undo.push(step);
+                    self.redo.clear();
+                    for i in changed {
+                        self.after_edit(i);
+                    }
+                    let mut t = format!(
+                        "Redrew {} placed part(s) of {name} ({}); wires followed {moved} moved pin(s).",
+                        done.len(),
+                        done.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+                    );
+                    if !lost.is_empty() {
+                        t += &format!(
+                            " Pins gone from the symbol (their wires are loose): {}.",
+                            lost.iter().take(8).cloned().collect::<Vec<_>>().join(", ")
+                        );
+                    }
+                    t
+                };
+                self.note = Some(text.clone());
+                self.symedit.note = Some(text);
+            }
+        }
+    }
+
+    /// Takes a library symbol onto the current sheet, at the middle of the
+    /// view, following the pointer until a click drops it.
+    fn place_lib(&mut self, lib: trace_core::LibSymbol, scene: Option<&Scene>) {
         if self
             .slots
             .get(self.current)
@@ -1870,8 +1941,20 @@ impl Schematics {
         {
             self.libs.open = true;
         }
+        if ui
+            .button("Symbol editor…")
+            .on_hover_text("Draw and edit library symbols (.SchLib): body, pins, pin table, parts; then update the placed parts")
+            .clicked()
+        {
+            self.symedit.open = true;
+        }
         if let Some(at) = self.libs.window(ui.ctx()) {
             self.start_place(at, scene);
+        }
+        if let Some((path, name)) = self.libs.edit_request.take() {
+            if let Err(e) = self.symedit.open_path(&path, Some(&name)) {
+                self.note = Some(format!("Could not open {}: {e}", path.display()));
+            }
         }
         ui.horizontal(|ui| {
             let save = ui

@@ -22,6 +22,8 @@ pub struct Libraries {
     /// The picked symbol: (library, symbol).
     pick: Option<(usize, usize)>,
     note: Option<String>,
+    /// A library and component to open in the symbol editor.
+    pub edit_request: Option<(PathBuf, String)>,
 }
 
 impl Libraries {
@@ -224,6 +226,20 @@ impl Libraries {
                     {
                         place = self.pick;
                     }
+                    let li = self.pick.map(|p| p.0).unwrap_or(0);
+                    let path = self.libs.get(li).map(|l| l.0.clone());
+                    let schlib = path.as_ref().is_some_and(|p| {
+                        p.extension().is_some_and(|e| e.eq_ignore_ascii_case("schlib"))
+                    });
+                    if ui
+                        .add_enabled(schlib, egui::Button::new("Edit…"))
+                        .on_hover_text("Open this symbol in the symbol editor (.SchLib only)")
+                        .clicked()
+                    {
+                        if let Some(p) = path {
+                            self.edit_request = Some((p, s.name.clone()));
+                        }
+                    }
                 }
                 None => {
                     ui.label(RichText::new("Pick a symbol to see it.").weak());
@@ -265,6 +281,11 @@ pub fn paint_preview(painter: egui::Painter, rect: Rect, d: &Drawing) {
         ],
         0.9,
     );
+    paint_drawing(&painter, &view, d);
+}
+
+/// Draws a drawing's shapes and texts through `view`.
+pub fn paint_drawing(painter: &egui::Painter, view: &View, d: &Drawing) {
     let to = |p: &[f64; 2]| view.to_screen(p[0] as f32, p[1] as f32);
     let px = |w: f64| ((w as f32) * view.scale).max(1.0);
     let rgb = |c: [u8; 3]| Color32::from_rgb(c[0], c[1], c[2]);

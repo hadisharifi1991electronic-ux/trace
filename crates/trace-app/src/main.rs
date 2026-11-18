@@ -39,6 +39,7 @@ mod simwin;
 mod stitchwin;
 mod studio;
 mod swapwin;
+mod symedit;
 mod symlib;
 mod testwin;
 mod thermwin;
@@ -294,7 +295,23 @@ impl App {
         // `TRACE_OPEN=rules[:kind]` opens the rules editor at start (for
         // screenshots and tests).
         if let Ok(w) = std::env::var("TRACE_OPEN") {
-            if let Some(rest) = w.strip_prefix("rules") {
+            if let Some(rest) = w.strip_prefix("symedit:") {
+                // symedit:<library>[|component[|tab]]
+                let mut it = rest.split('|');
+                let path = it.next().unwrap_or_default();
+                let comp = it.next();
+                if let Some(tab) = it.next() {
+                    app.schem.symedit.show_tab(tab);
+                }
+                if let Err(e) = app
+                    .schem
+                    .symedit
+                    .open_path(std::path::Path::new(path), comp)
+                {
+                    eprintln!("symbol editor: {e}");
+                }
+                app.schem.symedit.open = true;
+            } else if let Some(rest) = w.strip_prefix("rules") {
                 let kind = rest.strip_prefix(':').filter(|k| !k.is_empty());
                 app.rules_win.open_at(kind);
                 if let (Some(k), Some(scene)) = (kind, app.scene.as_ref()) {
@@ -3516,6 +3533,10 @@ impl eframe::App for App {
             self.edit.sel.clear();
             self.edit.sel.parts = parts.into_iter().collect();
             self.select_part(&first, true);
+        }
+        if let Some(a) = self.schem.symedit.window(ctx) {
+            let scene = self.scene.as_ref();
+            self.schem.symbol_act(a, scene);
         }
         let ruled = self
             .scene

@@ -581,7 +581,7 @@ impl Drawing {
     }
 
     /// Keeps the texts marked true, renumbering label links.
-    fn retain_texts(&mut self, keep: &[bool]) {
+    pub(crate) fn retain_texts(&mut self, keep: &[bool]) {
         let mut new_index = Vec::with_capacity(keep.len());
         let mut n = 0u32;
         for &k in keep {

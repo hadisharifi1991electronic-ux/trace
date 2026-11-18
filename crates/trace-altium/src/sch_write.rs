@@ -22,15 +22,15 @@ type Found = (Vec<usize>, Vec<usize>);
 
 /// One record being written, its fields in order.
 #[derive(Clone, Default)]
-struct Rec(Vec<(String, String)>);
+pub(super) struct Rec(pub(super) Vec<(String, String)>);
 
 impl Rec {
-    fn new(kind: i64) -> Rec {
+    pub(super) fn new(kind: i64) -> Rec {
         let mut r = Rec::default();
         r.set("RECORD", kind.to_string());
         r
     }
-    fn set(&mut self, k: &str, v: impl Into<String>) -> &mut Self {
+    pub(super) fn set(&mut self, k: &str, v: impl Into<String>) -> &mut Self {
         let k = k.to_ascii_uppercase();
         let v = v.into();
         match self.0.iter_mut().find(|(a, _)| *a == k) {
@@ -39,18 +39,18 @@ impl Rec {
         }
         self
     }
-    fn remove(&mut self, k: &str) {
+    pub(super) fn remove(&mut self, k: &str) {
         let k = k.to_ascii_uppercase();
         self.0.retain(|(a, _)| *a != k);
     }
-    fn get(&self, k: &str) -> Option<&str> {
+    pub(super) fn get(&self, k: &str) -> Option<&str> {
         let k = k.to_ascii_uppercase();
         self.0
             .iter()
             .find(|(a, _)| *a == k)
             .map(|(_, v)| v.as_str())
     }
-    fn flag(&mut self, k: &str, on: bool) -> &mut Self {
+    pub(super) fn flag(&mut self, k: &str, on: bool) -> &mut Self {
         if on {
             self.set(k, "T");
         } else {
@@ -59,7 +59,7 @@ impl Rec {
         self
     }
     /// A length in mil, as Altium's 10-mil units and a fraction.
-    fn len(&mut self, k: &str, mil: f64) -> &mut Self {
+    pub(super) fn len(&mut self, k: &str, mil: f64) -> &mut Self {
         let units = (mil / 10.0).floor();
         let mut frac = ((mil - units * 10.0) * 10_000.0).round() as i64;
         let mut units = units as i64;
@@ -76,13 +76,13 @@ impl Rec {
         }
         self
     }
-    fn at(&mut self, p: Pt) -> &mut Self {
+    pub(super) fn at(&mut self, p: Pt) -> &mut Self {
         self.len("LOCATION.X", p[0]).len("LOCATION.Y", p[1])
     }
-    fn corner(&mut self, p: Pt) -> &mut Self {
+    pub(super) fn corner(&mut self, p: Pt) -> &mut Self {
         self.len("CORNER.X", p[0]).len("CORNER.Y", p[1])
     }
-    fn points(&mut self, pts: &[Pt]) -> &mut Self {
+    pub(super) fn points(&mut self, pts: &[Pt]) -> &mut Self {
         self.set("LOCATIONCOUNT", pts.len().to_string());
         for (i, p) in pts.iter().enumerate() {
             self.len(&format!("X{}", i + 1), p[0]);
@@ -90,14 +90,14 @@ impl Rec {
         }
         self
     }
-    fn color(&mut self, k: &str, c: Rgb) -> &mut Self {
+    pub(super) fn color(&mut self, k: &str, c: Rgb) -> &mut Self {
         let v = c[0] as i64 | (c[1] as i64) << 8 | (c[2] as i64) << 16;
         self.set(k, v.to_string())
     }
-    fn owner(&mut self, idx: usize) -> &mut Self {
+    pub(super) fn owner(&mut self, idx: usize) -> &mut Self {
         self.set("OWNERINDEX", idx.to_string())
     }
-    fn from_props(p: &Props) -> Rec {
+    pub(super) fn from_props(p: &Props) -> Rec {
         let mut r = Rec::new(p.int("RECORD").unwrap_or(0));
         let mut keys: Vec<(&String, &String)> = p.keys().filter(|(k, _)| *k != "RECORD").collect();
         keys.sort();
@@ -106,7 +106,7 @@ impl Rec {
         }
         r
     }
-    fn props(&self) -> Props {
+    pub(super) fn props(&self) -> Props {
         let mut p = Props::default();
         for (k, v) in &self.0 {
             p.set(k, v.clone());
@@ -117,7 +117,7 @@ impl Rec {
     /// that is not plain ASCII its UTF-8 copy, as Altium writes them. A
     /// bar, which would end the value, becomes a broken bar (`¦`), which
     /// Altium leaves out of the Latin-1 copy.
-    fn bytes(&self) -> Vec<u8> {
+    pub(super) fn bytes(&self) -> Vec<u8> {
         let mut b = Vec::new();
         for (k, v) in &self.0 {
             if v.chars().all(|c| c.is_ascii() && c != '|' && c != '\0') {
@@ -146,7 +146,7 @@ impl Rec {
 }
 
 /// A record as stored: length (with its closing zero) and type 0.
-fn framed(body: &[u8]) -> Vec<u8> {
+pub(super) fn framed(body: &[u8]) -> Vec<u8> {
     let mut v = ((body.len() as u32 + 1) & 0x00ff_ffff)
         .to_le_bytes()
         .to_vec();
@@ -156,7 +156,7 @@ fn framed(body: &[u8]) -> Vec<u8> {
 }
 
 /// Altium's line width steps.
-fn width_code(w: f64) -> i64 {
+pub(super) fn width_code(w: f64) -> i64 {
     if w <= 0.0 {
         0
     } else if w <= 15.0 {
@@ -535,7 +535,7 @@ impl Original {
 }
 
 /// A short id in Altium's style, the same for the same seed.
-fn unique_id(seed: u64) -> String {
+pub(super) fn unique_id(seed: u64) -> String {
     let mut x = seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03;
     (0..8)
         .map(|_| {

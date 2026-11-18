@@ -120,9 +120,11 @@ checker and simulator all read.
   whole via stack, and the route ends on
   copper of its own net. Obstacles are handled as in Altium (Shift+R or
   the list on the route bar): Walkaround hugs what is in the way at 45°
-  and stops short when there is no way round; Push and walkaround moves
-  tracks of other nets aside first (shown in blue, placed with the
-  route; Ctrl+Z puts them back); Stop at obstacle draws a route that breaks
+  and stops short when there is no way round; Push obstacles moves tracks
+  and vias of other nets aside, and whatever they run into after them,
+  and stops at pads; Hug and push goes round pads close to them and
+  pushes the rest (shown in blue, placed with the route; Ctrl+Z puts them
+  back); Stop at obstacle draws a route that breaks
   clearance red and does not place it. Starting on a net of a differential pair
   routes both nets together at the width and gap the Impedance window
   works out for the pair. Ctrl+click several pads (or track ends) to
@@ -424,8 +426,9 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   pads, so moving far leaves long diagonal segments to tidy up; tracks on
   surface pads stay behind when the part is flipped. Silk follows parts
   on Altium boards (other formats do not say which silk is a part's).
-  Push moves tracks only (not vias or pads), one
-  track deep: a track that would have to push another is not moved.
+  Push never moves pads or arcs, gives up after 64 lines of track and 32
+  vias or about a tenth of a second, and pushes arcs' tracks only up to
+  the arc.
 - The design rule check judges clearance rules on the two objects
   themselves where their nets alone cannot decide: parts and footprints,
   layers, and rooms (`WithinRoom`, `TouchesRoom`; a room the board does

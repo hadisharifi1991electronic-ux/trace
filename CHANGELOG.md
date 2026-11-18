@@ -3,6 +3,34 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.86.0 (2026-11-18)
+
+Push-and-shove routing that moves more than one track:
+
+- Route modes as in Altium (Shift+R or the route bar): Walkaround,
+  Push obstacles, Hug and push, Stop at obstacle. Push obstacles pushes
+  along the route as drawn and stops at what cannot move (pads); Hug and
+  push goes round pads, close to them, and pushes everything else, and
+  walks round when the push cannot be done.
+- Chains: a pushed track pushes the tracks behind it, and those push the
+  next, however many deep (up to 64 lines of track and 32 vias).
+- Vias move: a via in the way moves the least distance that clears the
+  route, to a spot clear of pads, and the tracks ending on it follow, on
+  every layer it joins. A via pushes tracks on all its layers. Pressing V
+  in a push mode pushes copper out of the new via's way too, and the
+  preview's push is no longer lost when changing layer.
+- Pushed tracks hug: only the stretch near what pushes them moves, at
+  0°/45°/90°, leaving and rejoining the old path as late and as early as
+  it can; the rest of the track stays put.
+- Differential pairs move together: a pushed pair net takes its partner
+  with it and keeps the pair's spacing through the bends.
+- Rules: everything moved keeps the board clearance and each net's own
+  clearance rule, checked again once the push is worked out; copper
+  already tighter than the rules on the board does not block a push.
+- Tested on the CutiePi board (198 of 200 pushes, about 2 ms each) and
+  the BeagleBone Black (108 pushes in its dense DDR area, worst 145 ms),
+  with no clearance break left by any push (`pushcheck` example).
+
 ## 0.85.0 (2026-11-18)
 
 Schematic editing at the level of everyday Altium work:

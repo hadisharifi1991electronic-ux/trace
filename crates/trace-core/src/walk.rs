@@ -2,12 +2,9 @@
 //!
 //! Walkaround finds a path of 0°, 45° and 90° segments around copper of
 //! other nets: an A* search on a fine grid, then the corners pulled tight.
-//! Shoving moves the tracks a new route runs into: each one is routed again
-//! between its own ends, around the new copper.
+//! Pushing what is in the way aside is in [`crate::push`].
 
-use crate::edit::Edit;
-use crate::route::{Obstacles, P};
-use crate::{Board, LayerRef, Length, Point, Track};
+use crate::route::{Item, Obstacles, P};
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
 
@@ -27,6 +24,12 @@ pub struct Ask<'a> {
     pub extra: &'a [Capsule],
     /// Board tracks not to count as obstacles (the ones being shoved).
     pub skip: &'a [usize],
+    /// Tracks and vias of the board are not obstacles at all (they will
+    /// be pushed out of the way), only pads, arcs and `extra`; the search
+    /// grid is finer, so the path hugs what it goes round.
+    pub see_through: bool,
+    /// Give up searching after this.
+    pub deadline: Option<std::time::Instant>,
 }
 
 impl Ask<'_> {
@@ -36,12 +39,27 @@ impl Ask<'_> {
 
     /// As `clear`, for something `r` wide instead.
     fn clear_r(&self, a: P, b: P, r: f64) -> bool {
-        let skip = |t: usize| self.skip.contains(&t);
-        if !self
-            .obstacles
-            .clear(self.layer, a, b, r, self.nets, self.clearance, &skip)
-        {
-            return false;
+        if self.see_through {
+            let skip = |i: Item| matches!(i, Item::Track(_) | Item::Via(_));
+            if !self.obstacles.clear_items(
+                Some(self.layer),
+                a,
+                b,
+                r,
+                self.nets,
+                self.clearance,
+                &skip,
+            ) {
+                return false;
+            }
+        } else {
+            let skip = |t: usize| self.skip.contains(&t);
+            if !self
+                .obstacles
+                .clear(self.layer, a, b, r, self.nets, self.clearance, &skip)
+            {
+                return false;
+            }
         }
         self.extra
             .iter()
@@ -98,11 +116,18 @@ fn search(ask: &Ask, from: P, to: P, partial: bool) -> Option<(Vec<P>, bool)> {
         return Some((vec![from, to], true));
     }
     // A cursor inside other copper cannot be reached: search less.
-    let cap = if ask.clear(to, to) { 40_000 } else { 6_000 };
+    let cap = match (ask.see_through, ask.clear(to, to)) {
+        // Pushing is worked out over and over as the cursor moves: a
+        // shorter search, and a push that needs more gives up.
+        (true, true) => 8_000,
+        (false, true) => 40_000,
+        _ => 6_000,
+    };
     let dist = (to[0] - from[0]).hypot(to[1] - from[1]);
     // Grid fine enough to pass between pads, coarse enough to be quick.
-    let step = ((ask.r + ask.clearance) / 2.0)
-        .clamp(1.5, 25.0)
+    let fine = if ask.see_through { 4.0 } else { 2.0 };
+    let step = ((ask.r + ask.clearance) / fine)
+        .clamp(1.0, 25.0)
         .max(dist / 400.0);
     let margin = (dist * 0.6).max(30.0 * step);
     let lo = [from[0].min(to[0]) - margin, from[1].min(to[1]) - margin];
@@ -161,6 +186,9 @@ fn search(ask: &Ask, from: P, to: P, partial: bool) -> Option<(Vec<P>, bool)> {
         }
         expanded += 1;
         if expanded > cap {
+            break;
+        }
+        if expanded % 256 == 0 && ask.deadline.is_some_and(|d| std::time::Instant::now() > d) {
             break;
         }
         for (dx, dy) in DIRS {
@@ -267,105 +295,6 @@ fn join45(ask: &Ask, a: P, b: P) -> Option<Vec<P>> {
     None
 }
 
-/// Board tracks moved out of the way of a new route, as edits to apply
-/// after the route's own: removals, then the shoved copies.
-pub struct Shove {
-    pub remove: Vec<usize>,
-    pub add: Vec<Track>,
-}
-
-impl Shove {
-    /// The edits, for a board that will have `tracks` tracks when they
-    /// start (after the route's own are in).
-    pub fn edits(&self, board: &Board, tracks: usize) -> Vec<Edit> {
-        let mut out = Vec::new();
-        let mut remove = self.remove.clone();
-        remove.sort_unstable_by(|a, b| b.cmp(a));
-        for &i in &remove {
-            out.push(Edit::RemoveTrack {
-                index: i,
-                track: board.geometry.tracks[i].clone(),
-            });
-        }
-        for (at, t) in (tracks - remove.len()..).zip(&self.add) {
-            out.push(Edit::InsertTrack {
-                index: at,
-                track: t.clone(),
-            });
-        }
-        out
-    }
-}
-
-/// Moves the tracks of other nets that `route` (capsules on `layer`)
-/// runs into: each is routed again between its own ends around the new
-/// copper and what is already there. `None` when something other than a
-/// track is in the way, or a track cannot be moved.
-pub fn shove(
-    board: &Board,
-    obstacles: &Obstacles,
-    layer: u8,
-    route: &[Capsule],
-    nets: &[Option<u32>],
-    clearance: f64,
-) -> Option<Shove> {
-    let mut hit = Vec::new();
-    for &(a, b, r) in route {
-        if !obstacles.tracks_hit(layer, a, b, r, nets, clearance, &mut hit) {
-            return None;
-        }
-    }
-    if hit.is_empty() {
-        return None;
-    }
-    if hit.len() > 24 {
-        return None;
-    }
-    let mut extra: Vec<Capsule> = route.to_vec();
-    let mut add = Vec::new();
-    // Nearest first, so the tracks next to the route move before the ones
-    // behind them.
-    let g = &board.geometry;
-    let p = |q: Point| [q.x.mil(), q.y.mil()];
-    for &ti in &hit {
-        let t = &g.tracks[ti];
-        let (a, b, r) = (p(t.start), p(t.end), t.width.mil() / 2.0);
-        let ask = Ask {
-            obstacles,
-            layer,
-            r,
-            nets: &[t.net],
-            clearance,
-            extra: &extra,
-            skip: &hit,
-        };
-        // Its ends stay where they are, so they must be clear already.
-        if !ask.clear(a, a) || !ask.clear(b, b) {
-            return None;
-        }
-        let path = walkaround(&ask, a, b)?;
-        for w in path.windows(2) {
-            extra.push((w[0], w[1], r));
-            add.push(Track {
-                component: None,
-                layer: LayerRef::Copper(layer),
-                net: t.net,
-                start: Point {
-                    x: Length::from_mil(w[0][0]),
-                    y: Length::from_mil(w[0][1]),
-                },
-                end: Point {
-                    x: Length::from_mil(w[1][0]),
-                    y: Length::from_mil(w[1][1]),
-                },
-                width: t.width,
-                text: false,
-            });
-        }
-    }
-    Some(Shove { remove: hit, add })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,6 +354,8 @@ mod tests {
             clearance: 5.0,
             extra: &[],
             skip: &[],
+            see_through: false,
+            deadline: None,
         };
         let path = walkaround(&ask, [0.0, 0.0], [200.0, 0.0]).expect("a way round");
         assert!(path.len() > 2);
@@ -454,6 +385,8 @@ mod tests {
             clearance: 5.0,
             extra: &[],
             skip: &[],
+            see_through: false,
+            deadline: None,
         };
         assert!(walkaround(&ask, [0.0, 0.0], [200.0, 0.0]).is_none());
         let (path, reached) = walk_toward(&ask, [0.0, 0.0], [200.0, 0.0]).expect("part way");
@@ -462,35 +395,5 @@ mod tests {
         // Pad edge at 180, so the track's centre stops by 172.
         assert!(end[0] > 160.0 && end[0] <= 172.0 + 1e-6, "{path:?}");
         assert!(path.windows(2).all(|w| ask.clear(w[0], w[1])));
-    }
-
-    #[test]
-    fn a_track_in_the_way_is_pushed_aside() {
-        let t = Track {
-            component: None,
-            layer: LayerRef::Copper(0),
-            net: Some(1),
-            start: pt(0.0, 10.0),
-            end: pt(300.0, 10.0),
-            width: Length::from_mil(6.0),
-            text: false,
-        };
-        let b = board(vec![t], Vec::new());
-        let obs = Obstacles::new(&b);
-        // A new track along y = 0 from x 100 to 200: 10 mil centre to
-        // centre, too close for 5 mil clearance.
-        let route = [([100.0, 0.0], [200.0, 0.0], 3.0)];
-        let s = shove(&b, &obs, 0, &route, &[Some(0)], 5.0).expect("shoved");
-        assert_eq!(s.remove, vec![0]);
-        for t in &s.add {
-            let (a, c) = (
-                [t.start.x.mil(), t.start.y.mil()],
-                [t.end.x.mil(), t.end.y.mil()],
-            );
-            let gap = crate::route::seg_seg(a, c, [100.0, 0.0], [200.0, 0.0]) - 6.0;
-            assert!(gap >= 5.0 - 1e-3, "{gap}");
-        }
-        let ends = (s.add.first().unwrap().start, s.add.last().unwrap().end);
-        assert_eq!(ends, (pt(0.0, 10.0), pt(300.0, 10.0)));
     }
 }

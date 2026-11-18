@@ -590,6 +590,27 @@ struct Obstacle {
     shape: Shape,
     /// The board track it is, for shoving.
     track: Option<usize>,
+    /// The board via it is, for shoving.
+    via: Option<usize>,
+}
+
+/// What a piece of copper in the way is, for push-and-shove: tracks and
+/// vias can be moved, everything else (pads, arcs, holes) is fixed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Item {
+    Track(usize),
+    Via(usize),
+    Fixed,
+}
+
+impl Obstacle {
+    fn item(&self) -> Item {
+        match (self.track, self.via) {
+            (Some(t), _) => Item::Track(t),
+            (_, Some(v)) => Item::Via(v),
+            _ => Item::Fixed,
+        }
+    }
 }
 
 const CELL: f64 = 100.0;
@@ -675,6 +696,7 @@ impl Obstacles {
                         r: t.width.mil() / 2.0,
                     },
                     track: Some(ti),
+                    via: None,
                 });
             }
         }
@@ -702,10 +724,11 @@ impl Obstacles {
                         r: a.width.mil() / 2.0,
                     },
                     track: None,
+                    via: None,
                 });
             }
         }
-        for v in &g.vias {
+        for (vi, v) in g.vias.iter().enumerate() {
             let c = pt(v.at);
             let (lo, hi) = (
                 v.from_layer.min(v.to_layer),
@@ -727,6 +750,7 @@ impl Obstacles {
                         r: d.max(v.hole.mil()) / 2.0,
                     },
                     track: None,
+                    via: Some(vi),
                 });
             }
         }
@@ -748,6 +772,7 @@ impl Obstacles {
                         &p.outline,
                     ),
                     track: None,
+                    via: None,
                 });
             } else {
                 for l in &p.stack {
@@ -763,6 +788,7 @@ impl Obstacles {
                             &l.outline,
                         ),
                         track: None,
+                        via: None,
                     });
                 }
             }
@@ -777,6 +803,7 @@ impl Obstacles {
                         r: p.hole.mil() / 2.0,
                     },
                     track: None,
+                    via: None,
                 });
             }
         }
@@ -823,6 +850,7 @@ impl Obstacles {
             net,
             shape,
             track: None,
+            via: None,
         });
         self.boxes.push(bb);
         for gx in (bb[0] / CELL).floor() as i32..=(bb[2] / CELL).floor() as i32 {
@@ -926,6 +954,54 @@ impl Obstacles {
     ) -> bool {
         self.check_skip(Some(layer), a, b, r, nets, clearance, skip)
             .is_none()
+    }
+
+    /// Calls `f` with what each piece of copper closer than `clearance`
+    /// to a capsule on `layer` (every layer for `None`) is, its net and
+    /// the gap, leaving out copper of `nets`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn hits(
+        &self,
+        layer: Option<u8>,
+        a: P,
+        b: P,
+        r: f64,
+        nets: &[Option<u32>],
+        clearance: f64,
+        f: &mut dyn FnMut(Item, Option<u32>, f64),
+    ) {
+        self.visit(layer, a, b, r, nets, clearance, &mut |o: &Obstacle, gap| {
+            f(o.item(), o.net, gap)
+        });
+    }
+
+    /// Whether a capsule keeps clearance from everything but what `skip`
+    /// names.
+    #[allow(clippy::too_many_arguments)]
+    pub fn clear_items(
+        &self,
+        layer: Option<u8>,
+        a: P,
+        b: P,
+        r: f64,
+        nets: &[Option<u32>],
+        clearance: f64,
+        skip: &dyn Fn(Item) -> bool,
+    ) -> bool {
+        let mut ok = true;
+        self.visit(layer, a, b, r, nets, clearance, &mut |o: &Obstacle, _| {
+            if !skip(o.item()) {
+                ok = false;
+            }
+        });
+        ok
+    }
+
+    /// The extra room rules ask around `net`'s copper, if more than
+    /// `clearance`.
+    pub fn net_gap(&self, net: Option<u32>, clearance: f64) -> f64 {
+        net.and_then(|n| self.net_gap.get(&n))
+            .map_or(clearance, |&g| g.max(clearance))
     }
 
     /// Board tracks on `layer` of nets other than `nets` closer than

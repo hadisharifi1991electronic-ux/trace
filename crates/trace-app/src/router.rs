@@ -10,8 +10,9 @@
 
 use trace_core::bus;
 use trace_core::edit::{Edit, History};
+use trace_core::push::{self, Pushed, Pusher};
 use trace_core::route::{self, Corner, Hit, Obstacles, Piece, ViaKind, P};
-use trace_core::walk::{self, Ask, Shove};
+use trace_core::walk::{self, Ask};
 use trace_core::{Arc, Board, LayerRef, Length, Point, Track, Via};
 
 /// One run of track on one layer; runs are joined by vias. Each click adds
@@ -51,10 +52,14 @@ pub struct PairInfo {
 /// Shift+R as in Altium.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// Finds a way round it.
+    /// Finds a way round it; nothing moves.
     Walkaround,
-    /// Pushes tracks aside, and goes round what cannot be pushed.
+    /// Pushes tracks and vias aside, and what they run into after them,
+    /// along the route as drawn; stops at what cannot move (pads).
     Push,
+    /// Goes round what cannot move, hugging it, and pushes tracks and vias
+    /// aside; walks round everything when the push cannot be done.
+    HugPush,
     /// Stops: the route turns red and is not placed.
     Stop,
 }
@@ -63,17 +68,23 @@ impl Mode {
     pub fn next(self) -> Self {
         match self {
             Mode::Walkaround => Mode::Push,
-            Mode::Push => Mode::Stop,
+            Mode::Push => Mode::HugPush,
+            Mode::HugPush => Mode::Stop,
             Mode::Stop => Mode::Walkaround,
         }
     }
     pub fn label(self) -> &'static str {
         match self {
             Mode::Walkaround => "Walkaround",
-            Mode::Push => "Push and walkaround",
+            Mode::Push => "Push obstacles",
+            Mode::HugPush => "Hug and push",
             Mode::Stop => "Stop at obstacle",
         }
     }
+    pub fn pushes(self) -> bool {
+        matches!(self, Mode::Push | Mode::HugPush)
+    }
+    pub const ALL: [Mode; 4] = [Mode::Walkaround, Mode::Push, Mode::HugPush, Mode::Stop];
 }
 
 pub struct Active {
@@ -97,9 +108,9 @@ pub struct Active {
     pub lands: bool,
     landing: Option<Vec<P>>,
     pub hit: Option<Hit>,
-    /// Tracks the preview pushes aside, shown moved and placed with the
-    /// next click.
-    pub shove: Option<Shove>,
+    /// Tracks and vias the preview pushes aside, shown moved and placed
+    /// with the next click.
+    pub shove: Option<Pushed>,
 }
 
 /// A piece of copper the route will place.
@@ -593,29 +604,41 @@ impl Router {
         }
         let layer = a.layer();
         let half = a.half_width(layer, width);
-        // Push: move the tracks in the way, if nothing else is.
-        if mode == Mode::Push {
-            let caps: Vec<walk::Capsule> = a
-                .layout(width)
-                .into_iter()
-                .filter(|p| p.live)
-                .flat_map(|p| {
-                    let r = p.width / 2.0;
-                    p.piece.chords().into_iter().map(move |(x, y)| (x, y, r))
-                })
-                .collect();
-            let obstacles = self.obstacles(board);
-            if let Some(s) = walk::shove(board, obstacles, layer, &caps, &nets, clearance) {
-                let skip = |t: usize| s.remove.contains(&t);
-                let clear = caps
-                    .iter()
-                    .all(|&(x, y, r)| obstacles.clear(layer, x, y, r, &nets, clearance, &skip));
-                if clear {
-                    let a = self.active.as_mut().unwrap();
-                    a.shove = Some(s);
-                    a.hit = None;
-                    return;
+        // Push: move the tracks and vias in the way, in a chain.
+        if mode.pushes() {
+            let keep_preview = a.preview.clone();
+            if mode == Mode::HugPush {
+                // Round what cannot move, close to it; through what can.
+                let obstacles = self.obstacles(board);
+                let ask = Ask {
+                    obstacles,
+                    layer,
+                    r: half,
+                    nets: &nets,
+                    clearance,
+                    extra: &[],
+                    skip: &[],
+                    see_through: true,
+                    deadline: None,
+                };
+                if let Some(path) = walk::walkaround(&ask, from, target) {
+                    let pieces: Vec<Piece> =
+                        path.windows(2).map(|w| Piece::Line(w[0], w[1])).collect();
+                    self.active.as_mut().unwrap().preview = pieces;
                 }
+            }
+            if let Some(s) = self.push_preview(board) {
+                let a = self.active.as_mut().unwrap();
+                a.shove = Some(s);
+                a.hit = None;
+                return;
+            }
+            let a = self.active.as_mut().unwrap();
+            a.preview = keep_preview;
+            if mode == Mode::Push {
+                // Something that cannot move is in the way: stop there.
+                a.hit = hit;
+                return;
             }
         }
         // Walkaround: a 45° path round what is in the way.
@@ -628,6 +651,8 @@ impl Router {
             clearance,
             extra: &[],
             skip: &[],
+            see_through: false,
+            deadline: None,
         };
         // When there is no way round, as far as it goes: the route stops
         // short of what is in the way, as in Altium.
@@ -650,6 +675,45 @@ impl Router {
             }
         }
         self.active.as_mut().unwrap().hit = hit;
+    }
+
+    /// The route's copper as pushers: the part following the cursor
+    /// (`live`), or the part already fixed with its vias.
+    fn route_copper(&self, live: bool) -> Vec<Pusher> {
+        let Some(a) = &self.active else {
+            return Vec::new();
+        };
+        let nets = a.lanes.clone();
+        let mut out: Vec<Pusher> = a
+            .layout(self.width)
+            .into_iter()
+            .filter(|p| p.live == live)
+            .flat_map(|p| {
+                let (l, r) = (p.layer, p.width / 2.0);
+                let nets = nets.clone();
+                p.piece
+                    .chords()
+                    .into_iter()
+                    .map(move |(x, y)| Pusher::track(l, x, y, r, &nets))
+            })
+            .collect();
+        if !live {
+            out.extend(
+                a.vias
+                    .iter()
+                    .map(|(v, _, k)| Pusher::via(*v, k.diameter, k.from, k.to, &nets)),
+            );
+        }
+        out
+    }
+
+    /// Pushes what is in the way of the preview aside, if it all can move.
+    fn push_preview(&mut self, board: &Board) -> Option<Pushed> {
+        let pushers = self.route_copper(true);
+        let keep = self.route_copper(false);
+        let clearance = self.clearance;
+        let obstacles = self.obstacles(board);
+        push::push(board, obstacles, clearance, &pushers, &keep)
     }
 
     /// The worst clearance break of the part of the route that follows the
@@ -740,7 +804,17 @@ impl Router {
             }
         };
         let d = stack.iter().map(|k| k.diameter).fold(0.0, f64::max);
+        // What the preview pushes goes in with the via.
+        let pushing = self.mode.pushes();
+        let ok_preview = self.active.as_ref().is_some_and(|a| a.hit.is_none());
+        let live = if ok_preview {
+            self.route_copper(true)
+        } else {
+            Vec::new()
+        };
+        let mut pre_shove = None;
         if let Some(a) = self.active.as_mut().filter(|a| a.hit.is_none()) {
+            pre_shove = a.shove.take();
             a.fix_preview();
         }
         let Some(a) = self.active.as_ref() else {
@@ -777,19 +851,51 @@ impl Router {
                 .collect();
         }
         let nets = a.lanes.clone();
+        let mut blocked = None;
         for &v in &spots {
             for k in &stack {
                 if let Some(h) = self
                     .obstacles(board)
                     .check_span_via(v, k.diameter, &nets, clearance, k.from, k.to)
                 {
-                    self.message = Some(format!(
-                        "No room for a via here: {}",
-                        too_close(board, &h, clearance)
-                    ));
-                    return;
+                    blocked = Some(h);
                 }
             }
+        }
+        let tracks = board.geometry.tracks.len();
+        if pushing && (blocked.is_some() || pre_shove.is_some()) {
+            // Push tracks and vias out of the new vias' way too.
+            let mut pushers = live;
+            for &v in &spots {
+                for k in &stack {
+                    pushers.push(Pusher::via(v, k.diameter, k.from, k.to, &nets));
+                }
+            }
+            let keep = self.route_copper(false);
+            let pushed = {
+                let obstacles = self.obstacles(board);
+                push::push(board, obstacles, clearance, &pushers, &keep)
+            };
+            match pushed {
+                Some(s) => {
+                    blocked = None;
+                    self.shoved = Some(s.edits(board, tracks));
+                }
+                None => {
+                    if let Some(s) = pre_shove.take() {
+                        self.shoved = Some(s.edits(board, tracks));
+                    }
+                }
+            }
+        } else if let Some(s) = pre_shove.take() {
+            self.shoved = Some(s.edits(board, tracks));
+        }
+        if let Some(h) = blocked {
+            self.message = Some(format!(
+                "No room for a via here: {}",
+                too_close(board, &h, clearance)
+            ));
+            return;
         }
         let a = self.active.as_mut().unwrap();
         let (from, to) = if multi {
@@ -1281,6 +1387,81 @@ mod tests {
                     "{t:?} {u:?}"
                 );
             }
+        }
+    }
+
+    #[test]
+    fn push_modes_move_tracks_and_hug_pads() {
+        let mut b = Board::default();
+        b.stackup.layers.push(StackLayer {
+            name: "L0".into(),
+            altium_id: None,
+            kind: LayerKind::Copper,
+            thickness: Length::from_mil(1.4),
+            dielectric_constant: None,
+            loss_tangent: None,
+            roughness_um: None,
+            material: None,
+        });
+        b.nets = ["A", "B", "C", "X"]
+            .iter()
+            .map(|n| Net {
+                name: (*n).into(),
+                ..Default::default()
+            })
+            .collect();
+        let at = |x: f64, y: f64| Point {
+            x: Length::from_mil(x),
+            y: Length::from_mil(y),
+        };
+        // Two tracks above the route's way, one behind the other.
+        for (net, y) in [(1, 10.0), (2, 21.0)] {
+            b.geometry.tracks.push(Track {
+                component: None,
+                layer: LayerRef::Copper(0),
+                net: Some(net),
+                start: at(-100.0, y),
+                end: at(400.0, y),
+                width: Length::from_mil(6.0),
+                text: false,
+            });
+        }
+        let mut block = pad(3, 150.0, -14.0);
+        block.size_x = Length::from_mil(16.0);
+        block.size_y = Length::from_mil(16.0);
+        b.geometry.pads = vec![pad(0, 0.0, 0.0), block];
+        let mut r = Router::new();
+        r.clearance = 5.0;
+        r.width = 6.0;
+        let no_pad = |_: P, _: Option<u32>| None;
+        r.start([0.0, 0.0], Some(0), 0, None);
+        // Push: straight at the pad below fails.
+        r.mode = Mode::Push;
+        r.update(&b, [300.0, 0.0], None, no_pad);
+        assert!(
+            r.active.as_ref().unwrap().hit.is_some(),
+            "a pad cannot move"
+        );
+        // Hug and push: round the pad, pushing both tracks up.
+        r.mode = Mode::HugPush;
+        r.update(&b, [300.0, 0.0], None, no_pad);
+        let a = r.active.as_ref().unwrap();
+        assert!(a.hit.is_none());
+        let s = a.shove.as_ref().expect("pushes");
+        assert_eq!(s.remove, vec![0, 1], "a chain of two");
+        // Click: the pushed tracks become edits of their own.
+        assert!(r.click(&b).is_none());
+        let edits = r.shoved.take().expect("pushed edits");
+        let mut nb = b.clone();
+        for e in &edits {
+            e.apply(&mut nb);
+        }
+        let obs = Obstacles::new(&nb);
+        for t in &nb.geometry.tracks {
+            let p = |q: Point| [q.x.mil(), q.y.mil()];
+            assert!(obs
+                .check_track(0, p(t.start), p(t.end), t.width.mil(), t.net, 5.0)
+                .is_none());
         }
     }
 }

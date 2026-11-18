@@ -577,12 +577,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     order.sort_by_key(|(s, _)| if view.flip { -rank(*s) } else { rank(*s) });
     let dim = if app.selected.is_some() { 0.2 } else { 1.0 };
     // Tracks the route is pushing aside are drawn where they will go.
-    let shoved_away: Vec<usize> = app
-        .router
-        .active
-        .as_ref()
-        .and_then(|a| a.shove.as_ref())
-        .map(|s| s.remove.clone())
+    let shove = app.router.active.as_ref().and_then(|a| a.shove.as_ref());
+    let shoved_away: Vec<usize> = shove.map(|s| s.remove.clone()).unwrap_or_default();
+    let vias_away: Vec<usize> = shove
+        .map(|s| s.vias.iter().map(|v| v.0).collect())
         .unwrap_or_default();
     // A part being dragged, and the tracks stretching to it, are drawn
     // where they go instead.
@@ -618,6 +616,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             .iter()
             .filter(|p| p.slot == *slot && !(p.all_layers && p.slot != Slot::Vias))
             .filter(|p| !matches!(p.source, Source::Track(t) if shoved_away.contains(&t)))
+            .filter(|p| !matches!(p.source, Source::Via(v) if vias_away.contains(&v)))
             .filter(|p| !lifted(p))
         {
             let b = p.geom.bbox();
@@ -836,7 +835,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         pending = app.router.finish(&scene.board);
     }
     if let Some(a) = &app.router.active {
-        draw_route(&mut shapes, &view, &app.router, a);
+        draw_route(&mut shapes, &view, &app.router, a, &scene.board);
     }
     // Pads gathered for a bus, ringed.
     for (p, _) in &app.router.bus {
@@ -1077,14 +1076,30 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             }
         }
     } else if let Some(edits) = app.router.shoved.take() {
+        use trace_core::edit::Edit;
         let n = edits
             .iter()
-            .filter(|e| matches!(e, trace_core::edit::Edit::RemoveTrack { .. }))
+            .filter(|e| matches!(e, Edit::RemoveTrack { .. }))
             .count();
-        let label = if n == 1 {
-            "Pushed a track aside".to_string()
-        } else {
-            format!("Pushed {n} tracks aside")
+        let v = edits
+            .iter()
+            .filter(|e| matches!(e, Edit::InsertVia { .. }))
+            .count();
+        let plural = |k: usize, one: &str| {
+            if k == 1 {
+                format!("a {one}")
+            } else {
+                format!("{k} {one}s")
+            }
+        };
+        let label = match (n, v) {
+            (_, 0) => format!("Pushed {} aside", plural(n, "track")),
+            (0, _) => format!("Pushed {} aside", plural(v, "via")),
+            _ => format!(
+                "Pushed {} and {} aside",
+                plural(n, "track"),
+                plural(v, "via")
+            ),
         };
         app.apply_edits(&label, edits);
     }
@@ -1097,6 +1112,7 @@ fn draw_route(
     view: &View,
     r: &crate::router::Router,
     a: &crate::router::Active,
+    board: &trace_core::Board,
 ) {
     let amber = Color32::from_rgb(255, 196, 64);
     let seg = |shapes: &mut Vec<Shape>, p: [f64; 2], q: [f64; 2], w: f64, c: Color32| {
@@ -1139,7 +1155,7 @@ fn draw_route(
             seg(shapes, x, y, p.width, if p.live { live } else { amber });
         }
     }
-    // Tracks pushed aside, where they will go.
+    // Tracks and vias pushed aside, where they will go.
     if let Some(s) = &a.shove {
         let pushed = Color32::from_rgb(110, 200, 255);
         for t in &s.add {
@@ -1150,6 +1166,22 @@ fn draw_route(
                 t.width.mil(),
                 pushed,
             );
+        }
+        for &(vi, at) in &s.vias {
+            let Some(v) = board.geometry.vias.get(vi) else {
+                continue;
+            };
+            let c = view.to_screen(at[0] as f32, at[1] as f32);
+            shapes.push(Shape::circle_filled(
+                c,
+                (v.diameter.mil() / 2.0) as f32 * view.scale,
+                pushed,
+            ));
+            shapes.push(Shape::circle_filled(
+                c,
+                (v.hole.mil() / 2.0) as f32 * view.scale,
+                Color32::from_rgb(20, 20, 24),
+            ));
         }
     }
     for (v, d, hole) in a.via_shapes() {

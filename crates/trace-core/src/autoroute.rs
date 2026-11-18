@@ -512,6 +512,8 @@ pub fn autoroute(board: &Board, goal: &Goal) -> (Vec<Edit>, Report) {
                         clearance,
                         extra: &[],
                         skip: &[],
+                        see_through: false,
+                        deadline: None,
                     };
                     let tight = if run.len() > 2 {
                         tighten(&ask, run.clone())

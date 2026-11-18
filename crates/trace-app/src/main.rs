@@ -2194,7 +2194,7 @@ impl App {
             .selected_text(r.mode.label())
             .show_ui(ui, |ui| {
                 use crate::router::Mode;
-                for m in [Mode::Walkaround, Mode::Push, Mode::Stop] {
+                for m in Mode::ALL {
                     ui.selectable_value(&mut r.mode, m, m.label());
                 }
             })

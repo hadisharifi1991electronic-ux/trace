@@ -199,6 +199,11 @@ USAGE:
                                                 per 1 W in; map.gif animates one plane through a cycle
                                                 (--field-plane N|name, --field-quantity E|H|energy|current,
                                                 --field-db 40 for the scale's depth)
+                                                --check openems [--openems-dir DIR] [--openems-exe PATH]
+                                                [--openems-cell C] runs the same transition in openEMS (an
+                                                independent FDTD, C:\\openEMS by default) and compares the two:
+                                                table, compare.svg, both .s2p in DIR; --export-openems DIR only
+                                                writes the model; --openems-read DIR reads a finished run
     trace pairsize <board> <layer> [--zdiff 100] [--wmin W] [--wmax W] [--gap S] [--ghz 8] [--next D] [--xtalk 2]
                                                 Every track width and gap on a layer that gives the target Zdiff
                                                 (2D field solver), ranked by loss, with crosstalk and etch
@@ -3388,6 +3393,14 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     let mut field_out: Option<String> = None;
     let mut field_db = 40.0;
     let mut field_plane: Option<String> = None;
+    // openEMS: compare, export only, its folder, program, cell, or
+    // read a finished run.
+    let mut oems_check = false;
+    let mut oems_export: Option<String> = None;
+    let mut oems_dir: Option<String> = None;
+    let mut oems_read: Option<String> = None;
+    let mut oems_exe: Option<String> = None;
+    let mut oems_cell = 0.0;
     let mut field_q = trace_core::emfield::Quantity::E;
     let mut it = rest.iter();
     let len = |x: Option<&&str>, what: &str| -> Result<f64, Box<dyn std::error::Error>> {
@@ -3408,6 +3421,32 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
             "--free-pitch" => free_pitch = true,
             "--try-backdrill" => try_backdrill = true,
             "--keep-pad" => keep_pad = true,
+            "--check" if it.clone().next() == Some(&"openems") => {
+                it.next();
+                oems_check = true;
+            }
+            "--export-openems" => {
+                oems_export = Some(
+                    it.next()
+                        .ok_or("--export-openems needs a folder")?
+                        .to_string(),
+                )
+            }
+            "--openems-dir" => {
+                oems_dir = Some(it.next().ok_or("--openems-dir needs a folder")?.to_string())
+            }
+            "--openems-read" => {
+                oems_read = Some(
+                    it.next()
+                        .ok_or("--openems-read needs a folder")?
+                        .to_string(),
+                );
+                oems_check = true;
+            }
+            "--openems-exe" => {
+                oems_exe = Some(it.next().ok_or("--openems-exe needs a path")?.to_string())
+            }
+            "--openems-cell" => oems_cell = len(it.next(), a)?,
             "--check" => check = true,
             "--quick" => quick = true,
             "--accurate" => {
@@ -3717,6 +3756,19 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
         }
         return Ok(());
     }
+    if let Some(dir) = &oems_export {
+        use trace_core::openems;
+        let s = openems::setup_for(&b.stackup, &v, oems_cell)?;
+        let ex = openems::export(&b.stackup, &s, Path::new(dir))?;
+        println!(
+            "Wrote {} for openEMS ({} cells, smallest {:.2} mil): run openEMS {} in that folder, then --openems-read {dir}",
+            ex.xml.display(),
+            ex.cells,
+            ex.cell,
+            openems::MODEL
+        );
+        return Ok(());
+    }
     let t = std::time::Instant::now();
     let last = std::cell::Cell::new(-1i32);
     let progress = |p: f64| {
@@ -3929,6 +3981,100 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
         }
         println!("Saved {o}");
     }
+    if oems_check {
+        openems_compare(
+            &b.stackup,
+            &v,
+            &r,
+            &title,
+            file,
+            oems_cell,
+            oems_dir.as_deref(),
+            oems_read.as_deref(),
+            oems_exe.as_deref(),
+        )?;
+    }
+    Ok(())
+}
+
+/// Runs (or reads) openEMS on the via `v` and compares it with Trace's `r`.
+#[allow(clippy::too_many_arguments)]
+fn openems_compare(
+    stackup: &trace_core::Stackup,
+    v: &trace_core::fdtd::ViaSetup,
+    r: &trace_core::fdtd::ViaResult,
+    title: &str,
+    file: &str,
+    cell: f64,
+    dir: Option<&str>,
+    read: Option<&str>,
+    exe: Option<&str>,
+) -> Res {
+    use trace_core::openems;
+    let default_dir = format!(
+        "{}_openems",
+        Path::new(file)
+            .file_stem()
+            .map_or("via".into(), |s| s.to_string_lossy().into_owned())
+    );
+    let dir = PathBuf::from(read.or(dir).unwrap_or(&default_dir));
+    let t = std::time::Instant::now();
+    let o = if read.is_some() {
+        let s = openems::setup_for(stackup, v, cell)?;
+        openems::read(stackup, &s, &dir)?
+    } else {
+        let exe = openems::find_exe(exe.map(Path::new)).ok_or(
+            "openEMS not found: install it (C:\\openEMS) or give --openems-exe PATH, \
+             or set TRACE_OPENEMS",
+        )?;
+        println!("openEMS: {} in {}", exe.display(), dir.display());
+        let last = std::cell::Cell::new(-1i32);
+        let (o, _) = openems::check(stackup, v, cell, &dir, &exe, &|p| {
+            let pc = (p * 100.0) as i32 / 5 * 5;
+            if pc > last.get() {
+                last.set(pc);
+                eprint!("\r  openEMS running… {pc}%");
+            }
+        })?;
+        eprintln!();
+        o
+    };
+    println!(
+        "openEMS: {:.0} s, {} cells, smallest cell {:.2} mil",
+        t.elapsed().as_secs_f64(),
+        o.cells,
+        o.cell
+    );
+    for n in &o.notes {
+        println!("  {n}");
+    }
+    if let Some(z) = o.z_via {
+        println!("openEMS via impedance: {z:.1} ohm");
+    }
+    print!("{}", openems::table(r, &o, 12, &[6.0]));
+    let c = openems::compare(r, &o);
+    println!("Trace vs openEMS: {}", c.summary());
+    std::fs::create_dir_all(&dir)?;
+    let save = |name: &str, text: String| -> Res {
+        let p = dir.join(name);
+        std::fs::write(&p, text)?;
+        println!("Saved {}", p.display());
+        Ok(())
+    };
+    save(
+        "compare.svg",
+        openems::svg(r, &o, &format!("{title}: Trace vs openEMS")),
+    )?;
+    save("trace.s2p", r.touchstone(title))?;
+    save("openems.s2p", o.touchstone(&format!("{title} (openEMS)")))?;
+    save(
+        "compare.txt",
+        format!(
+            "{title}\nTrace vs openEMS: {}\n{}",
+            c.summary(),
+            openems::table(r, &o, 40, &[6.0])
+        ),
+    )?;
     Ok(())
 }
 

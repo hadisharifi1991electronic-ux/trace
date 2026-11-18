@@ -36,6 +36,7 @@ pub mod hier;
 pub mod ibis;
 pub mod impedance;
 pub mod nettie;
+pub mod openems;
 pub mod pairopt;
 pub mod panel;
 pub mod pathloss;

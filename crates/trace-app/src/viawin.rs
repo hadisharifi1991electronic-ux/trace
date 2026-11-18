@@ -50,6 +50,10 @@ pub struct ViaWindow {
     accurate: bool,
     /// Field maps of the solve.
     fields: crate::fieldview::FieldView,
+    /// The same transition in openEMS: run, outcome and its folder.
+    oems_running: Option<(mpsc::Receiver<Solved>, Arc<AtomicU32>)>,
+    oems: Option<Solved>,
+    oems_dir: Option<std::path::PathBuf>,
 }
 
 impl Default for ViaWindow {
@@ -79,6 +83,9 @@ impl Default for ViaWindow {
             df: 0.02,
             accurate: true,
             fields: Default::default(),
+            oems_running: None,
+            oems: None,
+            oems_dir: None,
         }
     }
 }
@@ -495,6 +502,7 @@ impl ViaWindow {
                     c.request_repaint();
                 });
                 self.result = Some((self.setup.clone(), Err(String::new())));
+                self.oems = None;
                 self.running = Some((rx, prog));
             }
             if let Some(p) = self.running.as_ref().map(|(_, p)| p.clone()) {
@@ -534,6 +542,7 @@ impl ViaWindow {
                 }
             }
         });
+        self.openems_row(ui, ctx, stackup);
         self.optimiser(ui, ctx, stackup);
         let Some((_, res)) = &self.result else {
             return;
@@ -594,7 +603,22 @@ impl ViaWindow {
         for n in &r.notes {
             ui.weak(n);
         }
-        plot(ui, r, kind);
+        let other = match &self.oems {
+            Some(Ok(o)) if o.f.len() == r.f.len() => {
+                let c = trace_core::openems::compare(r, o);
+                ui.label(
+                    RichText::new(format!("Trace vs openEMS (dashed): {}", c.summary()))
+                        .color(Color32::from_rgb(120, 170, 230)),
+                );
+                Some(o)
+            }
+            Some(Err(e)) if !e.is_empty() => {
+                ui.colored_label(Color32::from_rgb(230, 110, 90), format!("openEMS: {e}"));
+                None
+            }
+            _ => None,
+        };
+        plot(ui, r, other, kind);
         self.fields.show(ui, ctx, &r.fields);
     }
 }
@@ -736,7 +760,103 @@ impl ViaWindow {
 }
 
 /// |S11| and |S21| in dB against frequency.
-fn plot(ui: &mut egui::Ui, r: &ViaResult, kind: &str) {
+impl ViaWindow {
+    /// Check with openEMS: the transition last solved, run in openEMS
+    /// (found in C:\openEMS, or TRACE_OPENEMS), its result dashed on the
+    /// plot; or only its model written to a folder.
+    fn openems_row(&mut self, ui: &mut egui::Ui, ctx: &egui::Context, stackup: &Stackup) {
+        use trace_core::openems;
+        if let Some((rx, _)) = &self.oems_running {
+            if let Ok(r) = rx.try_recv() {
+                self.oems = Some(r);
+                self.oems_running = None;
+            }
+        }
+        let Some((setup, Ok(_))) = &self.result else {
+            return;
+        };
+        let setup = setup.clone();
+        ui.horizontal(|ui| {
+            let exe = openems::find_exe(None);
+            let idle = self.oems_running.is_none();
+            let tip = match &exe {
+                Some(e) => format!(
+                    "Runs the same transition in openEMS ({}), an independent FDTD solver, \
+                     on half this grid's smallest cell, and draws its result dashed over \
+                     Trace's with how far apart they are. Large grids take a while.",
+                    e.display()
+                ),
+                None => "openEMS was not found (looked in C:\\openEMS, TRACE_OPENEMS and the PATH)"
+                    .into(),
+            };
+            if ui
+                .add_enabled(
+                    idle && exe.is_some(),
+                    egui::Button::new("Check with openEMS"),
+                )
+                .on_hover_text(tip)
+                .clicked()
+            {
+                let exe = exe.unwrap();
+                let stamp = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .map_or(0, |d| d.as_secs());
+                let dir = std::env::temp_dir().join(format!("trace-openems-{stamp}"));
+                self.oems_dir = Some(dir.clone());
+                let st = stackup.clone();
+                let setup = setup.clone();
+                let (tx, rx) = mpsc::channel();
+                let prog = Arc::new(AtomicU32::new(0));
+                let p2 = prog.clone();
+                let c = ctx.clone();
+                let token = crate::jobs::start(ctx, "via-openems");
+                std::thread::spawn(move || {
+                    let _g = token.install();
+                    let progress = |f: f64| p2.store((f * 1000.0) as u32, Ordering::Relaxed);
+                    let r = openems::check(&st, &setup, 0.0, &dir, &exe, &progress).map(|(r, _)| r);
+                    let _ = tx.send(r);
+                    c.request_repaint();
+                });
+                self.oems = None;
+                self.oems_running = Some((rx, prog));
+            }
+            if ui
+                .add_enabled(idle, egui::Button::new("Export openEMS model…"))
+                .on_hover_text(
+                    "Writes the transition as an openEMS model (trace_via.xml) to run yourself",
+                )
+                .clicked()
+            {
+                if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                    let r = openems::setup_for(stackup, &setup, 0.0)
+                        .and_then(|s| openems::export(stackup, &s, &dir));
+                    self.oems = match r {
+                        Ok(_) => {
+                            self.oems_dir = Some(dir);
+                            None
+                        }
+                        Err(e) => Some(Err(e)),
+                    };
+                }
+            }
+            if let Some(p) = self.oems_running.as_ref().map(|(_, p)| p.clone()) {
+                ui.spinner();
+                if crate::jobs::cancel_button(ui, "via-openems") {
+                    self.oems_running = None;
+                }
+                ui.label(format!(
+                    "openEMS running… {} %",
+                    p.load(Ordering::Relaxed) / 10
+                ));
+            }
+            if let Some(d) = &self.oems_dir {
+                ui.weak(format!("{}", d.display()));
+            }
+        });
+    }
+}
+
+fn plot(ui: &mut egui::Ui, r: &ViaResult, other: Option<&ViaResult>, kind: &str) {
     let w = ui.available_width().max(300.0);
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 300.0), egui::Sense::hover());
     let p = ui.painter_at(rect);
@@ -807,6 +927,22 @@ fn plot(ui: &mut egui::Ui, r: &ViaResult, kind: &str) {
                 .map(|(f, v)| egui::pos2(x(*f), y(v.db())))
                 .collect();
         p.add(egui::Shape::line(pts, Stroke::new(1.8_f32, c)));
+    }
+    // A second solver's result, dashed.
+    if let Some(o) = other {
+        for (s, c) in [(&o.s21, blue), (&o.s11, orange)] {
+            let pts: Vec<egui::Pos2> =
+                o.f.iter()
+                    .zip(s.iter())
+                    .map(|(f, v)| egui::pos2(x(*f), y(v.db())))
+                    .collect();
+            p.extend(egui::Shape::dashed_line(
+                &pts,
+                Stroke::new(1.6_f32, c),
+                6.0,
+                4.0,
+            ));
+        }
     }
     p.text(
         egui::pos2(plot.right() - 4.0, plot.top() + 4.0),

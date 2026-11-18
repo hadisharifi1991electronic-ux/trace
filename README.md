@@ -328,6 +328,7 @@ trace via board.PcbDoc 1 7 --pair 40 --optimise 10 best.s2p   tune a pair's anti
 trace via board.PcbDoc 1 7 --fields 6 map.svg   field maps: |E|, |H|, energy and surface current density on cut planes at 6 GHz (map.gif: animated through a cycle)
 trace via board.PcbDoc 1 7 --check   solve on two grids and say whether the result converged
 trace via board.PcbDoc 1 7 --accurate   refine the grid until converged, extrapolate, S11/S21 with error bars, passivity and causality
+trace via board.PcbDoc 1 8 --pair 40 --check openems   run the same via in openEMS (C:\openEMS) and compare: table, compare.svg, both .s2p (--export-openems DIR: model only)
 trace sparam check vendor.s4p via.s2p   passivity, reciprocity and causality of any Touchstone file
 trace thermal board.brd --power U1=2.5W@jc0.5/jb8,U2=1W --heatsink U1=40x40x15,fins=10 --air 1 --check map.svg maps.gif   3D steady-state temperatures: Tj per part, heatsinks, convection and radiation, grid error bars; density maps of T, heat flux, gradient, power and heat to air per layer and in side views
 trace bus board.brd "DDR_DQ*" DDR_DM0 --from U1 --to U5 --strobe DQS0 --rate 3200 --mask 136mV,0.2UI timing.svg   DDR/parallel bus: per-bit eyes with crosstalk, valid windows against the strobe, setup/hold and mask margins (as routed, trained, deskewed)

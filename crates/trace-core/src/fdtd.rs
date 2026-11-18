@@ -362,12 +362,12 @@ impl ViaResult {
 
 /// The stack-up along z: copper sheets (z of each copper layer, mil, from
 /// the top, going down) and the dielectric slabs between them.
-struct Stack {
+pub(crate) struct Stack {
     /// z of each copper layer (0 at the top copper, growing downwards).
-    sheet: Vec<f64>,
+    pub(crate) sheet: Vec<f64>,
     /// Slabs: top z, bottom z, Er, Df.
-    slabs: Vec<(f64, f64, f64, f64)>,
-    names: Vec<String>,
+    pub(crate) slabs: Vec<(f64, f64, f64, f64)>,
+    pub(crate) names: Vec<String>,
 }
 
 fn stack(stackup: &Stackup) -> Stack {
@@ -573,26 +573,45 @@ pub fn materials_between(stackup: &Stackup, from: u8, to: u8) -> Option<(f64, f6
     (w > 0.0).then(|| (e / w, d / w))
 }
 
-/// Solves a via transition on `stackup`.
-pub fn solve(stackup: &Stackup, setup: &ViaSetup) -> Result<ViaResult, String> {
-    solve_with(stackup, setup, &|_| {})
+/// The geometry and grid of a via transition, shared by the solver and
+/// the openEMS export (lengths in mil; z grows downwards from the top
+/// copper, x along the traces, the via at the origin).
+pub(crate) struct Model {
+    pub st: Stack,
+    pub nl: usize,
+    pub from: usize,
+    pub to: usize,
+    pub thru: bool,
+    pub w: [f64; 2],
+    pub z0: [f64; 2],
+    pub eeff: [f64; 2],
+    pub r_from: (Option<usize>, Option<usize>),
+    pub r_to: (Option<usize>, Option<usize>),
+    pub planes: Vec<bool>,
+    pub via_top: usize,
+    pub via_bot: usize,
+    pub stub: f64,
+    pub rd: f64,
+    pub rp: f64,
+    pub ra: f64,
+    pub sig: Vec<[f64; 2]>,
+    pub ret: Vec<[f64; 2]>,
+    pub d0: f64,
+    pub edge: f64,
+    pub dmax: f64,
+    pub core: f64,
+    pub half_pair: f64,
+    pub probe_at: f64,
+    pub port_at: f64,
+    pub x: Vec<f64>,
+    pub y: Vec<f64>,
+    pub z: Vec<f64>,
+    pub notes: Vec<String>,
+    pub er_max: f64,
 }
 
-/// As `solve`, reporting progress (0 to 1).
-pub fn solve_with(
-    stackup: &Stackup,
-    setup: &ViaSetup,
-    progress: &dyn Fn(f64),
-) -> Result<ViaResult, String> {
-    let clock = std::time::Instant::now();
-    // Materials given on the setup stand for the stack-up's.
-    let own;
-    let stackup = if setup.er.is_some() || setup.df.is_some() {
-        own = materials(stackup, setup.er, setup.df);
-        &own
-    } else {
-        stackup
-    };
+/// Builds the transition's geometry and grid (no solving).
+pub(crate) fn model(stackup: &Stackup, setup: &ViaSetup) -> Result<Model, String> {
     let st = stack(stackup);
     let nl = st.sheet.len();
     if nl < 2 {
@@ -616,7 +635,7 @@ pub fn solve_with(
     let _ = (gfrom, gto);
     let w_of =
         |g: &LayerGeometry, w: Option<f64>| w.or_else(|| g.width_for_field(50.0)).unwrap_or(5.0);
-    let mut notes = Vec::new();
+    let notes = Vec::new();
     // Planes: copper layers named like planes, else every other layer.
     let plane_name = |n: &str| {
         let u = n.to_ascii_uppercase();
@@ -919,6 +938,94 @@ pub fn solve_with(
     }
     zl.dedup_by(|a, b| (*a - *b).abs() < 1e-6);
     let z = with_pml(zl, 8);
+    Ok(Model {
+        st,
+        nl,
+        from,
+        to,
+        thru,
+        w,
+        z0,
+        eeff,
+        r_from,
+        r_to,
+        planes,
+        via_top,
+        via_bot,
+        stub,
+        rd,
+        rp,
+        ra,
+        sig,
+        ret,
+        d0,
+        edge,
+        dmax,
+        core,
+        half_pair,
+        probe_at,
+        port_at,
+        x,
+        y,
+        z,
+        notes,
+        er_max,
+    })
+}
+
+/// Solves a via transition on `stackup`.
+pub fn solve(stackup: &Stackup, setup: &ViaSetup) -> Result<ViaResult, String> {
+    solve_with(stackup, setup, &|_| {})
+}
+
+/// As `solve`, reporting progress (0 to 1).
+pub fn solve_with(
+    stackup: &Stackup,
+    setup: &ViaSetup,
+    progress: &dyn Fn(f64),
+) -> Result<ViaResult, String> {
+    let clock = std::time::Instant::now();
+    // Materials given on the setup stand for the stack-up's.
+    let own;
+    let stackup = if setup.er.is_some() || setup.df.is_some() {
+        own = materials(stackup, setup.er, setup.df);
+        &own
+    } else {
+        stackup
+    };
+    let Model {
+        st,
+        nl,
+        from,
+        to,
+        thru,
+        w,
+        z0,
+        eeff,
+        r_from,
+        r_to,
+        planes,
+        via_top,
+        via_bot,
+        stub,
+        rd,
+        rp,
+        ra,
+        sig,
+        ret,
+        d0,
+        edge,
+        dmax,
+        core,
+        half_pair,
+        probe_at,
+        port_at,
+        x,
+        y,
+        z,
+        mut notes,
+        er_max,
+    } = model(stackup, setup)?;
     let (nx, ny, nz) = (x.len() - 1, y.len() - 1, z.len() - 1);
     let (sx, sy) = ((ny + 1) * (nz + 1), nz + 1);
     let total = (nx + 1) * sx;
@@ -1726,6 +1833,109 @@ pub fn solve_with(
     if steps == max_steps {
         notes.push("stopped before the fields had died away: the result may ring".into());
     }
+    let xh = |i: usize| (x[i] + x[i + 1]) / 2.0 * MIL;
+    let xp = [
+        xh(x_probe[0]),
+        xh(x_probe[1]),
+        xh(x_probe[2]),
+        xh(x_probe[3]),
+    ];
+    let Extracted {
+        s11,
+        s21,
+        zline,
+        a1_at,
+        power,
+        z_via,
+    } = extract(
+        &st, setup, from, to, &freqs, &fv, &fi, ns, z0, eeff, xp, true, &mut notes,
+    );
+    if power > 1.005 {
+        notes.push(format!(
+            "the grid gave up to {:.1} % more power out than in; scaled back to passive (a finer cell would help)",
+            (power - 1.0) * 100.0
+        ));
+    }
+    if ns == 2 {
+        notes.push(format!(
+            "the pair's traces enter the vias at the vias' pitch (uncoupled), {:.1} Ω each",
+            (z0[0] * z0[1]).sqrt()
+        ));
+    }
+    let fields = match fcap {
+        Some(c) => {
+            let metal = |i: usize, j: usize, k: usize| {
+                let q = id(i, j, k);
+                [cbx[q], cby[q], cbz[q]]
+                    .iter()
+                    .filter(|&&b| b == 0.0)
+                    .count()
+                    >= 2
+            };
+            let er_at = |k: usize| {
+                let a = cell_mat[k.saturating_sub(1).min(nz - 1)].0;
+                let b = cell_mat[k.min(nz - 1)].0;
+                ((a + b) / 2.0) as f32
+            };
+            c.finish(
+                &a1_at, &metal, &er_at, &x, &y, &z, &sig, &ret, rd, ra, &st.names, setup,
+            )
+        }
+        None => Vec::new(),
+    };
+    Ok(ViaResult {
+        fields,
+        f: freqs.iter().map(|f| f / 1e9).collect(),
+        s11,
+        s21,
+        z_ref: if ns == 2 { 2.0 * z_ref } else { z_ref },
+        w,
+        z0,
+        z_line: zline,
+        stub,
+        cells: nx * ny * nz,
+        steps,
+        cell: d0,
+        power,
+        z_via,
+        notes,
+        err11: Vec::new(),
+        err21: Vec::new(),
+    })
+}
+
+/// What the probes' transforms give.
+pub(crate) struct Extracted {
+    pub s11: Vec<Cx>,
+    pub s21: Vec<Cx>,
+    pub zline: [f64; 2],
+    pub a1_at: Vec<Cx>,
+    pub power: f64,
+    pub z_via: Option<f64>,
+}
+
+/// S-parameters at the via from the probes' voltage and current
+/// transforms (`fv`, `fi`: probe `t` of signal via `s` at `t * ns + s`;
+/// probes 0 and 1 near the via on the two traces, 2 and 3 further out),
+/// the probes' x in metres, and the barrel's loss when asked for.
+/// `passive` scales back any point that gives out more power than in.
+pub(crate) fn extract(
+    st: &Stack,
+    setup: &ViaSetup,
+    from: usize,
+    to: usize,
+    freqs: &[f64],
+    fv: &[Vec<Cx>],
+    fi: &[Vec<Cx>],
+    ns: usize,
+    z0: [f64; 2],
+    eeff: [f64; 2],
+    xp: [f64; 4],
+    passive: bool,
+    notes: &mut Vec<String>,
+) -> Extracted {
+    let z_ref = 50.0;
+    let nf = freqs.len();
     // Power waves, each trace normalised to its own impedance as the
     // grid sees it (from the two probes on it), then moved to the via
     // with the trace's own propagation.
@@ -1741,7 +1951,6 @@ pub fn solve_with(
             )
         }
     };
-    let xh = |i: usize| (x[i] + x[i + 1]) / 2.0 * MIL;
     let mut s11 = Vec::with_capacity(nf);
     let mut s21 = Vec::with_capacity(nf);
     let mut zline = [0.0f64; 2];
@@ -1755,7 +1964,7 @@ pub fn solve_with(
             let (p, q) = if t == 0 { (2, 0) } else { (1, 3) };
             let (v1, i1) = pair_vi(p, f);
             let (v2, i2) = pair_vi(q, f);
-            let len = (xh(x_probe[q]) - xh(x_probe[p])).abs();
+            let len = (xp[q] - xp[p]).abs();
             let a = v1.mul(i1).add(v2.mul(i2)).div(v1.mul(i2).add(v2.mul(i1)));
             let b = v1.add(a.mul(v2).scale(-1.0)).div(i2);
             let c = i1.add(a.mul(i2).scale(-1.0)).div(v2);
@@ -1787,7 +1996,7 @@ pub fn solve_with(
         }
         // The traces' own waves, moved to the via's centre, give the
         // voltage and current there on each side.
-        let (d1, d2) = (xh(x_probe[0]).abs(), xh(x_probe[1]).abs());
+        let (d1, d2) = (xp[0].abs(), xp[1].abs());
         // Fall back on the field solver's delay where the probes could
         // not tell (very low frequencies).
         let gamma = |t: usize, e: f64| {
@@ -1847,7 +2056,7 @@ pub fn solve_with(
     for k in 0..s11.len() {
         let p = s11[k].abs().powi(2) + s21[k].abs().powi(2);
         power = power.max(p);
-        if p > 1.0 {
+        if p > 1.0 && passive {
             let g = 1.0 / p.sqrt();
             s11[k] = s11[k].scale(g);
             s21[k] = s21[k].scale(g);
@@ -1954,58 +2163,14 @@ pub fn solve_with(
             ));
         }
     }
-    if power > 1.005 {
-        notes.push(format!(
-            "the grid gave up to {:.1} % more power out than in; scaled back to passive (a finer cell would help)",
-            (power - 1.0) * 100.0
-        ));
-    }
-    if ns == 2 {
-        notes.push(format!(
-            "the pair's traces enter the vias at the vias' pitch (uncoupled), {:.1} Ω each",
-            (z0[0] * z0[1]).sqrt()
-        ));
-    }
-    let fields = match fcap {
-        Some(c) => {
-            let metal = |i: usize, j: usize, k: usize| {
-                let q = id(i, j, k);
-                [cbx[q], cby[q], cbz[q]]
-                    .iter()
-                    .filter(|&&b| b == 0.0)
-                    .count()
-                    >= 2
-            };
-            let er_at = |k: usize| {
-                let a = cell_mat[k.saturating_sub(1).min(nz - 1)].0;
-                let b = cell_mat[k.min(nz - 1)].0;
-                ((a + b) / 2.0) as f32
-            };
-            c.finish(
-                &a1_at, &metal, &er_at, &x, &y, &z, &sig, &ret, rd, ra, &st.names, setup,
-            )
-        }
-        None => Vec::new(),
-    };
-    Ok(ViaResult {
-        fields,
-        f: freqs.iter().map(|f| f / 1e9).collect(),
+    Extracted {
         s11,
         s21,
-        z_ref: zr,
-        w,
-        z0,
-        z_line: zline,
-        stub,
-        cells: nx * ny * nz,
-        steps,
-        cell: d0,
+        zline,
+        a1_at,
         power,
         z_via,
-        notes,
-        err11: Vec::new(),
-        err21: Vec::new(),
-    })
+    }
 }
 
 /// How much a result moves when the grid is refined.

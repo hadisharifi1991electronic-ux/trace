@@ -3,6 +3,29 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.82.0 (2026-11-18)
+
+- openEMS as a second, independent solver for vias and pairs. The
+  transition Trace's 3D solver runs (stack-up, planes with round or oval
+  antipads, pads, barrels and stub, return vias, traces, the resistors at
+  their ends and the probes on them) is written as an openEMS model
+  (CSXCAD XML, lengths in mil, the same graded grid and PML, on half
+  Trace's smallest cell by default as openEMS draws round metal in steps).
+  openEMS is run as an external program (found in C:\openEMS, through
+  `TRACE_OPENEMS`, or on the PATH), with progress from its energy decay
+  and a Cancel that stops it. Its voltage and current probes are read
+  back and turned into S-parameters by the same power-wave extraction and
+  barrel loss Trace uses, so the two results differ only by the solvers.
+- `trace via ... --check openems` solves in Trace, then in openEMS, and
+  prints both side by side with the difference (worst |S11| and |S21|
+  gap, via impedance from each), and saves compare.svg (openEMS dashed
+  over Trace), trace.s2p, openems.s2p and compare.txt in the run folder
+  (`--openems-dir`, default `<board>_openems`). `--openems-exe`,
+  `--openems-cell`; `--export-openems DIR` only writes the model and
+  `--openems-read DIR` reads a run finished elsewhere.
+- Via window: Check with openEMS (dashed curves on the plot, the gap
+  above it, Cancel beside the spinner) and Export openEMS model.
+
 ## 0.81.0 (2026-11-17)
 
 - Thermal density maps, as the field maps do for the EM solver. The 3D

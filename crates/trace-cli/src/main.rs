@@ -103,6 +103,13 @@ USAGE:
                                                 --rl: return loss goal; --il-budget: IL limit at the top.
                                                 --out DIR: report, CSV, chart, and each path's .s2p and .svg.
                                                 Exits 1 when a path needs a look
+    trace lc <value> [--case 0402] [--family LQW15AN] [--band 0.1-6] [--points 13] | trace lc --list
+                                                chip L/C parasitics library (used by trace path, trace rf and
+                                                --tune): SRF, Q, ESR/ESL and the impedance over the band of a
+                                                0201/0402/0603/0805 capacitor (pF/nF/uF value) or inductor (nH),
+                                                by family (Murata GJM/GRM/GQM, LQW/LQG/LQP, Coilcraft 0201HL/
+                                                0402HP/0402DC/0603HP; a part number picks it) or generic by case.
+                                                Typical datasheet values; a vendor .s2p (--model) wins
     trace bom <board> [--boards N] [--parts parts.csv]... [--mouser KEY] [--refresh] [--no-cache]
               [--template parts.csv] [bom.csv|report.txt]
                                                 BOM with part data: lines by part number, value and footprint
@@ -380,6 +387,7 @@ fn main() -> ExitCode {
         ["zcheck", file, rest @ ..] => zcheck_cmd(file, rest),
         ["path" | "pathloss", file, rest @ ..] => path_cmd(file, rest),
         ["rf" | "rfreport", file, rest @ ..] => rf_cmd(file, rest),
+        ["lc", value, rest @ ..] => lc_cmd(value, rest),
         ["compare" | "diff", a, b, rest @ ..] => compare_cmd(a, b, rest),
         ["flex", file, rest @ ..] => flex_cmd(file, rest),
         ["thermal", file, rest @ ..] => thermal_cmd(file, rest),
@@ -2645,6 +2653,121 @@ fn path_cmd(file: &str, rest: &[&str]) -> Res {
         std::fs::write(o, text)?;
         println!("Wrote {o}");
     }
+    Ok(())
+}
+
+fn lc_cmd(value: &str, rest: &[&str]) -> Res {
+    use trace_core::lcparts::{self, ChipModel, Kind};
+    use trace_core::pdn::{self, Package};
+    if value == "--list" {
+        for f in lcparts::FAMILIES {
+            let what = match f.kind {
+                Kind::Cap => format!("ESL {:.2} nH", f.esl * 1e9),
+                Kind::Ind => {
+                    let m = ChipModel {
+                        family: f,
+                        value: 10e-9,
+                        class2: false,
+                    };
+                    format!("10 nH: SRF {:.2} GHz, Q {:.0} at 1 GHz", m.srf(), m.q(1.0))
+                }
+            };
+            println!(
+                "{:<40} {} {:<11} {:<18} {}",
+                f.name,
+                f.case.label(),
+                f.tech,
+                if f.keys.is_empty() {
+                    "(by case)".to_string()
+                } else {
+                    f.keys.join(",")
+                },
+                what
+            );
+        }
+        return Ok(());
+    }
+    let mut case = Package::P0402;
+    let mut family: Option<String> = None;
+    let (mut lo, mut hi, mut points) = (0.1f64, 6.0f64, 13usize);
+    let mut i = 0;
+    while i < rest.len() {
+        let v = rest.get(i + 1).copied();
+        let need = || v.ok_or_else(|| format!("{} needs a value", rest[i]));
+        match rest[i] {
+            "--case" => {
+                case = match need()? {
+                    "0201" => Package::P0201,
+                    "0402" => Package::P0402,
+                    "0603" => Package::P0603,
+                    "0805" => Package::P0805,
+                    "1206" => Package::P1206,
+                    c => {
+                        return Err(
+                            format!("--case {c}: give 0201, 0402, 0603, 0805 or 1206").into()
+                        )
+                    }
+                };
+                i += 1;
+            }
+            "--family" | "--part" => {
+                family = Some(need()?.to_string());
+                i += 1;
+            }
+            "--band" => {
+                let b = need()?.trim_end_matches("GHz");
+                let (a, z) = b
+                    .split_once('-')
+                    .ok_or_else(|| format!("{b}: give LOW-HIGH in GHz, such as 0.1-6"))?;
+                lo = a.parse()?;
+                hi = z.parse()?;
+                i += 1;
+            }
+            "--points" => {
+                points = need()?.parse::<usize>()?.max(2);
+                i += 1;
+            }
+            o => return Err(format!("trace lc: unknown option {o}").into()),
+        }
+        i += 1;
+    }
+    if !(lo > 0.0 && hi > lo) {
+        return Err("--band: give LOW-HIGH with LOW above 0".into());
+    }
+    let text = family.clone().unwrap_or_default();
+    let m = if let Some(h) = trace_core::pathloss::parse_henries(value)
+        .filter(|_| value.to_ascii_lowercase().contains('h'))
+    {
+        let mut m = ChipModel::inductor(h, case, &text);
+        if let Some(f) = family
+            .as_deref()
+            .and_then(|f| lcparts::family_named(Kind::Ind, f))
+        {
+            m.family = f;
+        }
+        m
+    } else if let Some(c) = pdn::parse_farads(value) {
+        let mut m = ChipModel::capacitor(c, case, &format!("{text} {value}"));
+        if let Some(f) = family
+            .as_deref()
+            .and_then(|f| lcparts::family_named(Kind::Cap, f))
+        {
+            m.family = f;
+        }
+        m
+    } else {
+        return Err(format!("{value}: give a value such as 10nH, 4n7H, 1.2pF or 100nF").into());
+    };
+    if let Some(f) = &family {
+        let kind = m.kind();
+        if lcparts::family_named(kind, f).is_none() {
+            eprintln!("note: no family matches {f}; using {}", m.family.name);
+        }
+    }
+    // Log-spaced points over the band.
+    let r = (hi / lo).powf(1.0 / (points - 1) as f64);
+    let freqs: Vec<f64> = (0..points).map(|k| lo * r.powi(k as i32)).collect();
+    print!("{}", m.table(&freqs));
     Ok(())
 }
 

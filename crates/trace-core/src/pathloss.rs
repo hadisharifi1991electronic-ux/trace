@@ -549,6 +549,9 @@ pub enum PartModel {
         c: Option<f64>,
         cp: f64,
     },
+    /// A chip capacitor or inductor from the parasitics library: SRF,
+    /// Q and ESR/ESL by family and case.
+    Chip(crate::lcparts::ChipModel),
     /// A ferrite bead: its impedance at 100 MHz (R across L across C).
     Bead { z100: f64 },
     /// A balun as an ideal transformer: balanced over unbalanced
@@ -574,6 +577,7 @@ impl PartModel {
                 }
                 Some(z)
             }
+            PartModel::Chip(m) => Some(m.z(f)),
             PartModel::Bead { z100 } => {
                 let l = z100 / (TAU * 100e6);
                 let cp = 0.3e-12;
@@ -606,6 +610,7 @@ impl PartModel {
                 }
                 s.join(" + ")
             }
+            PartModel::Chip(m) => m.describe(),
             PartModel::Bead { z100 } => format!("bead {z100:.0} Ω at 100 MHz"),
             PartModel::Ideal { ratio } => format!("ideal 1:{ratio:.2} (no model given)"),
             PartModel::File(n) => {
@@ -813,6 +818,18 @@ fn part_model(
     let pack = Package::from_pitch(pitch);
     let pre = prefix(&p.designator);
     let up = format!("{value} {}", p.footprint).to_ascii_uppercase();
+    // What picks its family in the parasitics library.
+    let hint = format!(
+        "{pn} {value} {} {} {}",
+        p.param(&[
+            "Manufacturer Part Number 1",
+            "Supplier Part Number",
+            "Description"
+        ])
+        .unwrap_or(""),
+        p.footprint,
+        p.library_ref.as_deref().unwrap_or("")
+    );
     let bead = matches!(pre.as_str(), "FB" | "E" | "B" | "BD" | "FER")
         || up.contains("BEAD")
         || up.contains("BLM")
@@ -834,15 +851,9 @@ fn part_model(
     }
     if pre == "C" || (pre != "R" && pre != "L" && pdn::parse_farads(&value).is_some()) {
         let farads = pdn::parse_farads(&value)?;
-        let m = pdn::CapModel::mlcc(farads, pack);
-        // Small RF values have a far lower ESR than the decoupling rule.
-        let esr = if farads < 1e-9 { 0.15 } else { m.esr };
-        return Some(PartModel::Rlc {
-            r: esr,
-            l: m.esl,
-            c: Some(farads),
-            cp: 0.0,
-        });
+        return Some(PartModel::Chip(crate::lcparts::ChipModel::capacitor(
+            farads, pack, &hint,
+        )));
     }
     if pre == "L" {
         // A 0 Ω link on an inductor footprint is common.
@@ -851,12 +862,17 @@ fn part_model(
             None if pdn::parse_ohms(&value).is_some_and(|r| r < 1.0) => 0.0,
             None => return None,
         };
-        return Some(PartModel::Rlc {
-            r: if h > 0.0 { 0.2 } else { 0.01 },
-            l: if h > 0.0 { h } else { pack.esl() * 0.8 },
-            c: None,
-            cp: if h > 0.0 { 0.1e-12 } else { 0.0 },
-        });
+        if h <= 0.0 {
+            return Some(PartModel::Rlc {
+                r: 0.01,
+                l: pack.esl() * 0.8,
+                c: None,
+                cp: 0.0,
+            });
+        }
+        return Some(PartModel::Chip(crate::lcparts::ChipModel::inductor(
+            h, pack, &hint,
+        )));
     }
     if pre == "D" {
         // An ESD diode or similar off the line: its capacitance.
@@ -1561,6 +1577,21 @@ enum Lm {
 }
 
 impl Ctx<'_> {
+    /// Notes a library part that resonates in (or, an inductor, below)
+    /// the band, once per part.
+    fn srf_note(&mut self, des: &str, pm: &PartModel) {
+        let PartModel::Chip(m) = pm else { return };
+        let (lo, hi) = (
+            self.opt.fmin.max(*self.f.first().unwrap_or(&0.0)),
+            *self.f.last().unwrap_or(&self.opt.ghz),
+        );
+        if let Some(n) = crate::lcparts::srf_note(des, m, lo, hi) {
+            if !self.notes.contains(&n) {
+                self.notes.push(n);
+            }
+        }
+    }
+
     fn z_ref(diff: bool) -> f64 {
         if diff {
             100.0
@@ -1958,7 +1989,10 @@ impl Ctx<'_> {
             };
             let pc = &board.components[ci];
             match pm {
-                Some(pm) => used.push((ci, x, y, pm)),
+                Some(pm) => {
+                    self.srf_note(&pc.designator, &pm);
+                    used.push((ci, x, y, pm))
+                }
                 None if freed(self.opt, &pc.designator) => {}
                 None => unfitted.push(format!(
                     "{} {}",
@@ -2171,7 +2205,10 @@ impl Ctx<'_> {
             Some(PartModel::File(n)) => Some(PartModel::File(n)),
             _ => match part_model(board, *comp, &pads, self.opt, 2) {
                 Some(PartModel::File(n)) if n.ports != 1 => return None,
-                Some(pm) => Some(pm),
+                Some(pm) => {
+                    self.srf_note(&des, &pm);
+                    Some(pm)
+                }
                 None if freed(self.opt, &des) => None,
                 None => {
                     self.notes.push(format!(
@@ -3266,22 +3303,14 @@ impl Cand {
     fn model(self, pack: Package) -> Option<PartModel> {
         match self {
             Cand::Empty => None,
-            Cand::Cap(farads) => {
-                let m = pdn::CapModel::mlcc(farads, pack);
-                Some(PartModel::Rlc {
-                    r: if farads < 1e-9 { 0.15 } else { m.esr },
-                    l: m.esl,
-                    c: Some(farads),
-                    cp: 0.0,
-                })
-            }
-            // A chip inductor: Q about 30 at 2 GHz, 0.1 pF across.
-            Cand::Ind(h) => Some(PartModel::Rlc {
-                r: TAU * 2e9 * h / 30.0,
-                l: h,
-                c: None,
-                cp: 0.1e-12,
-            }),
+            // Generic parts of this case from the parasitics library,
+            // so that the tuner sees each value's SRF and Q.
+            Cand::Cap(farads) => Some(PartModel::Chip(crate::lcparts::ChipModel::capacitor(
+                farads, pack, "C0G",
+            ))),
+            Cand::Ind(h) => Some(PartModel::Chip(crate::lcparts::ChipModel::inductor(
+                h, pack, "",
+            ))),
         }
     }
 }

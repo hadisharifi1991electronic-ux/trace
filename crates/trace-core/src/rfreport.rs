@@ -796,6 +796,17 @@ impl RfReport {
                             let _ = writeln!(o, "    {d:.3} dB  {w}");
                         }
                     }
+                    let parts: Vec<_> = r
+                        .sections
+                        .iter()
+                        .filter(|s| matches!(s.kind, "part" | "shunt" | "balun"))
+                        .collect();
+                    if !parts.is_empty() {
+                        let _ = writeln!(o, "  parts:");
+                        for s in parts {
+                            let _ = writeln!(o, "    {} ({}): {}", s.what, s.kind, s.model);
+                        }
+                    }
                     for n in &r.notes {
                         let _ = writeln!(o, "  note: {n}");
                     }

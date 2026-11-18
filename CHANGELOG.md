@@ -3,6 +3,35 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.84.0 (2026-11-18)
+
+- Chip L/C parasitics library (`trace_core::lcparts`): the Path loss, the
+  RF report (`trace rf`) and `--tune` now model chip capacitors and
+  inductors as real parts instead of ideal L and C plus a fixed guess.
+  - Capacitors: C in series with ESL (by case and series: 0201 0.18-0.20
+    nH, 0402 0.25-0.30 nH, 0603 0.40-0.45 nH) and an ESR that grows with
+    frequency (electrode skin loss plus the dielectric's loss tangent; C0G
+    for pF parts, X7R/X5R above 1 nF unless the text says C0G/NP0).
+  - Inductors: L in series with DC resistance plus skin loss, chosen to
+    give the series' Q, with the winding capacitance across that sets the
+    SRF (and grows a little with L, so 47 nH 0402 resonates near 1.8 GHz).
+  - Families fitted to typical datasheet values: Murata GJM03/GJM15/
+    GQM18/GQM22, GRM03/GRM15/GRM18, LQW15AN/LQW03AW/LQW18AN, LQG15HS,
+    LQP15MN, LQP03TN/LQP03HQ; Coilcraft 0201HL/0201DS, 0402HP(CS)/0402DC,
+    0603HP(CS). A part is matched by its part number (or value,
+    description, footprint, library ref), else a generic family for its
+    case (0201 thin-film, 0402/0603 wire-wound inductors; MLCC caps).
+    A vendor `.s2p` given with `--model` still wins.
+  - Each path's notes flag an inductor whose SRF falls inside or below the
+    band (it is a capacitor above it, with what it looks like at the top)
+    and a pF capacitor that resonates inside the band. The RF report lists
+    every part on a path with its model (family, SRF, Q, ESL/ESR or DCR).
+  - The tuner's candidates use the generic family of the site's case, so
+    it no longer picks inductors that are past their SRF in the band.
+- `trace lc <value> [--case 0402] [--family LQW15AN] [--band 0.1-6]`:
+  SRF, Q, ESR/ESL and |Z|, R, X, Q and the value it looks like across the
+  band for one part; `trace lc --list` lists the families.
+
 ## 0.83.0 (2026-11-18)
 
 - Whole-board RF report (Tools > Signal and power integrity > RF report…,

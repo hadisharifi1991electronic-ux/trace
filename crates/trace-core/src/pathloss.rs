@@ -2781,7 +2781,19 @@ fn prepare_with(
                     .component
                     .and_then(|c| by_comp.get(&c))
                     .map_or(0, |l| l.len());
-                let chip = pins >= 4 && !is_balun(board, p.component.unwrap_or(0) as usize);
+                // A connector is not a chip: the path goes on through it
+                // to another board, and ends there only when nothing
+                // else is reached.
+                let conn = p.component.is_some_and(|c| {
+                    let d = board.components[c as usize].designator.to_ascii_uppercase();
+                    (d.starts_with('J') && !d.starts_with("JP"))
+                        || d.starts_with("CN")
+                        || (d.starts_with('P')
+                            && d[1..].chars().all(|c| c.is_ascii_digit())
+                            && d.len() > 1)
+                });
+                let chip =
+                    pins >= 4 && !conn && !is_balun(board, p.component.unwrap_or(0) as usize);
                 let cand = (chip, d[k], pi, pins);
                 // Of the chips, the largest (the transceiver, not a
                 // clock chip's output or a VCXO on the same net), then

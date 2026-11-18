@@ -3,6 +3,18 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.90.1 (2026-11-18)
+
+RF report, from the 0.89.1 run on the ADRV9026 EVB:
+
+- A connector is not taken as the chip a path ends at (FPGA_REF_CLK
+  ended at the FMC connector, not the clock chip); it ends a path only
+  when nothing else is reached.
+- A termination is taken as the load with the chip high impedance
+  behind it when it sits within a tenth of a wavelength of the chip (a
+  twentieth before, which turned away clock-chip terminations 140 to
+  180 mil from the pin).
+
 ## 0.90.0 (2026-11-18)
 
 3D finite-element EM solver, the HFSS way (first stage):

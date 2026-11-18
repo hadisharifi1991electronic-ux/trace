@@ -3,6 +3,32 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.91.0 (2026-11-18)
+
+3D FEM EM solver, second stage:
+
+- Second-order elements (HFSS's default): 20 unknowns per tetrahedron
+  (hierarchical edge, edge-gradient and face functions), on a coarser
+  starting mesh. WR-90 waveguide now within 0.0007 of the exact S21.
+- Modal wave ports: each port absorbs its mode with the exact modal
+  condition (electric shape from the 2D solve with the dielectrics, the
+  magnetic shape from the one without), not a local one, so microstrip and
+  other mixed fills stay lossless: a lossless microstrip now gives S11
+  -61 dB and |S21| 1.000 (it lost 3% of the power before).
+- Port Z0 from a finer second-order 2D solve; adaptive passes also wait
+  for every port's Z0 to settle within 1% (8 mil stripline: 55.4 against
+  56.5 ohm exact for a zero-thickness strip).
+- New solver for the 3D system: symmetric indefinite (Bunch-Kaufman LBLᵀ)
+  with minimum-degree ordering, about 2.5x the unknowns of the general LU
+  in the same memory (285,000 unknowns in under 15 GB).
+- Board vias: `trace via <board> <from> <to> --check fem` solves the same
+  via as the FDTD solver (planes, antipads, pads, barrel and stub, return
+  vias, both traces, wave ports, reference planes at the via) and prints
+  both side by side. CutiePi TOP to L03, 10 GHz: |S21| within 0.13 dB of
+  FDTD over the band; S11 within about 2-6 dB (FEM copper is a zero-
+  thickness perfect conductor, so its traces read 55-58 ohm, not 50).
+- Next: the openEMS check on the ADRV RF via, thick copper, and a window.
+
 ## 0.90.0 (2026-11-18)
 
 3D finite-element EM solver, the HFSS way (first stage):

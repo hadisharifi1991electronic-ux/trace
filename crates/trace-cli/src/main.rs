@@ -4093,6 +4093,7 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     // openEMS: compare, export only, its folder, program, cell, or
     // read a finished run.
     let mut oems_check = false;
+    let mut fem_check = false;
     let mut oems_export: Option<String> = None;
     let mut oems_dir: Option<String> = None;
     let mut oems_read: Option<String> = None;
@@ -4118,6 +4119,10 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
             "--free-pitch" => free_pitch = true,
             "--try-backdrill" => try_backdrill = true,
             "--keep-pad" => keep_pad = true,
+            "--check" if it.clone().next() == Some(&"fem") => {
+                it.next();
+                fem_check = true;
+            }
             "--check" if it.clone().next() == Some(&"openems") => {
                 it.next();
                 oems_check = true;
@@ -4678,6 +4683,9 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
         }
         println!("Saved {o}");
     }
+    if fem_check {
+        fem_compare(&b.stackup, &v, &r)?;
+    }
     if oems_check {
         openems_compare(
             &b.stackup,
@@ -4691,6 +4699,73 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
             oems_exe.as_deref(),
         )?;
     }
+    Ok(())
+}
+
+/// Solves the via `v` with the 3D FEM solver (adaptive, second order) and
+/// compares it with the FDTD result `r`.
+fn fem_compare(
+    stackup: &trace_core::Stackup,
+    v: &trace_core::fdtd::ViaSetup,
+    r: &trace_core::fdtd::ViaResult,
+) -> Res {
+    use trace_core::fem3d;
+    let model = fem3d::via(stackup, v)?;
+    if std::env::var_os("TRACE_FEM_DEBUG").is_some() {
+        eprintln!("{model:#?}");
+    }
+    let fmax = v.fmax_ghz;
+    let setup = fem3d::Setup {
+        f_adapt: fmax,
+        sweep: (1..=10).map(|k| fmax * k as f64 / 10.0).collect(),
+        z_ref: Some(r.z_ref),
+        ..fem3d::Setup::default()
+    };
+    println!("3D FEM check (HFSS-style: adaptive tetrahedra, second-order elements, wave ports):");
+    let t0 = std::time::Instant::now();
+    let s = fem3d::solve(&model, &setup, |l| {
+        eprintln!("  {l}");
+        true
+    })?;
+    println!(
+        "  {} after {} passes, {} tetrahedra, {} unknowns, {:.0} s; port Z0 {:.1} / {:.1} ohm",
+        if s.converged {
+            "converged"
+        } else {
+            "not converged"
+        },
+        s.passes.len(),
+        s.tets,
+        s.unknowns,
+        t0.elapsed().as_secs_f64(),
+        s.info[0][0].z0,
+        s.info[0][1].z0
+    );
+    println!("  GHz     |S11| FDTD  FEM (dB)     |S21| FDTD  FEM (dB)");
+    let mut d11: f64 = 0.0;
+    let mut d21: f64 = 0.0;
+    for (k, f) in s.f.iter().enumerate() {
+        let i =
+            r.f.iter()
+                .enumerate()
+                .min_by(|a, b| (a.1 - f).abs().total_cmp(&(b.1 - f).abs()))
+                .map(|x| x.0)
+                .unwrap_or(0);
+        let db = |x: f64| 20.0 * x.max(1e-9).log10();
+        let (a11, a21) = (r.s11[i].abs(), r.s21[i].abs());
+        let (b11, b21) = (s.s[k][0].norm(), s.s[k][2].norm());
+        d11 = d11.max((db(a11) - db(b11)).abs());
+        d21 = d21.max((db(a21) - db(b21)).abs());
+        println!(
+            "  {:6.2}  {:8.2} {:8.2}        {:7.3} {:7.3}",
+            f,
+            db(a11),
+            db(b11),
+            db(a21),
+            db(b21)
+        );
+    }
+    println!("  largest difference: S11 {d11:.2} dB, S21 {d21:.3} dB (FEM copper is lossless)");
     Ok(())
 }
 

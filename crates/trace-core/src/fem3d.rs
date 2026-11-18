@@ -22,7 +22,12 @@
 //! again, and stop once no S-parameter moves by more than the target ΔS
 //! between passes. The final mesh then sweeps the band.
 
-#![allow(clippy::needless_range_loop, clippy::too_many_arguments, clippy::type_complexity, clippy::map_entry)]
+#![allow(
+    clippy::needless_range_loop,
+    clippy::too_many_arguments,
+    clippy::type_complexity,
+    clippy::map_entry
+)]
 
 use std::collections::HashMap;
 
@@ -79,6 +84,8 @@ pub struct Sheet {
     pub at: f64,
     pub poly: Vec<[f64; 2]>,
     pub holes: Vec<([f64; 2], f64)>,
+    /// A round sheet (centre, radius) in place of the polygon.
+    pub disc: Option<([f64; 2], f64)>,
     pub net: u32,
 }
 
@@ -139,6 +146,8 @@ pub struct Setup {
     pub max_unknowns: usize,
     /// Renormalise to this impedance (None: each port's own Z0).
     pub z_ref: Option<f64>,
+    /// Element order: 1 (Whitney) or 2 (HFSS's default).
+    pub order: usize,
 }
 
 impl Default for Setup {
@@ -153,6 +162,7 @@ impl Default for Setup {
             per_lambda: 6.0,
             max_unknowns: 400_000,
             z_ref: Some(50.0),
+            order: 2,
         }
     }
 }
@@ -316,7 +326,7 @@ impl Model {
     }
 
     /// The starting mesh.
-    pub fn mesh(&self, f_ghz: f64, per_lambda: f64) -> Mesh {
+    pub fn mesh(&self, f_ghz: f64, per_lambda: f64, per_axis: f64) -> Mesh {
         let lambda = C0 / (f_ghz * 1e9) / self.er_max().sqrt();
         let h = lambda / per_lambda;
         let tol = self.tol();
@@ -353,7 +363,9 @@ impl Model {
                 br[u].push(clamp(u, p[0]));
                 br[v].push(clamp(v, p[1]));
             }
-            for (c, r) in &s.holes {
+            for (c, r) in s.holes.iter().chain(s.disc.iter()) {
+                br[u].push(clamp(u, c[0]));
+                br[v].push(clamp(v, c[1]));
                 br[u].push(clamp(u, c[0] - r));
                 br[u].push(clamp(u, c[0] + r));
                 br[v].push(clamp(v, c[1] - r));
@@ -370,7 +382,13 @@ impl Model {
         // Also at least a dozen cells across every axis, so small cross
         // sections start with some resolution.
         let g: Vec<Vec<f64>> = (0..3)
-            .map(|a| axis_lines(br[a].clone(), h.min((self.hi[a] - self.lo[a]) / 12.0), tol))
+            .map(|a| {
+                axis_lines(
+                    br[a].clone(),
+                    h.min((self.hi[a] - self.lo[a]) / per_axis),
+                    tol,
+                )
+            })
             .collect();
         kuhn(&g[0], &g[1], &g[2])
     }
@@ -459,6 +477,9 @@ fn on_sheet(s: &Sheet, p: [f64; 3], tol: f64) -> bool {
     }
     let (u, v) = others(s.axis);
     let q = [p[u], p[v]];
+    if let Some((c, r)) = s.disc {
+        return (q[0] - c[0]).hypot(q[1] - c[1]) <= r + tol;
+    }
     point_in_poly(&s.poly, q, tol)
         && s.holes
             .iter()
@@ -636,32 +657,177 @@ fn whitney(g: &[[f64; 3]], l: &[f64], i: usize, j: usize) -> [f64; 3] {
     sub(scale(g[j], l[i]), scale(g[i], l[j]))
 }
 
+/// Local faces of a sorted tetrahedron (node positions, increasing).
+const LOCAL_FACES: [(usize, usize, usize); 4] = [(0, 1, 2), (0, 1, 3), (0, 2, 3), (1, 2, 3)];
+
+/// What a basis function hangs on: kind (0 Whitney, 1 edge gradient,
+/// 2 and 3 the two face functions) and its global nodes.
+type Key = (u8, [u32; 3]);
+
+/// The basis functions' keys for a sorted tetrahedron.
+fn keys(s: &[u32; 4], order: usize) -> Vec<Key> {
+    let mut k = Vec::with_capacity(20);
+    for (a, b) in LOCAL_EDGES {
+        k.push((0, [s[a], s[b], u32::MAX]));
+    }
+    if order >= 2 {
+        for (a, b) in LOCAL_EDGES {
+            k.push((1, [s[a], s[b], u32::MAX]));
+        }
+        for (a, b, c) in LOCAL_FACES {
+            k.push((2, [s[a], s[b], s[c]]));
+            k.push((3, [s[a], s[b], s[c]]));
+        }
+    }
+    k
+}
+
+/// Basis values and curls at barycentric point `l` (same order as `keys`).
+/// Order 2 is the hierarchical mixed-order second-order set (Webb):
+/// Whitney, the gradients of λiλj, and on each face (i, j, k) λk·Nij and
+/// λi·Njk; 20 functions, full second order in the curl-conforming sense.
+fn basis(g: &[[f64; 3]; 4], l: &[f64; 4], order: usize, out: &mut Vec<([f64; 3], [f64; 3])>) {
+    out.clear();
+    for (i, j) in LOCAL_EDGES {
+        out.push((whitney(g, l, i, j), scale(cross(g[i], g[j]), 2.0)));
+    }
+    if order >= 2 {
+        for (i, j) in LOCAL_EDGES {
+            out.push((add(scale(g[j], l[i]), scale(g[i], l[j])), [0.0; 3]));
+        }
+        let face_fn = |k: usize, i: usize, j: usize| -> ([f64; 3], [f64; 3]) {
+            let n = whitney(g, l, i, j);
+            let c = add(cross(g[k], n), scale(cross(g[i], g[j]), 2.0 * l[k]));
+            (scale(n, l[k]), c)
+        };
+        for (a, b, c) in LOCAL_FACES {
+            out.push(face_fn(c, a, b));
+            out.push(face_fn(a, b, c));
+        }
+    }
+}
+
+/// True when the function with key `k` has a tangential part on the face
+/// with (sorted) nodes `f`.
+fn on_face(k: &Key, f: &[u32; 3]) -> bool {
+    match k.0 {
+        0 | 1 => f.contains(&k.1[0]) && f.contains(&k.1[1]),
+        _ => k.1 == *f,
+    }
+}
+
 const KA: f64 = 0.585_410_196_624_968_5;
 const KB: f64 = 0.138_196_601_125_010_5;
-const QUAD4: [[f64; 4]; 4] = [
-    [KA, KB, KB, KB],
-    [KB, KA, KB, KB],
-    [KB, KB, KA, KB],
-    [KB, KB, KB, KA],
+/// Degree-2 tetrahedron rule: (barycentrics, weight share).
+const Q_TET2: [([f64; 4], f64); 4] = [
+    ([KA, KB, KB, KB], 0.25),
+    ([KB, KA, KB, KB], 0.25),
+    ([KB, KB, KA, KB], 0.25),
+    ([KB, KB, KB, KA], 0.25),
 ];
+
+/// Degree-4 tetrahedron rule (Keast, 11 points).
+fn q_tet4() -> Vec<([f64; 4], f64)> {
+    let mut q = vec![([0.25; 4], -0.013_155_555_555_555_6 * 6.0)];
+    let (a, b) = (0.071_428_571_428_571_4, 0.785_714_285_714_286);
+    for k in 0..4 {
+        let mut l = [a; 4];
+        l[k] = b;
+        q.push((l, 0.007_622_222_222_222_22 * 6.0));
+    }
+    let (c, d) = (0.399_403_576_166_799, 0.100_596_423_833_201);
+    for (i, j) in LOCAL_EDGES {
+        let mut l = [d; 4];
+        l[i] = c;
+        l[j] = c;
+        q.push((l, 0.024_888_888_888_888_9 * 6.0));
+    }
+    q
+}
+
+/// Degree-4 triangle rule (Dunavant, 6 points).
+const Q_TRI4: [([f64; 3], f64); 6] = [
+    (
+        [
+            0.108_103_018_168_070,
+            0.445_948_490_915_965,
+            0.445_948_490_915_965,
+        ],
+        0.223_381_589_678_011,
+    ),
+    (
+        [
+            0.445_948_490_915_965,
+            0.108_103_018_168_070,
+            0.445_948_490_915_965,
+        ],
+        0.223_381_589_678_011,
+    ),
+    (
+        [
+            0.445_948_490_915_965,
+            0.445_948_490_915_965,
+            0.108_103_018_168_070,
+        ],
+        0.223_381_589_678_011,
+    ),
+    (
+        [
+            0.816_847_572_980_459,
+            0.091_576_213_509_771,
+            0.091_576_213_509_771,
+        ],
+        0.109_951_743_655_322,
+    ),
+    (
+        [
+            0.091_576_213_509_771,
+            0.816_847_572_980_459,
+            0.091_576_213_509_771,
+        ],
+        0.109_951_743_655_322,
+    ),
+    (
+        [
+            0.091_576_213_509_771,
+            0.091_576_213_509_771,
+            0.816_847_572_980_459,
+        ],
+        0.109_951_743_655_322,
+    ),
+];
+
+/// A boundary face: its sorted nodes, the tetrahedron behind it and which
+/// of the tetrahedron's (sorted) nodes they are.
+#[derive(Clone, Copy)]
+struct BFace {
+    f: [u32; 3],
+    tet: usize,
+    local: [usize; 3],
+}
 
 struct Assembled {
     /// Each tet's node indices, sorted (so local edges point up in index).
     tets: Vec<[u32; 4]>,
     eps: Vec<c64>,
-    /// Global edge per local edge, None where the edge is PEC.
-    dof: Vec<[Option<u32>; 6]>,
+    /// Global unknown per local basis function, None where it is PEC.
+    dof: Vec<Vec<Option<u32>>>,
     n: usize,
+    order: usize,
     ports: Vec<PortMesh>,
-    /// Radiation faces: (tet, local face nodes).
-    rad: Vec<([u32; 3], c64)>,
-    edge_dof: HashMap<(u32, u32), u32>,
+    /// Radiation faces and their wavenumber.
+    rad: Vec<(BFace, f64)>,
 }
 
 struct PortMesh {
-    tris: Vec<[u32; 3]>,
-    /// The mode's tangential field at each triangle's three edge midpoints.
-    e: Vec<[[f64; 3]; 3]>,
+    tris: Vec<BFace>,
+    /// The mode's tangential field at each triangle's quadrature points,
+    /// and the shape of n x H (for a quasi-TEM line: the field without
+    /// the dielectrics; for a waveguide the same as e).
+    e: Vec<[[f64; 3]; 6]>,
+    e0: Vec<[[f64; 3]; 6]>,
+    /// ∫ e·e0.
+    ee0: f64,
     info: PortInfo,
     /// sqrt(2 x power) for unit mode amplitude.
     norm: f64,
@@ -685,122 +851,146 @@ fn tri_geo(p: [[f64; 3]; 3]) -> ([f64; 3], f64, [[f64; 3]; 3]) {
 }
 
 const TRI_EDGES: [(usize, usize); 3] = [(0, 1), (0, 2), (1, 2)];
-/// Midpoint rule (exact to degree 2): barycentrics of the edge midpoints.
-const TRI_Q: [[f64; 3]; 3] = [[0.5, 0.5, 0.0], [0.5, 0.0, 0.5], [0.0, 0.5, 0.5]];
 
-fn assemble_mesh(model: &Model, mesh: &Mesh, f_ghz: f64) -> Result<Assembled, String> {
+fn face_nodes(mesh: &Mesh, f: &[u32; 3]) -> [[f64; 3]; 3] {
+    [
+        mesh.nodes[f[0] as usize],
+        mesh.nodes[f[1] as usize],
+        mesh.nodes[f[2] as usize],
+    ]
+}
+
+fn tet_nodes(mesh: &Mesh, s: &[u32; 4]) -> [[f64; 3]; 4] {
+    [
+        mesh.nodes[s[0] as usize],
+        mesh.nodes[s[1] as usize],
+        mesh.nodes[s[2] as usize],
+        mesh.nodes[s[3] as usize],
+    ]
+}
+
+fn assemble_mesh(
+    model: &Model,
+    mesh: &Mesh,
+    f_ghz: f64,
+    order: usize,
+) -> Result<Assembled, String> {
     let tol = model.tol();
     let k0 = 2.0 * std::f64::consts::PI * f_ghz * 1e9 / C0;
     let mut tets = Vec::with_capacity(mesh.tets.len());
     let mut eps = Vec::with_capacity(mesh.tets.len());
-    let mut pec_edge: HashMap<(u32, u32), bool> = HashMap::new();
     let mut is_pec_tet = Vec::with_capacity(mesh.tets.len());
     for t in &mesh.tets {
         let mut s = *t;
         s.sort_unstable();
-        let c = scale(
-            add(
-                add(mesh.nodes[s[0] as usize], mesh.nodes[s[1] as usize]),
-                add(mesh.nodes[s[2] as usize], mesh.nodes[s[3] as usize]),
-            ),
-            0.25,
-        );
+        let p = tet_nodes(mesh, &s);
+        let c = scale(add(add(p[0], p[1]), add(p[2], p[3])), 0.25);
         let (e, pec) = model.at(c);
         tets.push(s);
         eps.push(e);
         is_pec_tet.push(pec.is_some());
     }
-    // PEC edges: in conductor solids, on sheets, on PEC walls.
-    for (ti, s) in tets.iter().enumerate() {
-        for (a, b) in LOCAL_EDGES {
-            let e = (s[a], s[b]);
-            let entry = pec_edge.entry(e).or_insert(false);
-            if is_pec_tet[ti] {
-                *entry = true;
+    let in_port = |a: usize, side: usize, m: [f64; 3]| {
+        model.ports.iter().any(|pt| {
+            pt.axis == a && pt.high == (side == 1) && {
+                let (u, w) = others(a);
+                m[u] > pt.lo[0] + tol
+                    && m[u] < pt.hi[0] - tol
+                    && m[w] > pt.lo[1] + tol
+                    && m[w] < pt.hi[1] - tol
             }
-        }
-    }
-    for (e, v) in pec_edge.iter_mut() {
-        if *v {
-            continue;
-        }
-        let p = mesh.nodes[e.0 as usize];
-        let q = mesh.nodes[e.1 as usize];
-        let m = scale(add(p, q), 0.5);
+        })
+    };
+    // Is a set of points (an edge or a face) on a conductor surface: a
+    // sheet or a PEC wall (outside the ports)? `m` is its centre.
+    let on_conductor = |pts: &[[f64; 3]], m: [f64; 3]| -> bool {
         for s in &model.sheets {
-            if (p[s.axis] - s.at).abs() < tol
-                && (q[s.axis] - s.at).abs() < tol
-                && on_sheet(s, m, tol)
-            {
-                *v = true;
-                break;
+            if pts.iter().all(|p| (p[s.axis] - s.at).abs() < tol) && on_sheet(s, m, tol) {
+                return true;
             }
-        }
-        if *v {
-            continue;
         }
         for a in 0..3 {
             for (side, b) in [(0, model.lo[a]), (1, model.hi[a])] {
-                if (p[a] - b).abs() < tol && (q[a] - b).abs() < tol {
-                    let in_port = model.ports.iter().any(|pt| {
-                        pt.axis == a && pt.high == (side == 1) && {
-                            let (u, w) = others(a);
-                            m[u] > pt.lo[0] + tol
-                                && m[u] < pt.hi[0] - tol
-                                && m[w] > pt.lo[1] + tol
-                                && m[w] < pt.hi[1] - tol
-                        }
-                    });
-                    if model.walls[2 * a + side] == Wall::Pec && !in_port {
-                        *v = true;
-                    }
+                if pts.iter().all(|p| (p[a] - b).abs() < tol)
+                    && model.walls[2 * a + side] == Wall::Pec
+                    && !in_port(a, side, m)
+                {
+                    return true;
                 }
             }
         }
+        false
+    };
+    let mut pec: HashMap<Key, bool> = HashMap::new();
+    for (ti, s) in tets.iter().enumerate() {
+        for k in keys(s, order) {
+            let e = pec.entry(k).or_insert(false);
+            if is_pec_tet[ti] {
+                *e = true;
+            }
+        }
     }
-    let mut edge_dof: HashMap<(u32, u32), u32> = HashMap::new();
+    // Edge and face geometry tests, shared by the keys on the same nodes.
+    let mut geo_pec: HashMap<[u32; 3], bool> = HashMap::new();
+    for (k, v) in pec.iter_mut() {
+        if *v {
+            continue;
+        }
+        let nodes = k.1;
+        *v = *geo_pec.entry(nodes).or_insert_with(|| {
+            let pts: Vec<[f64; 3]> = nodes
+                .iter()
+                .filter(|&&n| n != u32::MAX)
+                .map(|&n| mesh.nodes[n as usize])
+                .collect();
+            let m = scale(
+                pts.iter().fold([0.0; 3], |a, p| add(a, *p)),
+                1.0 / pts.len() as f64,
+            );
+            on_conductor(&pts, m)
+        });
+    }
+    let mut key_dof: HashMap<Key, u32> = HashMap::new();
     let mut dof = Vec::with_capacity(tets.len());
     for s in &tets {
-        let mut d = [None; 6];
-        for (k, (a, b)) in LOCAL_EDGES.iter().enumerate() {
-            let e = (s[*a], s[*b]);
-            if !pec_edge[&e] {
-                let n = edge_dof.len() as u32;
-                d[k] = Some(*edge_dof.entry(e).or_insert(n));
-            }
-        }
+        let d: Vec<Option<u32>> = keys(s, order)
+            .into_iter()
+            .map(|k| {
+                if pec[&k] {
+                    None
+                } else {
+                    let n = key_dof.len() as u32;
+                    Some(*key_dof.entry(k).or_insert(n))
+                }
+            })
+            .collect();
         dof.push(d);
     }
-    let n = edge_dof.len();
+    let n = key_dof.len();
     // Boundary faces.
-    let mut faces: HashMap<[u32; 3], (usize, u8)> = HashMap::new();
+    let mut faces: HashMap<[u32; 3], (BFace, u8)> = HashMap::new();
     for (ti, s) in tets.iter().enumerate() {
-        for skip in 0..4 {
-            let f: Vec<u32> = (0..4).filter(|&k| k != skip).map(|k| s[k]).collect();
-            let key = [f[0], f[1], f[2]];
-            let ent = faces.entry(key).or_insert((ti, 0));
-            ent.1 += 1;
+        for (a, b, c) in LOCAL_FACES {
+            let bf = BFace {
+                f: [s[a], s[b], s[c]],
+                tet: ti,
+                local: [a, b, c],
+            };
+            faces.entry(bf.f).or_insert((bf, 0)).1 += 1;
         }
     }
-    let mut port_tris: Vec<Vec<([u32; 3], usize)>> = vec![Vec::new(); model.ports.len()];
+    let mut port_tris: Vec<Vec<BFace>> = vec![Vec::new(); model.ports.len()];
     let mut rad = Vec::new();
-    for (f, (ti, cnt)) in &faces {
-        if *cnt != 1 {
-            continue;
-        }
-        let p = [
-            mesh.nodes[f[0] as usize],
-            mesh.nodes[f[1] as usize],
-            mesh.nodes[f[2] as usize],
-        ];
+    let mut bfaces: Vec<&(BFace, u8)> = faces.values().filter(|v| v.1 == 1).collect();
+    bfaces.sort_by_key(|v| v.0.f);
+    for (bf, _) in bfaces {
+        let p = face_nodes(mesh, &bf.f);
         let c = scale(add(add(p[0], p[1]), p[2]), 1.0 / 3.0);
-        let mut done = false;
-        for a in 0..3 {
+        'axes: for a in 0..3 {
             for (side, b) in [(0, model.lo[a]), (1, model.hi[a])] {
-                if done || !p.iter().all(|q| (q[a] - b).abs() < tol) {
+                if !p.iter().all(|q| (q[a] - b).abs() < tol) {
                     continue;
                 }
-                done = true;
                 let (u, w) = others(a);
                 let port = model.ports.iter().position(|pt| {
                     pt.axis == a
@@ -811,10 +1001,11 @@ fn assemble_mesh(model: &Model, mesh: &Mesh, f_ghz: f64) -> Result<Assembled, St
                         && c[w] < pt.hi[1]
                 });
                 if let Some(pi) = port {
-                    port_tris[pi].push((*f, *ti));
-                } else if model.walls[2 * a + side] == Wall::Radiation && !is_pec_tet[*ti] {
-                    rad.push((*f, k0 * eps[*ti].re.sqrt() * c64::new(1.0, 0.0)));
+                    port_tris[pi].push(*bf);
+                } else if model.walls[2 * a + side] == Wall::Radiation && !is_pec_tet[bf.tet] {
+                    rad.push((*bf, k0 * eps[bf.tet].re.sqrt()));
                 }
+                break 'axes;
             }
         }
     }
@@ -823,17 +1014,224 @@ fn assemble_mesh(model: &Model, mesh: &Mesh, f_ghz: f64) -> Result<Assembled, St
         if port_tris[pi].is_empty() {
             return Err(format!("port {} has no mesh faces", pt.name));
         }
-        ports.push(port_mode(model, mesh, pt, &port_tris[pi], &eps, k0, tol)?);
+        ports.push(port_mode(
+            model,
+            mesh,
+            pt,
+            &port_tris[pi],
+            &eps,
+            k0,
+            tol,
+            order,
+        )?);
     }
     Ok(Assembled {
         tets,
         eps,
         dof,
         n,
+        order,
         ports,
         rad,
-        edge_dof,
     })
+}
+
+/// The 2D potential problem on a port: Lagrange elements of order `p`
+/// (1 or 2) on the port triangles each cut `sub_n` x `sub_n`.
+struct Port2d {
+    c: f64,
+    c0: f64,
+    /// −∇φ at each parent triangle's quadrature points (sub_n = 1 only),
+    /// with the dielectrics and without (the magnetic field's shape).
+    e: Vec<[[f64; 3]; 6]>,
+    e0: Vec<[[f64; 3]; 6]>,
+}
+
+fn port_2d(
+    model: &Model,
+    mesh: &Mesh,
+    pt: &Port,
+    tris: &[BFace],
+    tri_eps: &[f64],
+    signal: u32,
+    tol: f64,
+    sub_n: usize,
+    p_order: usize,
+) -> Result<Port2d, String> {
+    let _ = others(pt.axis);
+    let q = 1.0 / (tol * 10.0);
+    let mut fidx: HashMap<[i64; 3], usize> = HashMap::new();
+    let mut fnodes: Vec<[f64; 3]> = Vec::new();
+    let mut node_at = |x: [f64; 3]| -> usize {
+        let key = [
+            (x[0] * q).round() as i64,
+            (x[1] * q).round() as i64,
+            (x[2] * q).round() as i64,
+        ];
+        *fidx.entry(key).or_insert_with(|| {
+            fnodes.push(x);
+            fnodes.len() - 1
+        })
+    };
+    // Sub-triangles: (corner points, parent).
+    let mut ftris: Vec<([[f64; 3]; 3], usize)> = Vec::new();
+    for (ti, bf) in tris.iter().enumerate() {
+        let p = face_nodes(mesh, &bf.f);
+        let pt_at = |i: usize, j: usize| -> [f64; 3] {
+            let (a, b) = (i as f64 / sub_n as f64, j as f64 / sub_n as f64);
+            add(
+                add(scale(p[0], 1.0 - a - b), scale(p[1], a)),
+                scale(p[2], b),
+            )
+        };
+        for i in 0..sub_n {
+            for j in 0..sub_n - i {
+                ftris.push(([pt_at(i, j), pt_at(i + 1, j), pt_at(i, j + 1)], ti));
+                if i + j + 1 < sub_n {
+                    ftris.push(([pt_at(i + 1, j), pt_at(i + 1, j + 1), pt_at(i, j + 1)], ti));
+                }
+            }
+        }
+    }
+    // Element nodes: corners, then (P2) side midpoints in TRI_EDGES order.
+    let elems: Vec<Vec<usize>> = ftris
+        .iter()
+        .map(|(c, _)| {
+            let mut v: Vec<usize> = c.iter().map(|x| node_at(*x)).collect();
+            if p_order == 2 {
+                for (a, b) in TRI_EDGES {
+                    v.push(node_at(scale(add(c[a], c[b]), 0.5)));
+                }
+            }
+            v
+        })
+        .collect();
+    let nn = fnodes.len();
+    let mut fixed: Vec<Option<f64>> = vec![None; nn];
+    for (i, p) in fnodes.iter().enumerate() {
+        let p = *p;
+        match model.conductor_at(p, tol, 2 * pt.axis + pt.high as usize) {
+            Some(n) if n == signal => fixed[i] = Some(1.0),
+            Some(_) => fixed[i] = Some(0.0),
+            // The rim follows the wall beside it: grounded on a PEC wall
+            // (conductor_at above), free beside a radiation wall.
+            None => {}
+        }
+    }
+    if !fixed.contains(&Some(1.0)) {
+        return Err(format!(
+            "port {}: the signal conductor does not cross the port",
+            pt.name
+        ));
+    }
+    let mut nf = 0;
+    let free: Vec<Option<usize>> = fixed
+        .iter()
+        .map(|f| {
+            f.is_none().then(|| {
+                nf += 1;
+                nf - 1
+            })
+        })
+        .collect();
+    // Shape gradients at barycentric point l.
+    let grads = |g: &[[f64; 3]; 3], l: &[f64; 3]| -> Vec<[f64; 3]> {
+        if p_order == 1 {
+            g.to_vec()
+        } else {
+            let mut v: Vec<[f64; 3]> = (0..3).map(|i| scale(g[i], 4.0 * l[i] - 1.0)).collect();
+            for (a, b) in TRI_EDGES {
+                v.push(scale(add(scale(g[a], l[b]), scale(g[b], l[a])), 4.0));
+            }
+            v
+        }
+    };
+    let geo: Vec<(f64, [[f64; 3]; 3])> = ftris
+        .iter()
+        .map(|(c, _)| {
+            let (_, a, g) = tri_geo(*c);
+            (a, g)
+        })
+        .collect();
+    let solve = |with_eps: bool| -> (Vec<f64>, f64) {
+        let mut kt: Vec<Triplet<usize, usize, f64>> = Vec::new();
+        let mut rhs = vec![0.0; nf];
+        for (k, el) in elems.iter().enumerate() {
+            let (area, g) = geo[k];
+            let e = if with_eps { tri_eps[ftris[k].1] } else { 1.0 };
+            let nl = el.len();
+            let mut m = vec![0.0; nl * nl];
+            for (l, wq) in &Q_TRI4 {
+                let gr = grads(&g, l);
+                for i in 0..nl {
+                    for j in 0..nl {
+                        m[i * nl + j] += wq * area * e * dot(gr[i], gr[j]);
+                    }
+                }
+            }
+            for i in 0..nl {
+                let Some(fi) = free[el[i]] else { continue };
+                for j in 0..nl {
+                    match free[el[j]] {
+                        Some(fj) => kt.push(Triplet::new(fi, fj, m[i * nl + j])),
+                        None => rhs[fi] -= m[i * nl + j] * fixed[el[j]].unwrap(),
+                    }
+                }
+            }
+        }
+        let mut phi: Vec<f64> = fixed.iter().map(|f| f.unwrap_or(0.0)).collect();
+        if nf > 0 {
+            let a = SparseColMat::<usize, f64>::try_new_from_triplets(nf, nf, &kt).unwrap();
+            let lu = a.sp_lu().unwrap();
+            let mut x = faer::Mat::<f64>::zeros(nf, 1);
+            for i in 0..nf {
+                x[(i, 0)] = rhs[i];
+            }
+            let x = lu.solve(&x);
+            for (gi, f) in free.iter().enumerate() {
+                if let Some(fi) = f {
+                    phi[gi] = x[(*fi, 0)];
+                }
+            }
+        }
+        let mut c = 0.0;
+        for (k, el) in elems.iter().enumerate() {
+            let (area, g) = geo[k];
+            let e = if with_eps { tri_eps[ftris[k].1] } else { 1.0 };
+            for (l, wq) in &Q_TRI4 {
+                let gr = grads(&g, l);
+                let mut v = [0.0; 3];
+                for i in 0..el.len() {
+                    v = add(v, scale(gr[i], phi[el[i]]));
+                }
+                c += wq * area * e * dot(v, v);
+            }
+        }
+        (phi, c)
+    };
+    let (phi, c) = solve(true);
+    let (phi0, c0) = solve(false);
+    let mut e = Vec::new();
+    let mut e0 = Vec::new();
+    if sub_n == 1 {
+        for (k, el) in elems.iter().enumerate() {
+            // The parent's own vertex order, so the quadrature points line
+            // up with the 3D integrals.
+            let (_, g) = geo[k];
+            let mut v = [[0.0; 3]; 6];
+            let mut v0 = [[0.0; 3]; 6];
+            for (qi, (l, _)) in Q_TRI4.iter().enumerate() {
+                let gr = grads(&g, l);
+                for i in 0..el.len() {
+                    v[qi] = add(v[qi], scale(gr[i], -phi[el[i]]));
+                    v0[qi] = add(v0[qi], scale(gr[i], -phi0[el[i]]));
+                }
+            }
+            e.push(v);
+            e0.push(v0);
+        }
+    }
+    Ok(Port2d { c, c0, e, e0 })
 }
 
 /// Solve the port's mode on its triangles.
@@ -841,15 +1239,15 @@ fn port_mode(
     model: &Model,
     mesh: &Mesh,
     pt: &Port,
-    tris: &[([u32; 3], usize)],
+    tris: &[BFace],
     eps: &[c64],
     k0: f64,
     tol: f64,
+    order: usize,
 ) -> Result<PortMesh, String> {
     let (u, w) = others(pt.axis);
-    let tri_list: Vec<[u32; 3]> = tris.iter().map(|t| t.0).collect();
-    let tri_eps: Vec<f64> = tris.iter().map(|t| eps[t.1].re).collect();
-    match pt.mode {
+    let tri_eps: Vec<f64> = tris.iter().map(|t| eps[t.tet].re).collect();
+    let (e, e0, info, norm) = match pt.mode {
         Mode::Te10 => {
             let (a, b) = (pt.hi[0] - pt.lo[0], pt.hi[1] - pt.lo[1]);
             // The wide side carries the sine; E points across the narrow side.
@@ -870,391 +1268,330 @@ fn port_mode(
             let beta = b2.sqrt();
             let zte = ETA0 * k0 / beta;
             let mut e = Vec::new();
-            let mut ee = 0.0;
-            for t in &tri_list {
-                let p = [
-                    mesh.nodes[t[0] as usize],
-                    mesh.nodes[t[1] as usize],
-                    mesh.nodes[t[2] as usize],
-                ];
-                let (_, area, _) = tri_geo(p);
-                let mut v = [[0.0; 3]; 3];
-                for (q, l) in TRI_Q.iter().enumerate() {
+            for t in tris {
+                let p = face_nodes(mesh, &t.f);
+                let mut v = [[0.0; 3]; 6];
+                for (q, (l, _)) in Q_TRI4.iter().enumerate() {
                     let x = add(add(scale(p[0], l[0]), scale(p[1], l[1])), scale(p[2], l[2]));
-                    let s = (kc * (x[along] - w0)).sin();
-                    v[q][dir] = s;
-                    ee += area / 3.0 * s * s;
+                    v[q][dir] = (kc * (x[along] - w0)).sin();
                 }
                 e.push(v);
             }
-            Ok(PortMesh {
-                tris: tri_list,
+            (
+                e.clone(),
                 e,
-                info: PortInfo {
+                PortInfo {
                     z0: zte,
                     eeff: (beta / k0).powi(2),
                     beta,
                 },
-                norm: (ee / zte).sqrt(),
-                ee,
-                err: vec![0.0; tris.len()],
-            })
+                None,
+            )
         }
         Mode::Tem { signal } => {
-            // The 2D solve runs on the port's triangles each cut into
-            // SUB x SUB, so Z0 and the mode come out finer than the 3D mesh.
-            let run = |sub_n: usize| -> Result<(f64, f64, Vec<[f64; 3]>), String> {
-                let q = 1.0 / (tol * 10.0);
-                let mut fidx: HashMap<[i64; 3], usize> = HashMap::new();
-                let mut fnodes: Vec<[f64; 3]> = Vec::new();
-                let mut ftris: Vec<([usize; 3], usize)> = Vec::new();
-                for (ti, t) in tri_list.iter().enumerate() {
-                    let p = [
-                        mesh.nodes[t[0] as usize],
-                        mesh.nodes[t[1] as usize],
-                        mesh.nodes[t[2] as usize],
-                    ];
-                    let mut node = |i: usize, j: usize| -> usize {
-                        let (a, b) = (i as f64 / sub_n as f64, j as f64 / sub_n as f64);
-                        let x = add(
-                            add(scale(p[0], 1.0 - a - b), scale(p[1], a)),
-                            scale(p[2], b),
-                        );
-                        let key = [
-                            (x[0] * q).round() as i64,
-                            (x[1] * q).round() as i64,
-                            (x[2] * q).round() as i64,
-                        ];
-                        *fidx.entry(key).or_insert_with(|| {
-                            fnodes.push(x);
-                            fnodes.len() - 1
-                        })
-                    };
-                    for i in 0..sub_n {
-                        for j in 0..sub_n - i {
-                            let (n0, n1, n2) = (node(i, j), node(i + 1, j), node(i, j + 1));
-                            ftris.push(([n0, n1, n2], ti));
-                            if i + j + 1 < sub_n {
-                                let n3 = node(i + 1, j + 1);
-                                ftris.push(([n1, n3, n2], ti));
-                            }
-                        }
-                    }
-                }
-                let nn = fnodes.len();
-                let mut fixed: Vec<Option<f64>> = vec![None; nn];
-                for (i, p) in fnodes.iter().enumerate() {
-                    let p = *p;
-                    let on_rim = (p[u] - pt.lo[0]).abs() < tol
-                        || (p[u] - pt.hi[0]).abs() < tol
-                        || (p[w] - pt.lo[1]).abs() < tol
-                        || (p[w] - pt.hi[1]).abs() < tol;
-                    match model.conductor_at(p, tol, 2 * pt.axis + pt.high as usize) {
-                        Some(n) if n == signal => fixed[i] = Some(1.0),
-                        Some(_) => fixed[i] = Some(0.0),
-                        None if on_rim => fixed[i] = Some(0.0),
-                        None => {}
-                    }
-                }
-                if !fixed.contains(&Some(1.0)) {
-                    return Err::<(f64, f64, Vec<[f64; 3]>), String>(format!(
-                        "port {}: the signal conductor does not cross the port",
-                        pt.name
-                    ));
-                }
-                let fgeo: Vec<(f64, [[f64; 3]; 3])> = ftris
-                    .iter()
-                    .map(|(t, _)| {
-                        let (_, area, g) = tri_geo([fnodes[t[0]], fnodes[t[1]], fnodes[t[2]]]);
-                        (area, g)
-                    })
-                    .collect();
-                let free: Vec<Option<usize>> = {
-                    let mut c = 0;
-                    fixed
-                        .iter()
-                        .map(|f| {
-                            if f.is_none() {
-                                c += 1;
-                                Some(c - 1)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                };
-                let nf = free.iter().filter(|f| f.is_some()).count();
-                let solve = |with_eps: bool| -> (Vec<f64>, f64) {
-                    let mut kt: Vec<Triplet<usize, usize, f64>> = Vec::new();
-                    let mut rhs = vec![0.0; nf];
-                    for (k, (t, parent)) in ftris.iter().enumerate() {
-                        let (area, g) = fgeo[k];
-                        let e = if with_eps { tri_eps[*parent] } else { 1.0 };
-                        for i in 0..3 {
-                            let Some(fi) = free[t[i]] else { continue };
-                            for j in 0..3 {
-                                let kk = e * area * dot(g[i], g[j]);
-                                match free[t[j]] {
-                                    Some(fj) => kt.push(Triplet::new(fi, fj, kk)),
-                                    None => rhs[fi] -= kk * fixed[t[j]].unwrap(),
-                                }
-                            }
-                        }
-                    }
-                    let mut phi: Vec<f64> = fixed.iter().map(|f| f.unwrap_or(0.0)).collect();
-                    if nf > 0 {
-                        let a =
-                            SparseColMat::<usize, f64>::try_new_from_triplets(nf, nf, &kt).unwrap();
-                        let lu = a.sp_lu().unwrap();
-                        let mut x = faer::Mat::<f64>::zeros(nf, 1);
-                        for i in 0..nf {
-                            x[(i, 0)] = rhs[i];
-                        }
-                        let x = lu.solve(&x);
-                        for (gi, f) in free.iter().enumerate() {
-                            if let Some(fi) = f {
-                                phi[gi] = x[(*fi, 0)];
-                            }
-                        }
-                    }
-                    let mut c = 0.0;
-                    for (k, (t, parent)) in ftris.iter().enumerate() {
-                        let (area, g) = fgeo[k];
-                        let e = if with_eps { tri_eps[*parent] } else { 1.0 };
-                        let mut gr = [0.0; 3];
-                        for i in 0..3 {
-                            gr = add(gr, scale(g[i], phi[t[i]]));
-                        }
-                        c += e * area * dot(gr, gr);
-                    }
-                    (phi, c)
-                };
-                let (phi, c) = solve(true);
-                let (_, c0) = solve(false);
-                let mut sum = vec![[0.0; 3]; tri_list.len()];
-                for (k, (t, parent)) in ftris.iter().enumerate() {
-                    let (area, g) = fgeo[k];
-                    for i in 0..3 {
-                        sum[*parent] = add(sum[*parent], scale(g[i], -phi[t[i]] * area));
-                    }
-                }
-                Ok((c, c0, sum))
+            // Z0 and Er,eff from a fine second-order solve; the mode's shape
+            // on the 3D mesh's own triangles at the 3D order, so the 3D
+            // field can match it exactly (a finer shape would leak power).
+            let fine = if tris.len() < 2000 {
+                6
+            } else if tris.len() < 8000 {
+                3
+            } else {
+                2
             };
-            // Z0 and Er,eff from the fine solve; the mode's shape from the
-            // 3D mesh's own triangles, so the 3D field can match it exactly
-            // (a finer shape would leak power as an unmatched remainder).
-            let fine = if tri_list.len() < 3000 { 4 } else { 2 };
-            let (c, c0, _) = run(fine)?;
-            let (_, _, sum) = run(1)?;
-            let eeff = c / c0;
-            let z0 = ETA0 / (c * c0).sqrt();
-            let beta = k0 * eeff.sqrt();
-            let mut e = Vec::new();
-            let mut ee = 0.0;
-            for (ti, t) in tri_list.iter().enumerate() {
-                let p = [
-                    mesh.nodes[t[0] as usize],
-                    mesh.nodes[t[1] as usize],
-                    mesh.nodes[t[2] as usize],
-                ];
-                let (_, area, _) = tri_geo(p);
-                let gr = scale(sum[ti], 1.0 / area);
-                ee += area * dot(gr, gr);
-                e.push([gr; 3]);
-            }
-            // 2D error: jumps of the normal flux across triangle sides.
-            let mut sides: HashMap<(u32, u32), Vec<(usize, f64)>> = HashMap::new();
-            for (ti, t) in tri_list.iter().enumerate() {
-                let p = [
-                    mesh.nodes[t[0] as usize],
-                    mesh.nodes[t[1] as usize],
-                    mesh.nodes[t[2] as usize],
-                ];
-                let d = scale(e[ti][0], tri_eps[ti]);
-                for (a, b) in TRI_EDGES {
-                    let k = ekey(t[a], t[b]);
-                    let o = p[3 - a - b];
-                    let side = sub(mesh.nodes[k.1 as usize], mesh.nodes[k.0 as usize]);
-                    let len = dot(side, side).sqrt();
-                    let r = sub(o, mesh.nodes[k.0 as usize]);
-                    let r = sub(r, scale(side, dot(r, side) / (len * len)));
-                    // Outward normal of this side, in the plane.
-                    let m = scale(r, -1.0 / dot(r, r).sqrt());
-                    sides.entry(k).or_default().push((ti, dot(d, m) * len));
-                }
-            }
-            let mut err = vec![0.0; tri_list.len()];
-            for v in sides.values() {
-                if v.len() == 2 {
-                    // The two normals are opposite as the triangles share
-                    // one orientation of the face plane, so a sum is a jump.
-                    let j = (v[0].1 + v[1].1).powi(2);
-                    err[v[0].0] += j;
-                    err[v[1].0] += j;
-                }
-            }
-            Ok(PortMesh {
-                tris: tri_list,
-                e,
-                info: PortInfo { z0, eeff, beta },
-                norm: (1.0 / z0).sqrt(),
-                ee,
-                err,
-            })
+            let f = port_2d(model, mesh, pt, tris, &tri_eps, signal, tol, fine, 2)?;
+            let shape = port_2d(
+                model,
+                mesh,
+                pt,
+                tris,
+                &tri_eps,
+                signal,
+                tol,
+                1,
+                order.min(2),
+            )?;
+            let eeff = f.c / f.c0;
+            let z0 = ETA0 / (f.c * f.c0).sqrt();
+            (
+                shape.e,
+                shape.e0,
+                PortInfo {
+                    z0,
+                    eeff,
+                    beta: k0 * eeff.sqrt(),
+                },
+                Some(z0),
+            )
+        }
+    };
+    let mut ee = 0.0;
+    let mut ee0 = 0.0;
+    for (ti, t) in tris.iter().enumerate() {
+        let (_, area, _) = tri_geo(face_nodes(mesh, &t.f));
+        for (q, (_, wq)) in Q_TRI4.iter().enumerate() {
+            ee += wq * area * dot(e[ti][q], e[ti][q]);
+            ee0 += wq * area * dot(e[ti][q], e0[ti][q]);
         }
     }
+    let norm = match norm {
+        Some(z0) => (1.0 / z0).sqrt(),
+        None => (ee / info.z0).sqrt(),
+    };
+    // 2D error: jumps of the normal flux (mean field) across triangle sides.
+    let mut sides: HashMap<(u32, u32), Vec<(usize, f64)>> = HashMap::new();
+    for (ti, t) in tris.iter().enumerate() {
+        let p = face_nodes(mesh, &t.f);
+        let mean = scale(e[ti].iter().fold([0.0; 3], |a, v| add(a, *v)), 1.0 / 6.0);
+        let d = scale(mean, tri_eps[ti]);
+        for (a, b) in TRI_EDGES {
+            let k = ekey(t.f[a], t.f[b]);
+            let o = p[3 - a - b];
+            let side = sub(mesh.nodes[k.1 as usize], mesh.nodes[k.0 as usize]);
+            let len = dot(side, side).sqrt();
+            let r = sub(o, mesh.nodes[k.0 as usize]);
+            let r = sub(r, scale(side, dot(r, side) / (len * len)));
+            // Outward normal of this side, in the plane.
+            let m = scale(r, -1.0 / dot(r, r).sqrt());
+            sides.entry(k).or_default().push((ti, dot(d, m) * len));
+        }
+    }
+    let mut err = vec![0.0; tris.len()];
+    for v in sides.values() {
+        if v.len() == 2 {
+            let j = (v[0].1 + v[1].1).powi(2);
+            err[v[0].0] += j;
+            err[v[1].0] += j;
+        }
+    }
+    Ok(PortMesh {
+        tris: tris.to_vec(),
+        e,
+        e0,
+        ee0,
+        info,
+        norm,
+        ee,
+        err,
+    })
 }
 
 fn czero() -> c64 {
     c64::new(0.0, 0.0)
 }
 
-/// Solve at one frequency; per excitation, the edge values, and the S matrix.
+/// The tangential traces of the tetrahedron's basis functions on a
+/// boundary face at its quadrature points: for each quadrature point, the
+/// (local basis index, tangential value) of the functions living there.
+fn face_traces(mesh: &Mesh, asm: &Assembled, bf: &BFace) -> (f64, Vec<Vec<(usize, [f64; 3])>>) {
+    let s = &asm.tets[bf.tet];
+    let geo = tet_geo(tet_nodes(mesh, s));
+    let (n, area, _) = tri_geo(face_nodes(mesh, &bf.f));
+    let ks = keys(s, asm.order);
+    let live: Vec<usize> = (0..ks.len()).filter(|&i| on_face(&ks[i], &bf.f)).collect();
+    let mut out = Vec::with_capacity(6);
+    let mut b = Vec::new();
+    for (lq, _) in &Q_TRI4 {
+        let mut l = [0.0; 4];
+        for k in 0..3 {
+            l[bf.local[k]] = lq[k];
+        }
+        basis(&geo.g, &l, asm.order, &mut b);
+        out.push(
+            live.iter()
+                .map(|&i| {
+                    let v = b[i].0;
+                    (i, sub(v, scale(n, dot(v, n))))
+                })
+                .collect(),
+        );
+    }
+    (area, out)
+}
+
+/// Solve at one frequency; per excitation, the unknowns, and the S matrix.
 fn solve_at(
     model: &Model,
     mesh: &Mesh,
     f_ghz: f64,
+    order: usize,
 ) -> Result<(Assembled, Vec<Vec<c64>>, Vec<c64>), String> {
-    let asm = assemble_mesh(model, mesh, f_ghz)?;
+    let asm = assemble_mesh(model, mesh, f_ghz, order)?;
     let k0 = 2.0 * std::f64::consts::PI * f_ghz * 1e9 / C0;
     let n = asm.n;
     if n == 0 {
         return Err("no unknowns".into());
     }
-    let mut trip: Vec<Triplet<usize, usize, c64>> = Vec::with_capacity(asm.tets.len() * 36);
+    let quad: Vec<([f64; 4], f64)> = if order >= 2 {
+        q_tet4()
+    } else {
+        Q_TET2.to_vec()
+    };
+    let nb = if order >= 2 { 20 } else { 6 };
+    let mut trip: Vec<Triplet<usize, usize, c64>> =
+        Vec::with_capacity(asm.tets.len() * nb * nb / 2);
+    let mut b = Vec::new();
+    let mut stiff = vec![0.0; nb * nb];
+    let mut mass = vec![0.0; nb * nb];
     for (ti, s) in asm.tets.iter().enumerate() {
-        let p = [
-            mesh.nodes[s[0] as usize],
-            mesh.nodes[s[1] as usize],
-            mesh.nodes[s[2] as usize],
-            mesh.nodes[s[3] as usize],
-        ];
-        let geo = tet_geo(p);
-        let mut curl = [[0.0; 3]; 6];
-        for (k, (i, j)) in LOCAL_EDGES.iter().enumerate() {
-            curl[k] = scale(cross(geo.g[*i], geo.g[*j]), 2.0);
-        }
-        let mut mass = [[0.0; 6]; 6];
-        for l in &QUAD4 {
-            let nv: Vec<[f64; 3]> = LOCAL_EDGES
-                .iter()
-                .map(|(i, j)| whitney(&geo.g, l, *i, *j))
-                .collect();
-            for a in 0..6 {
-                for b in 0..6 {
-                    mass[a][b] += geo.vol / 4.0 * dot(nv[a], nv[b]);
+        let geo = tet_geo(tet_nodes(mesh, s));
+        stiff.iter_mut().for_each(|v| *v = 0.0);
+        mass.iter_mut().for_each(|v| *v = 0.0);
+        for (l, wq) in &quad {
+            basis(&geo.g, l, order, &mut b);
+            let w = wq * geo.vol;
+            for a in 0..nb {
+                for c in 0..nb {
+                    stiff[a * nb + c] += w * dot(b[a].1, b[c].1);
+                    mass[a * nb + c] += w * dot(b[a].0, b[c].0);
                 }
             }
         }
         let ke = asm.eps[ti] * (k0 * k0);
-        for a in 0..6 {
-            let Some(da) = asm.dof[ti][a] else { continue };
-            for b in 0..6 {
-                let Some(db) = asm.dof[ti][b] else { continue };
-                let v = c64::new(geo.vol * dot(curl[a], curl[b]), 0.0) - ke * mass[a][b];
-                trip.push(Triplet::new(da as usize, db as usize, v));
-            }
-        }
-    }
-    let face_mass = |p: [[f64; 3]; 3]| -> (f64, [[f64; 3]; 3], [[[f64; 3]; 3]; 3]) {
-        let (_, area, g) = tri_geo(p);
-        // N at each quadrature point for each of the three edges.
-        let mut nq = [[[0.0; 3]; 3]; 3];
-        for (q, l) in TRI_Q.iter().enumerate() {
-            for (k, (i, j)) in TRI_EDGES.iter().enumerate() {
-                nq[q][k] = whitney(&g, l, *i, *j);
-            }
-        }
-        (area, [[0.0; 3]; 3], nq)
-    };
-    let add_face = |trip: &mut Vec<Triplet<usize, usize, c64>>,
-                    f: [u32; 3],
-                    coef: c64,
-                    edge_dof: &HashMap<(u32, u32), u32>| {
-        let p = [
-            mesh.nodes[f[0] as usize],
-            mesh.nodes[f[1] as usize],
-            mesh.nodes[f[2] as usize],
-        ];
-        let (area, _, nq) = face_mass(p);
-        let d: Vec<Option<u32>> = TRI_EDGES
-            .iter()
-            .map(|(i, j)| edge_dof.get(&(f[*i], f[*j])).copied())
-            .collect();
-        for a in 0..3 {
+        let d = &asm.dof[ti];
+        for a in 0..nb {
             let Some(da) = d[a] else { continue };
-            for b in 0..3 {
-                let Some(db) = d[b] else { continue };
-                let mut m = 0.0;
-                for q in 0..3 {
-                    m += area / 3.0 * dot(nq[q][a], nq[q][b]);
+            for c in 0..nb {
+                let Some(dc) = d[c] else { continue };
+                let v = c64::new(stiff[a * nb + c], 0.0) - ke * mass[a * nb + c];
+                trip.push(Triplet::new(da as usize, dc as usize, v));
+            }
+        }
+    }
+    let add_face = |trip: &mut Vec<Triplet<usize, usize, c64>>, bf: &BFace, coef: c64| {
+        let (area, tr) = face_traces(mesh, &asm, bf);
+        let d = &asm.dof[bf.tet];
+        for (q, (_, wq)) in Q_TRI4.iter().enumerate() {
+            for (ia, va) in &tr[q] {
+                let Some(da) = d[*ia] else { continue };
+                for (ic, vc) in &tr[q] {
+                    let Some(dc) = d[*ic] else { continue };
+                    trip.push(Triplet::new(
+                        da as usize,
+                        dc as usize,
+                        coef * (wq * area * dot(*va, *vc)),
+                    ));
                 }
-                trip.push(Triplet::new(da as usize, db as usize, coef * m));
             }
         }
     };
-    for (f, k) in &asm.rad {
-        add_face(&mut trip, *f, c64::new(0.0, k.re), &asm.edge_dof);
+    for (bf, k) in &asm.rad {
+        add_face(&mut trip, bf, c64::new(0.0, *k));
     }
+    // Ports. Each absorbs everything locally (jβ on its face, which is
+    // exact for the mode in a uniform fill) and, as a rank-2 correction
+    // solved by Woodbury's identity, swaps that for the exact modal
+    // condition on the mode itself: n x curl E = -2jβ e0 + jβ V e0 with
+    // V = ∫E·e0 / ∫e·e0, e0 the magnetic shape. On microstrip, where the
+    // dielectric makes the electric and magnetic shapes differ, the plain
+    // local condition loses a few percent of the power.
     let np = asm.ports.len();
-    let mut rhs = faer::Mat::<c64>::zeros(n, np);
+    let mut be = vec![vec![0.0f64; n]; np];
+    let mut b0 = vec![vec![0.0f64; n]; np];
     for (pi, pm) in asm.ports.iter().enumerate() {
         let jb = c64::new(0.0, pm.info.beta);
-        for (ti, f) in pm.tris.iter().enumerate() {
-            add_face(&mut trip, *f, jb, &asm.edge_dof);
-            let p = [
-                mesh.nodes[f[0] as usize],
-                mesh.nodes[f[1] as usize],
-                mesh.nodes[f[2] as usize],
-            ];
-            let (area, _, nq) = face_mass(p);
-            for (k, (i, j)) in TRI_EDGES.iter().enumerate() {
-                if let Some(d) = asm.edge_dof.get(&(f[*i], f[*j])) {
-                    let mut b = 0.0;
-                    for q in 0..3 {
-                        b += area / 3.0 * dot(nq[q][k], pm.e[ti][q]);
+        for (ti, bf) in pm.tris.iter().enumerate() {
+            add_face(&mut trip, bf, jb);
+            let (area, tr) = face_traces(mesh, &asm, bf);
+            let d = &asm.dof[bf.tet];
+            for (q, (_, wq)) in Q_TRI4.iter().enumerate() {
+                for (ia, va) in &tr[q] {
+                    if let Some(da) = d[*ia] {
+                        be[pi][da as usize] += wq * area * dot(*va, pm.e[ti][q]);
+                        b0[pi][da as usize] += wq * area * dot(*va, pm.e0[ti][q]);
                     }
-                    rhs[(*d as usize, pi)] += jb * 2.0 * b;
                 }
             }
         }
     }
-    let a = SparseColMat::<usize, c64>::try_new_from_triplets(n, n, &trip)
-        .map_err(|e| format!("{e:?}"))?;
-    let lu = a
-        .sp_lu()
-        .map_err(|e| format!("factorisation failed: {e:?}"))?;
-    let x = lu.solve(&rhs);
-    let sols: Vec<Vec<c64>> = (0..np)
-        .map(|c| (0..n).map(|r| x[(r, c)]).collect())
-        .collect();
-    // Mode amplitudes at each port for each excitation.
-    let mut s = vec![czero(); np * np];
-    for (pe, sol) in sols.iter().enumerate() {
-        for (pq, pm) in asm.ports.iter().enumerate() {
-            let mut g = czero();
-            for (ti, f) in pm.tris.iter().enumerate() {
-                let p = [
-                    mesh.nodes[f[0] as usize],
-                    mesh.nodes[f[1] as usize],
-                    mesh.nodes[f[2] as usize],
-                ];
-                let (area, _, nq) = face_mass(p);
-                for (k, (i, j)) in TRI_EDGES.iter().enumerate() {
-                    if let Some(d) = asm.edge_dof.get(&(f[*i], f[*j])) {
-                        let mut b = 0.0;
-                        for q in 0..3 {
-                            b += area / 3.0 * dot(nq[q][k], pm.e[ti][q]);
-                        }
-                        g += sol[*d as usize] * b;
-                    }
+    // Columns: [b0 of each port, be of each port].
+    let m2 = 2 * np;
+    let mut cols = faer::Mat::<c64>::zeros(n, m2);
+    for p in 0..np {
+        for r in 0..n {
+            cols[(r, p)] = c64::new(b0[p][r], 0.0);
+            cols[(r, np + p)] = c64::new(be[p][r], 0.0);
+        }
+    }
+    let y = sym_solve(n, trip, &cols)?;
+    // A = A0 + U C Uᵀ, U = [b0 | be], C = diag(jβ/ee0, -jβ/ee).
+    let mut cinv_d = vec![czero(); m2];
+    for (p, pm) in asm.ports.iter().enumerate() {
+        let jb = c64::new(0.0, pm.info.beta);
+        cinv_d[p] = c64::new(pm.ee0, 0.0) / jb;
+        cinv_d[np + p] = -c64::new(pm.ee, 0.0) / jb;
+    }
+    let ucol = |k: usize| -> &Vec<f64> {
+        if k < np {
+            &b0[k]
+        } else {
+            &be[k - np]
+        }
+    };
+    // S = C⁻¹ + Uᵀ A0⁻¹ U.
+    let mut sm = vec![czero(); m2 * m2];
+    for i in 0..m2 {
+        let u = ucol(i);
+        for j in 0..m2 {
+            let mut acc = czero();
+            for r in 0..n {
+                if u[r] != 0.0 {
+                    acc += y[j][r] * u[r];
                 }
             }
-            g /= pm.ee;
-            if pq == pe {
-                g -= c64::new(1.0, 0.0);
+            sm[i * m2 + j] = acc;
+        }
+        sm[i * m2 + i] += cinv_d[i];
+    }
+    let sinv = cinv(&sm, m2);
+    // Excitation p: r = 2jβ b0_p, so A0⁻¹ r = 2jβ y[p]; x = z − Y S⁻¹ Uᵀ z.
+    let mut sols = Vec::with_capacity(np);
+    for (p, pm) in asm.ports.iter().enumerate() {
+        let k2 = c64::new(0.0, 2.0 * pm.info.beta);
+        let z: Vec<c64> = y[p].iter().map(|v| *v * k2).collect();
+        let utz: Vec<c64> = (0..m2)
+            .map(|i| {
+                let u = ucol(i);
+                let mut acc = czero();
+                for r in 0..n {
+                    if u[r] != 0.0 {
+                        acc += z[r] * u[r];
+                    }
+                }
+                acc
+            })
+            .collect();
+        let mut coef = vec![czero(); m2];
+        for i in 0..m2 {
+            for j in 0..m2 {
+                coef[i] += sinv[i * m2 + j] * utz[j];
             }
-            let mut v = g * (pm.norm / asm.ports[pe].norm);
+        }
+        let mut x = z;
+        for j in 0..m2 {
+            if coef[j] != czero() {
+                for r in 0..n {
+                    x[r] -= y[j][r] * coef[j];
+                }
+            }
+        }
+        sols.push(x);
+    }
+    // Mode voltages at each port for each excitation.
+    let mut s = vec![czero(); np * np];
+    for (pq, pm) in asm.ports.iter().enumerate() {
+        for pe in 0..np {
+            let mut g = czero();
+            for r in 0..n {
+                if b0[pq][r] != 0.0 {
+                    g += sols[pe][r] * b0[pq][r];
+                }
+            }
+            let mut v = g / pm.ee0;
+            if pq == pe {
+                v -= c64::new(1.0, 0.0);
+            }
+            let mut v = v * (pm.norm / asm.ports[pe].norm);
             // De-embed: move both reference planes inwards.
             let shift = model.ports[pq].deembed * pm.info.beta
                 + model.ports[pe].deembed * asm.ports[pe].info.beta;
@@ -1265,56 +1602,142 @@ fn solve_at(
     Ok((asm, sols, s))
 }
 
-/// Per-tetrahedron error indicator from the solutions.
-fn estimate(
-    model: &Model,
-    mesh: &Mesh,
+/// Solves the complex symmetric system (`trip`, both triangles given) for
+/// each column of `rhs`. It is factorised as the real symmetric indefinite
+/// system [[Re, Im], [Im, −Re]] (unknowns Re x and −Im x side by side),
+/// with a minimum-degree ordering and supernodal Bunch-Kaufman LBLᵀ: about
+/// half the memory of a general LU with column ordering on FEM matrices.
+fn sym_solve(
+    n: usize,
+    trip: Vec<Triplet<usize, usize, c64>>,
+    rhs: &faer::Mat<c64>,
+) -> Result<Vec<Vec<c64>>, String> {
+    use faer::dyn_stack::{MemBuffer, MemStack, StackReq};
+    use faer::sparse::linalg::cholesky::{
+        factorize_symbolic_cholesky, CholeskySymbolicParams, SymmetricOrdering,
+    };
+    let mut rt: Vec<Triplet<usize, usize, f64>> = Vec::with_capacity(trip.len() * 2);
+    for t in &trip {
+        let (i, j, v) = (t.row, t.col, t.val);
+        if i < j {
+            continue;
+        }
+        if i > j {
+            rt.push(Triplet::new(2 * i, 2 * j, v.re));
+            rt.push(Triplet::new(2 * i, 2 * j + 1, v.im));
+            rt.push(Triplet::new(2 * i + 1, 2 * j, v.im));
+            rt.push(Triplet::new(2 * i + 1, 2 * j + 1, -v.re));
+        } else {
+            rt.push(Triplet::new(2 * i, 2 * i, v.re));
+            rt.push(Triplet::new(2 * i + 1, 2 * i, v.im));
+            rt.push(Triplet::new(2 * i + 1, 2 * i + 1, -v.re));
+        }
+    }
+    drop(trip);
+    let m = 2 * n;
+    let a = SparseColMat::<usize, f64>::try_new_from_triplets(m, m, &rt)
+        .map_err(|e| format!("{e:?}"))?;
+    drop(rt);
+    let sym = factorize_symbolic_cholesky(
+        a.symbolic(),
+        faer::Side::Lower,
+        SymmetricOrdering::Amd,
+        CholeskySymbolicParams::default(),
+    )
+    .map_err(|e| format!("symbolic factorisation failed: {e:?}"))?;
+    let par = faer::Par::rayon(0);
+    let k = rhs.ncols();
+    let mut mem = MemBuffer::try_new(StackReq::any_of(&[
+        sym.factorize_numeric_intranode_lblt_scratch::<f64>(par, Default::default()),
+        sym.solve_in_place_scratch::<f64>(k, par),
+    ]))
+    .map_err(|_| "out of memory for the factorisation".to_string())?;
+    let stack = MemStack::new(&mut mem);
+    let mut lv = Vec::new();
+    lv.try_reserve_exact(sym.len_val()).map_err(|_| {
+        format!(
+            "out of memory: the factor needs {:.1} GB",
+            sym.len_val() as f64 * 8e-9
+        )
+    })?;
+    lv.resize(sym.len_val(), 0.0f64);
+    let mut sub = vec![0.0f64; m];
+    let mut pf = vec![0usize; m];
+    let mut pi = vec![0usize; m];
+    let lblt = sym.factorize_numeric_intranode_lblt(
+        &mut lv,
+        &mut sub,
+        &mut pf,
+        &mut pi,
+        a.as_ref(),
+        faer::Side::Lower,
+        par,
+        stack,
+        Default::default(),
+    );
+    let mut x = faer::Mat::<f64>::zeros(m, k);
+    for c in 0..k {
+        for r in 0..n {
+            x[(2 * r, c)] = rhs[(r, c)].re;
+            x[(2 * r + 1, c)] = rhs[(r, c)].im;
+        }
+    }
+    lblt.solve_in_place_with_conj(faer::Conj::No, x.as_mut(), par, stack);
+    Ok((0..k)
+        .map(|c| {
+            (0..n)
+                .map(|r| c64::new(x[(2 * r, c)], -x[(2 * r + 1, c)]))
+                .collect()
+        })
+        .collect())
+}
+
+/// Field and curl in tetrahedron `ti` at barycentric point `l`.
+fn field_at(
     asm: &Assembled,
-    sols: &[Vec<c64>],
-    f_ghz: f64,
-) -> Vec<f64> {
+    geo: &Geo,
+    ti: usize,
+    sol: &[c64],
+    l: &[f64; 4],
+    b: &mut Vec<([f64; 3], [f64; 3])>,
+) -> ([c64; 3], [c64; 3]) {
+    basis(&geo.g, l, asm.order, b);
+    let mut e = [czero(); 3];
+    let mut c = [czero(); 3];
+    for (k, d) in asm.dof[ti].iter().enumerate() {
+        let Some(d) = d else { continue };
+        let x = sol[*d as usize];
+        for a in 0..3 {
+            e[a] += x * b[k].0[a];
+            c[a] += x * b[k].1[a];
+        }
+    }
+    (e, c)
+}
+
+/// Per-tetrahedron error indicator from the solutions.
+fn estimate(mesh: &Mesh, asm: &Assembled, sols: &[Vec<c64>], f_ghz: f64) -> Vec<f64> {
     let k0 = 2.0 * std::f64::consts::PI * f_ghz * 1e9 / C0;
     let nt = asm.tets.len();
     let mut eta = vec![0.0; nt];
     let geos: Vec<Geo> = asm
         .tets
         .iter()
-        .map(|s| {
-            tet_geo([
-                mesh.nodes[s[0] as usize],
-                mesh.nodes[s[1] as usize],
-                mesh.nodes[s[2] as usize],
-                mesh.nodes[s[3] as usize],
-            ])
-        })
+        .map(|s| tet_geo(tet_nodes(mesh, s)))
         .collect();
-    let mut faces: HashMap<[u32; 3], Vec<usize>> = HashMap::new();
+    let mut faces: HashMap<[u32; 3], Vec<(usize, [usize; 3])>> = HashMap::new();
     for (ti, s) in asm.tets.iter().enumerate() {
-        for skip in 0..4 {
-            let f: Vec<u32> = (0..4).filter(|&k| k != skip).map(|k| s[k]).collect();
-            faces.entry([f[0], f[1], f[2]]).or_default().push(ti);
+        for (a, b, c) in LOCAL_FACES {
+            faces
+                .entry([s[a], s[b], s[c]])
+                .or_default()
+                .push((ti, [a, b, c]));
         }
     }
-    let field = |ti: usize, sol: &[c64], l: [f64; 4]| -> ([c64; 3], [c64; 3]) {
-        let g = &geos[ti];
-        let mut e = [czero(); 3];
-        let mut c = [czero(); 3];
-        for (k, (i, j)) in LOCAL_EDGES.iter().enumerate() {
-            let Some(d) = asm.dof[ti][k] else { continue };
-            let x = sol[d as usize];
-            let w = whitney(&g.g, &l, *i, *j);
-            let cu = scale(cross(g.g[*i], g.g[*j]), 2.0);
-            for a in 0..3 {
-                e[a] += x * w[a];
-                c[a] += x * cu[a];
-            }
-        }
-        (e, c)
-    };
-    let _ = model;
+    let mut b = Vec::new();
     for sol in sols {
         for ti in 0..nt {
-            let (e, _) = field(ti, sol, [0.25; 4]);
+            let (e, _) = field_at(asm, &geos[ti], ti, sol, &[0.25; 4], &mut b);
             let h2 = geos[ti].vol.powf(2.0 / 3.0);
             let r: f64 = e
                 .iter()
@@ -1326,27 +1749,17 @@ fn estimate(
             if ts.len() != 2 {
                 continue;
             }
-            let p = [
-                mesh.nodes[f[0] as usize],
-                mesh.nodes[f[1] as usize],
-                mesh.nodes[f[2] as usize],
-            ];
-            let (n, area, _) = tri_geo(p);
-            let mut jump_t = 0.0;
+            let (n, area, _) = tri_geo(face_nodes(mesh, f));
             let mut jump_n = czero();
             let mut cs = Vec::new();
-            for (side, &ti) in ts.iter().enumerate() {
-                let s = &asm.tets[ti];
+            for (side, (ti, loc)) in ts.iter().enumerate() {
                 let mut l = [0.0; 4];
-                for k in 0..4 {
-                    if f.contains(&s[k]) {
-                        l[k] = 1.0 / 3.0;
-                    }
+                for k in loc {
+                    l[*k] = 1.0 / 3.0;
                 }
-                let (e, c) = field(ti, sol, l);
+                let (e, c) = field_at(asm, &geos[*ti], *ti, sol, &l, &mut b);
                 let sign = if side == 0 { 1.0 } else { -1.0 };
-                let en = (e[0] * n[0] + e[1] * n[1] + e[2] * n[2]) * asm.eps[ti];
-                jump_n += en * sign;
+                jump_n += (e[0] * n[0] + e[1] * n[1] + e[2] * n[2]) * asm.eps[*ti] * sign;
                 cs.push(c);
             }
             let d = [
@@ -1354,16 +1767,15 @@ fn estimate(
                 cs[0][1] - cs[1][1],
                 cs[0][2] - cs[1][2],
             ];
-            // |n x d|²
             let nx = [
                 d[1] * n[2] - d[2] * n[1],
                 d[2] * n[0] - d[0] * n[2],
                 d[0] * n[1] - d[1] * n[0],
             ];
-            jump_t += nx.iter().map(|v| v.norm_sqr()).sum::<f64>();
+            let jump_t: f64 = nx.iter().map(|v| v.norm_sqr()).sum();
             let v = area.sqrt() * area * (jump_t + k0 * k0 * jump_n.norm_sqr()) * 0.5;
-            eta[ts[0]] += v;
-            eta[ts[1]] += v;
+            eta[ts[0].0] += v;
+            eta[ts[1].0] += v;
         }
     }
     eta
@@ -1457,14 +1869,32 @@ pub fn solve(
     setup: &Setup,
     mut progress: impl FnMut(&str) -> bool,
 ) -> Result<Solution, String> {
-    let mut mesh = model.mesh(setup.f_adapt, setup.per_lambda);
+    // Second-order elements start from a coarser mesh, as HFSS does.
+    let mut mesh = if setup.order >= 2 {
+        model.mesh(setup.f_adapt, setup.per_lambda / 2.0, 5.0)
+    } else {
+        model.mesh(setup.f_adapt, setup.per_lambda, 12.0)
+    };
     let mut passes: Vec<Pass> = Vec::new();
     let mut converged = false;
     let mut last_unknowns;
+    let mut last_z0: Vec<f64> = Vec::new();
     loop {
         let t0 = std::time::Instant::now();
-        let (asm, sols, s) = solve_at(model, &mesh, setup.f_adapt)?;
+        let (asm, sols, s) = solve_at(model, &mesh, setup.f_adapt, setup.order)?;
         last_unknowns = asm.n;
+        let z0: Vec<f64> = asm.ports.iter().map(|p| p.info.z0).collect();
+        // Converge on the S-parameters the user gets (renormalised), and
+        // on the ports' Z0 to within 1% (HFSS's port accuracy).
+        let s = match setup.z_ref {
+            Some(z) => renormalise(&s, &z0, z),
+            None => s,
+        };
+        let z_moved = last_z0
+            .iter()
+            .zip(&z0)
+            .any(|(a, b)| (a - b).abs() > 0.01 * b);
+        last_z0 = z0;
         let delta = passes.last().map(|p| max_delta(&p.s, &s));
         passes.push(Pass {
             tets: mesh.tets.len(),
@@ -1487,15 +1917,15 @@ pub fn solve(
             return Err("stopped".into());
         }
         if let Some(d) = delta {
-            if d < setup.delta_s && passes.len() >= setup.min_passes {
+            if d < setup.delta_s && !z_moved && passes.len() >= setup.min_passes {
                 converged = true;
                 break;
             }
         }
-        if passes.len() >= setup.max_passes || asm.n * 2 > setup.max_unknowns {
+        if passes.len() >= setup.max_passes || asm.n * 8 / 5 > setup.max_unknowns {
             break;
         }
-        let eta = estimate(model, &mesh, &asm, &sols, setup.f_adapt);
+        let eta = estimate(&mesh, &asm, &sols, setup.f_adapt);
         let mut order: Vec<usize> = (0..eta.len()).collect();
         order.sort_by(|a, b| eta[*b].partial_cmp(&eta[*a]).unwrap());
         let take = ((eta.len() as f64) * setup.refine).ceil() as usize;
@@ -1516,7 +1946,7 @@ pub fn solve(
                 if pm.err[i] > 0.0 {
                     // Split the triangle's own longest side, so the port's
                     // 2D mesh really gets finer.
-                    let t = pm.tris[i];
+                    let t = pm.tris[i].f;
                     let mut best = (ekey(t[0], t[1]), -1.0);
                     for (a, b) in TRI_EDGES {
                         let e = ekey(t[a], t[b]);
@@ -1540,7 +1970,7 @@ pub fn solve(
     let mut out_s = Vec::new();
     let mut info = Vec::new();
     for (k, &f) in sweep.iter().enumerate() {
-        let (asm, _, s) = solve_at(model, &mesh, f)?;
+        let (asm, _, s) = solve_at(model, &mesh, f, setup.order)?;
         let z0: Vec<f64> = asm.ports.iter().map(|p| p.info.z0).collect();
         let s = match setup.z_ref {
             Some(z) => renormalise(&s, &z0, z),
@@ -1649,6 +2079,7 @@ pub fn line(kind: LineKind, w: f64, h: f64, er: f64, tand: f64, len: f64) -> Mod
             [x0 * MIL, len * MIL],
         ],
         holes: Vec::new(),
+        disc: None,
         net: 1,
     };
     let port = |name: &str, high: bool| Port {
@@ -1669,6 +2100,153 @@ pub fn line(kind: LineKind, w: f64, h: f64, er: f64, tand: f64, len: f64) -> Mod
         sheets: vec![sheet],
         ports: vec![port("P1", false), port("P2", true)],
     }
+}
+
+/// A via transition from the stack-up, the same geometry the FDTD solver
+/// and openEMS get: planes with round antipads, pads, the barrel (and its
+/// stub), return vias, and the two traces running out to wave ports at
+/// either end, with the reference planes moved back to the via. Copper is
+/// perfect conductor; side walls radiate (the board goes on).
+pub fn via(stackup: &crate::Stackup, setup: &crate::fdtd::ViaSetup) -> Result<Model, String> {
+    if setup.pair.is_some() {
+        return Err("the 3D FEM via model is single-ended for now".into());
+    }
+    let stackup = crate::fdtd::materials(stackup, setup.er, setup.df);
+    let m = crate::fdtd::model(&stackup, setup)?;
+    let z = |l: usize| -m.st.sheet[l] * MIL;
+    let nl = m.nl;
+    let h_max = m.st.slabs.iter().map(|s| s.1 - s.0).fold(0.0, f64::max);
+    let reach = m.w[0].max(m.w[1]) / 2.0 + 5.0 * h_max;
+    let half_w = (2.5 * m.ra).max(setup.return_dist + 2.0 * m.rp).max(reach) * MIL;
+    let xa = m.port_at * MIL;
+    // Air beyond an outer copper that is not a plane (a trace or a pad
+    // sits there, and a wall on it would short them).
+    let outer = |l: usize| !m.planes[l];
+    let air_top = if outer(0) {
+        5.0 * (m.st.slabs[0].1 - m.st.slabs[0].0) * MIL
+    } else {
+        0.0
+    };
+    let last = m.st.slabs.len() - 1;
+    let air_bot = if outer(nl - 1) {
+        5.0 * (m.st.slabs[last].1 - m.st.slabs[last].0) * MIL
+    } else {
+        0.0
+    };
+    let lo = [-xa, -half_w, z(nl - 1) - air_bot];
+    let hi = [xa, half_w, z(0) + air_top];
+    let mut solids = Vec::new();
+    for s in &m.st.slabs {
+        solids.push(Solid {
+            shape: Shape::Box {
+                lo: [lo[0], lo[1], -s.1 * MIL],
+                hi: [hi[0], hi[1], -s.0 * MIL],
+            },
+            fill: Fill::Dielectric {
+                er: s.2,
+                tand: if setup.lossy { s.3 } else { 0.0 },
+            },
+        });
+    }
+    let sig: Vec<[f64; 2]> = m.sig.iter().map(|c| [c[0] * MIL, c[1] * MIL]).collect();
+    for c in sig.iter().filter(|_| !m.thru) {
+        solids.push(Solid {
+            shape: Shape::Cyl {
+                axis: 2,
+                c: *c,
+                r: m.rd * MIL,
+                lo: z(m.via_bot),
+                hi: z(m.via_top),
+            },
+            fill: Fill::Pec { net: 1 },
+        });
+    }
+    for c in &m.ret {
+        solids.push(Solid {
+            shape: Shape::Cyl {
+                axis: 2,
+                c: [c[0] * MIL, c[1] * MIL],
+                r: m.rd * MIL,
+                lo: z(nl - 1),
+                hi: z(0),
+            },
+            fill: Fill::Pec { net: 0 },
+        });
+    }
+    let mut sheets = Vec::new();
+    let rect = |x0: f64, x1: f64, y0: f64, y1: f64| vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
+    for l in 0..nl {
+        if m.planes[l] {
+            sheets.push(Sheet {
+                axis: 2,
+                at: z(l),
+                poly: rect(lo[0], hi[0], lo[1], hi[1]),
+                holes: sig.iter().map(|c| (*c, m.ra * MIL)).collect(),
+                disc: None,
+                net: 0,
+            });
+        }
+    }
+    let mut pads = if m.thru {
+        Vec::new()
+    } else {
+        vec![m.via_top, m.via_bot, m.from, m.to]
+    };
+    pads.sort();
+    pads.dedup();
+    for &l in &pads {
+        for c in &sig {
+            sheets.push(Sheet {
+                axis: 2,
+                at: z(l),
+                poly: Vec::new(),
+                holes: Vec::new(),
+                disc: Some((*c, m.rp * MIL)),
+                net: 1,
+            });
+        }
+    }
+    let c = sig[0];
+    for (t, &l) in [m.from, m.to].iter().enumerate() {
+        let hw = m.w[t] / 2.0 * MIL;
+        let (x0, x1) = if t == 0 { (lo[0], c[0]) } else { (c[0], hi[0]) };
+        sheets.push(Sheet {
+            axis: 2,
+            at: z(l),
+            poly: rect(x0, x1, c[1] - hw, c[1] + hw),
+            holes: Vec::new(),
+            disc: None,
+            net: 1,
+        });
+    }
+    let port = |name: &str, high: bool| Port {
+        name: name.into(),
+        axis: 0,
+        high,
+        lo: [lo[1], lo[2]],
+        hi: [hi[1], hi[2]],
+        mode: Mode::Tem { signal: 1 },
+        deembed: if high { xa - c[0] } else { xa + c[0] },
+    };
+    // Lids over the air are perfect conductor (as in `line`): a radiation
+    // wall that close soaks up the traces' fringing field.
+    let wall_z = |_air: f64| Wall::Pec;
+    Ok(Model {
+        lo,
+        hi,
+        walls: [
+            Wall::Pec,
+            Wall::Pec,
+            Wall::Radiation,
+            Wall::Radiation,
+            wall_z(air_bot),
+            wall_z(air_top),
+        ],
+        er: 1.0,
+        solids,
+        sheets,
+        ports: vec![port("P1", false), port("P2", true)],
+    })
 }
 
 #[cfg(test)]
@@ -1728,6 +2306,7 @@ mod tests {
         let setup = Setup {
             f_adapt: 10.0,
             max_passes: 6,
+            max_unknowns: 50_000,
             z_ref: None,
             ..Setup::default()
         };
@@ -1752,7 +2331,7 @@ mod tests {
         let setup = Setup {
             f_adapt: 5.0,
             max_passes: 10,
-            max_unknowns: 60_000,
+            max_unknowns: 50_000,
             z_ref: None,
             ..Setup::default()
         };
@@ -1772,9 +2351,25 @@ mod tests {
         assert!((r.info[0][0].eeff - 4.0).abs() < 0.05);
         // The exact zero-thickness value is 56.5 ohm; the edge singularity
         // keeps a first-order mesh a little low.
-        assert!((z - 56.5).abs() < 0.07 * 56.5, "Z0 {z}");
+        assert!((z - 56.5).abs() < 0.04 * 56.5, "Z0 {z}");
         assert!(r.s[0][0].norm_sqr() + r.s[0][2].norm_sqr() > 0.98, "power");
         assert!(r.s[0][0].norm() < 0.08);
         assert!((r.s[0][2].norm() - 1.0).abs() < 0.03);
+    }
+
+    #[test]
+    fn microstrip_modal_port_conserves_power() {
+        // Inhomogeneous fill: the modal port keeps a lossless line lossless.
+        let m = line(LineKind::Microstrip, 10.0, 5.0, 4.0, 0.0, 200.0);
+        let setup = Setup {
+            f_adapt: 5.0,
+            max_unknowns: 40_000,
+            z_ref: None,
+            ..Setup::default()
+        };
+        let r = solve(&m, &setup, |_| true).unwrap();
+        let p = r.s[0][0].norm_sqr() + r.s[0][2].norm_sqr();
+        assert!((p - 1.0).abs() < 0.005, "power {p}");
+        assert!(r.s[0][0].norm() < 0.02, "S11 {}", r.s[0][0].norm());
     }
 }

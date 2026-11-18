@@ -152,20 +152,29 @@ pub struct Path {
     pub termination: Option<(String, f64)>,
     /// dB added back to |S21| for the termination's share.
     pub il_corr_db: f64,
+    /// With a chip model: the loss to the power the chip takes, dB per
+    /// frequency (mismatch included); empty otherwise.
+    pub delivered: Vec<f64>,
 }
 
 impl Path {
     /// Insertion loss at `f` GHz, dB.
     pub fn il_at(&self, f: f64) -> Option<f64> {
-        self.report
-            .as_ref()
-            .ok()
-            .and_then(|r| r.il_at(f))
-            .map(|d| (d - self.il_corr_db).max(0.0))
+        let r = self.report.as_ref().ok()?;
+        if !self.delivered.is_empty() {
+            let k =
+                r.f.partition_point(|&x| x < f)
+                    .min(r.f.len().checked_sub(1)?);
+            return self.delivered.get(k).copied();
+        }
+        r.il_at(f).map(|d| (d - self.il_corr_db).max(0.0))
     }
 
     /// Insertion loss per frequency, dB (negative, as |S21|).
     pub fn s21_db(&self) -> Vec<f64> {
+        if !self.delivered.is_empty() {
+            return self.delivered.iter().map(|d| -d).collect();
+        }
         self.report.as_ref().map_or(Vec::new(), |r| {
             r.s.iter()
                 .map(|s| (s[2].db() + self.il_corr_db).min(0.0))
@@ -511,7 +520,7 @@ fn judge(path: &mut Path, setup: &Setup, board: &Board) {
         }
     }
     if let Some(b) = setup.il_budget {
-        let il = (rep.il_db() - path.il_corr_db).max(0.0);
+        let il = path.il_at(top).unwrap_or(0.0);
         if il > b {
             findings.push(format!(
                 "insertion loss {il:.2} dB at {top} GHz is over the {b:.2} dB budget"
@@ -614,7 +623,16 @@ fn not_rf(rep: &Report, board: &Board) -> Option<String> {
 /// their names and the resistance the path's mode sees (a resistor to
 /// ground from one line of a pair counts twice), when that is within a
 /// factor of two of the end's reference.
-fn termination(rep: &Report, board: &Board) -> Option<(String, f64)> {
+struct Term {
+    names: String,
+    ohms: f64,
+    /// Trace length between the last termination and the chip, mil.
+    after: f64,
+    /// Terminating resistors earlier on the path.
+    mid: Vec<String>,
+}
+
+fn termination(rep: &Report, board: &Board) -> Option<Term> {
     let from = match rep
         .sections
         .iter()
@@ -628,25 +646,49 @@ fn termination(rep: &Report, board: &Board) -> Option<(String, f64)> {
                 + 1
         }
     };
+    let zr = rep.z_ref[1];
+    let seen = |s: &crate::pathloss::Section| -> Option<f64> {
+        let (r, to_ground) = shunt_ohms(board, s)?;
+        if !(20.0..=250.0).contains(&r) {
+            return None;
+        }
+        Some(if s.diff && to_ground { 2.0 * r } else { r })
+    };
     let mut names = Vec::new();
     let mut g = 0.0;
-    for s in &rep.sections[from..] {
-        let Some((r, to_ground)) = shunt_ohms(board, s) else {
-            continue;
-        };
-        if !(20.0..=250.0).contains(&r) {
-            continue;
-        }
-        let seen = if s.diff && to_ground { 2.0 * r } else { r };
-        g += 1.0 / seen;
+    let mut last = from;
+    for (k, s) in rep.sections.iter().enumerate().skip(from) {
+        let Some(r) = seen(s) else { continue };
+        g += 1.0 / r;
+        last = k;
         names.push(s.what.split_whitespace().next().unwrap_or("").to_string());
     }
     if names.is_empty() {
         return None;
     }
     let r = 1.0 / g;
-    let zr = rep.z_ref[1];
-    (r > 0.5 * zr && r < 2.0 * zr).then(|| (names.join(", "), r))
+    if !(r > 0.5 * zr && r < 2.0 * zr) {
+        return None;
+    }
+    let after = rep.sections[last + 1..]
+        .iter()
+        .filter(|s| s.kind == "trace")
+        .map(|s| s.length)
+        .sum();
+    let mid = rep.sections[..from]
+        .iter()
+        .filter(|s| {
+            let z = if s.diff { 100.0 } else { 50.0 };
+            seen(s).is_some_and(|r| r > 0.5 * z && r < 2.0 * z)
+        })
+        .filter_map(|s| s.what.split_whitespace().next().map(String::from))
+        .collect();
+    Some(Term {
+        names: names.join(", "),
+        ohms: r,
+        after,
+        mid,
+    })
 }
 
 /// A chip input that takes no current: Γ = 1.
@@ -798,8 +840,30 @@ pub fn run(
         // what the chip sees.
         let mut term = None;
         let mut corr = 0.0;
+        let top = setup.band.1;
+        // A twentieth of a wavelength at the top, in the board, mil.
+        let short = 299_792_458.0 / (top * 1e9) / 25.4e-6 / 20.0 / 1.9;
         if let Ok(rep) = &r {
-            if let Some((names, ohms)) = termination(rep, board) {
+            let t = termination(rep, board);
+            if let Some(t) = &t {
+                if !t.mid.is_empty() {
+                    extra_notes.push(format!(
+                        "{} also terminate{} the line earlier on the path: two terminations on one path; check which is fitted",
+                        t.mid.join(", "),
+                        if t.mid.len() == 1 { "s" } else { "" }
+                    ));
+                }
+            }
+            match t {
+                Some(t) if t.after > short => extra_notes.push(format!(
+                    "{} ({:.0} Ω) terminate{} the line {:.0} mil from the chip: too far to take the chip as high impedance behind it; the chip is taken as {:.0} Ω (give its model with --load), and the termination's share counts as loss",
+                    t.names,
+                    t.ohms,
+                    if t.names.contains(',') { "" } else { "s" },
+                    t.after,
+                    rep.z_ref[1]
+                )),
+                Some(Term { names, ohms, .. }) => {
                 let zr = rep.z_ref[1];
                 corr = 10.0 * (1.0 + zr / ohms).log10();
                 if load.is_none() {
@@ -824,6 +888,30 @@ pub fn run(
                     "{names} terminate the path at the chip ({ohms:.0} Ω as the path sees it): the insertion loss counts the power into the termination as delivered ({corr:.2} dB added back)"
                 ));
                 term = Some((names, ohms));
+                }
+                None => {}
+            }
+        }
+        // Into a chip model: the insertion loss is the power the chip
+        // takes (transducer gain from a matched source), mismatch and all.
+        let mut delivered = Vec::new();
+        if term.is_none() && load.is_some() {
+            if let Ok(rep) = &r {
+                let z2 = rep.z_ref[1];
+                delivered = rep
+                    .s
+                    .iter()
+                    .zip(&rep.load_z)
+                    .map(|(s, &zl)| {
+                        let gl = zl.add(Cx::new(-z2, 0.0)).div(zl.add(Cx::new(z2, 0.0)));
+                        let num = s[2].abs().powi(2) * (1.0 - gl.abs().powi(2)).max(0.0);
+                        let den = Cx::new(1.0, 0.0)
+                            .add(s[3].mul(gl).scale(-1.0))
+                            .abs()
+                            .powi(2);
+                        -10.0 * (num / den.max(1e-30)).max(1e-30).log10()
+                    })
+                    .collect();
             }
         }
         if let Ok(rep) = &mut r {
@@ -841,6 +929,7 @@ pub fn run(
             losses: Vec::new(),
             termination: term,
             il_corr_db: corr,
+            delivered,
         };
         judge(&mut path, setup, board);
         out.paths.push(path);
@@ -973,7 +1062,7 @@ impl RfReport {
             "worst RL", "length", "vias", "parts"
         );
         let _ = writeln!(o, "{head}");
-        for p in &self.paths {
+        for p in self.paths.iter().filter(|p| p.status != Status::NotRf) {
             let (v, parts) = p.counts();
             let mut line = format!(
                 "{:<6} {:<22} {:<12} {:<12}",
@@ -1007,9 +1096,31 @@ impl RfReport {
         }
         let _ = writeln!(
             o,
-            "\nIL in dB at GHz; worst RL in dB@GHz from {} GHz (* = into the chip's port model).",
+            "\nIL in dB at GHz (into the chip's model where one is given, mismatch included); worst RL in dB@GHz from {} GHz (* = into the chip's model or the termination).",
             self.band.0
         );
+        let apart: Vec<&Path> = self
+            .paths
+            .iter()
+            .filter(|p| p.status == Status::NotRf)
+            .collect();
+        if !apart.is_empty() {
+            let _ = writeln!(
+                o,
+                "\nNot RF (connector lines found to be bias, control or power):"
+            );
+            for p in apart {
+                let _ = writeln!(
+                    o,
+                    "  {} ({}): {}",
+                    p.name,
+                    p.report
+                        .as_ref()
+                        .map_or(p.from.as_str(), |r| r.start.as_str()),
+                    p.findings.first().map_or("", |s| s.as_str())
+                );
+            }
+        }
         for p in &self.paths {
             let _ = writeln!(o, "\n{} {} ({}):", p.class.name(), p.name, p.status.name());
             match &p.report {
@@ -1020,6 +1131,10 @@ impl RfReport {
                     let _ = writeln!(o, "  {}", r.summary());
                     if let Some(l) = &p.load {
                         let _ = writeln!(o, "  load: {l}");
+                        if let Some((d, f)) = r.worst_loaded() {
+                            let _ =
+                                writeln!(o, "  return loss into it: worst {d:.1} dB at {f:.2} GHz");
+                        }
                     }
                     for f in &p.findings {
                         let _ = writeln!(o, "  ! {f}");

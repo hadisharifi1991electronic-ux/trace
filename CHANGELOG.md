@@ -28,6 +28,30 @@ is moved to the Recycle Bin.
   S11 below -30 dB to 20 GHz, phase within 1%.
 - Next stage: second-order elements (HFSS's default, for tighter Z0),
   board vias from the stack-up checked against openEMS, and a window.
+## 0.89.1 (2026-11-18)
+
+RF report and path loss, from the 0.88.1 run on the ADRV9026 EVB:
+
+- A path ends at the largest chip it reaches, then the nearest: DEVCLK
+  ended at the clock chip's output on the same net (0.88.1 took the
+  nearest) and now reaches the transceiver again; the VCXO tune line
+  still ends at the clock chip, not the VCXO.
+- A balun's balanced nets taken as a pair get their polarity from their
+  names (+/-, _P/_N), else the lower pin number is the positive line.
+- Other baluns on the path's nets (alternatives behind 0 Ω selectors, as
+  T409/T410 on the LO inputs) are named in a note: the board does not
+  say which is fitted. Alternative footprints stacked on the same pads
+  are not counted.
+- RF report:
+  - A termination more than a twentieth of a wavelength from the chip
+    is no longer taken as the load with the chip open behind it (an open
+    line past it made a 100 Ω termination read -0.8 dB): the chip is
+    taken as the line's impedance, with a note. Terminating resistors
+    earlier on the path are named as a second termination to check.
+  - With a chip model, the insertion loss is the power the chip takes
+    (mismatch included), not |S21| into the reference.
+  - Lines found not to be RF are listed apart below the table, and each
+    path's detail gives its return loss into the load.
 
 ## 0.89.0 (2026-11-18)
 

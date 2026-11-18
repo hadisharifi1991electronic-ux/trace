@@ -1895,12 +1895,33 @@ pub fn default_thetas(board: &Board, part: usize) -> (f64, f64) {
         .map(|p| p.size_x.mm() * p.size_y.mm())
         .collect();
     let biggest = pads.iter().cloned().fold(0.0, f64::max);
-    let others = pads
-        .iter()
-        .filter(|&&a| a < biggest)
-        .cloned()
-        .fold(0.0, f64::max);
-    let epad = pads.len() > 4 && biggest > 6.0 * others.max(1e-6) && biggest > 0.15 * area;
+    // The next largest pad (an equal one counts: five equal SOT-23 leads
+    // are not an exposed pad).
+    let others = {
+        let mut v = pads.clone();
+        v.sort_by(|a, b| b.total_cmp(a));
+        v.get(1).copied().unwrap_or(0.0)
+    };
+    // One pad much larger than the rest: a QFN/DFN exposed pad, or the
+    // tab of an SOT-223, DPAK or D2PAK (3 or 4 pads).
+    let big_one = pads.len() >= 3 && biggest > 4.0 * others.max(1e-6) && biggest > 0.1 * area;
+    // An exposed pad drawn as several pads (paste windows, split pads,
+    // thermal vias as pads): copper near the body's centre, where leads
+    // never are, covering a good part of the body.
+    let central: f64 = {
+        let comp = &board.components[part];
+        let (cx, cy) = (comp.x.mm(), comp.y.mm());
+        let reach = 0.3 * area.sqrt();
+        board
+            .geometry
+            .pads
+            .iter()
+            .filter(|p| p.component == Some(part as u32))
+            .filter(|p| (p.at.x.mm() - cx).hypot(p.at.y.mm() - cy) < reach)
+            .map(|p| p.size_x.mm() * p.size_y.mm())
+            .sum()
+    };
+    let epad = big_one || (pads.len() > 4 && central > 0.12 * area);
     // A ball grid: many round surface pads of one size.
     let round = board
         .geometry
@@ -1934,8 +1955,8 @@ pub enum Package {
     /// Ball grid (flip chip above about 10 mm): a thin lid or bare die on
     /// top, hundreds of balls into the board's planes.
     Bga,
-    /// QFN, DFN, PowerPAD: the die sits on a pad soldered to the board;
-    /// the top is mould compound.
+    /// QFN, DFN, PowerPAD, SOT-223 and DPAK tabs: the die sits on a pad
+    /// soldered to the board; the top is mould compound.
     ExposedPad,
     /// SOIC, TSSOP, SOT and the rest: heat leaves through the leads.
     Leaded,
@@ -1943,7 +1964,8 @@ pub enum Package {
 
 /// Typical JEDEC (2s2p) θJC (to the case top) and θJB, K/W, for a body
 /// `size` mm across, fitted to datasheet values: a 14 mm flip-chip BGA
-/// about 1 and 4, a 5 mm QFN about 30 and 8, an SOIC-8 about 55 and 65.
+/// about 1 and 4, a 5 mm QFN about 30 and 8, an SOIC-8 about 55 and 50, an SOT-23
+/// about 80 and 50.
 pub fn package_thetas(kind: Package, size: f64) -> (f64, f64) {
     let size = size.max(0.5);
     match kind {
@@ -1957,7 +1979,7 @@ pub fn package_thetas(kind: Package, size: f64) -> (f64, f64) {
         ),
         Package::Leaded => (
             (250.0 / size).clamp(10.0, 80.0),
-            (300.0 / size).clamp(10.0, 120.0),
+            (220.0 / size).clamp(10.0, 50.0),
         ),
     }
 }
@@ -1992,6 +2014,9 @@ mod tests {
             (20.0..40.0).contains(&jc) && (5.0..12.0).contains(&jb),
             "{jc} {jb}"
         );
+        // A 3 mm LFCSP LDO and an SOT-223 tab: θJB about 13 and 8.
+        let (_, jb) = package_thetas(Package::ExposedPad, 3.0);
+        assert!((8.0..16.0).contains(&jb), "{jb}");
         let (jc, jb) = package_thetas(Package::Leaded, 4.5);
         assert!(
             (40.0..70.0).contains(&jc) && (40.0..90.0).contains(&jb),

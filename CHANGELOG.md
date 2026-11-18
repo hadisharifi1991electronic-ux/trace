@@ -3,6 +3,20 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.82.1 (2026-11-18)
+
+- Thermal package guesses, from the ADRV9026 rerun (an LDO came out the
+  hottest part on a leaded guess of 58 / 70 K/W):
+  - Five equal SOT-23 leads were taken for an exposed pad (the "next
+    largest pad" skipped equal ones); now they are leaded.
+  - An exposed pad drawn as several pads (paste windows, split pads,
+    thermal vias as pads) is found by the copper near the body's centre,
+    and an SOT-223 / DPAK / D2PAK tab (3 or 4 pads, one large) counts as
+    an exposed pad: a 3 mm LFCSP LDO gets θJB about 13 K/W, an SOT-223
+    about 8.
+  - Leaded θJB tops out at 50 K/W (SOT-23 and SOIC-8 datasheets give
+    about 35 to 55), where it reached 120.
+
 ## 0.82.0 (2026-11-18)
 
 - openEMS as a second, independent solver for vias and pairs. The

@@ -2692,6 +2692,20 @@ fn prepare_with(
                         && !partner.contains_key(&other[0].0)
                         && !partner.contains_key(&other[1].0)
                     {
+                        // The positive line: by its name (+, P), else the
+                        // lower pin number.
+                        let pol = |m: u32| {
+                            let u = net_name(board, m).to_ascii_uppercase();
+                            if u.ends_with('+') || u.ends_with("_P") {
+                                0
+                            } else if u.ends_with('-') || u.ends_with("_N") {
+                                2
+                            } else {
+                                1
+                            }
+                        };
+                        let pin = |q: usize| g.pads[q].name.parse::<u32>().unwrap_or(u32::MAX);
+                        other.sort_by_key(|&(m, q)| (pol(m), pin(q)));
                         let (a, b) = (other[0].0, other[1].0);
                         partner.insert(a, b);
                         partner.insert(b, a);
@@ -2757,21 +2771,26 @@ fn prepare_with(
             // The nearest chip pin reached (a part with 4 pins or more:
             // where the signal ends; copper on past it belongs to
             // something else), else the farthest pin.
-            let mut best: Option<(bool, f64, usize)> = None;
+            let mut best: Option<(bool, f64, usize, usize)> = None;
             for (&pi, &k) in &gr.pad_node {
                 let p = &g.pads[pi];
                 if !d[k].is_finite() || p.component == start_comp {
                     continue;
                 }
-                let chip = p.component.and_then(|c| by_comp.get(&c)).is_some_and(|l| {
-                    l.len() >= 4 && !is_balun(board, p.component.unwrap_or(0) as usize)
-                });
-                let cand = (chip, d[k], pi);
+                let pins = p
+                    .component
+                    .and_then(|c| by_comp.get(&c))
+                    .map_or(0, |l| l.len());
+                let chip = pins >= 4 && !is_balun(board, p.component.unwrap_or(0) as usize);
+                let cand = (chip, d[k], pi, pins);
+                // Of the chips, the largest (the transceiver, not a
+                // clock chip's output or a VCXO on the same net), then
+                // the nearest; with no chip, the farthest pin.
                 let better = best.is_none_or(|b| {
                     if cand.0 != b.0 {
                         cand.0
                     } else if chip {
-                        cand.1 < b.1
+                        (cand.3, -cand.1) > (b.3, -b.1)
                     } else {
                         cand.1 > b.1
                     }
@@ -2984,6 +3003,50 @@ fn prepare_with(
     }
     // The mode at the end (after a balun that is the last element).
     let end_diff = diff;
+    // Other baluns on the nets the path reached: an assembly choice
+    // (alternative baluns behind 0 Ω selectors) the board does not say.
+    {
+        let mut others: Vec<String> = Vec::new();
+        let used_pads: Vec<[f64; 2]> = used_parts
+            .iter()
+            .filter(|&&c| is_balun(board, c))
+            .flat_map(|&c| by_comp.get(&(c as u32)).into_iter().flatten())
+            .map(|&q| mil(&g.pads[q].at))
+            .collect();
+        for (&c, list) in &by_comp {
+            let c = c as usize;
+            if used_parts.contains(&c) || list.len() < 3 || !is_balun(board, c) {
+                continue;
+            }
+            // A footprint stacked on the used one is its alternative
+            // package, not another route.
+            let stacked = list
+                .iter()
+                .any(|&q| used_pads.iter().any(|u| dist(*u, mil(&g.pads[q].at)) < 5.0));
+            if stacked {
+                continue;
+            }
+            if list
+                .iter()
+                .any(|&q| g.pads[q].net.is_some_and(|n| nets.contains(&n)))
+            {
+                others.push(board.components[c].designator.clone());
+            }
+        }
+        let used: Vec<String> = used_parts
+            .iter()
+            .filter(|&&c| is_balun(board, c))
+            .map(|&c| board.components[c].designator.clone())
+            .collect();
+        if !others.is_empty() && !used.is_empty() {
+            others.sort();
+            rep.notes.push(format!(
+                "{} also on the path's nets: alternative baluns (an assembly choice); the path took {}. Check which is fitted",
+                others.join(", "),
+                used.join(", ")
+            ));
+        }
+    }
     rep.notes.extend(mode_notes);
     // Shunt parts off the path: two-pin parts with a pad on a net of the
     // path and the other to ground (or a rail, AC ground), or across the

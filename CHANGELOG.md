@@ -3,6 +3,14 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.81.1 (2026-11-18)
+
+- EMI simulation, plane cavities: below a plane pair's first resonance
+  the voltage is the same all round its edge, and opposite edges cancel.
+  What is left radiates as the pair's vertical dipole, k·εr·side/2 of
+  one edge alone, so small or low-frequency cavities no longer read as
+  strong radiators. At resonance and above nothing changes.
+
 ## 0.81.0 (2026-11-17)
 
 - Thermal density maps, as the field maps do for the EM solver. The 3D

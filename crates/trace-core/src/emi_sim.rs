@@ -52,7 +52,9 @@
 //!    and the package (0.3 nH) to the plane, is the voltage
 //!    across the plane pair at its edge; the edge, a slot fed by that
 //!    voltage, radiates E = k V L / (π r) over a quarter of the perimeter
-//!    (at most λ/2).
+//!    (at most λ/2). Below the first cavity resonance the edges carry
+//!    the same voltage all round and opposite edges cancel, leaving the
+//!    plane pair's vertical dipole, k·εr·side/2 of that.
 //! 4. *Decoupling loops*: each capacitor's current (the plane voltage
 //!    over its branch: ESR, ESL, mounting and C) in the loop of its pads
 //!    and vias down to the plane (pitch × depth), as a small loop.
@@ -1781,7 +1783,14 @@ fn rail_fields(
         let v = z * i;
         let k = 2.0 * PI * f / C0;
         let le = (perim / 4.0).min(C0 / f / 2.0);
-        let e = k * v * le / (PI * r);
+        // Below the cavity's first resonance the edge voltage is the same
+        // all round, and the magnetic currents of opposite edges cancel:
+        // what is left radiates as the vertical dipole of the plane
+        // pair's charge, jωCV·d, which is k·εr·side/2 of one edge alone.
+        // At the resonance and above the edges no longer cancel.
+        let er = model.cavity.er.max(1.0);
+        let below = (k * er * side / 2.0).min(1.0);
+        let e = k * v * le / (PI * r) * below;
         cav[b] = add_db(cav[b], db_uv(e));
         // Each capacitor's current in its loop.
         let mut p2 = 0.0;

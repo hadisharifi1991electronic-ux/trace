@@ -3,6 +3,32 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.90.0 (2026-11-18)
+
+3D finite-element EM solver, the HFSS way (first stage):
+
+- Frequency-domain FEM on a tetrahedral mesh with edge (Whitney/Nedelec)
+  elements, so the field is solved in full 3D, not on a stepped grid.
+- Wave ports: each port solves its own 2D cross-section for the mode
+  (quasi-TEM lines: Z0 and Er,eff from the field with and without the
+  dielectrics; waveguides: TE10), launches it and absorbs it. Walls are
+  perfect conductor or a radiation boundary; dielectric loss (tan d).
+- Adaptive meshing: solve at the adapt frequency, estimate each
+  tetrahedron's error (residual and field jumps across its faces), split
+  the worst 30% (longest-edge bisection, the mesh stays conforming, port
+  cross-sections are refined from their own 2D error), and repeat until no
+  S-parameter moves by more than the target dS (0.02) between passes.
+  Then the final mesh sweeps the band; S renormalised to 50 ohm (or kept
+  at the port's own Z0), Touchstone out.
+- CLI: `trace fem waveguide|microstrip|stripline key=value ... -o x.s2p`
+  (w, h, len in mil; er, tand; f = adapt GHz; sweep=lo:hi:n; ds; passes).
+- Checked: WR-90 waveguide at 10 GHz, S11 0.003 and S21 within 0.004 of
+  the exact answer; 8 mil stripline in 20 mil Er 4: Z0 54.3 ohm against
+  56.5 exact, Er,eff 4.000, power conserved; 10/5 mil microstrip Er 4:
+  S11 below -30 dB to 20 GHz, phase within 1%.
+- Next stage: second-order elements (HFSS's default, for tighter Z0),
+  board vias from the stack-up checked against openEMS, and a window.
+
 ## 0.89.0 (2026-11-18)
 
 Schematic symbol editor, as Altium's SCH Library editor:

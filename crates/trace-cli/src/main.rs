@@ -17,6 +17,10 @@ on the board, for boards whose file has none.
 USAGE:
     trace inspect <board|file.SchDoc>           Summary of a board or sheet
     trace pairs <board> [max-skew]              Differential pair lengths and skew (default max-skew 5mil)
+    trace fem <waveguide|microstrip|stripline> [key=value ...] [-o out.s2p]
+                                                3D FEM (HFSS-style): adaptive tetrahedral mesh to dS, wave ports,
+                                                S-parameter sweep. Keys: w h len (mil), er tand, a b (mm, waveguide;
+                                                len in mm too), f (adapt GHz), sweep=lo:hi:n, ds, passes, zref (0 = port Z0)
     trace rules <board>                         Design rules by category and kind, in priority order
     trace rules <board> --net <net>             The rule of each kind that applies to a net
     trace rules <board> --check                 Rule problems and scope terms Trace does not judge
@@ -382,6 +386,7 @@ fn main() -> ExitCode {
         ["inspect", file] => inspect(file),
         ["pairs", file] => pairs(file, "5mil"),
         ["pairs", file, skew] => pairs(file, skew),
+        ["fem", kind, rest @ ..] => fem(kind, rest),
         ["rules", file] => rules(file),
         ["rules", file, "--params"] => rules_params(file),
         ["rules", file, "--check"] => rules_check(file),
@@ -961,6 +966,135 @@ fn pairs(file: &str, max_skew: &str) -> Res {
         over,
         open
     );
+    Ok(())
+}
+
+fn fem(kind: &str, rest: &[&str]) -> Res {
+    fem_run(kind, rest).map_err(|e| e.into())
+}
+
+fn fem_run(kind: &str, rest: &[&str]) -> Result<(), String> {
+    use trace_core::fem3d;
+    let mut kv: std::collections::HashMap<&str, &str> = std::collections::HashMap::new();
+    let mut out = None;
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        if *a == "-o" {
+            out = it.next().copied();
+        } else if let Some((k, v)) = a.split_once('=') {
+            kv.insert(k, v);
+        } else {
+            return Err(format!("expected key=value, got {a}"));
+        }
+    }
+    let num = |k: &str, d: f64| -> Result<f64, String> {
+        kv.get(k)
+            .map(|v| v.parse::<f64>().map_err(|_| format!("{k}: not a number")))
+            .unwrap_or(Ok(d))
+    };
+    let model = match kind {
+        "waveguide" => {
+            let slab = match kv.get("slab") {
+                Some(v) => Some((
+                    num("er", 2.2)?,
+                    v.parse::<f64>().map_err(|_| "slab: not a number")?,
+                )),
+                None => None,
+            };
+            fem3d::waveguide(num("a", 22.86)?, num("b", 10.16)?, num("len", 20.0)?, slab)
+        }
+        "microstrip" | "stripline" => {
+            let k = if kind == "microstrip" {
+                fem3d::LineKind::Microstrip
+            } else {
+                fem3d::LineKind::Stripline
+            };
+            fem3d::line(
+                k,
+                num("w", 10.0)?,
+                num("h", 5.0)?,
+                num("er", 4.0)?,
+                num("tand", 0.0)?,
+                num("len", 300.0)?,
+            )
+        }
+        _ => return Err(format!("unknown model {kind}")),
+    };
+    let f = num("f", 10.0)?;
+    let sweep = match kv.get("sweep") {
+        Some(s) => {
+            let p: Vec<f64> = s
+                .split(':')
+                .map(|x| x.parse::<f64>().map_err(|_| "sweep: lo:hi:n"))
+                .collect::<Result<_, _>>()?;
+            if p.len() != 3 || p[2] < 1.0 {
+                return Err("sweep: lo:hi:n".into());
+            }
+            let n = p[2] as usize;
+            (0..n)
+                .map(|i| {
+                    if n == 1 {
+                        p[0]
+                    } else {
+                        p[0] + (p[1] - p[0]) * i as f64 / (n - 1) as f64
+                    }
+                })
+                .collect()
+        }
+        None => Vec::new(),
+    };
+    let zref = num("zref", 50.0)?;
+    let setup = fem3d::Setup {
+        f_adapt: f,
+        sweep,
+        delta_s: num("ds", 0.02)?,
+        max_passes: num("passes", 10.0)? as usize,
+        max_unknowns: num("maxdof", 400_000.0)? as usize,
+        z_ref: if zref > 0.0 { Some(zref) } else { None },
+        ..fem3d::Setup::default()
+    };
+    let r = fem3d::solve(&model, &setup, |l| {
+        eprintln!("{l}");
+        true
+    })?;
+    println!(
+        "{} after {} passes: {} tetrahedra, {} unknowns",
+        if r.converged {
+            "converged"
+        } else {
+            "NOT converged"
+        },
+        r.passes.len(),
+        r.tets,
+        r.unknowns
+    );
+    for (i, p) in r.ports.iter().enumerate() {
+        let inf = r.info[0][i];
+        println!(
+            "port {p}: Z0 {:.2} ohm, Er,eff {:.3}, beta {:.2} rad/m",
+            inf.z0, inf.eeff, inf.beta
+        );
+    }
+    let n = r.n();
+    for (k, f) in r.f.iter().enumerate() {
+        let row: Vec<String> = (0..n * n)
+            .map(|i| {
+                let s = r.s[k][i];
+                format!(
+                    "S{}{} {:.2} dB {:.1} deg",
+                    i / n + 1,
+                    i % n + 1,
+                    20.0 * s.norm().max(1e-12).log10(),
+                    s.arg().to_degrees()
+                )
+            })
+            .collect();
+        println!("{f} GHz  {}", row.join("  "));
+    }
+    if let Some(o) = out {
+        std::fs::write(o, r.touchstone()).map_err(|e| format!("{o}: {e}"))?;
+        println!("wrote {o}");
+    }
     Ok(())
 }
 

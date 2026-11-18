@@ -25,6 +25,7 @@ pub mod erc;
 pub mod eye;
 pub mod fanout;
 pub mod fdtd;
+pub mod fem3d;
 pub mod field;
 pub mod file;
 pub mod flex;

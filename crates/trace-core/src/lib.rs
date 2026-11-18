@@ -57,6 +57,7 @@ pub mod swap;
 pub mod teardrop;
 pub mod testpoint;
 pub mod thermal;
+pub mod thermfield;
 pub mod touchstone;
 pub mod units;
 pub mod validate;

@@ -5,6 +5,7 @@
 use eframe::egui::{self, Color32, RichText};
 use std::sync::mpsc;
 use trace_core::thermal::{self, Air, Heatsink, Setup, Source};
+use trace_core::thermfield::{Sweep, TCut, TQuantity, TScale};
 use trace_core::Board;
 
 struct Row {
@@ -15,6 +16,9 @@ struct Row {
     sink: bool,
     sink_text: String,
 }
+
+/// A drawn map: size, scale, plane name, value span.
+type MapView = ([f32; 2], TScale, String, Option<(f64, f64)>);
 
 type Solved = Result<(thermal::Result, Option<Vec<(String, f64, f64)>>), String>;
 
@@ -30,8 +34,14 @@ pub struct ThermalWindow {
     running: Option<mpsc::Receiver<Solved>>,
     result: Option<thermal::Result>,
     bars: Option<Vec<(String, f64, f64)>>,
+    /// The plane shown (index into the field's planes), the quantity and
+    /// the depth of the log scale.
     layer: usize,
-    texture: Option<(usize, egui::TextureHandle)>,
+    q: TQuantity,
+    decades: f64,
+    texture: Option<((usize, usize, i32), egui::TextureHandle)>,
+    /// What the texture shows: size, scale, plane name, value span.
+    view: Option<MapView>,
     save_path: String,
     note: Option<String>,
     /// The temperature map and junction temperatures for the board.
@@ -53,7 +63,10 @@ impl Default for ThermalWindow {
             result: None,
             bars: None,
             layer: 0,
+            q: TQuantity::Temperature,
+            decades: 3.0,
             texture: None,
+            view: None,
             save_path: String::new(),
             note: None,
             overlay: None,
@@ -71,7 +84,7 @@ impl ThermalWindow {
                 Ok(r) => {
                     match r {
                         Ok((res, bars)) => {
-                            self.layer = self.layer.min(res.maps.len().saturating_sub(1));
+                            self.layer = 0;
                             self.result = Some(res);
                             self.bars = bars;
                             self.error = None;
@@ -314,93 +327,267 @@ impl ThermalWindow {
         for n in &r.notes {
             ui.weak(n);
         }
-        ui.horizontal(|ui| {
-            for (k, m) in r.maps.iter().enumerate() {
-                if ui.selectable_label(self.layer == k, &m.name).clicked() {
-                    self.layer = k;
+        // Density maps: a quantity on any slab (from above) or a side view.
+        let cuts = r.field.planes(true, None);
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Show");
+            egui::ComboBox::from_id_salt("therm-q")
+                .selected_text(self.q.label())
+                .show_ui(ui, |ui| {
+                    for q in TQuantity::ALL {
+                        ui.selectable_value(
+                            &mut self.q,
+                            q,
+                            format!("{} ({})", q.label(), q.unit()),
+                        );
+                    }
+                });
+            ui.label("on");
+            let name = |c: &TCut| match *c {
+                TCut::Slab(s) => {
+                    let sl = &r.field.slabs[s];
+                    if sl.copper.is_some() {
+                        sl.name.clone()
+                    } else {
+                        format!("  {} (dielectric)", sl.name)
+                    }
                 }
+                TCut::Xz { .. } => "Side view along x (through the hottest point)".into(),
+                TCut::Yz { .. } => "Side view along y (through the hottest point)".into(),
+            };
+            self.layer = self.layer.min(cuts.len() - 1);
+            egui::ComboBox::from_id_salt("therm-plane")
+                .selected_text(name(&cuts[self.layer]))
+                .height(420.0)
+                .show_ui(ui, |ui| {
+                    for (k, c) in cuts.iter().enumerate() {
+                        ui.selectable_value(&mut self.layer, k, name(c));
+                    }
+                });
+            if ui
+                .small_button("▲")
+                .on_hover_text("The plane above")
+                .clicked()
+            {
+                self.layer = self.layer.saturating_sub(1);
+            }
+            if ui
+                .small_button("▼")
+                .on_hover_text("The plane below")
+                .clicked()
+            {
+                self.layer = (self.layer + 1).min(cuts.len() - 1);
+            }
+            if self.q.log() {
+                ui.add(
+                    egui::Slider::new(&mut self.decades, 1.0..=6.0)
+                        .step_by(0.5)
+                        .suffix(" decades"),
+                )
+                .on_hover_text(
+                    "How far below the largest value the colour scale reaches (log scale)",
+                );
             }
         });
-        let k = self.layer.min(r.maps.len().saturating_sub(1));
-        if self.texture.as_ref().is_none_or(|t| t.0 != k) {
-            let (lo, hi) = r
-                .maps
-                .iter()
-                .flat_map(|m| m.t.iter())
-                .filter(|v| !v.is_nan())
-                .fold((f64::MAX, f64::MIN), |a, &v| {
-                    (a.0.min(v as f64), a.1.max(v as f64))
-                });
-            let m = &r.maps[k];
-            let mut px = Vec::with_capacity(r.cols * r.rows);
-            for j in (0..r.rows).rev() {
-                for i in 0..r.cols {
-                    let v = m.t[j * r.cols + i];
-                    px.push(if v.is_nan() {
-                        Color32::TRANSPARENT
+        let k = self.layer;
+        let key = (k, self.q as usize, (self.decades * 10.0) as i32);
+        if self.texture.as_ref().is_none_or(|t| t.0 != key) {
+            let f = &r.field;
+            let cut = cuts[k];
+            // One scale for every plane of this quantity, so moving
+            // through the board compares like with like.
+            let sc = f.scale(self.q, &cuts, self.decades);
+            let plane = f.plane(cut, self.q);
+            let tex = sc.map(|sc| {
+                let fr = plane.frame(760, 220);
+                let img = plane.draw(f, &sc, fr);
+                let px: Vec<Color32> = img
+                    .rgb
+                    .chunks(3)
+                    .map(|c| Color32::from_rgb(c[0], c[1], c[2]))
+                    .collect();
+                let tex = ctx.load_texture(
+                    "thermal-map",
+                    egui::ColorImage {
+                        size: [img.w, img.h],
+                        pixels: px,
+                    },
+                    egui::TextureOptions::LINEAR,
+                );
+                (tex, [img.w as f32, img.h as f32], sc)
+            });
+            // The same map on the board (a slab), with each part's
+            // junction; a side view keeps the board showing the top layer.
+            let slab = match cut {
+                TCut::Slab(s) => s,
+                _ => 0,
+            };
+            if let Some(sc) = sc {
+                let rgba = f.rgba(slab, self.q, &sc);
+                let px: Vec<Color32> = rgba
+                    .iter()
+                    .map(|c| Color32::from_rgba_unmultiplied(c[0], c[1], c[2], c[3]))
+                    .collect();
+                let btex = ctx.load_texture(
+                    "thermal-board",
+                    egui::ColorImage {
+                        size: [f.cols, f.rows],
+                        pixels: px,
+                    },
+                    egui::TextureOptions::NEAREST,
+                );
+                let mil = 1.0 / 0.0254;
+                let (x0, y0) = (f.origin[0] * mil, f.origin[1] * mil);
+                let (x1, y1) = (
+                    x0 + f.cols as f64 * f.cell * mil,
+                    y0 + f.rows as f64 * f.cell * mil,
+                );
+                let col = |v: f64| {
+                    let c = sc.colour(v).unwrap_or([128, 128, 128]);
+                    Color32::from_rgb(c[0], c[1], c[2])
+                };
+                let (lo, hi) = (sc.lo, sc.hi);
+                let mid = if self.q.log() {
+                    (lo * hi).sqrt()
+                } else {
+                    (lo + hi) / 2.0
+                };
+                let tcol = |t: f64| {
+                    let tsc = f
+                        .scale(TQuantity::Temperature, &cuts, 3.0)
+                        .and_then(|s| s.colour(t))
+                        .unwrap_or([200, 200, 200]);
+                    Color32::from_rgb(tsc[0], tsc[1], tsc[2])
+                };
+                let markers = r
+                    .parts
+                    .iter()
+                    .filter_map(|p| {
+                        let c = board.components.get(p.part)?;
+                        Some(crate::overlay::Marker {
+                            at: [c.x.mil(), c.y.mil()],
+                            color: tcol(p.junction_c),
+                            label: format!("{} Tj {:.1} °C", p.designator, p.junction_c),
+                        })
+                    })
+                    .collect();
+                let fmt = |v: f64| {
+                    if self.q.log() {
+                        format!("{} {}", trace_core::emfield::si(v), self.q.unit())
                     } else {
-                        let c = thermal::heat_color((v as f64 - lo) / (hi - lo).max(1e-9));
-                        Color32::from_rgb(c[0], c[1], c[2])
-                    });
+                        format!("{v:.1} {}", self.q.unit())
+                    }
+                };
+                self.overlay = Some(crate::overlay::Overlay {
+                    title: format!("Thermal: {} on {}", self.q.label(), f.slabs[slab].name),
+                    markers,
+                    nets: Vec::new(),
+                    image: Some((btex, [x0 as f32, y0 as f32, x1 as f32, y1 as f32])),
+                    legend: vec![(col(lo), fmt(lo)), (col(mid), fmt(mid)), (col(hi), fmt(hi))],
+                    on: true,
+                });
+            }
+            match tex {
+                Some((tex, size, sc)) => {
+                    self.texture = Some((key, tex));
+                    self.view = Some((size, sc, plane.name.clone(), plane.span(self.q.log())));
+                }
+                None => {
+                    self.texture = None;
+                    self.view = None;
                 }
             }
-            let img = egui::ColorImage {
-                size: [r.cols, r.rows],
-                pixels: px,
-            };
-            let tex = ctx.load_texture("thermal-map", img, egui::TextureOptions::NEAREST);
-            // The same map on the board, with each part's junction.
-            let mil = 1.0 / 0.0254;
-            let (x0, y0) = (r.origin[0] * mil, r.origin[1] * mil);
-            let (x1, y1) = (
-                x0 + r.cols as f64 * r.cell * mil,
-                y0 + r.rows as f64 * r.cell * mil,
-            );
-            let hot = |t: f64| {
-                let c = thermal::heat_color((t - lo) / (hi - lo).max(1e-9));
-                Color32::from_rgb(c[0], c[1], c[2])
-            };
-            let markers = r
-                .parts
-                .iter()
-                .filter_map(|p| {
-                    let c = board.components.get(p.part)?;
-                    Some(crate::overlay::Marker {
-                        at: [c.x.mil(), c.y.mil()],
-                        color: hot(p.junction_c),
-                        label: format!("{} Tj {:.1} °C", p.designator, p.junction_c),
-                    })
-                })
-                .collect();
-            self.overlay = Some(crate::overlay::Overlay {
-                title: format!("Thermal: {}", m.name),
-                markers,
-                nets: Vec::new(),
-                image: Some((tex.clone(), [x0 as f32, y0 as f32, x1 as f32, y1 as f32])),
-                legend: vec![
-                    (hot(lo), format!("{lo:.1} °C")),
-                    (hot((lo + hi) / 2.0), format!("{:.1} °C", (lo + hi) / 2.0)),
-                    (hot(hi), format!("{hi:.1} °C")),
-                ],
-                on: true,
-            });
-            self.texture = Some((k, tex));
         }
-        if let Some((_, tex)) = &self.texture {
-            let w = ui.available_width().min(760.0);
-            let h = w * r.rows as f32 / r.cols.max(1) as f32;
-            let (w, h) = if h > 520.0 {
-                (520.0 * r.cols as f32 / r.rows.max(1) as f32, 520.0)
-            } else {
-                (w, h)
-            };
-            ui.image((tex.id(), egui::vec2(w, h)));
+        match (&self.texture, &self.view) {
+            (Some((_, tex)), Some((size, sc, name, span))) => {
+                let w = ui.available_width().min(760.0);
+                let mut h = w * size[1] / size[0].max(1.0);
+                let mut w = w;
+                if h > 520.0 {
+                    w *= 520.0 / h;
+                    h = 520.0;
+                }
+                ui.horizontal(|ui| {
+                    ui.strong(name);
+                    if let Some((lo, hi)) = span {
+                        ui.weak(format!(
+                            "{} to {} {}",
+                            trace_core::emfield::si(*lo),
+                            trace_core::emfield::si(*hi),
+                            self.q.unit()
+                        ));
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.image((tex.id(), egui::vec2(w, h)));
+                    // Scale bar.
+                    let (rect, _) = ui
+                        .allocate_exact_size(egui::vec2(90.0, h.max(140.0)), egui::Sense::hover());
+                    let p = ui.painter();
+                    let bar = egui::Rect::from_min_size(
+                        rect.min + egui::vec2(4.0, 8.0),
+                        egui::vec2(14.0, rect.height() - 16.0),
+                    );
+                    let n = 64;
+                    for i in 0..n {
+                        let t = 1.0 - i as f64 / n as f64;
+                        let v = if sc.q.log() {
+                            sc.lo * (sc.hi / sc.lo).powf(t)
+                        } else {
+                            sc.lo + t * (sc.hi - sc.lo)
+                        };
+                        let c = sc.colour(v).unwrap_or([0, 0, 0]);
+                        let y0 = bar.top() + bar.height() * i as f32 / n as f32;
+                        p.rect_filled(
+                            egui::Rect::from_min_max(
+                                egui::pos2(bar.left(), y0),
+                                egui::pos2(bar.right(), y0 + bar.height() / n as f32 + 0.5),
+                            ),
+                            0.0,
+                            Color32::from_rgb(c[0], c[1], c[2]),
+                        );
+                    }
+                    let lab = |v: f64| {
+                        if sc.q.log() {
+                            trace_core::emfield::si(v)
+                        } else {
+                            format!("{v:.1}")
+                        }
+                    };
+                    let tc = ui.visuals().text_color();
+                    let fid = egui::FontId::proportional(11.0);
+                    p.text(
+                        egui::pos2(bar.right() + 4.0, bar.top()),
+                        egui::Align2::LEFT_CENTER,
+                        lab(sc.hi),
+                        fid.clone(),
+                        tc,
+                    );
+                    p.text(
+                        egui::pos2(bar.right() + 4.0, bar.bottom()),
+                        egui::Align2::LEFT_CENTER,
+                        lab(sc.lo),
+                        fid.clone(),
+                        tc,
+                    );
+                    p.text(
+                        egui::pos2(bar.right() + 4.0, bar.center().y),
+                        egui::Align2::LEFT_CENTER,
+                        sc.q.unit(),
+                        fid,
+                        tc,
+                    );
+                });
+            }
+            _ => {
+                ui.weak(format!("No {} on this plane.", self.q.label()));
+            }
         }
         ui.horizontal(|ui| {
             ui.label("Save to");
             ui.add(
                 egui::TextEdit::singleline(&mut self.save_path)
-                    .hint_text("folder\\name (map.svg, temps.csv, report.txt)")
+                    .hint_text("folder\\name (maps.svg, maps.gif, temps.csv, report.txt)")
                     .desired_width(320.0),
             );
             if ui.button("Save").clicked() && !self.save_path.trim().is_empty() {
@@ -415,11 +602,24 @@ impl ThermalWindow {
                     .trim_end_matches(".txt")
                     .to_string();
                 let w = |ext: &str, text: String| std::fs::write(format!("{base}{ext}"), text);
-                let res = w(".svg", r.svg("Temperatures"))
-                    .and_then(|_| w(".csv", r.csv()))
-                    .and_then(|_| w(".txt", r.report()));
+                let cuts = r.field.planes(false, None);
+                let res = w(
+                    ".svg",
+                    r.field.svg("Thermal density maps", &TQuantity::ALL, &cuts, self.decades),
+                )
+                .and_then(|_| w(".csv", r.csv()))
+                .and_then(|_| w(".txt", r.report()))
+                .and_then(|_| {
+                    std::fs::write(
+                        format!("{base}.gif"),
+                        r.field.gif(self.q, Sweep::Depth, self.decades, 40),
+                    )
+                });
                 self.note = Some(match res {
-                    Ok(()) => format!("Wrote {base}.svg, .csv and .txt"),
+                    Ok(()) => format!(
+                        "Wrote {base}.svg (every quantity, every layer and side views), .gif ({} down through the layers), .csv and .txt",
+                        self.q.label()
+                    ),
                     Err(e) => format!("Could not save: {e}"),
                 });
             }

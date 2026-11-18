@@ -265,6 +265,9 @@ pub struct Result {
     pub iterations: usize,
     pub nodes: usize,
     pub notes: Vec<String>,
+    /// Temperature, conductivity and heat in every slab, for the density
+    /// maps (`thermfield`).
+    pub field: crate::thermfield::ThermField,
 }
 
 /// Air at one atmosphere: (k W/m·K, ν m²/s, α m²/s, Pr) at T kelvin
@@ -472,6 +475,7 @@ fn k_material(name: Option<&str>) -> (f64, f64) {
 #[derive(Clone, Debug)]
 struct Slab {
     t: f64,
+    name: String,
     /// Copper layer index, or None for dielectric / mask.
     copper: Option<usize>,
     k_in: f64,
@@ -550,6 +554,7 @@ pub fn solve(board: &Board, setup: &Setup) -> std::result::Result<Result, String
             LayerKind::Copper => {
                 slabs.push(Slab {
                     t: if t > 0.0 { t } else { 0.035 * MM },
+                    name: l.name.clone(),
                     copper: Some(ci),
                     k_in: 0.0,
                     k_z: 0.0,
@@ -567,9 +572,14 @@ pub fn solve(board: &Board, setup: &Setup) -> std::result::Result<Result, String
                 };
                 // Thick cores in slabs of at most 0.4 mm.
                 let n = ((t / (0.4 * MM)).ceil() as usize).max(1);
-                for _ in 0..n {
+                for k in 0..n {
                     slabs.push(Slab {
                         t: t / n as f64,
+                        name: if n > 1 {
+                            format!("{} ({}/{n})", l.name, k + 1)
+                        } else {
+                            l.name.clone()
+                        },
                         copper: None,
                         k_in: ki,
                         k_z: kz,
@@ -582,38 +592,29 @@ pub fn solve(board: &Board, setup: &Setup) -> std::result::Result<Result, String
     let nl = ci;
     if nl == 0 {
         // No stack-up: a 1.6 mm two-layer FR-4 board.
-        slabs = vec![
-            Slab {
-                t: 0.035 * MM,
-                copper: Some(0),
-                k_in: 0.0,
-                k_z: 0.0,
-            },
-            Slab {
+        slabs = vec![Slab {
+            t: 0.035 * MM,
+            name: "Top".into(),
+            copper: Some(0),
+            k_in: 0.0,
+            k_z: 0.0,
+        }];
+        for k in 0..3 {
+            slabs.push(Slab {
                 t: 0.53 * MM,
+                name: format!("FR-4 ({}/3)", k + 1),
                 copper: None,
                 k_in: 0.81,
                 k_z: 0.29,
-            },
-            Slab {
-                t: 0.53 * MM,
-                copper: None,
-                k_in: 0.81,
-                k_z: 0.29,
-            },
-            Slab {
-                t: 0.53 * MM,
-                copper: None,
-                k_in: 0.81,
-                k_z: 0.29,
-            },
-            Slab {
-                t: 0.035 * MM,
-                copper: Some(1),
-                k_in: 0.0,
-                k_z: 0.0,
-            },
-        ];
+            });
+        }
+        slabs.push(Slab {
+            t: 0.035 * MM,
+            name: "Bottom".into(),
+            copper: Some(1),
+            k_in: 0.0,
+            k_z: 0.0,
+        });
         names = vec!["Top".into(), "Bottom".into()];
         notes.push("no stack-up: a 1.6 mm two-layer FR-4 board".into());
     }
@@ -1359,6 +1360,93 @@ pub fn solve(board: &Board, setup: &Setup) -> std::result::Result<Result, String
                 .into(),
         );
     }
+    // Every slab's temperatures and conductivities, the heat the parts put
+    // into the board and the heat its faces give the air: the density maps.
+    let field = {
+        let mut z = 0.0;
+        let slab_info: Vec<crate::thermfield::SlabInfo> = slabs
+            .iter()
+            .map(|sl| {
+                let i = crate::thermfield::SlabInfo {
+                    name: sl.name.clone(),
+                    z_mm: z,
+                    t_mm: sl.t / MM,
+                    copper: sl.copper,
+                };
+                z += sl.t / MM;
+                i
+            })
+            .collect();
+        let mut temp = vec![vec![f32::NAN; per]; ns];
+        let mut k = vec![vec![[0f32; 3]; per]; ns];
+        for s in 0..ns {
+            for &c in &cells {
+                temp[s][c] = (ta + t[node(s, c)]) as f32;
+                let v = kc(s, c);
+                k[s][c] = [v[0] as f32, v[1] as f32, v[2] as f32];
+            }
+        }
+        // Heat into the board under each part (junction to board).
+        let mut source = vec![vec![0f32; per]; ns];
+        for (q, s) in setup.sources.iter().enumerate() {
+            let sr = &srcs[q];
+            let g_jb = 1.0 / s.theta_jb.max(1e-3);
+            for &(n, f) in &sr.under {
+                let (sl, c) = (n / nb, cells[n % nb]);
+                source[sl][c] += (g_jb * f * (t[sr.j] - t[n])).max(0.0) as f32;
+            }
+        }
+        // Heat to air from each face cell (convection and radiation).
+        let mut air_top = vec![f32::NAN; per];
+        let mut air_bot = vec![f32::NAN; per];
+        let e = if setup.fixed_h.is_some() {
+            0.0
+        } else {
+            setup.emissivity
+        };
+        for &c in &cells {
+            for (s, hc, blocked, out) in [
+                (0usize, h_top.0, no_top[c], &mut air_top),
+                (ns - 1, h_bot.0, no_bot[c], &mut air_bot),
+            ] {
+                out[c] = 0.0;
+                if blocked {
+                    continue;
+                }
+                let n = node(s, c);
+                let h = hc + h_rad(e, ta + t[n], ta);
+                let r = slabs[s].t / (2.0 * kc(s, c)[2]) + 1.0 / h;
+                out[c] = (t[n] / r) as f32;
+            }
+        }
+        let bodies: Vec<(String, Vec<[f64; 2]>)> = setup
+            .sources
+            .iter()
+            .map(|s| {
+                let comp = &board.components[s.part];
+                let corners = bodies
+                    .iter()
+                    .find(|b| b.component == s.part)
+                    .map_or(Vec::new(), |b| b.corners.to_vec());
+                (comp.designator.clone(), corners)
+            })
+            .collect();
+        crate::thermfield::ThermField {
+            slabs: slab_info,
+            origin,
+            cell,
+            cols,
+            rows,
+            ambient_c: ta,
+            temp,
+            k,
+            source,
+            air_top,
+            air_bot,
+            outline: outline.clone(),
+            parts: bodies,
+        }
+    };
     Ok(Result {
         parts,
         maps,
@@ -1377,6 +1465,7 @@ pub fn solve(board: &Board, setup: &Setup) -> std::result::Result<Result, String
         iterations,
         nodes: n_nodes,
         notes,
+        field,
     })
 }
 

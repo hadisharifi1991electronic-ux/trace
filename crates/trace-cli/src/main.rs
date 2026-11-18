@@ -104,14 +104,19 @@ USAGE:
                                                 file to fill in. Exits 1 on errors.
     trace thermal <board> --power U1=2.5W[@jc0.5/jb8]... [--heatsink U1=40x40x20[,fins=10,fin=1,base=3,
                   k=200,tim=0.1@3,contact=0.05]] [--ambient 25] [--air M/S] [--vertical] [--cell MM]
-                  [--k-diel 0.81/0.29] [--check] [map.svg] [temps.csv] [report.txt]
+                  [--k-diel 0.81/0.29] [--check] [--maps t,flux,gradient,power,air] [--planes all]
+                  [--at X,Y] [--decades 3] [--sweep depth|x|y] [map.svg] [maps.gif] [temps.csv] [report.txt]
                                                 3D steady-state temperatures: board conduction from the real copper
                                                 of every layer and the via barrels, parts as JEDEC two-resistor
                                                 packages (θJC, θJB; guessed from size when not given), plate-fin
                                                 heatsinks with TIM and contact resistance, natural or forced
                                                 convection from correlations and radiation; Tj per part, maps per
                                                 layer, heat balance; --check solves again on a 1.5x finer grid and
-                                                gives error bars
+                                                gives error bars. map.svg: density maps of temperature, heat flux
+                                                |k grad T|, gradient, power density put in and heat to air on every
+                                                copper layer, mid-dielectric and side views through the hottest
+                                                point (--at X,Y mm; --planes all for every slab; --maps picks);
+                                                maps.gif sweeps the cut down the layers (--sweep x|y: side views)
     trace bus <board> NETS... --from U1 [--to U5] --rate MT/S [--strobe DQS0] [--swing 0.8] [--rise PS]
               [--setup PS] [--hold PS] [--mask 136mV,0.2UI] [--offset 0.5 | --edge-aligned] [--no-xtalk]
               [--vias-3d] [--prbs 7] [timing.svg] [bits.csv] [report.txt]
@@ -2625,6 +2630,7 @@ fn path_cmd(file: &str, rest: &[&str]) -> Res {
 
 fn thermal_cmd(file: &str, rest: &[&str]) -> Res {
     use trace_core::thermal::{self, Air, Heatsink, Setup};
+    use trace_core::thermfield;
     let b = board(file)?;
     let mut setup = Setup::new();
     let mut sinks: Vec<(String, Heatsink)> = Vec::new();
@@ -2632,6 +2638,11 @@ fn thermal_cmd(file: &str, rest: &[&str]) -> Res {
     let mut check = false;
     let mut speed = 0.0;
     let mut vertical = false;
+    let mut maps_q: Vec<thermfield::TQuantity> = thermfield::TQuantity::ALL.to_vec();
+    let mut all_planes = false;
+    let mut at: Option<[f64; 2]> = None;
+    let mut decades = 3.0;
+    let mut sweep = thermfield::Sweep::Depth;
     let mut it = rest.iter();
     while let Some(&a) = it.next() {
         let mut val = || it.next().copied().ok_or(format!("{a} needs a value"));
@@ -2677,6 +2688,35 @@ fn thermal_cmd(file: &str, rest: &[&str]) -> Res {
                 setup.emissivity = val()?.parse().map_err(|_| "--emissivity: not a number")?
             }
             "--check" => check = true,
+            "--maps" => {
+                maps_q = val()?
+                    .split(',')
+                    .map(|q| {
+                        thermfield::TQuantity::parse(q)
+                            .ok_or(format!("--maps: {q}? (t, flux, gradient, power, air)"))
+                    })
+                    .collect::<Result<Vec<_>, _>>()?
+            }
+            "--planes" => all_planes = val()?.eq_ignore_ascii_case("all"),
+            "--at" => {
+                let v = val()?;
+                let (x, y) = v.split_once(',').ok_or("--at: X,Y in mm")?;
+                at = Some([
+                    x.trim()
+                        .trim_end_matches("mm")
+                        .parse()
+                        .map_err(|_| "--at: not mm")?,
+                    y.trim()
+                        .trim_end_matches("mm")
+                        .parse()
+                        .map_err(|_| "--at: not mm")?,
+                ]);
+            }
+            "--decades" => decades = val()?.parse().map_err(|_| "--decades: not a number")?,
+            "--sweep" => {
+                let v = val()?;
+                sweep = thermfield::Sweep::parse(v).ok_or(format!("--sweep: {v}? (depth, x, y)"))?
+            }
             _ if !a.starts_with("--") => outs.push(a),
             _ => return Err(format!("unknown option {a}").into()),
         }
@@ -2737,10 +2777,24 @@ fn thermal_cmd(file: &str, rest: &[&str]) -> Res {
             .file_stem()
             .map_or(String::new(), |s| s.to_string_lossy().into_owned())
     );
+    let cuts = r.field.planes(all_planes, at);
     for o in outs {
         let low = o.to_ascii_lowercase();
+        if low.ends_with(".gif") {
+            // One GIF per quantity asked; the first keeps the given name.
+            for (k, &q) in maps_q.iter().enumerate() {
+                let name = if k == 0 {
+                    o.to_string()
+                } else {
+                    format!("{}-{}.gif", &o[..o.len() - 4], q.short())
+                };
+                std::fs::write(&name, r.field.gif(q, sweep, decades, 40))?;
+                println!("Wrote {name} ({} swept {:?})", q.label(), sweep);
+            }
+            continue;
+        }
         let text = if low.ends_with(".svg") {
-            r.svg(&title)
+            r.field.svg(&title, &maps_q, &cuts, decades)
         } else if low.ends_with(".csv") {
             r.csv()
         } else {

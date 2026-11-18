@@ -3,6 +3,31 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.81.0 (2026-11-17)
+
+- Thermal density maps, as the field maps do for the EM solver. The 3D
+  thermal solve now keeps every slab of the stack-up (not only the copper
+  layers) and draws, on any slab seen from above or in side views along x
+  and y through the hottest point (thickness drawn taller):
+  - temperature (°C), smoothed between cell centres;
+  - heat flux density |q| = |k∇T| (W/cm²), with the conductivity the
+    solver used across each face, so it is the heat really crossing (it
+    shows how the planes spread heat and where the vias carry it down);
+  - temperature gradient |∇T| (K/mm);
+  - power density (W/cm³): the heat each part puts into the board under
+    its pads;
+  - heat to air (W/cm²): convection plus radiation from each face cell.
+  The densities are on a log scale (`--decades`, default 3), temperature
+  linear, each on one scale for every plane so layers compare.
+- `trace thermal ... maps.svg` writes every quantity on every copper
+  layer, the dielectric mid-way between them and the side views
+  (`--maps t,flux` picks quantities, `--planes all` every slab, `--at X,Y`
+  moves the side views); `maps.gif` sweeps the cut down through the
+  layers (`--sweep x|y`: a side view moving across the board), one GIF
+  per quantity.
+- Thermal window: pick the quantity and the plane (▲ ▼ step through the
+  board), with a scale bar; the board overlay follows the chosen slab and
+  quantity. Save writes the full SVG page and a GIF too.
 ## 0.80.3 (2026-11-17)
 
 - EMI simulation: control lines are no longer taken as 50 MHz clocks.

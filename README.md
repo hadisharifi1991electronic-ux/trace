@@ -197,6 +197,15 @@ checker and simulator all read.
   red (fails). The "Results on the board" box in the corner hides or
   removes each one. Every long job (solves, optimisers, tuners, the
   autorouter) has a Cancel button beside its spinner
+- see thermal density maps: the thermal window shows temperature, heat
+  flux density |k∇T|, temperature gradient, the power density the parts
+  put into the board and the heat each face gives the air, on any slab of
+  the stack-up (copper layers and the dielectric between them) or in side
+  views through the hottest point, on one colour scale per quantity, and
+  lays the chosen slab's map over the board. Save writes every quantity on
+  every layer as one SVG page and a GIF that sweeps down through the
+  layers (`trace thermal ... maps.svg maps.gif`, `--sweep x|y` for side
+  views moving across the board)
 - export ODB++ (File → Export ODB++): one `.tgz` job with every copper,
   mask, paste, silkscreen, drill (plated, non-plated, blind and buried
   spans) and mechanical layer, the board profile, both component layers,
@@ -320,7 +329,7 @@ trace via board.PcbDoc 1 7 --fields 6 map.svg   field maps: |E|, |H|, energy and
 trace via board.PcbDoc 1 7 --check   solve on two grids and say whether the result converged
 trace via board.PcbDoc 1 7 --accurate   refine the grid until converged, extrapolate, S11/S21 with error bars, passivity and causality
 trace sparam check vendor.s4p via.s2p   passivity, reciprocity and causality of any Touchstone file
-trace thermal board.brd --power U1=2.5W@jc0.5/jb8,U2=1W --heatsink U1=40x40x15,fins=10 --air 1 --check map.svg   3D steady-state temperatures: Tj per part, heatsinks, convection and radiation, grid error bars
+trace thermal board.brd --power U1=2.5W@jc0.5/jb8,U2=1W --heatsink U1=40x40x15,fins=10 --air 1 --check map.svg maps.gif   3D steady-state temperatures: Tj per part, heatsinks, convection and radiation, grid error bars; density maps of T, heat flux, gradient, power and heat to air per layer and in side views
 trace bus board.brd "DDR_DQ*" DDR_DM0 --from U1 --to U5 --strobe DQS0 --rate 3200 --mask 136mV,0.2UI timing.svg   DDR/parallel bus: per-bit eyes with crosstalk, valid windows against the strobe, setup/hold and mask margins (as routed, trained, deskewed)
 trace emi board.brd --net CLK=25MHz@2ns,3.3V --limit cispr-b spectrum.svg findings.csv   EMI check: plane gaps and splits, layer changes without return vias, edge traces and stitching; then the EMI simulation of every net, cable, plane and decoupling loop against FCC/CISPR limits
 trace emi board.brd --signal "JESD*=12.288Gbps@30ps,0.8V" --cable J1=2m --map near.svg spectrum.svg   EMI simulation with your sources and cables, near-field map at the worst frequency

@@ -37,6 +37,10 @@ use faer::sparse::{SparseColMat, Triplet};
 
 const C0: f64 = 299_792_458.0;
 const ETA0: f64 = 376.730_313_668;
+/// Largest ratio between neighbouring starting-grid gaps (thin copper and
+/// dielectrics would otherwise grade fine lines across the whole box; the
+/// adaptive passes refine where it matters).
+const GRADE: f64 = 8.0;
 
 /// What a solid is made of.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -83,7 +87,8 @@ pub struct Sheet {
     pub axis: usize,
     pub at: f64,
     pub poly: Vec<[f64; 2]>,
-    pub holes: Vec<([f64; 2], f64)>,
+    /// Holes: capsules (both ends, radius); equal ends make a circle.
+    pub holes: Vec<([f64; 2], [f64; 2], f64)>,
     /// A round sheet (centre, radius) in place of the polygon.
     pub disc: Option<([f64; 2], f64)>,
     pub net: u32,
@@ -100,6 +105,9 @@ pub enum Wall {
 pub enum Mode {
     /// Quasi-TEM line mode, driven on conductor `signal` against all others.
     Tem { signal: u32 },
+    /// Odd (differential) quasi-TEM mode of a pair: `plus` at +½ V,
+    /// `minus` at −½ V; Z0 is then the differential impedance.
+    Diff { plus: u32, minus: u32 },
     /// Rectangular waveguide TE10 over the whole port rectangle.
     Te10,
 }
@@ -295,7 +303,7 @@ fn axis_lines(mut br: Vec<f64>, h: f64, tol: f64) -> Vec<f64> {
             } else {
                 g
             };
-            if g > 3.0 * lft.min(rgt) * 1.0001 {
+            if g > GRADE * lft.min(rgt) * 1.0001 {
                 next.push(out[i] + g / 2.0);
                 changed = true;
             }
@@ -363,7 +371,13 @@ impl Model {
                 br[u].push(clamp(u, p[0]));
                 br[v].push(clamp(v, p[1]));
             }
-            for (c, r) in s.holes.iter().chain(s.disc.iter()) {
+            let caps: Vec<([f64; 2], f64)> = s
+                .holes
+                .iter()
+                .flat_map(|(a, b, r)| [(*a, *r), (*b, *r)])
+                .chain(s.disc.iter().copied())
+                .collect();
+            for (c, r) in &caps {
                 br[u].push(clamp(u, c[0]));
                 br[v].push(clamp(v, c[1]));
                 br[u].push(clamp(u, c[0] - r));
@@ -483,7 +497,7 @@ fn on_sheet(s: &Sheet, p: [f64; 3], tol: f64) -> bool {
     point_in_poly(&s.poly, q, tol)
         && s.holes
             .iter()
-            .all(|(c, r)| (q[0] - c[0]).hypot(q[1] - c[1]) >= r - tol)
+            .all(|(a, b, r)| crate::fdtd::seg_dist(q, *a, *b) >= r - tol)
 }
 
 /// Kuhn's split of a graded grid into tetrahedra.
@@ -1053,7 +1067,7 @@ fn port_2d(
     pt: &Port,
     tris: &[BFace],
     tri_eps: &[f64],
-    signal: u32,
+    signal: (u32, Option<u32>),
     tol: f64,
     sub_n: usize,
     p_order: usize,
@@ -1108,17 +1122,19 @@ fn port_2d(
         .collect();
     let nn = fnodes.len();
     let mut fixed: Vec<Option<f64>> = vec![None; nn];
+    let vp = if signal.1.is_some() { 0.5 } else { 1.0 };
     for (i, p) in fnodes.iter().enumerate() {
         let p = *p;
         match model.conductor_at(p, tol, 2 * pt.axis + pt.high as usize) {
-            Some(n) if n == signal => fixed[i] = Some(1.0),
+            Some(n) if n == signal.0 => fixed[i] = Some(vp),
+            Some(n) if Some(n) == signal.1 => fixed[i] = Some(-vp),
             Some(_) => fixed[i] = Some(0.0),
             // The rim follows the wall beside it: grounded on a PEC wall
             // (conductor_at above), free beside a radiation wall.
             None => {}
         }
     }
-    if !fixed.contains(&Some(1.0)) {
+    if !fixed.contains(&Some(vp)) || (signal.1.is_some() && !fixed.contains(&Some(-vp))) {
         return Err(format!(
             "port {}: the signal conductor does not cross the port",
             pt.name
@@ -1288,7 +1304,12 @@ fn port_mode(
                 None,
             )
         }
-        Mode::Tem { signal } => {
+        Mode::Tem { .. } | Mode::Diff { .. } => {
+            let signal = match pt.mode {
+                Mode::Diff { plus, minus } => (plus, Some(minus)),
+                Mode::Tem { signal } => (signal, None),
+                Mode::Te10 => unreachable!(),
+            };
             // Z0 and Er,eff from a fine second-order solve; the mode's shape
             // on the 3D mesh's own triangles at the 3D order, so the 3D
             // field can match it exactly (a finer shape would leak power).
@@ -1885,7 +1906,7 @@ pub fn solve(
         last_unknowns = asm.n;
         let z0: Vec<f64> = asm.ports.iter().map(|p| p.info.z0).collect();
         // Converge on the S-parameters the user gets (renormalised), and
-        // on the ports' Z0 to within 1% (HFSS's port accuracy).
+        // on the ports' Z0 to within 0.5% (HFSS's port accuracy).
         let s = match setup.z_ref {
             Some(z) => renormalise(&s, &z0, z),
             None => s,
@@ -1893,7 +1914,7 @@ pub fn solve(
         let z_moved = last_z0
             .iter()
             .zip(&z0)
-            .any(|(a, b)| (a - b).abs() > 0.01 * b);
+            .any(|(a, b)| (a - b).abs() > 0.005 * b);
         last_z0 = z0;
         let delta = passes.last().map(|p| max_delta(&p.s, &s));
         passes.push(Pass {
@@ -2108,9 +2129,6 @@ pub fn line(kind: LineKind, w: f64, h: f64, er: f64, tand: f64, len: f64) -> Mod
 /// either end, with the reference planes moved back to the via. Copper is
 /// perfect conductor; side walls radiate (the board goes on).
 pub fn via(stackup: &crate::Stackup, setup: &crate::fdtd::ViaSetup) -> Result<Model, String> {
-    if setup.pair.is_some() {
-        return Err("the 3D FEM via model is single-ended for now".into());
-    }
     let stackup = crate::fdtd::materials(stackup, setup.er, setup.df);
     let m = crate::fdtd::model(&stackup, setup)?;
     let z = |l: usize| -m.st.sheet[l] * MIL;
@@ -2149,7 +2167,8 @@ pub fn via(stackup: &crate::Stackup, setup: &crate::fdtd::ViaSetup) -> Result<Mo
         });
     }
     let sig: Vec<[f64; 2]> = m.sig.iter().map(|c| [c[0] * MIL, c[1] * MIL]).collect();
-    for c in sig.iter().filter(|_| !m.thru) {
+    // Each signal via its own net (a pair: 1 and 2).
+    for (k, c) in sig.iter().enumerate().filter(|_| !m.thru) {
         solids.push(Solid {
             shape: Shape::Cyl {
                 axis: 2,
@@ -2158,7 +2177,7 @@ pub fn via(stackup: &crate::Stackup, setup: &crate::fdtd::ViaSetup) -> Result<Mo
                 lo: z(m.via_bot),
                 hi: z(m.via_top),
             },
-            fill: Fill::Pec { net: 1 },
+            fill: Fill::Pec { net: 1 + k as u32 },
         });
     }
     for c in &m.ret {
@@ -2181,7 +2200,11 @@ pub fn via(stackup: &crate::Stackup, setup: &crate::fdtd::ViaSetup) -> Result<Mo
                 axis: 2,
                 at: z(l),
                 poly: rect(lo[0], hi[0], lo[1], hi[1]),
-                holes: sig.iter().map(|c| (*c, m.ra * MIL)).collect(),
+                holes: if setup.antipad_oval && sig.len() == 2 {
+                    vec![(sig[0], sig[1], m.ra * MIL)]
+                } else {
+                    sig.iter().map(|c| (*c, *c, m.ra * MIL)).collect()
+                },
                 disc: None,
                 net: 0,
             });
@@ -2195,37 +2218,66 @@ pub fn via(stackup: &crate::Stackup, setup: &crate::fdtd::ViaSetup) -> Result<Mo
     pads.sort();
     pads.dedup();
     for &l in &pads {
-        for c in &sig {
+        for (k, c) in sig.iter().enumerate() {
             sheets.push(Sheet {
                 axis: 2,
                 at: z(l),
                 poly: Vec::new(),
                 holes: Vec::new(),
                 disc: Some((*c, m.rp * MIL)),
-                net: 1,
+                net: 1 + k as u32,
             });
         }
     }
-    let c = sig[0];
-    for (t, &l) in [m.from, m.to].iter().enumerate() {
-        let hw = m.w[t] / 2.0 * MIL;
-        let (x0, x1) = if t == 0 { (lo[0], c[0]) } else { (c[0], hi[0]) };
-        sheets.push(Sheet {
-            axis: 2,
-            at: z(l),
-            poly: rect(x0, x1, c[1] - hw, c[1] + hw),
-            holes: Vec::new(),
-            disc: None,
-            net: 1,
-        });
+    for (k, c) in sig.iter().enumerate() {
+        let net = 1 + k as u32;
+        for (t, &l) in [m.from, m.to].iter().enumerate() {
+            let hw = m.w[t] / 2.0 * MIL;
+            let (x0, x1) = if t == 0 { (lo[0], c[0]) } else { (c[0], hi[0]) };
+            sheets.push(Sheet {
+                axis: 2,
+                at: z(l),
+                poly: rect(x0, x1, c[1] - hw, c[1] + hw),
+                holes: Vec::new(),
+                disc: None,
+                net,
+            });
+            // The copper's own thickness, below the sheet (where the
+            // stack-up puts it: in the slab under an inner or top layer,
+            // outside the board under the bottom one).
+            let t_cu = stackup
+                .copper_layers()
+                .nth(l)
+                .map(|c| c.thickness.mil())
+                .unwrap_or(0.0)
+                * MIL;
+            if t_cu > 0.0 {
+                solids.push(Solid {
+                    shape: Shape::Box {
+                        lo: [x0, c[1] - hw, z(l) - t_cu],
+                        hi: [x1, c[1] + hw, z(l)],
+                    },
+                    fill: Fill::Pec { net },
+                });
+            }
+        }
     }
+    let c = [
+        sig.iter().map(|c| c[0]).sum::<f64>() / sig.len() as f64,
+        0.0,
+    ];
+    let mode = if sig.len() == 2 {
+        Mode::Diff { plus: 1, minus: 2 }
+    } else {
+        Mode::Tem { signal: 1 }
+    };
     let port = |name: &str, high: bool| Port {
         name: name.into(),
         axis: 0,
         high,
         lo: [lo[1], lo[2]],
         hi: [hi[1], hi[2]],
-        mode: Mode::Tem { signal: 1 },
+        mode,
         deembed: if high { xa - c[0] } else { xa + c[0] },
     };
     // Lids over the air are perfect conductor (as in `line`): a radiation

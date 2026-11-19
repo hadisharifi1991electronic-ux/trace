@@ -4094,6 +4094,7 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     // read a finished run.
     let mut oems_check = false;
     let mut fem_check = false;
+    let mut fem_dof: Option<usize> = None;
     let mut oems_export: Option<String> = None;
     let mut oems_dir: Option<String> = None;
     let mut oems_read: Option<String> = None;
@@ -4122,6 +4123,13 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
             "--check" if it.clone().next() == Some(&"fem") => {
                 it.next();
                 fem_check = true;
+            }
+            "--fem-dof" => {
+                let x = it.next().ok_or("--fem-dof needs a count")?;
+                fem_dof = Some(
+                    x.parse::<usize>()
+                        .map_err(|_| format!("not a count: {x}"))?,
+                );
             }
             "--check" if it.clone().next() == Some(&"openems") => {
                 it.next();
@@ -4684,7 +4692,7 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
         println!("Saved {o}");
     }
     if fem_check {
-        fem_compare(&b.stackup, &v, &r)?;
+        fem_compare(&b.stackup, &v, &r, fem_dof)?;
     }
     if oems_check {
         openems_compare(
@@ -4708,6 +4716,7 @@ fn fem_compare(
     stackup: &trace_core::Stackup,
     v: &trace_core::fdtd::ViaSetup,
     r: &trace_core::fdtd::ViaResult,
+    max_dof: Option<usize>,
 ) -> Res {
     use trace_core::fem3d;
     let model = fem3d::via(stackup, v)?;
@@ -4719,6 +4728,7 @@ fn fem_compare(
         f_adapt: fmax,
         sweep: (1..=10).map(|k| fmax * k as f64 / 10.0).collect(),
         z_ref: Some(r.z_ref),
+        max_unknowns: max_dof.unwrap_or(400_000),
         ..fem3d::Setup::default()
     };
     println!("3D FEM check (HFSS-style: adaptive tetrahedra, second-order elements, wave ports):");

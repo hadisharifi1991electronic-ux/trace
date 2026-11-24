@@ -93,6 +93,29 @@ impl Default for ViaWindow {
 impl ViaWindow {
     /// Opens the window on a via as built (from the impedance check), with
     /// its target.
+    /// The last solve's S11 (Sdd11 for a pair) as a Smith chart curve,
+    /// with its reference impedance.
+    pub fn smith_curve(&self) -> Option<(trace_core::smith::Curve, f64)> {
+        let (_, Ok(r)) = self.result.as_ref()? else {
+            return None;
+        };
+        if r.f.is_empty() {
+            return None;
+        }
+        let name = if self.is_pair {
+            "Via pair Sdd11"
+        } else {
+            "Via S11"
+        };
+        Some((
+            trace_core::smith::Curve {
+                name: name.into(),
+                points: r.f.iter().copied().zip(r.s11.iter().copied()).collect(),
+            },
+            r.z_ref,
+        ))
+    }
+
     pub fn load(&mut self, board: &Board, s: ViaSetup, target: f64) {
         self.board_key = (board as *const Board as usize, board.geometry.vias.len());
         self.is_pair = s.pair.is_some();

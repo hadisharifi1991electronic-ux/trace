@@ -235,12 +235,22 @@ USAGE:
                                                 independent FDTD, C:\\openEMS by default) and compares the two:
                                                 table, compare.svg, both .s2p in DIR; --export-openems DIR only
                                                 writes the model; --openems-read DIR reads a finished run
+                                                --check fem [--fem-dof N] also solves it with the 3D FEM solver
+                                                (HFSS-style: adaptive tetrahedra, second-order elements, wave
+                                                ports) and compares; N caps the unknowns (default 400000, about
+                                                30 KB of memory each), the first mesh included.
+                                                <board> may be a stack-up file (.txt) alone: the via in that
+                                                stack-up, without a board
     trace pairsize <board> <layer> [--zdiff 100] [--wmin W] [--wmax W] [--gap S] [--ghz 8] [--next D] [--xtalk 2]
                                                 Every track width and gap on a layer that gives the target Zdiff
                                                 (2D field solver), ranked by loss, with crosstalk and etch
     trace cascade <load.s1p> [stage.s2p | --line Z@len@Eeff[@dB/in]]... [--ref R] [--step GHz]
                                                 Return loss into a chain of two-ports (vias from trace via, lines)
                                                 ending in a load such as a chip's port model, input side first
+    trace smith <file.sNp>... [--param S11[,S22]] [--markers GHz,GHz] [-o chart.svg]
+                                                Smith chart of S11 (or any Sij) from Touchstone files (Trace's
+                                                via, FEM, openEMS or a vendor's): curves, markers reading Z,
+                                                VSWR and return loss (default markers: start, middle, end)
     trace sparam check <file.sNp>...           Passivity, reciprocity and causality of any Touchstone file (from
                                                 Trace, a vendor or another solver); exits 1 if one fails
     trace stitch <board> <net> <out.tracepcb> [--grid 100mil] [--stagger] [--via 16/8] [--layers 1-4]
@@ -387,6 +397,7 @@ fn main() -> ExitCode {
         ["pairs", file] => pairs(file, "5mil"),
         ["pairs", file, skew] => pairs(file, skew),
         ["fem", kind, rest @ ..] => fem(kind, rest),
+        ["smith", rest @ ..] if !rest.is_empty() => smith(rest),
         ["rules", file] => rules(file),
         ["rules", file, "--params"] => rules_params(file),
         ["rules", file, "--check"] => rules_check(file),
@@ -2515,6 +2526,90 @@ fn pairsize(file: &str, layer: &str, rest: &[&str]) -> Res {
     Ok(())
 }
 
+fn smith(args: &[&str]) -> Res {
+    use trace_core::smith;
+    let mut files = Vec::new();
+    let mut params = vec![(1, 1)];
+    let mut markers: Vec<f64> = Vec::new();
+    let mut out: Option<String> = None;
+    let mut it = args.iter();
+    while let Some(&a) = it.next() {
+        match a {
+            "--param" => {
+                let x = it.next().ok_or("--param needs S11 or similar")?;
+                params = x
+                    .split(',')
+                    .map(|p| smith::parse_param(p).ok_or(format!("not an S-parameter: {p}")))
+                    .collect::<Result<_, _>>()?;
+            }
+            "--markers" => {
+                let x = it.next().ok_or("--markers needs GHz")?;
+                markers = x
+                    .trim_end_matches(['G', 'g', 'H', 'h', 'z'])
+                    .split(',')
+                    .map(|f| {
+                        f.trim()
+                            .parse()
+                            .map_err(|_| format!("not a frequency: {f}"))
+                    })
+                    .collect::<Result<_, _>>()?;
+            }
+            "-o" => out = Some(it.next().ok_or("-o needs a file")?.to_string()),
+            _ if a.starts_with('-') => return Err(format!("unknown option {a}").into()),
+            _ => files.push(a),
+        }
+    }
+    if files.is_empty() {
+        return Err("smith needs a Touchstone file".into());
+    }
+    let mut curves = Vec::new();
+    let mut z0 = 50.0;
+    for f in &files {
+        let n = trace_core::touchstone::read(Path::new(f))?;
+        z0 = n.z_ref;
+        let stem = Path::new(f)
+            .file_stem()
+            .map_or(f.to_string(), |s| s.to_string_lossy().into_owned());
+        for &(i, j) in &params {
+            curves.push(smith::from_network(&n, i, j, &format!("{stem} S{i}{j}"))?);
+        }
+    }
+    if markers.is_empty() {
+        if let Some(c) = curves.first() {
+            let p = &c.points;
+            if !p.is_empty() {
+                markers = vec![p[0].0, p[p.len() / 2].0, p[p.len() - 1].0];
+            }
+        }
+    }
+    for c in &curves {
+        println!("{}:", c.name);
+        for &f in &markers {
+            if let Some(g) = smith::at(c, f) {
+                println!("  {}", smith::read(g, f, z0).text());
+            }
+        }
+    }
+    let out = out.unwrap_or_else(|| {
+        let stem = Path::new(files[0])
+            .file_stem()
+            .map_or("smith".into(), |s| s.to_string_lossy().into_owned());
+        format!("{stem}_smith.svg")
+    });
+    let title = files
+        .iter()
+        .map(|f| {
+            Path::new(f)
+                .file_name()
+                .map_or(f.to_string(), |s| s.to_string_lossy().into_owned())
+        })
+        .collect::<Vec<_>>()
+        .join(", ");
+    std::fs::write(&out, smith::svg(&curves, &markers, z0, &title))?;
+    println!("Saved {out}");
+    Ok(())
+}
+
 fn sparam_check(files: &[&str]) -> Res {
     let mut bad = false;
     for f in files {
@@ -4052,7 +4147,19 @@ fn zcheck_cmd(file: &str, rest: &[&str]) -> Res {
 
 fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     use trace_core::fdtd::{self, ViaSetup};
-    let b = board(file)?;
+    // A stack-up file alone (no board): the via in that stack-up.
+    let b = if file.ends_with(".txt") {
+        let st = std::fs::read_to_string(file)
+            .map_err(|e| e.to_string())
+            .and_then(|t| trace_core::stackfile::parse(&t))
+            .map_err(|e| format!("{file}: {e}"))?;
+        Board {
+            stackup: st,
+            ..Board::default()
+        }
+    } else {
+        board(file)?
+    };
     let geo = b.layer_geometry();
     let layer = |l: &str| -> Result<u8, String> {
         l.parse::<usize>()
@@ -4087,7 +4194,7 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     let mut target: Option<f64> = None;
     let mut feed: Option<f64> = None;
     // Field maps: output, dB depth, plane, quantity (for an animation).
-    let mut field_out: Option<String> = None;
+    let mut field_outs: Vec<String> = Vec::new();
     let mut field_db = 40.0;
     let mut field_plane: Option<String> = None;
     // openEMS: compare, export only, its folder, program, cell, or
@@ -4254,7 +4361,7 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
                             .map_err(|_| format!("not a frequency: {f}"))?,
                     );
                 }
-                field_out = Some(
+                field_outs.push(
                     it.next()
                         .ok_or("--fields needs an output (.svg or .gif)")?
                         .to_string(),
@@ -4287,6 +4394,10 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
                     .trim_end_matches(['G', 'g', 'H', 'h', 'z'])
                     .parse()
                     .map_err(|_| format!("not a frequency: {x}"))?;
+            }
+            // A .gif is always a field animation, never the Touchstone.
+            _ if !a.starts_with("--") && a.to_ascii_lowercase().ends_with(".gif") => {
+                field_outs.push(a.to_string())
             }
             _ if !a.starts_with("--") => outs.push(a),
             _ => return Err(format!("unknown option {a}").into()),
@@ -4611,7 +4722,10 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
         names(v.from),
         names(v.to)
     );
-    if let Some(out) = &field_out {
+    if !field_outs.is_empty() && r.fields.is_empty() {
+        return Err("a field map (.gif) needs --fields GHz".into());
+    }
+    for out in &field_outs {
         use trace_core::emfield::Quantity;
         let many = r.fields.len() > 1;
         for m in &r.fields {
@@ -4682,6 +4796,14 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
             }
         }
     }
+    // The FEM result goes beside the Touchstone, as <name>_fem.s2p.
+    let fem_out = outs
+        .iter()
+        .find(|o| !o.to_ascii_lowercase().ends_with(".svg"))
+        .map(|o| match o.rsplit_once('.') {
+            Some((stem, ext)) => format!("{stem}_fem.{ext}"),
+            None => format!("{o}_fem.s2p"),
+        });
     for o in outs {
         let low = o.to_ascii_lowercase();
         if low.ends_with(".svg") {
@@ -4692,7 +4814,7 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
         println!("Saved {o}");
     }
     if fem_check {
-        fem_compare(&b.stackup, &v, &r, fem_dof)?;
+        fem_compare(&b.stackup, &v, &r, fem_dof, fem_out.as_deref())?;
     }
     if oems_check {
         openems_compare(
@@ -4717,6 +4839,7 @@ fn fem_compare(
     v: &trace_core::fdtd::ViaSetup,
     r: &trace_core::fdtd::ViaResult,
     max_dof: Option<usize>,
+    out: Option<&str>,
 ) -> Res {
     use trace_core::fem3d;
     let model = fem3d::via(stackup, v)?;
@@ -4726,9 +4849,20 @@ fn fem_compare(
     let fmax = v.fmax_ghz;
     let setup = fem3d::Setup {
         f_adapt: fmax,
-        sweep: (1..=10).map(|k| fmax * k as f64 / 10.0).collect(),
+        sweep: {
+            // TRACE_FEM_SWEEP=n: fewer sweep points (quick checks).
+            let n: usize = std::env::var("TRACE_FEM_SWEEP")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(10);
+            (1..=n).map(|k| fmax * k as f64 / n as f64).collect()
+        },
         z_ref: Some(r.z_ref),
         max_unknowns: max_dof.unwrap_or(400_000),
+        max_passes: std::env::var("TRACE_FEM_PASSES")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(10),
         ..fem3d::Setup::default()
     };
     println!("3D FEM check (HFSS-style: adaptive tetrahedra, second-order elements, wave ports):");
@@ -4776,6 +4910,24 @@ fn fem_compare(
         );
     }
     println!("  largest difference: S11 {d11:.2} dB, S21 {d21:.3} dB (FEM copper is lossless)");
+    // Lossless copper and (by default) lossless laminate: any power gain
+    // or loss is the mesh's error, mostly at the ports.
+    let worst =
+        s.s.iter()
+            .map(|m| (m[0].norm_sqr() + m[2].norm_sqr() - 1.0).abs())
+            .fold(0.0f64, f64::max);
+    if !s.converged || worst > 0.02 {
+        println!(
+            "  Caution: {}power balance off by up to {:.0}%: the mesh is still too coarse for \
+             this model (raise --fem-dof if memory allows); trust the FDTD result",
+            if s.converged { "" } else { "not converged; " },
+            100.0 * worst
+        );
+    }
+    if let Some(o) = out {
+        std::fs::write(o, s.touchstone())?;
+        println!("  Saved {o} (FEM; trace smith {o} draws its Smith chart)");
+    }
     Ok(())
 }
 

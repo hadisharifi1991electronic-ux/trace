@@ -3,6 +3,39 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.92.0 (2026-11-24)
+
+3D FEM mesh fix, and a Smith chart:
+
+- `--fem-dof N` now caps the first mesh too: the starting grid merges the
+  lines of small details (pad edges, copper thickness) until it fits a
+  third of N, keeping the box, layers, barrels and traces. ADRV9026 RF
+  pair via: first pass 25,200 tetrahedra (was 61,000 and 347,000
+  unknowns), so several passes fit; near the limit each pass refines
+  fewer tetrahedra, and a pass that would pass N is not taken. ADRV pair
+  at the default 400,000: two passes in 2.2 GB and 5 minutes (was one
+  pass in 9.8 GB), but still not converged (ports off by up to 10% in
+  power): its accurate answer needs the low-memory solver that comes
+  next. The FEM check now says so when the power balance is off.
+- Ports with a coarse face are refined before the first pass.
+- No more false shorts on coarse meshes: an edge or face is conductor
+  only when all its points are on the sheet or inside the solid, so an
+  edge from a via in its antipad to the plane beyond no longer joins them.
+- The top layer's copper thickness is air beside a top trace, not
+  laminate (the two ports of a TOP to BOTTOM pair now agree within 3%).
+- Via wave ports sit closer to the via (they need only clear its fringing
+  field).
+- `trace via <stackup.txt> ...`: a via in a stack-up file alone, with no
+  board.
+- The FEM result is saved as `<name>_fem.s2p` beside the via's Touchstone.
+- Field animations: a `.gif` output of `trace via --fields` is always the
+  animation (it was written as Touchstone).
+- `trace help` lists `--check fem` and `--fem-dof`.
+- Smith chart: `trace smith <file.sNp>... [--param S11] [--markers GHz,..]
+  [-o chart.svg]` draws S11 (or any Sij) with markers reading Z, VSWR and
+  return loss; in the app, Analysis > Smith chart (Touchstone files and
+  the via window's last result; hover reads, click drops a marker).
+
 ## 0.91.1 (2026-11-19)
 
 3D FEM via model:

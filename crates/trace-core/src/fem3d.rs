@@ -317,6 +317,32 @@ fn axis_lines(mut br: Vec<f64>, h: f64, tol: f64) -> Vec<f64> {
     out
 }
 
+/// The hard lines, plus the soft ones further than `d` from any line
+/// kept so far (hard lines win).
+fn merge_lines(hard: &[f64], soft: &[f64], d: f64) -> Vec<f64> {
+    let mut all: Vec<(f64, bool)> = hard
+        .iter()
+        .map(|&x| (x, true))
+        .chain(soft.iter().map(|&x| (x, false)))
+        .collect();
+    all.sort_by(|a, b| a.0.total_cmp(&b.0).then(b.1.cmp(&a.1)));
+    let mut out: Vec<(f64, bool)> = Vec::new();
+    for (x, h) in all {
+        if h {
+            while out.last().is_some_and(|&(y, hy)| !hy && x - y < d) {
+                out.pop();
+            }
+            if out.last().is_some_and(|&(y, _)| x - y < d * 1e-6) {
+                out.pop();
+            }
+            out.push((x, true));
+        } else if out.last().is_none_or(|&(y, _)| x - y >= d) {
+            out.push((x, false));
+        }
+    }
+    out.into_iter().map(|p| p.0).collect()
+}
+
 impl Model {
     fn tol(&self) -> f64 {
         let d = sub(self.hi, self.lo);
@@ -333,15 +359,32 @@ impl Model {
         e
     }
 
-    /// The starting mesh.
-    pub fn mesh(&self, f_ghz: f64, per_lambda: f64, per_axis: f64) -> Mesh {
+    /// The starting mesh: a graded grid through every edge of the model,
+    /// cut into tetrahedra. When that would be more than `max_tets`, the
+    /// grid lines of small details (pad and hole edges, copper thickness)
+    /// are merged until it fits; the box, the layers and the sheets keep
+    /// theirs, and adaptive refinement then finds the details again.
+    pub fn mesh(&self, f_ghz: f64, per_lambda: f64, per_axis: f64, max_tets: usize) -> Mesh {
         let lambda = C0 / (f_ghz * 1e9) / self.er_max().sqrt();
         let h = lambda / per_lambda;
         let tol = self.tol();
         let mut br: [Vec<f64>; 3] = Default::default();
+        // Lines that must stay: the box, sheets and dielectric layers.
+        let mut hard: [Vec<f64>; 3] = Default::default();
         for a in 0..3 {
-            br[a].push(self.lo[a]);
-            br[a].push(self.hi[a]);
+            hard[a].push(self.lo[a]);
+            hard[a].push(self.hi[a]);
+        }
+        for s in &self.solids {
+            if let (Fill::Dielectric { .. }, Shape::Box { lo, hi }) = (&s.fill, &s.shape) {
+                for a in 0..3 {
+                    hard[a].push(lo[a].clamp(self.lo[a], self.hi[a]));
+                    hard[a].push(hi[a].clamp(self.lo[a], self.hi[a]));
+                }
+            }
+        }
+        for s in &self.sheets {
+            hard[s.axis].push(s.at);
         }
         let clamp = |a: usize, v: f64| v.clamp(self.lo[a], self.hi[a]);
         for s in &self.solids {
@@ -359,7 +402,8 @@ impl Model {
                     for (k, a) in [u, v].into_iter().enumerate() {
                         br[a].push(clamp(a, c[k] - r));
                         br[a].push(clamp(a, c[k] + r));
-                        br[a].push(clamp(a, c[k]));
+                        // The axis stays, so a barrel is never lost.
+                        hard[a].push(clamp(a, c[k]));
                     }
                 }
             }
@@ -367,9 +411,14 @@ impl Model {
         for s in &self.sheets {
             br[s.axis].push(s.at);
             let (u, v) = others(s.axis);
+            // A signal sheet (a trace) keeps its outline: the wave ports
+            // take their mode from the mesh's own triangles, which must
+            // see the trace's width.
+            let keep = s.net != 0;
+            let to = if keep { &mut hard } else { &mut br };
             for p in &s.poly {
-                br[u].push(clamp(u, p[0]));
-                br[v].push(clamp(v, p[1]));
+                to[u].push(clamp(u, p[0]));
+                to[v].push(clamp(v, p[1]));
             }
             let caps: Vec<([f64; 2], f64)> = s
                 .holes
@@ -378,8 +427,8 @@ impl Model {
                 .chain(s.disc.iter().copied())
                 .collect();
             for (c, r) in &caps {
-                br[u].push(clamp(u, c[0]));
-                br[v].push(clamp(v, c[1]));
+                hard[u].push(clamp(u, c[0]));
+                hard[v].push(clamp(v, c[1]));
                 br[u].push(clamp(u, c[0] - r));
                 br[u].push(clamp(u, c[0] + r));
                 br[v].push(clamp(v, c[1] - r));
@@ -393,18 +442,54 @@ impl Model {
             br[v].push(p.lo[1]);
             br[v].push(p.hi[1]);
         }
-        // Also at least a dozen cells across every axis, so small cross
+        // Also at least `per_axis` cells across every axis, so small cross
         // sections start with some resolution.
-        let g: Vec<Vec<f64>> = (0..3)
-            .map(|a| {
-                axis_lines(
-                    br[a].clone(),
-                    h.min((self.hi[a] - self.lo[a]) / per_axis),
-                    tol,
-                )
+        let ext = (0..3)
+            .map(|a| self.hi[a] - self.lo[a])
+            .fold(0.0f64, f64::max);
+        let r_min = self
+            .solids
+            .iter()
+            .filter_map(|s| match (&s.fill, &s.shape) {
+                (Fill::Pec { .. }, Shape::Cyl { r, .. }) => Some(*r),
+                _ => None,
             })
-            .collect();
-        kuhn(&g[0], &g[1], &g[2])
+            .chain(self.sheets.iter().flat_map(|s| {
+                s.holes
+                    .iter()
+                    .map(|h| h.2)
+                    .chain(s.disc.iter().map(|d| d.1))
+                    .collect::<Vec<_>>()
+            }))
+            .fold(ext, f64::min);
+        let mut d = 0.0f64;
+        loop {
+            let g: Vec<Vec<f64>> = (0..3)
+                .map(|a| {
+                    axis_lines(
+                        merge_lines(&hard[a], &br[a], d.max(tol)),
+                        h.min((self.hi[a] - self.lo[a]) / per_axis),
+                        tol,
+                    )
+                })
+                .collect();
+            let tets = 6 * (g[0].len() - 1) * (g[1].len() - 1) * (g[2].len() - 1);
+            if std::env::var_os("TRACE_FEM_MESH").is_some() {
+                eprintln!(
+                    "  start mesh: merge {:.1} um, lines {} x {} x {}, {tets} tetrahedra",
+                    d * 1e6,
+                    g[0].len(),
+                    g[1].len(),
+                    g[2].len()
+                );
+            }
+            // Never merge past about a barrel's radius: coarser than that,
+            // a via can lose its own hole in the planes.
+            if tets <= max_tets || d > ext || d > 1.5 * r_min {
+                return kuhn(&g[0], &g[1], &g[2]);
+            }
+            d = (d * 1.4).max(ext * 1e-3);
+        }
     }
 
     /// Material at a point: (complex Er, PEC net).
@@ -845,6 +930,9 @@ struct PortMesh {
     info: PortInfo,
     /// sqrt(2 x power) for unit mode amplitude.
     norm: f64,
+    /// Relative gap between the port Z0 on the mesh's own triangles and
+    /// on the fine 2D solve (0 for a waveguide).
+    gap: f64,
     /// ∫ e·e.
     ee: f64,
     /// The 2D solve's error at each triangle.
@@ -902,8 +990,24 @@ fn assemble_mesh(
         let (e, pec) = model.at(c);
         tets.push(s);
         eps.push(e);
-        is_pec_tet.push(pec.is_some());
+        is_pec_tet.push(pec);
     }
+    // The PEC solid (net) each node lies in or on, if any.
+    let node_pec: Vec<Option<u32>> = mesh
+        .nodes
+        .iter()
+        .map(|&p| {
+            let mut net = None;
+            for s in &model.solids {
+                if let Fill::Pec { net: n } = s.fill {
+                    if inside(&s.shape, p, tol) {
+                        net = Some(n);
+                    }
+                }
+            }
+            net
+        })
+        .collect();
     let in_port = |a: usize, side: usize, m: [f64; 3]| {
         model.ports.iter().any(|pt| {
             pt.axis == a && pt.high == (side == 1) && {
@@ -917,9 +1021,14 @@ fn assemble_mesh(
     };
     // Is a set of points (an edge or a face) on a conductor surface: a
     // sheet or a PEC wall (outside the ports)? `m` is its centre.
+    // Every point and the centre must be on it, so an edge from a via
+    // inside a plane's hole to the plane beyond never shorts the two.
     let on_conductor = |pts: &[[f64; 3]], m: [f64; 3]| -> bool {
         for s in &model.sheets {
-            if pts.iter().all(|p| (p[s.axis] - s.at).abs() < tol) && on_sheet(s, m, tol) {
+            if pts.iter().all(|p| (p[s.axis] - s.at).abs() < tol)
+                && on_sheet(s, m, tol)
+                && pts.iter().all(|&p| on_sheet(s, p, tol))
+            {
                 return true;
             }
         }
@@ -939,8 +1048,15 @@ fn assemble_mesh(
     for (ti, s) in tets.iter().enumerate() {
         for k in keys(s, order) {
             let e = pec.entry(k).or_insert(false);
-            if is_pec_tet[ti] {
-                *e = true;
+            // Inside a PEC solid: the keys whose nodes are all in it.
+            if let Some(n) = is_pec_tet[ti] {
+                if k.1
+                    .iter()
+                    .filter(|&&v| v != u32::MAX)
+                    .all(|&v| node_pec[v as usize] == Some(n))
+                {
+                    *e = true;
+                }
             }
         }
     }
@@ -1016,7 +1132,9 @@ fn assemble_mesh(
                 });
                 if let Some(pi) = port {
                     port_tris[pi].push(*bf);
-                } else if model.walls[2 * a + side] == Wall::Radiation && !is_pec_tet[bf.tet] {
+                } else if model.walls[2 * a + side] == Wall::Radiation
+                    && is_pec_tet[bf.tet].is_none()
+                {
                     rad.push((*bf, k0 * eps[bf.tet].re.sqrt()));
                 }
                 break 'axes;
@@ -1263,6 +1381,8 @@ fn port_mode(
 ) -> Result<PortMesh, String> {
     let (u, w) = others(pt.axis);
     let tri_eps: Vec<f64> = tris.iter().map(|t| eps[t.tet].re).collect();
+    // How far the mesh's own port Z0 is from the fine 2D solve's.
+    let mut gap = 0.0;
     let (e, e0, info, norm) = match pt.mode {
         Mode::Te10 => {
             let (a, b) = (pt.hi[0] - pt.lo[0], pt.hi[1] - pt.lo[1]);
@@ -1332,8 +1452,13 @@ fn port_mode(
                 1,
                 order.min(2),
             )?;
+            // Z0 from the fine solve; the gap to the mesh's own triangles
+            // tells the solver to refine a coarse port face first.
+            let zf = ETA0 / (f.c * f.c0).sqrt();
+            let zs = ETA0 / (shape.c * shape.c0).sqrt();
+            gap = (zs - zf).abs() / zf;
             let eeff = f.c / f.c0;
-            let z0 = ETA0 / (f.c * f.c0).sqrt();
+            let z0 = zf;
             (
                 shape.e,
                 shape.e0,
@@ -1394,6 +1519,7 @@ fn port_mode(
         norm,
         ee,
         err,
+        gap,
     })
 }
 
@@ -1891,11 +2017,58 @@ pub fn solve(
     mut progress: impl FnMut(&str) -> bool,
 ) -> Result<Solution, String> {
     // Second-order elements start from a coarser mesh, as HFSS does.
+    // Start at no more than a third of the unknowns allowed, so at least
+    // two refinements fit (about 5.5 unknowns per tetrahedron at order 2,
+    // 1.2 at order 1).
+    let per_tet = if setup.order >= 2 { 5.5 } else { 1.2 };
+    let max_tets = ((setup.max_unknowns as f64 / 3.0) / per_tet) as usize;
     let mut mesh = if setup.order >= 2 {
-        model.mesh(setup.f_adapt, setup.per_lambda / 2.0, 5.0)
+        model.mesh(setup.f_adapt, setup.per_lambda / 2.0, 5.0, max_tets)
     } else {
-        model.mesh(setup.f_adapt, setup.per_lambda, 12.0)
+        model.mesh(setup.f_adapt, setup.per_lambda, 12.0, max_tets)
     };
+    // Coarse port faces first: refine the tetrahedra on any port whose
+    // mode on the mesh's own triangles is off the fine 2D solve by more
+    // than 2%, so the ports start right (their power and Z0 hang on it).
+    for _ in 0..4 {
+        let asm = assemble_mesh(model, &mesh, setup.f_adapt, setup.order)?;
+        let marked = vec![false; mesh.tets.len()];
+        let mut edges = Vec::new();
+        let mut any = false;
+        for pm in asm.ports.iter().filter(|p| p.gap > 0.02) {
+            any = true;
+            // Each port triangle's longest side, so the face really gets
+            // finer.
+            for t in &pm.tris {
+                let f = t.f;
+                let mut best = (ekey(f[0], f[1]), -1.0);
+                for (a, b) in TRI_EDGES {
+                    let e = ekey(f[a], f[b]);
+                    let l = mesh.len2(e);
+                    if l > best.1 {
+                        best = (e, l);
+                    }
+                }
+                edges.push(best.0);
+            }
+        }
+        let per = asm.n as f64 / mesh.tets.len().max(1) as f64;
+        if !any {
+            break;
+        }
+        let before = mesh.clone();
+        mesh.refine(&marked, &edges);
+        if mesh.tets.len() as f64 * per * 1.7 > setup.max_unknowns as f64 {
+            mesh = before;
+            break;
+        }
+        if !progress(&format!(
+            "ports: refined to {} tetrahedra (port Z0 on the mesh off by more than 2%)",
+            mesh.tets.len()
+        )) {
+            return Err("stopped".into());
+        }
+    }
     let mut passes: Vec<Pass> = Vec::new();
     let mut converged = false;
     let mut last_unknowns;
@@ -1943,13 +2116,18 @@ pub fn solve(
                 break;
             }
         }
-        if passes.len() >= setup.max_passes || asm.n * 8 / 5 > setup.max_unknowns {
+        // Refining a share q of the tetrahedra grows the mesh about
+        // 1 + 2.3 q (closure included); near the limit refine fewer, so a
+        // last pass fits.
+        let room = setup.max_unknowns as f64 / asm.n as f64;
+        if passes.len() >= setup.max_passes || room < 1.15 {
             break;
         }
+        let frac = setup.refine.min((0.92 * room - 1.0) / 2.3).max(0.05);
         let eta = estimate(&mesh, &asm, &sols, setup.f_adapt);
         let mut order: Vec<usize> = (0..eta.len()).collect();
         order.sort_by(|a, b| eta[*b].partial_cmp(&eta[*a]).unwrap());
-        let take = ((eta.len() as f64) * setup.refine).ceil() as usize;
+        let take = ((eta.len() as f64) * frac).ceil() as usize;
         let mut marked = vec![false; eta.len()];
         let mut edges = Vec::new();
         for &i in order.iter().take(take) {
@@ -1981,7 +2159,14 @@ pub fn solve(
             }
         }
         // The estimator sees sorted tets in the same order as the mesh.
+        let before = mesh.clone();
+        let per = asm.n as f64 / before.tets.len().max(1) as f64;
         mesh.refine(&marked, &edges);
+        // Over the limit: stop on the last solved mesh (the sweep uses it).
+        if mesh.tets.len() as f64 * per > setup.max_unknowns as f64 {
+            mesh = before;
+            break;
+        }
     }
     let sweep = if setup.sweep.is_empty() {
         vec![setup.f_adapt]
@@ -2136,7 +2321,10 @@ pub fn via(stackup: &crate::Stackup, setup: &crate::fdtd::ViaSetup) -> Result<Mo
     let h_max = m.st.slabs.iter().map(|s| s.1 - s.0).fold(0.0, f64::max);
     let reach = m.w[0].max(m.w[1]) / 2.0 + 5.0 * h_max;
     let half_w = (2.5 * m.ra).max(setup.return_dist + 2.0 * m.rp).max(reach) * MIL;
-    let xa = m.port_at * MIL;
+    // Wave ports need only clear the via's fringing field (they take the
+    // line's own mode), so they sit closer than the FDTD's sources do;
+    // a shorter box is a much smaller mesh.
+    let xa = m.port_at.min(m.ra.max(m.rp) + reach + 2.0 * h_max) * MIL;
     // Air beyond an outer copper that is not a plane (a trace or a pad
     // sits there, and a wall on it would short them).
     let outer = |l: usize| !m.planes[l];
@@ -2154,11 +2342,27 @@ pub fn via(stackup: &crate::Stackup, setup: &crate::fdtd::ViaSetup) -> Result<Mo
     let lo = [-xa, -half_w, z(nl - 1) - air_bot];
     let hi = [xa, half_w, z(0) + air_top];
     let mut solids = Vec::new();
-    for s in &m.st.slabs {
+    // The top slab holds the top copper's thickness too (the stack-up's
+    // convention); beside a top trace that is air, not laminate.
+    let t_top = if outer(0) {
+        stackup
+            .copper_layers()
+            .next()
+            .map(|c| c.thickness.mil())
+            .unwrap_or(0.0)
+    } else {
+        0.0
+    };
+    for (i, s) in m.st.slabs.iter().enumerate() {
+        let top = if i == 0 {
+            s.0 + t_top.min(s.1 - s.0)
+        } else {
+            s.0
+        };
         solids.push(Solid {
             shape: Shape::Box {
                 lo: [lo[0], lo[1], -s.1 * MIL],
-                hi: [hi[0], hi[1], -s.0 * MIL],
+                hi: [hi[0], hi[1], -top * MIL],
             },
             fill: Fill::Dielectric {
                 er: s.2,

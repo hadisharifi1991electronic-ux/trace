@@ -36,6 +36,7 @@ mod scene;
 mod schview;
 mod shapetool;
 mod simwin;
+mod smithwin;
 mod stitchwin;
 mod studio;
 mod swapwin;
@@ -154,6 +155,7 @@ pub struct App {
     bus_sim: buswin::BusWindow,
     emi: emiwin::EmiWindow,
     via: viawin::ViaWindow,
+    smith: smithwin::SmithWindow,
     zcheck: zwin::ZWindow,
     pathloss: pathwin::PathWindow,
     rf: rfwin::RfWindow,
@@ -259,6 +261,7 @@ impl App {
             bus_sim: buswin::BusWindow::default(),
             emi: emiwin::EmiWindow::default(),
             via: viawin::ViaWindow::default(),
+            smith: smithwin::SmithWindow::default(),
             zcheck: zwin::ZWindow::default(),
             pathloss: pathwin::PathWindow::default(),
             rf: rfwin::RfWindow::default(),
@@ -3418,6 +3421,9 @@ impl eframe::App for App {
             self.via.show(ctx, &scene.board, self.imp.stackup());
             self.pairs.show(ctx, &scene.board, self.imp.stackup());
         }
+        // The Smith chart needs no board (Touchstone files alone).
+        let via_curve = self.via.smith_curve();
+        self.smith.show(ctx, via_curve);
         // Results that go on the board.
         if let Some(o) = self.emi.overlay.take() {
             self.overlays.set("emi", o);

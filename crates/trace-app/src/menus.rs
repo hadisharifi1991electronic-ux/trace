@@ -597,6 +597,9 @@ impl App {
                 if item(ui, true, "Via S-parameters (3D)…", "", "3D full-wave solve of a via or via pair: return and insertion loss, stub resonance, Touchstone") {
                     self.via.open = true;
                 }
+                if item(ui, true, "Smith chart…", "", "S11 of Touchstone files or of the last via solve on the impedance chart: Z, VSWR and return loss at markers") {
+                    self.smith.open = true;
+                }
                 if item(ui, true, "Pair cross-sections…", "", "Track widths and gaps on a layer that give the target Zdiff, ranked by loss") {
                     self.pairs.open = true;
                 }

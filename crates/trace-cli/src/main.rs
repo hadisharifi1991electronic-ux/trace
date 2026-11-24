@@ -4863,6 +4863,12 @@ fn fem_compare(
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(10),
+        // TRACE_FEM_SOLVER=direct|iter forces a linear solver.
+        iterative: match std::env::var("TRACE_FEM_SOLVER").as_deref() {
+            Ok("direct") => Some(false),
+            Ok("iter") => Some(true),
+            _ => None,
+        },
         ..fem3d::Setup::default()
     };
     println!("3D FEM check (HFSS-style: adaptive tetrahedra, second-order elements, wave ports):");

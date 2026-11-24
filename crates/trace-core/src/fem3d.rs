@@ -41,6 +41,8 @@ const ETA0: f64 = 376.730_313_668;
 /// dielectrics would otherwise grade fine lines across the whole box; the
 /// adaptive passes refine where it matters).
 const GRADE: f64 = 8.0;
+/// Above this many unknowns the iterative solver is used.
+const ITER_MIN: usize = 150_000;
 
 /// What a solid is made of.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -156,6 +158,9 @@ pub struct Setup {
     pub z_ref: Option<f64>,
     /// Element order: 1 (Whitney) or 2 (HFSS's default).
     pub order: usize,
+    /// Linear solver: Some(true) the half-memory iterative one, Some(false)
+    /// the direct one, None by size (iterative above 150k unknowns).
+    pub iterative: Option<bool>,
 }
 
 impl Default for Setup {
@@ -171,6 +176,7 @@ impl Default for Setup {
             max_unknowns: 400_000,
             z_ref: Some(50.0),
             order: 2,
+            iterative: None,
         }
     }
 }
@@ -1562,6 +1568,8 @@ fn solve_at(
     mesh: &Mesh,
     f_ghz: f64,
     order: usize,
+    iterative: Option<bool>,
+    f_pre: f64,
 ) -> Result<(Assembled, Vec<Vec<c64>>, Vec<c64>), String> {
     let asm = assemble_mesh(model, mesh, f_ghz, order)?;
     let k0 = 2.0 * std::f64::consts::PI * f_ghz * 1e9 / C0;
@@ -1575,8 +1583,11 @@ fn solve_at(
         Q_TET2.to_vec()
     };
     let nb = if order >= 2 { 20 } else { 6 };
+    let iter = iterative.unwrap_or(n > ITER_MIN);
     let mut trip: Vec<Triplet<usize, usize, c64>> =
         Vec::with_capacity(asm.tets.len() * nb * nb / 2);
+    // The iterative solver's factor is taken at f_pre: keep ε·mass.
+    let mut emass: Vec<[f32; 2]> = Vec::new();
     let mut b = Vec::new();
     let mut stiff = vec![0.0; nb * nb];
     let mut mass = vec![0.0; nb * nb];
@@ -1602,6 +1613,10 @@ fn solve_at(
                 let Some(dc) = d[c] else { continue };
                 let v = c64::new(stiff[a * nb + c], 0.0) - ke * mass[a * nb + c];
                 trip.push(Triplet::new(da as usize, dc as usize, v));
+                if iter {
+                    let em = asm.eps[ti] * mass[a * nb + c];
+                    emass.push([em.re as f32, em.im as f32]);
+                }
             }
         }
     }
@@ -1660,7 +1675,13 @@ fn solve_at(
             cols[(r, np + p)] = c64::new(be[p][r], 0.0);
         }
     }
-    let y = sym_solve(n, trip, &cols)?;
+    let y = if iter {
+        let kp = 2.0 * std::f64::consts::PI * f_pre.max(f_ghz) * 1e9 / C0;
+        let shift = c64::new(k0 * k0 - kp * kp, 0.0);
+        iter_solve(n, trip, &cols, &node_gradients(&asm), &emass, shift)?
+    } else {
+        sym_solve(n, trip, &cols)?
+    };
     // A = A0 + U C Uᵀ, U = [b0 | be], C = diag(jβ/ee0, -jβ/ee).
     let mut cinv_d = vec![czero(); m2];
     for (p, pm) in asm.ports.iter().enumerate() {
@@ -1749,94 +1770,479 @@ fn solve_at(
     Ok((asm, sols, s))
 }
 
+/// The factor's number type: f64, or f32 for half the memory (then
+/// polished by GMRES).
+trait Real: faer::traits::RealField + Copy {
+    fn of(x: f64) -> Self;
+    fn to(self) -> f64;
+}
+
+impl Real for f64 {
+    fn of(x: f64) -> Self {
+        x
+    }
+    fn to(self) -> f64 {
+        self
+    }
+}
+
+impl Real for f32 {
+    fn of(x: f64) -> Self {
+        x as f32
+    }
+    fn to(self) -> f64 {
+        self as f64
+    }
+}
+
+/// A factorised complex symmetric matrix, kept for many solves. It is
+/// factorised as the real symmetric indefinite system [[Re, Im], [Im, −Re]]
+/// (unknowns Re x and −Im x side by side), with a minimum-degree ordering
+/// and supernodal Bunch-Kaufman LBLᵀ: about half the memory of a general
+/// LU with column ordering on FEM matrices.
+struct SymFactor<T: Real> {
+    n: usize,
+    sym: faer::sparse::linalg::cholesky::SymbolicCholesky<usize>,
+    lv: Vec<T>,
+    sub: Vec<T>,
+    pf: Vec<usize>,
+    pi: Vec<usize>,
+}
+
+impl<T: Real> SymFactor<T> {
+    /// From (row, col, value) entries, both triangles given (duplicates
+    /// add up).
+    fn new(n: usize, trip: &[Triplet<usize, usize, c64>]) -> Result<SymFactor<T>, String> {
+        use faer::dyn_stack::{MemBuffer, MemStack};
+        use faer::sparse::linalg::cholesky::{
+            factorize_symbolic_cholesky, CholeskySymbolicParams, SymmetricOrdering,
+        };
+        let mut rt: Vec<Triplet<usize, usize, T>> = Vec::with_capacity(trip.len() * 2);
+        for t in trip {
+            let (i, j, v) = (t.row, t.col, t.val);
+            if i < j {
+                continue;
+            }
+            if i > j {
+                rt.push(Triplet::new(2 * i, 2 * j, T::of(v.re)));
+                rt.push(Triplet::new(2 * i, 2 * j + 1, T::of(v.im)));
+                rt.push(Triplet::new(2 * i + 1, 2 * j, T::of(v.im)));
+                rt.push(Triplet::new(2 * i + 1, 2 * j + 1, T::of(-v.re)));
+            } else {
+                rt.push(Triplet::new(2 * i, 2 * i, T::of(v.re)));
+                rt.push(Triplet::new(2 * i + 1, 2 * i, T::of(v.im)));
+                rt.push(Triplet::new(2 * i + 1, 2 * i + 1, T::of(-v.re)));
+            }
+        }
+        let m = 2 * n;
+        let a = SparseColMat::<usize, T>::try_new_from_triplets(m, m, &rt)
+            .map_err(|e| format!("{e:?}"))?;
+        drop(rt);
+        let sym = factorize_symbolic_cholesky(
+            a.symbolic(),
+            faer::Side::Lower,
+            SymmetricOrdering::Amd,
+            CholeskySymbolicParams::default(),
+        )
+        .map_err(|e| format!("symbolic factorisation failed: {e:?}"))?;
+        let par = faer::Par::rayon(0);
+        let mut mem = MemBuffer::try_new(
+            sym.factorize_numeric_intranode_lblt_scratch::<T>(par, Default::default()),
+        )
+        .map_err(|_| "out of memory for the factorisation".to_string())?;
+        let stack = MemStack::new(&mut mem);
+        let mut lv = Vec::new();
+        lv.try_reserve_exact(sym.len_val()).map_err(|_| {
+            format!(
+                "out of memory: the factor needs {:.1} GB",
+                sym.len_val() as f64 * std::mem::size_of::<T>() as f64 * 1e-9
+            )
+        })?;
+        lv.resize(sym.len_val(), T::of(0.0));
+        let mut sub = vec![T::of(0.0); m];
+        let mut pf = vec![0usize; m];
+        let mut pi = vec![0usize; m];
+        sym.factorize_numeric_intranode_lblt(
+            &mut lv,
+            &mut sub,
+            &mut pf,
+            &mut pi,
+            a.as_ref(),
+            faer::Side::Lower,
+            par,
+            stack,
+            Default::default(),
+        );
+        Ok(SymFactor {
+            n,
+            sym,
+            lv,
+            sub,
+            pf,
+            pi,
+        })
+    }
+
+    /// Solves for each column of `x` in place.
+    fn solve(&self, x: &mut faer::Mat<c64>) {
+        use faer::dyn_stack::{MemBuffer, MemStack};
+        use faer::sparse::linalg::cholesky::IntranodeLbltRef;
+        let (n, k) = (self.n, x.ncols());
+        let par = faer::Par::rayon(0);
+        let mut mem = MemBuffer::new(self.sym.solve_in_place_scratch::<T>(k, par));
+        let stack = MemStack::new(&mut mem);
+        let perm = faer::perm::PermRef::new_checked(&self.pf, &self.pi, 2 * n);
+        let lblt = IntranodeLbltRef::new(&self.sym, &self.lv, &self.sub, perm);
+        let mut y = faer::Mat::<T>::from_fn(2 * n, k, |r, c| {
+            let v = x[(r / 2, c)];
+            T::of(if r % 2 == 0 { v.re } else { v.im })
+        });
+        lblt.solve_in_place_with_conj(faer::Conj::No, y.as_mut(), par, stack);
+        for c in 0..k {
+            for r in 0..n {
+                x[(r, c)] = c64::new(y[(2 * r, c)].to(), -y[(2 * r + 1, c)].to());
+            }
+        }
+    }
+
+    fn solve_vec(&self, v: &mut [c64]) {
+        let mut x = faer::Mat::<c64>::from_fn(v.len(), 1, |r, _| v[r]);
+        self.solve(&mut x);
+        for (r, o) in v.iter_mut().enumerate() {
+            *o = x[(r, 0)];
+        }
+    }
+}
+
 /// Solves the complex symmetric system (`trip`, both triangles given) for
-/// each column of `rhs`. It is factorised as the real symmetric indefinite
-/// system [[Re, Im], [Im, −Re]] (unknowns Re x and −Im x side by side),
-/// with a minimum-degree ordering and supernodal Bunch-Kaufman LBLᵀ: about
-/// half the memory of a general LU with column ordering on FEM matrices.
+/// each column of `rhs`, directly.
 fn sym_solve(
     n: usize,
     trip: Vec<Triplet<usize, usize, c64>>,
     rhs: &faer::Mat<c64>,
 ) -> Result<Vec<Vec<c64>>, String> {
-    use faer::dyn_stack::{MemBuffer, MemStack, StackReq};
-    use faer::sparse::linalg::cholesky::{
-        factorize_symbolic_cholesky, CholeskySymbolicParams, SymmetricOrdering,
-    };
-    let mut rt: Vec<Triplet<usize, usize, f64>> = Vec::with_capacity(trip.len() * 2);
-    for t in &trip {
-        let (i, j, v) = (t.row, t.col, t.val);
-        if i < j {
-            continue;
-        }
-        if i > j {
-            rt.push(Triplet::new(2 * i, 2 * j, v.re));
-            rt.push(Triplet::new(2 * i, 2 * j + 1, v.im));
-            rt.push(Triplet::new(2 * i + 1, 2 * j, v.im));
-            rt.push(Triplet::new(2 * i + 1, 2 * j + 1, -v.re));
-        } else {
-            rt.push(Triplet::new(2 * i, 2 * i, v.re));
-            rt.push(Triplet::new(2 * i + 1, 2 * i, v.im));
-            rt.push(Triplet::new(2 * i + 1, 2 * i + 1, -v.re));
-        }
-    }
+    let f = SymFactor::<f64>::new(n, &trip)?;
     drop(trip);
-    let m = 2 * n;
-    let a = SparseColMat::<usize, f64>::try_new_from_triplets(m, m, &rt)
-        .map_err(|e| format!("{e:?}"))?;
-    drop(rt);
-    let sym = factorize_symbolic_cholesky(
-        a.symbolic(),
-        faer::Side::Lower,
-        SymmetricOrdering::Amd,
-        CholeskySymbolicParams::default(),
-    )
-    .map_err(|e| format!("symbolic factorisation failed: {e:?}"))?;
-    let par = faer::Par::rayon(0);
-    let k = rhs.ncols();
-    let mut mem = MemBuffer::try_new(StackReq::any_of(&[
-        sym.factorize_numeric_intranode_lblt_scratch::<f64>(par, Default::default()),
-        sym.solve_in_place_scratch::<f64>(k, par),
-    ]))
-    .map_err(|_| "out of memory for the factorisation".to_string())?;
-    let stack = MemStack::new(&mut mem);
-    let mut lv = Vec::new();
-    lv.try_reserve_exact(sym.len_val()).map_err(|_| {
-        format!(
-            "out of memory: the factor needs {:.1} GB",
-            sym.len_val() as f64 * 8e-9
-        )
-    })?;
-    lv.resize(sym.len_val(), 0.0f64);
-    let mut sub = vec![0.0f64; m];
-    let mut pf = vec![0usize; m];
-    let mut pi = vec![0usize; m];
-    let lblt = sym.factorize_numeric_intranode_lblt(
-        &mut lv,
-        &mut sub,
-        &mut pf,
-        &mut pi,
-        a.as_ref(),
-        faer::Side::Lower,
-        par,
-        stack,
-        Default::default(),
-    );
-    let mut x = faer::Mat::<f64>::zeros(m, k);
-    for c in 0..k {
-        for r in 0..n {
-            x[(2 * r, c)] = rhs[(r, c)].re;
-            x[(2 * r + 1, c)] = rhs[(r, c)].im;
+    let mut x = rhs.clone();
+    f.solve(&mut x);
+    Ok((0..x.ncols())
+        .map(|c| (0..n).map(|r| x[(r, c)]).collect())
+        .collect())
+}
+
+/// A sparse matrix by rows.
+struct Csr {
+    ptr: Vec<usize>,
+    col: Vec<u32>,
+    val: Vec<c64>,
+}
+
+impl Csr {
+    /// From entries (duplicates add up).
+    fn new(n: usize, mut trip: Vec<Triplet<usize, usize, c64>>) -> Csr {
+        trip.sort_unstable_by(|a, b| (a.row, a.col).cmp(&(b.row, b.col)));
+        let mut ptr = vec![0usize; n + 1];
+        let mut col: Vec<u32> = Vec::with_capacity(trip.len() / 2);
+        let mut val: Vec<c64> = Vec::with_capacity(trip.len() / 2);
+        let mut last = (usize::MAX, usize::MAX);
+        for t in &trip {
+            if (t.row, t.col) == last {
+                *val.last_mut().unwrap() += t.val;
+            } else {
+                col.push(t.col as u32);
+                val.push(t.val);
+                ptr[t.row + 1] += 1;
+                last = (t.row, t.col);
+            }
+        }
+        for i in 0..n {
+            ptr[i + 1] += ptr[i];
+        }
+        Csr { ptr, col, val }
+    }
+
+    fn n(&self) -> usize {
+        self.ptr.len() - 1
+    }
+
+    /// y = A x, rows split over the threads.
+    fn mul(&self, x: &[c64], y: &mut [c64]) {
+        let threads = std::thread::available_parallelism().map_or(4, |t| t.get());
+        let chunk = self.n().div_ceil(threads).max(1);
+        std::thread::scope(|sc| {
+            for (k, ys) in y.chunks_mut(chunk).enumerate() {
+                sc.spawn(move || {
+                    for (i, yi) in ys.iter_mut().enumerate() {
+                        let r = k * chunk + i;
+                        let mut acc = czero();
+                        for p in self.ptr[r]..self.ptr[r + 1] {
+                            acc += self.val[p] * x[self.col[p] as usize];
+                        }
+                        *yi = acc;
+                    }
+                });
+            }
+        });
+    }
+}
+
+/// Right-preconditioned restarted flexible GMRES for A x = b, to a relative
+/// residual of `tol`. Returns the iterations taken, or an error.
+fn gmres(
+    a: &Csr,
+    m: &dyn Fn(&[c64], &mut [c64]),
+    b: &[c64],
+    x: &mut [c64],
+    tol: f64,
+    max_it: usize,
+) -> Result<usize, String> {
+    const RESTART: usize = 30;
+    let n = b.len();
+    let norm = |v: &[c64]| v.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
+    let dotc = |u: &[c64], v: &[c64]| -> c64 {
+        u.iter().zip(v).map(|(p, q)| p.conj() * q).sum()
+    };
+    let bn = norm(b).max(1e-300);
+    let mut tmp = vec![czero(); n];
+    let mut w = vec![czero(); n];
+    let mut z = vec![czero(); n];
+    let mut it = 0;
+    loop {
+        a.mul(x, &mut tmp);
+        let r: Vec<c64> = b.iter().zip(&tmp).map(|(p, q)| p - q).collect();
+        let beta = norm(&r);
+        if beta / bn < tol {
+            return Ok(it);
+        }
+        if it >= max_it {
+            return Err(format!(
+                "iterative solver: residual {:.1e} after {it} iterations",
+                beta / bn
+            ));
+        }
+        let mut v: Vec<Vec<c64>> = vec![r.iter().map(|q| q / beta).collect()];
+        let mut h = vec![vec![czero(); RESTART]; RESTART + 1];
+        // Flexible GMRES: keep M v (a single-precision M is linear only to
+        // its rounding, so it is not applied again to the combination).
+        let mut zs: Vec<Vec<c64>> = Vec::with_capacity(RESTART);
+        let (mut cs, mut sn) = (vec![czero(); RESTART], vec![czero(); RESTART]);
+        let mut g = vec![czero(); RESTART + 1];
+        g[0] = c64::new(beta, 0.0);
+        let mut k = 0;
+        while k < RESTART && it < max_it {
+            m(&v[k], &mut z);
+            a.mul(&z, &mut w);
+            zs.push(z.clone());
+            for j in 0..=k {
+                let hj = dotc(&v[j], &w);
+                h[j][k] = hj;
+                for (wi, vi) in w.iter_mut().zip(&v[j]) {
+                    *wi -= hj * vi;
+                }
+            }
+            let wn = norm(&w);
+            h[k + 1][k] = c64::new(wn, 0.0);
+            for j in 0..k {
+                let t = cs[j].conj() * h[j][k] + sn[j].conj() * h[j + 1][k];
+                h[j + 1][k] = -sn[j] * h[j][k] + cs[j] * h[j + 1][k];
+                h[j][k] = t;
+            }
+            let (p, q) = (h[k][k], h[k + 1][k]);
+            let d = (p.norm_sqr() + q.norm_sqr()).sqrt().max(1e-300);
+            cs[k] = p / d;
+            sn[k] = q / d;
+            h[k][k] = c64::new(d, 0.0);
+            h[k + 1][k] = czero();
+            g[k + 1] = -sn[k] * g[k];
+            g[k] = cs[k].conj() * g[k];
+            it += 1;
+            k += 1;
+            if it % 25 == 0 && std::env::var_os("TRACE_FEM_MESH").is_some() {
+                eprintln!("  gmres {it}: residual {:.1e}", g[k].norm() / bn);
+            }
+            if g[k].norm() / bn < tol || wn < 1e-300 {
+                break;
+            }
+            v.push(w.iter().map(|q| q / wn).collect());
+        }
+        // Back-substitute and update x += M⁻¹ V y.
+        let mut y = vec![czero(); k];
+        for i in (0..k).rev() {
+            let mut acc = g[i];
+            for j in i + 1..k {
+                acc -= h[i][j] * y[j];
+            }
+            y[i] = acc / h[i][i];
+        }
+        for (j, yj) in y.iter().enumerate() {
+            for (xi, zi) in x.iter_mut().zip(&zs[j]) {
+                *xi += yj * zi;
+            }
         }
     }
-    lblt.solve_in_place_with_conj(faer::Conj::No, x.as_mut(), par, stack);
-    Ok((0..k)
-        .map(|c| {
-            (0..n)
-                .map(|r| c64::new(x[(2 * r, c)], -x[(2 * r + 1, c)]))
-                .collect()
+}
+
+/// The gradient of each free node's hat function, as Whitney unknowns
+/// (∇λm is the sum of the Whitney functions of the edges at m, +1 where
+/// the edge points into m). Nodes touching a PEC edge are left out.
+fn node_gradients(asm: &Assembled) -> Vec<Vec<(u32, f64)>> {
+    let nn = asm.tets.iter().flatten().map(|&v| v as usize + 1).max().unwrap_or(0);
+    let mut cols: Vec<Vec<(u32, f64)>> = vec![Vec::new(); nn];
+    let mut bad = vec![false; nn];
+    for (t, d) in asm.tets.iter().zip(&asm.dof) {
+        for (k, &(i, j)) in LOCAL_EDGES.iter().enumerate() {
+            let (a, b) = (t[i] as usize, t[j] as usize);
+            match d[k] {
+                Some(e) => {
+                    cols[a].push((e, -1.0));
+                    cols[b].push((e, 1.0));
+                }
+                None => {
+                    bad[a] = true;
+                    bad[b] = true;
+                }
+            }
+        }
+    }
+    cols.into_iter()
+        .zip(bad)
+        .filter(|(c, b)| !b && !c.is_empty())
+        .map(|(mut c, _)| {
+            c.sort_unstable_by_key(|x| x.0);
+            c.dedup_by_key(|x| x.0);
+            c
         })
-        .collect())
+        .collect()
+}
+
+/// The iterative solver factors sweep points below this share of the
+/// adaptive frequency at that share instead (TRACE_FEM_FPRE overrides).
+fn pre_frac() -> f64 {
+    std::env::var("TRACE_FEM_FPRE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(0.4)
+}
+
+/// Solves with the factor in single precision (half the memory of the
+/// direct solve), polished to double precision by preconditioned GMRES.
+/// `grad` (node gradients) adds an exact correction on the gradient
+/// fields, which single precision loses at low frequencies (there they
+/// are k² smaller than the rest of the matrix).
+fn iter_solve(
+    n: usize,
+    trip: Vec<Triplet<usize, usize, c64>>,
+    rhs: &faer::Mat<c64>,
+    grad: &[Vec<(u32, f64)>],
+    emass: &[[f32; 2]],
+    shift: c64,
+) -> Result<Vec<Vec<c64>>, String> {
+    // Scale to a unit diagonal first (D A D): the basis functions differ
+    // widely in size, and single precision keeps far more of the
+    // small-eigenvalue (low-frequency, gradient) part of a balanced matrix.
+    let mut diag = vec![0.0f64; n];
+    for t in &trip {
+        if t.row == t.col {
+            diag[t.row] += t.val.norm();
+        }
+    }
+    let d: Vec<f64> = diag
+        .iter()
+        .map(|&v| if v > 1e-300 { 1.0 / v.sqrt() } else { 1.0 })
+        .collect();
+    let mut trip = trip;
+    for t in trip.iter_mut() {
+        t.val *= d[t.row] * d[t.col];
+    }
+    // The factor: of A + shift·εM (A at the preconditioner's frequency,
+    // where single precision still holds the gradient fields).
+    let sh = |trip: &mut [Triplet<usize, usize, c64>], sg: f64| {
+        if shift.norm() > 0.0 {
+            for (t, m) in trip.iter_mut().zip(emass) {
+                t.val += shift * c64::new(m[0] as f64, m[1] as f64) * (sg * d[t.row] * d[t.col]);
+            }
+        }
+    };
+    sh(&mut trip, 1.0);
+    let m = SymFactor::<f32>::new(n, &trip)?;
+    sh(&mut trip, -1.0);
+    let a = Csr::new(n, trip);
+    // Gradient space in the scaled unknowns: G' = D⁻¹ G; S = G'ᵀ A' G'.
+    let g: Vec<Vec<(u32, f64)>> = grad
+        .iter()
+        .map(|c| c.iter().map(|&(e, sg)| (e, sg / d[e as usize])).collect())
+        .collect();
+    let mut owner: Vec<[(u32, f64); 2]> = vec![[(u32::MAX, 0.0); 2]; n];
+    for (m, c) in g.iter().enumerate() {
+        for &(e, w) in c {
+            let o = &mut owner[e as usize];
+            let k = if o[0].0 == u32::MAX { 0 } else { 1 };
+            o[k] = (m as u32, w);
+        }
+    }
+    let mut st: Vec<Triplet<usize, usize, c64>> = Vec::new();
+    for r in 0..n {
+        for &(mr, wr) in &owner[r] {
+            if mr == u32::MAX {
+                continue;
+            }
+            for p in a.ptr[r]..a.ptr[r + 1] {
+                for &(mc, wc) in &owner[a.col[p] as usize] {
+                    if mc != u32::MAX {
+                        st.push(Triplet::new(mr as usize, mc as usize, a.val[p] * (wr * wc)));
+                    }
+                }
+            }
+        }
+    }
+    drop(owner);
+    let ng = g.len();
+    let sf = if ng > 0 {
+        Some(SymFactor::<f64>::new(ng, &st)?)
+    } else {
+        None
+    };
+    drop(st);
+    let coarse = |r: &[c64], z: &mut [c64]| {
+        let Some(sf) = &sf else { return };
+        let mut q: Vec<c64> = g
+            .iter()
+            .map(|c| c.iter().map(|&(e, w)| r[e as usize] * w).sum())
+            .collect();
+        sf.solve_vec(&mut q);
+        for (c, qm) in g.iter().zip(&q) {
+            for &(e, w) in c {
+                z[e as usize] += qm * w;
+            }
+        }
+    };
+    // z = G S⁻¹ Gᵀ r, then the single-precision factor on what is left,
+    // then the gradient part once more.
+    let pre = |r: &[c64], z: &mut [c64]| {
+        z.iter_mut().for_each(|v| *v = czero());
+        coarse(r, z);
+        let mut az = vec![czero(); n];
+        a.mul(z, &mut az);
+        let mut r2: Vec<c64> = r.iter().zip(&az).map(|(p, q)| p - q).collect();
+        m.solve_vec(&mut r2);
+        for (zi, ri) in z.iter_mut().zip(&r2) {
+            *zi += ri;
+        }
+        a.mul(z, &mut az);
+        let r3: Vec<c64> = r.iter().zip(&az).map(|(p, q)| p - q).collect();
+        coarse(&r3, z);
+    };
+    let mut out = Vec::with_capacity(rhs.ncols());
+    for c in 0..rhs.ncols() {
+        let b: Vec<c64> = (0..n).map(|r| rhs[(r, c)] * d[r]).collect();
+        let mut y = vec![czero(); n];
+        let it = gmres(&a, &pre, &b, &mut y, 1e-9, 300)?;
+        if std::env::var_os("TRACE_FEM_MESH").is_some() {
+            eprintln!("  gmres: {it} iterations");
+        }
+        out.push(y.iter().zip(&d).map(|(v, s)| v * s).collect());
+    }
+    Ok(out)
 }
 
 /// Field and curl in tetrahedron `ti` at barycentric point `l`.
@@ -2075,7 +2481,7 @@ pub fn solve(
     let mut last_z0: Vec<f64> = Vec::new();
     loop {
         let t0 = std::time::Instant::now();
-        let (asm, sols, s) = solve_at(model, &mesh, setup.f_adapt, setup.order)?;
+        let (asm, sols, s) = solve_at(model, &mesh, setup.f_adapt, setup.order, setup.iterative, 0.0)?;
         last_unknowns = asm.n;
         let z0: Vec<f64> = asm.ports.iter().map(|p| p.info.z0).collect();
         // Converge on the S-parameters the user gets (renormalised), and
@@ -2176,7 +2582,14 @@ pub fn solve(
     let mut out_s = Vec::new();
     let mut info = Vec::new();
     for (k, &f) in sweep.iter().enumerate() {
-        let (asm, _, s) = solve_at(model, &mesh, f, setup.order)?;
+        let (asm, _, s) = solve_at(
+            model,
+            &mesh,
+            f,
+            setup.order,
+            setup.iterative,
+            pre_frac() * setup.f_adapt,
+        )?;
         let z0: Vec<f64> = asm.ports.iter().map(|p| p.info.z0).collect();
         let s = match setup.z_ref {
             Some(z) => renormalise(&s, &z0, z),
@@ -2627,5 +3040,28 @@ mod tests {
         let p = r.s[0][0].norm_sqr() + r.s[0][2].norm_sqr();
         assert!((p - 1.0).abs() < 0.005, "power {p}");
         assert!(r.s[0][0].norm() < 0.02, "S11 {}", r.s[0][0].norm());
+    }
+
+    #[test]
+    fn iterative_solver_matches_direct() {
+        let m = line(LineKind::Microstrip, 10.0, 5.0, 4.0, 0.0, 200.0);
+        let run = |it: bool| {
+            let setup = Setup {
+                f_adapt: 5.0,
+                sweep: vec![1.0, 5.0],
+                max_unknowns: 40_000,
+                z_ref: None,
+                iterative: Some(it),
+                ..Setup::default()
+            };
+            solve(&m, &setup, |_| true).unwrap()
+        };
+        let (d, i) = (run(false), run(true));
+        assert_eq!(d.unknowns, i.unknowns);
+        for (a, b) in d.s.iter().zip(&i.s) {
+            for (x, y) in a.iter().zip(b) {
+                assert!((*x - *y).norm() < 1e-6, "{x} vs {y}");
+            }
+        }
     }
 }

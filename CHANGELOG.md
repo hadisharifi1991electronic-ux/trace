@@ -3,6 +3,25 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.94.0 (2026-11-24)
+
+3D FEM: a fast, interpolating frequency sweep:
+
+- The sweep solves only enough frequencies to pin the response down
+  (the ends, then the middle of the widest gap, until two new points in a
+  row land within 0.005 of what the solved ones predict) and fills in the
+  rest with rational interpolation. `trace via ... --check fem` now gives
+  100 frequencies (the Touchstone has them all; the table shows ten).
+  ADRV pair via: 100 frequencies from 10 solves in 18 minutes (0.93.0: 10
+  frequencies in 28 minutes), matching a solve at every point to 0.01 dB.
+  TRACE_FEM_INTERP=0 solves every point.
+- One single-precision factor serves the whole sweep (one more below 40%
+  of the adaptive frequency), and all port excitations are solved
+  together, so each sweep point is a few GMRES iterations, not a factor.
+- Adaptive passes no longer stop early when a full refinement would pass
+  `--fem-dof`: the worst half (or quarter) of the flagged tetrahedra is
+  refined instead (on the ADRV board 0.93.0 stopped after 2 passes).
+
 ## 0.93.0 (2026-11-24)
 
 3D FEM: a low-memory solver, so big models converge:

@@ -2775,7 +2775,7 @@ pub fn solve(
         let eta = estimate(&mesh, &asm, &sols, setup.f_adapt);
         let mut order: Vec<usize> = (0..eta.len()).collect();
         order.sort_by(|a, b| eta[*b].partial_cmp(&eta[*a]).unwrap());
-        let take = ((eta.len() as f64) * frac).ceil() as usize;
+        let mut take = ((eta.len() as f64) * frac).ceil() as usize;
         let mut marked = vec![false; eta.len()];
         let mut edges = Vec::new();
         for &i in order.iter().take(take) {
@@ -2810,8 +2810,26 @@ pub fn solve(
         let before = mesh.clone();
         let per = asm.n as f64 / before.tets.len().max(1) as f64;
         mesh.refine(&marked, &edges);
-        // Over the limit: stop on the last solved mesh (the sweep uses it).
-        if mesh.tets.len() as f64 * per > setup.max_unknowns as f64 {
+        // Over the limit: refine fewer (the worst half, then a quarter),
+        // else stop on the last solved mesh (the sweep uses it).
+        let mut fits = mesh.tets.len() as f64 * per <= setup.max_unknowns as f64;
+        for _ in 0..3 {
+            if fits {
+                break;
+            }
+            take /= 2;
+            if take < eta.len() / 50 {
+                break;
+            }
+            mesh = before.clone();
+            marked.iter_mut().for_each(|m| *m = false);
+            for &i in order.iter().take(take) {
+                marked[i] = true;
+            }
+            mesh.refine(&marked, &edges);
+            fits = mesh.tets.len() as f64 * per <= setup.max_unknowns as f64;
+        }
+        if !fits {
             mesh = before;
             break;
         }

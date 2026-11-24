@@ -3,6 +3,43 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.98.0 (2026-11-24)
+
+Vias and cut-outs that look real, with their fields on them:
+
+- A new realistic 3D view of any 3D FEM model (a via, a board cut-out, a
+  planar window), ray cast on the CPU: copper with its real thickness,
+  plated barrels with their drilled holes, pads, traces, planes with
+  their antipads, see-through laminate (amber, deeper for higher Er),
+  wave ports, soft shadows, a metal look with reflections, box outline,
+  axes and a scale bar. By default it is cut open through the signal via,
+  so the barrel, the pads and the antipads show in section.
+- The solver keeps the fields of one excitation on a 3D grid after the
+  last pass. They paint |E| or |H| on the cut face, or the surface
+  current |n x H| on every copper surface, on a dB scale, as the
+  magnitude or at any phase; a GIF animates one cycle.
+- App: Via window > "3D model…": drag to turn, right-drag to move, wheel
+  to zoom (a quick picture while moving, a fine one when still); cut
+  across x or y with a slider; laminate and shadows on or off; "Solve
+  fields (3D FEM)" at any frequency and driven port, then |E|, |H| or
+  surface current, Instant + phase slider, Animate; save a PNG (1800 x
+  1200) or a GIF.
+- Command line: `--render FILE.png|FILE.gif` on `trace via ... --check
+  fem`, `trace cutout`, `trace planar` and `trace fem`, with `--field
+  e|h|j|none`, `--field-ghz`, `--field-port`, `--view AZ,EL[,ZOOM]`,
+  `--cut y=MIL|x=MIL|none`, `--phase`, `--range`, `--size`, `--frames`,
+  `--geometry-only` (draw and stop before solving).
+- GIFs of shaded scenes get their own palette (median cut), so copper
+  and laminate no longer band.
+- `trace cutout` and `trace planar`: `--fmin` and `--points` set the
+  sweep (default 100 points up to --fmax, as before).
+- RF report: a termination within a fifth of a wavelength of the chip
+  (about 200 mil at 6 GHz; it was a tenth, about 100 mil) is taken as
+  terminating the chip, so clock terminations at 140 to 180 mil no
+  longer read as about 3.5 dB of loss.
+- Checked: `trace via --fields 6 out.gif` writes the field animation (not
+  a Touchstone) under the .gif name.
+
 ## 0.97.0 (2026-11-24)
 
 Board cut-outs with many nets:

@@ -841,9 +841,11 @@ pub fn run(
         let mut term = None;
         let mut corr = 0.0;
         let top = setup.band.1;
-        // A tenth of a wavelength at the top, in the board, mil: closer
-        // than that the line between termination and chip barely turns.
-        let short = 299_792_458.0 / (top * 1e9) / 25.4e-6 / 10.0 / 1.9;
+        // A fifth of a wavelength at the top, in the board (about 200 mil
+        // at 6 GHz), mil: closer than that the open line between the
+        // termination and a high-impedance chip stays well short of its
+        // quarter-wave resonance, so the termination still sets the match.
+        let short = 299_792_458.0 / (top * 1e9) / 25.4e-6 / 5.0 / 1.9;
         if let Ok(rep) = &r {
             let t = termination(rep, board);
             if let Some(t) = &t {

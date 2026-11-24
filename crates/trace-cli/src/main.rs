@@ -242,7 +242,8 @@ USAGE:
                                                 10 KB of memory each), the first mesh included.
                                                 <board> may be a stack-up file (.txt) alone: the via in that
                                                 stack-up, without a board
-    trace cutout <board> <x0,y0,x1,y1 | via:NET[,HALF]> [--fmax 6] [--fem-dof 400000] [--lossless] [--order 1|2]
+    trace cutout <board> <x0,y0,x1,y1 | via:NET[,HALF]> [--fmin 0] [--fmax 6] [--points 100] [--fem-dof 400000]
+              [--lossless] [--order 1|2]
               [--value C1=2.2pF]... [out.sNp] [smith.svg]
                                                 3D FEM cut-out of a board window through every layer, with
                                                 every net in it: traces, arcs, pads and pours on each layer,
@@ -251,14 +252,27 @@ USAGE:
                                                 side: one differential port); two-pad parts on the outer
                                                 layers are lumped ports as in planar. via:NET centres a
                                                 +-HALF mil (120) window on NET's via and its pair's.
-    trace planar <board> <layer> <x0,y0,x1,y1> [--fmax 6] [--fem-dof 400000] [--lossless]
-              [--value C1=2.2pF]... [out.sNp] [smith.svg]
+    trace planar <board> <layer> <x0,y0,x1,y1> [--fmin 0] [--fmax 6] [--points 100] [--fem-dof 400000]
+              [--lossless] [--value C1=2.2pF]... [out.sNp] [smith.svg]
                                                 Planar 3D FEM of a window (mil) of an outer layer: traces,
                                                 pads, pours and ground vias over the next layer's plane. Each
                                                 trace leaving the window is a wave port; each two-pad part is a
                                                 lumped port, so its value (from the board, or --value) goes in
                                                 afterwards: re-tune a matching network without solving again.
                                                 Writes the full N-port and a Smith chart of S11 with the parts.
+                                                --fmin/--points: the sweep (fmin 0: fmax/points to fmax).
+    3D view of any FEM model (via --check fem, cutout, planar, fem):
+              --render FILE.png|FILE.gif [--field e|h|j|none] [--field-ghz F] [--field-port N]
+              [--view AZ,EL[,ZOOM]] [--cut y=MIL|x=MIL|none] [--phase DEG] [--range 40]
+              [--size 1200x800] [--copper 1.4] [--no-laminate] [--frames 24] [--geometry-only]
+                                                A realistic ray-cast picture: copper with its thickness, plated
+                                                barrels with their holes, pads, antipads, see-through laminate,
+                                                wave ports, cut open through the signal via by default. --field e|h
+                                                paints |E| or |H| on the cut, j the surface current on the copper
+                                                (fields of port N driven, from the final mesh, at F, default the
+                                                adaptive frequency). A .gif animates the field through one cycle
+                                                (or turns the model without a field). --geometry-only draws it
+                                                and stops before solving.
     trace pairsize <board> <layer> [--zdiff 100] [--wmin W] [--wmax W] [--gap S] [--ghz 8] [--next D] [--xtalk 2]
                                                 Every track width and gap on a layer that gives the target Zdiff
                                                 (2D field solver), ranked by loss, with crosstalk and etch
@@ -368,12 +382,215 @@ USAGE:
 ";
 
 /// A stack-up file given with --stackup, put on every board loaded.
+/// The realistic 3D picture asked for with --render (any FEM command).
+static RENDER: std::sync::OnceLock<RenderOpts> = std::sync::OnceLock::new();
+
+#[derive(Clone, Debug)]
+struct RenderOpts {
+    out: Vec<String>,
+    view: trace_core::render3d::View,
+    /// None: the default cut through a signal barrel; Some(None): no cut.
+    cut: Option<Option<(usize, f64)>>,
+    field_ghz: Option<f64>,
+    port: usize,
+    frames: usize,
+    /// Draw the geometry and stop before solving.
+    only: bool,
+    copper: f64,
+}
+
+impl RenderOpts {
+    /// Takes --render FILE (.png or .gif, repeatable) and its options out
+    /// of the arguments.
+    fn take(args: &mut Vec<String>) -> Result<Option<RenderOpts>, String> {
+        let mut r = RenderOpts {
+            out: Vec::new(),
+            view: trace_core::render3d::View::default(),
+            cut: None,
+            field_ghz: None,
+            port: 0,
+            frames: 24,
+            only: false,
+            copper: 1.4,
+        };
+        let mut i = 0;
+        let mut any = false;
+        while i < args.len() {
+            let a = args[i].clone();
+            let val = |i: usize| args.get(i + 1).cloned().ok_or(format!("{a} needs a value"));
+            let n = match a.as_str() {
+                "--render" => {
+                    r.out.push(val(i)?);
+                    2
+                }
+                "--field" => {
+                    let v = val(i)?;
+                    r.view.overlay =
+                        trace_core::render3d::Overlay::parse(&v).ok_or("--field e|h|j|none")?;
+                    2
+                }
+                "--view" => {
+                    let v = val(i)?;
+                    let p: Vec<f64> = v.split(',').filter_map(|x| x.trim().parse().ok()).collect();
+                    if p.len() < 2 {
+                        return Err("--view AZ,EL[,ZOOM] (degrees)".into());
+                    }
+                    r.view.az = p[0];
+                    r.view.el = p[1];
+                    if let Some(z) = p.get(2) {
+                        r.view.zoom = *z;
+                    }
+                    2
+                }
+                "--cut" => {
+                    let v = val(i)?.to_ascii_lowercase();
+                    r.cut = Some(if v == "none" {
+                        None
+                    } else {
+                        let (ax, at) = v.split_once('=').ok_or("--cut x=MIL|y=MIL|none")?;
+                        let ax = match ax {
+                            "x" => 0,
+                            "y" => 1,
+                            _ => return Err("--cut x=MIL|y=MIL|none".into()),
+                        };
+                        Some((ax, at.parse().map_err(|_| "--cut x=MIL|y=MIL|none")?))
+                    });
+                    2
+                }
+                "--phase" => {
+                    r.view.phase = Some(val(i)?.parse().map_err(|_| "--phase DEG")?);
+                    2
+                }
+                "--field-ghz" => {
+                    r.field_ghz = Some(val(i)?.parse().map_err(|_| "--field-ghz GHz")?);
+                    2
+                }
+                "--field-port" => {
+                    let p: usize = val(i)?.parse().map_err(|_| "--field-port N (from 1)")?;
+                    r.port = p.max(1) - 1;
+                    2
+                }
+                "--range" => {
+                    r.view.range_db = val(i)?.parse().map_err(|_| "--range DB")?;
+                    2
+                }
+                "--frames" => {
+                    r.frames = val(i)?.parse().map_err(|_| "--frames N")?;
+                    2
+                }
+                "--size" => {
+                    let v = val(i)?;
+                    let (w, h) = v.split_once('x').ok_or("--size WxH")?;
+                    r.view.w = w.parse().map_err(|_| "--size WxH")?;
+                    r.view.h = h.parse().map_err(|_| "--size WxH")?;
+                    2
+                }
+                "--copper" => {
+                    r.copper = val(i)?.parse().map_err(|_| "--copper MIL")?;
+                    2
+                }
+                "--no-laminate" => {
+                    r.view.laminate = false;
+                    1
+                }
+                "--geometry-only" => {
+                    r.only = true;
+                    1
+                }
+                _ => 0,
+            };
+            if n == 0 {
+                i += 1;
+            } else {
+                any = true;
+                args.drain(i..i + n);
+            }
+        }
+        if !any {
+            return Ok(None);
+        }
+        if r.out.is_empty() {
+            return Err("3D view options need --render FILE.png|FILE.gif".into());
+        }
+        Ok(Some(r))
+    }
+
+    /// The field request for the solver (an overlay asked for).
+    fn ask(&self, f_adapt: f64) -> Option<trace_core::fem3d::FieldAsk> {
+        (self.view.overlay != trace_core::render3d::Overlay::None).then(|| {
+            trace_core::fem3d::FieldAsk {
+                f_ghz: self.field_ghz.unwrap_or(f_adapt),
+                port: self.port,
+                points: 1_500_000,
+            }
+        })
+    }
+}
+
+/// The fields to keep for --render, if asked.
+fn render_ask(f_adapt: f64) -> Option<trace_core::fem3d::FieldAsk> {
+    RENDER.get().and_then(|r| r.ask(f_adapt))
+}
+
+/// Saves the --render pictures of `model` (with `fields` when solved).
+/// Returns true when only the geometry was asked for (stop there).
+fn render_model(
+    model: &trace_core::fem3d::Model,
+    fields: Option<&trace_core::fem3d::FieldGrid>,
+    title: &str,
+) -> Result<bool, String> {
+    use trace_core::render3d;
+    let Some(r) = RENDER.get() else {
+        return Ok(false);
+    };
+    // Fields are drawn after the solve.
+    if fields.is_none() && !r.only && r.view.overlay != render3d::Overlay::None {
+        return Ok(false);
+    }
+    let t0 = std::time::Instant::now();
+    let sc = render3d::Scene::new(model, r.copper, 1.0);
+    let mut v = r.view.clone();
+    v.cut = match r.cut {
+        None => Some(sc.default_cut()),
+        Some(c) => c,
+    };
+    v.title = title.to_string();
+    for o in &r.out {
+        let low = o.to_ascii_lowercase();
+        if low.ends_with(".gif") {
+            // Animations: a smaller picture, one ray per pixel.
+            let mut vg = v.clone();
+            vg.w = vg.w.min(800);
+            vg.h = vg.h * vg.w / v.w.max(1);
+            vg.samples = 1;
+            let frames = render3d::frames(&sc, fields, &vg, r.frames);
+            std::fs::write(o, trace_core::emfield::gif_adaptive(&frames, 8))
+                .map_err(|e| e.to_string())?;
+        } else {
+            let pic = render3d::render(&sc, fields, &v);
+            std::fs::write(o, trace_core::emfield::png(&pic)).map_err(|e| e.to_string())?;
+        }
+        println!("Saved {o} (3D view, {:.1} s)", t0.elapsed().as_secs_f64());
+    }
+    Ok(r.only)
+}
+
 static STACKUP: std::sync::OnceLock<trace_core::Stackup> = std::sync::OnceLock::new();
 /// The assembly variant outputs are made for (`--variant`).
 static VARIANT: std::sync::OnceLock<String> = std::sync::OnceLock::new();
 
 fn main() -> ExitCode {
     let mut args: Vec<String> = std::env::args().skip(1).collect();
+    match RenderOpts::take(&mut args) {
+        Ok(Some(r)) => {
+            let _ = RENDER.set(r);
+        }
+        Ok(None) => {}
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    }
     if let Some(i) = args.iter().position(|a| a == "--stackup") {
         let Some(path) = args.get(i + 1).cloned() else {
             eprintln!("error: --stackup needs a file");
@@ -1090,12 +1307,19 @@ fn fem_run(kind: &str, rest: &[&str]) -> Result<(), String> {
         max_passes: num("passes", 10.0)? as usize,
         max_unknowns: num("maxdof", 650_000.0)? as usize,
         z_ref: if zref > 0.0 { Some(zref) } else { None },
+        fields: render_ask(f),
         ..fem3d::Setup::default()
     };
+    if render_model(&model, None, &format!("{kind} (3D FEM model)"))? {
+        return Ok(());
+    }
     let r = fem3d::solve(&model, &setup, |l| {
         eprintln!("{l}");
         true
     })?;
+    if r.fields.is_some() {
+        render_model(&model, r.fields.as_ref(), &format!("{kind} (3D FEM)"))?;
+    }
     println!(
         "{} after {} passes: {} tetrahedra, {} unknowns",
         if r.converged {
@@ -4262,6 +4486,8 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
         return Err("window: x0,y0,x1,y1 in mil, or via:NET[,HALF]".into());
     }
     let mut fmax = 6.0;
+    let mut fmin = 0.0;
+    let mut points = 100usize;
     let mut dof = 400_000usize;
     let mut order = 2usize;
     let mut lossy = true;
@@ -4271,6 +4497,8 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
     while let Some(a) = it.next() {
         match *a {
             "--fmax" => fmax = it.next().and_then(|x| x.parse().ok()).ok_or("--fmax GHz")?,
+            "--fmin" => fmin = it.next().and_then(|x| x.parse().ok()).ok_or("--fmin GHz")?,
+            "--points" => points = it.next().and_then(|x| x.parse().ok()).ok_or("--points N")?,
             "--fem-dof" => {
                 dof = it
                     .next()
@@ -4321,9 +4549,18 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
             }
         }
     }
+    let what = if all {
+        "Board cut-out"
+    } else {
+        "Planar window"
+    };
+    if render_model(&model, None, &format!("{what} (3D FEM model)"))? {
+        return Ok(());
+    }
     let setup = fem3d::Setup {
+        fields: render_ask(fmax),
         f_adapt: fmax,
-        sweep: (1..=100).map(|k| fmax * k as f64 / 100.0).collect(),
+        sweep: sweep_points(fmin, fmax, points),
         // Differential ports only: 100 ohm, as a pair is specified.
         z_ref: Some(
             if model
@@ -4345,6 +4582,9 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
         eprintln!("  {m}");
         true
     })?;
+    if sol.fields.is_some() {
+        render_model(&model, sol.fields.as_ref(), &format!("{what} (3D FEM)"))?;
+    }
     println!(
         "  {} after {} passes, {} unknowns, {:.0} s",
         if sol.converged {
@@ -5127,6 +5367,18 @@ fn via(file: &str, from: &str, to: &str, rest: &[&str]) -> Res {
     Ok(())
 }
 
+/// Sweep frequencies: `n` points from `fmin` (0: start at fmax/n) to fmax.
+fn sweep_points(fmin: f64, fmax: f64, n: usize) -> Vec<f64> {
+    let n = n.max(2);
+    if fmin <= 0.0 {
+        (1..=n).map(|k| fmax * k as f64 / n as f64).collect()
+    } else {
+        (0..n)
+            .map(|k| fmin + (fmax - fmin) * k as f64 / (n - 1) as f64)
+            .collect()
+    }
+}
+
 /// Solves the via `v` with the 3D FEM solver (adaptive, second order) and
 /// compares it with the FDTD result `r`.
 fn fem_compare(
@@ -5142,7 +5394,11 @@ fn fem_compare(
         eprintln!("{model:#?}");
     }
     let fmax = v.fmax_ghz;
+    if render_model(&model, None, "Via (3D FEM model)")? {
+        return Ok(());
+    }
     let setup = fem3d::Setup {
+        fields: render_ask(fmax),
         f_adapt: fmax,
         sweep: {
             // TRACE_FEM_SWEEP=n: other sweep points (quick checks).
@@ -5177,6 +5433,9 @@ fn fem_compare(
         eprintln!("  {l}");
         true
     })?;
+    if s.fields.is_some() {
+        render_model(&model, s.fields.as_ref(), "Via (3D FEM)")?;
+    }
     println!(
         "  {} after {} passes, {} tetrahedra, {} unknowns, {:.0} s; port Z0 {:.1} / {:.1} ohm",
         if s.converged {

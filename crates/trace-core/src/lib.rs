@@ -50,6 +50,7 @@ pub mod planar;
 pub mod pour;
 pub mod push;
 pub mod query;
+pub mod render3d;
 pub mod reuse;
 pub mod rfreport;
 pub mod route;

@@ -50,6 +50,8 @@ pub struct ViaWindow {
     accurate: bool,
     /// Field maps of the solve.
     fields: crate::fieldview::FieldView,
+    /// The realistic 3D model of the transition.
+    model3d: crate::model3d::Model3dWindow,
     /// The same transition in openEMS: run, outcome and its folder.
     oems_running: Option<(mpsc::Receiver<Solved>, Arc<AtomicU32>)>,
     oems: Option<Solved>,
@@ -83,6 +85,7 @@ impl Default for ViaWindow {
             df: 0.02,
             accurate: true,
             fields: Default::default(),
+            model3d: Default::default(),
             oems_running: None,
             oems: None,
             oems_dir: None,
@@ -137,6 +140,7 @@ impl ViaWindow {
     }
 
     pub fn show(&mut self, ctx: &egui::Context, board: &Board, stackup: &Stackup) {
+        self.model3d.show(ctx);
         if !self.open {
             return;
         }
@@ -541,6 +545,27 @@ impl ViaWindow {
                 ));
             } else {
                 ui.weak("A 3D solve takes from seconds to a few minutes.");
+            }
+            if ui
+                .add_enabled(
+                    self.setup.from != self.setup.to,
+                    egui::Button::new("3D model…"),
+                )
+                .on_hover_text(
+                    "The transition as it is built: copper with its thickness, the plated \
+                     barrels, pads, antipads and laminate, cut open; turn it with the mouse \
+                     and solve its fields (3D FEM) to paint |E|, |H| or the surface current on it",
+                )
+                .clicked()
+            {
+                match trace_core::fem3d::via(stackup, &self.setup) {
+                    Ok(m) => {
+                        let title =
+                            format!("Via {} to {}", name(self.setup.from), name(self.setup.to));
+                        self.model3d.set_model(m, &title, self.setup.fmax_ghz / 2.0);
+                    }
+                    Err(e) => self.sized_note = Some(format!("3D model: {e}")),
+                }
             }
             if let Some((setup, Ok(r))) = &self.result {
                 let title = format!("Via {} to {}", name(setup.from), name(setup.to));

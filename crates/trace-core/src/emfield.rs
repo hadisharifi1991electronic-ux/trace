@@ -755,14 +755,68 @@ fn nearest_index(
 /// An animated GIF looping forever, `delay` hundredths of a second per
 /// frame. All frames the same size.
 pub fn gif(frames: &[Raster], delay: u16) -> Vec<u8> {
+    gif_with(frames, delay, &palette())
+}
+
+/// An animated GIF with a palette made for its own pictures (median cut
+/// over all frames): for shaded scenes, where the map's palette bands.
+pub fn gif_adaptive(frames: &[Raster], delay: u16) -> Vec<u8> {
+    let mut px: Vec<[u8; 3]> = Vec::new();
+    for f in frames {
+        for c in f.rgb.chunks(3).step_by(5) {
+            px.push([c[0], c[1], c[2]]);
+        }
+    }
+    let mut boxes: Vec<Vec<[u8; 3]>> = vec![px];
+    while boxes.len() < 256 {
+        // Split the box with the widest channel spread (weighted by size).
+        let mut best = None;
+        for (i, b) in boxes.iter().enumerate() {
+            if b.len() < 2 {
+                continue;
+            }
+            for ch in 0..3 {
+                let (lo, hi) = b
+                    .iter()
+                    .fold((255u8, 0u8), |(l, h), c| (l.min(c[ch]), h.max(c[ch])));
+                let score = (hi - lo) as f64 * (b.len() as f64).sqrt();
+                if hi > lo && best.is_none_or(|(_, _, s)| score > s) {
+                    best = Some((i, ch, score));
+                }
+            }
+        }
+        let Some((i, ch, _)) = best else { break };
+        let mut b = boxes.swap_remove(i);
+        b.sort_unstable_by_key(|c| c[ch]);
+        let other = b.split_off(b.len() / 2);
+        boxes.push(b);
+        boxes.push(other);
+    }
+    let mut pal: Vec<[u8; 3]> = boxes
+        .iter()
+        .filter(|b| !b.is_empty())
+        .map(|b| {
+            let n = b.len() as u64;
+            let s = b.iter().fold([0u64; 3], |a, c| {
+                [a[0] + c[0] as u64, a[1] + c[1] as u64, a[2] + c[2] as u64]
+            });
+            [(s[0] / n) as u8, (s[1] / n) as u8, (s[2] / n) as u8]
+        })
+        .collect();
+    while pal.len() < 256 {
+        pal.push([0, 0, 0]);
+    }
+    gif_with(frames, delay, &pal)
+}
+
+fn gif_with(frames: &[Raster], delay: u16, pal: &[[u8; 3]]) -> Vec<u8> {
     let (w, h) = (frames[0].w as u16, frames[0].h as u16);
-    let pal = palette();
     let mut out = Vec::new();
     out.extend_from_slice(b"GIF89a");
     out.extend_from_slice(&w.to_le_bytes());
     out.extend_from_slice(&h.to_le_bytes());
     out.extend_from_slice(&[0xf7, 0, 0]);
-    for c in &pal {
+    for c in pal {
         out.extend_from_slice(c);
     }
     // Loop forever.
@@ -782,7 +836,7 @@ pub fn gif(frames: &[Raster], delay: u16) -> Vec<u8> {
         let idx: Vec<u8> = f
             .rgb
             .chunks(3)
-            .map(|c| nearest_index(&pal, [c[0], c[1], c[2]], &mut cache))
+            .map(|c| nearest_index(pal, [c[0], c[1], c[2]], &mut cache))
             .collect();
         out.push(8);
         let data = lzw(&idx, 8);

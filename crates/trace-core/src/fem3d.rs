@@ -241,6 +241,153 @@ pub struct Setup {
     /// Linear solver: Some(true) the half-memory iterative one, Some(false)
     /// the direct one, None by size (iterative above 150k unknowns).
     pub iterative: Option<bool>,
+    /// Keep the fields of one excitation on a 3D grid (for the 3D view).
+    pub fields: Option<FieldAsk>,
+}
+
+/// Which fields to keep after the solve.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FieldAsk {
+    pub f_ghz: f64,
+    /// Excited port (index into the S-parameter ports).
+    pub port: usize,
+    /// About this many grid points over the box.
+    pub points: usize,
+}
+
+/// E and H phasors (per unit mode at the excited port) on a regular grid
+/// over the model box; zero inside conductors.
+#[derive(Clone, Debug)]
+pub struct FieldGrid {
+    pub f_ghz: f64,
+    pub port: String,
+    /// Grid origin (m), spacing (m) and node counts.
+    pub lo: [f64; 3],
+    pub h: f64,
+    pub n: [usize; 3],
+    /// Per node: x, y, z as (re, im).
+    pub e: Vec<[f32; 6]>,
+    pub hf: Vec<[f32; 6]>,
+}
+
+pub type C3 = [c64; 3];
+
+impl FieldGrid {
+    /// E and H at a point (trilinear between the nodes).
+    pub fn at(&self, p: [f64; 3]) -> (C3, C3) {
+        let mut ix = [0usize; 3];
+        let mut fr = [0.0; 3];
+        for a in 0..3 {
+            let u = ((p[a] - self.lo[a]) / self.h).clamp(0.0, (self.n[a] - 1) as f64);
+            let i = (u.floor() as usize).min(self.n[a].saturating_sub(2));
+            ix[a] = i;
+            fr[a] = u - i as f64;
+        }
+        let mut e = [czero(); 3];
+        let mut h = [czero(); 3];
+        for k in 0..8 {
+            let d = [k & 1, (k >> 1) & 1, (k >> 2) & 1];
+            let mut w = 1.0;
+            let mut id = [0; 3];
+            for a in 0..3 {
+                w *= if d[a] == 1 { fr[a] } else { 1.0 - fr[a] };
+                id[a] = (ix[a] + d[a]).min(self.n[a] - 1);
+            }
+            if w == 0.0 {
+                continue;
+            }
+            let j = (id[2] * self.n[1] + id[1]) * self.n[0] + id[0];
+            for a in 0..3 {
+                e[a] += c64::new(self.e[j][2 * a] as f64, self.e[j][2 * a + 1] as f64) * w;
+                h[a] += c64::new(self.hf[j][2 * a] as f64, self.hf[j][2 * a + 1] as f64) * w;
+            }
+        }
+        (e, h)
+    }
+}
+
+/// Samples one solution on a regular grid over the model box.
+fn field_grid(
+    model: &Model,
+    mesh: &Mesh,
+    asm: &Assembled,
+    sol: &[c64],
+    ask: &FieldAsk,
+    port: String,
+) -> FieldGrid {
+    let len: Vec<f64> = (0..3).map(|a| model.hi[a] - model.lo[a]).collect();
+    let vol = len[0] * len[1] * len[2];
+    let h = (vol / ask.points.max(1000) as f64).cbrt();
+    let n = [0, 1, 2].map(|a| ((len[a] / h).ceil() as usize + 1).max(2));
+    let total = n[0] * n[1] * n[2];
+    let mut e = vec![[0f32; 6]; total];
+    let mut hf = vec![[0f32; 6]; total];
+    let w = 2.0 * std::f64::consts::PI * ask.f_ghz * 1e9;
+    let mu0 = 4.0e-7 * std::f64::consts::PI;
+    // H = curl E / (-j w mu0).
+    let to_h = c64::new(0.0, 1.0 / (w * mu0));
+    let mut b = Vec::new();
+    for (ti, t) in asm.tets.iter().enumerate() {
+        if asm.dof[ti].iter().all(|x| x.is_none()) {
+            continue;
+        }
+        let pts = tet_nodes(mesh, t);
+        let geo = tet_geo(pts);
+        let mut lo = [f64::MAX; 3];
+        let mut hi = [f64::MIN; 3];
+        for p in &pts {
+            for a in 0..3 {
+                lo[a] = lo[a].min(p[a]);
+                hi[a] = hi[a].max(p[a]);
+            }
+        }
+        let r = [0, 1, 2].map(|a| {
+            let i0 = ((lo[a] - model.lo[a]) / h).ceil().max(0.0) as usize;
+            let i1 = (((hi[a] - model.lo[a]) / h).floor().max(-1.0) + 1.0) as usize;
+            (i0, i1.min(n[a]))
+        });
+        for k in r[2].0..r[2].1 {
+            for j in r[1].0..r[1].1 {
+                for i in r[0].0..r[0].1 {
+                    let p = [
+                        model.lo[0] + i as f64 * h,
+                        model.lo[1] + j as f64 * h,
+                        model.lo[2] + k as f64 * h,
+                    ];
+                    let mut l = [0.0; 4];
+                    let mut inside = true;
+                    for m in 0..4 {
+                        l[m] = dot(geo.g[m], sub(p, pts[(m + 1) % 4]));
+                        if l[m] < -1e-9 {
+                            inside = false;
+                            break;
+                        }
+                    }
+                    if !inside {
+                        continue;
+                    }
+                    let (ev, cv) = field_at(asm, &geo, ti, sol, &l, &mut b);
+                    let ix = (k * n[1] + j) * n[0] + i;
+                    for a in 0..3 {
+                        let hv = cv[a] * to_h;
+                        e[ix][2 * a] = ev[a].re as f32;
+                        e[ix][2 * a + 1] = ev[a].im as f32;
+                        hf[ix][2 * a] = hv.re as f32;
+                        hf[ix][2 * a + 1] = hv.im as f32;
+                    }
+                }
+            }
+        }
+    }
+    FieldGrid {
+        f_ghz: ask.f_ghz,
+        port,
+        lo: model.lo,
+        h,
+        n,
+        e,
+        hf,
+    }
 }
 
 impl Default for Setup {
@@ -259,6 +406,7 @@ impl Default for Setup {
             interp_tol: 0.005,
             interp_max: 20,
             iterative: None,
+            fields: None,
         }
     }
 }
@@ -299,6 +447,8 @@ pub struct Solution {
     pub z_ref: Option<f64>,
     pub tets: usize,
     pub unknowns: usize,
+    /// The fields asked for in the setup.
+    pub fields: Option<FieldGrid>,
 }
 
 impl Solution {
@@ -3285,6 +3435,38 @@ pub fn solve(
     let out_s: Vec<Vec<c64>> = sweep.iter().map(|&f| interp_s(&solved, f)).collect();
     let info: Vec<Vec<PortInfo>> = sweep.iter().map(|&f| interp_info(&solved, f)).collect();
     let solved_f: Vec<f64> = solved.iter().map(|p| p.0).collect();
+    let names: Vec<String> = model
+        .ports
+        .iter()
+        .map(|p| p.name.clone())
+        .chain(model.lumped.iter().map(|l| l.name.clone()))
+        .collect();
+    let fields = match &setup.fields {
+        Some(ask) => {
+            progress(&format!("fields at {:.3} GHz for the 3D view", ask.f_ghz));
+            let fa = anchor(ask.f_ghz, setup.f_adapt);
+            let (asm, sols, _) = solve_at(
+                model,
+                &mesh,
+                ask.f_ghz,
+                setup.order,
+                setup.iterative,
+                Some((fa, &mut cache)),
+            )?;
+            let p = ask.port.min(sols.len().saturating_sub(1));
+            sols.get(p).map(|sol| {
+                field_grid(
+                    model,
+                    &mesh,
+                    &asm,
+                    sol,
+                    ask,
+                    names.get(p).cloned().unwrap_or_default(),
+                )
+            })
+        }
+        None => None,
+    };
     Ok(Solution {
         ports: model
             .ports
@@ -3301,6 +3483,7 @@ pub fn solve(
         z_ref: setup.z_ref,
         tets: mesh.tets.len(),
         unknowns: last_unknowns,
+        fields,
     })
 }
 

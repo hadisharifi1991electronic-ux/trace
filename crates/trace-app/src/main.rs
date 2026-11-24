@@ -20,6 +20,7 @@ mod fpview;
 mod imp;
 mod jobs;
 mod menus;
+mod model3d;
 mod overlay;
 mod pairwin;
 mod panelize;

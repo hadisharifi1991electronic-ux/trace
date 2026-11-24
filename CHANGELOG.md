@@ -3,7 +3,7 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
-## 0.98.1 (2026-11-24)
+## 0.99.1 (2026-11-24)
 
 - 3D FEM: when the half-memory iterative solver cannot converge (seen on a
   DAC39RF12 EVM cut-out with four lumped ports: residual 1e-1, or stalled
@@ -11,8 +11,29 @@ is moved to the Recycle Bin.
   now falls back to the direct double-precision solve instead of
   stopping. A residual that stalls below 1e-4 is accepted (far below
   what moves S).
-- 3D view: outer-layer copper sits on top of the laminate (it was centred
-  on the surface, half in the air).
+- Via/cut-out 3D model: outer-layer copper sits on top of the laminate
+  (it was centred on the surface, half in the air).
+
+## 0.99.0 (2026-11-24)
+
+The whole-board 3D view, built as the board is:
+
+- Every copper layer sits at its stack-up height with its real
+  thickness: tracks, pours, planes and pads are solid copper with side
+  walls, not flat paint. Outer copper shows under the solder mask, bare
+  pads in gold.
+- Holes are drilled through the laminate, and every plated hole has its
+  barrel (with the plating thickness), joined to the annular rings on
+  each layer it reaches. Backdrilled stubs have no barrel left.
+- X-ray (button or X key): the laminate and mask go clear and the copper
+  half clear, coloured by layer, so the inner layers show through. A
+  Layers menu shows or hides each copper layer.
+- Section: cut the board open across x or y anywhere with a slider, and
+  keep either side. The cut face is drawn solid: core and prepreg
+  bands, every copper layer, and the barrels of the vias it passes
+  through.
+- `TRACE_OPEN=3d:<spec>` opens the 3D view set up for screenshots
+  (xray, section, y, flip, pos=, hide=, yaw=, pitch=, zoom=, at=).
 
 ## 0.98.0 (2026-11-24)
 

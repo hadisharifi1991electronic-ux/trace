@@ -315,6 +315,10 @@ impl App {
                     eprintln!("symbol editor: {e}");
                 }
                 app.schem.symedit.open = true;
+            } else if let Some(rest) = w.strip_prefix("3d") {
+                // 3d[:spec]: the 3D view, set as `View3d::apply_spec` reads.
+                app.mode3d = true;
+                app.view3d.apply_spec(rest.trim_start_matches(':'));
             } else if let Some(rest) = w.strip_prefix("rules") {
                 let kind = rest.strip_prefix(':').filter(|k| !k.is_empty());
                 app.rules_win.open_at(kind);

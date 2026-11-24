@@ -1569,7 +1569,7 @@ fn solve_at(
     f_ghz: f64,
     order: usize,
     iterative: Option<bool>,
-    f_pre: f64,
+    pre: Option<(f64, &mut Option<Precond>)>,
 ) -> Result<(Assembled, Vec<Vec<c64>>, Vec<c64>), String> {
     let asm = assemble_mesh(model, mesh, f_ghz, order)?;
     let k0 = 2.0 * std::f64::consts::PI * f_ghz * 1e9 / C0;
@@ -1676,9 +1676,22 @@ fn solve_at(
         }
     }
     let y = if iter {
-        let kp = 2.0 * std::f64::consts::PI * f_pre.max(f_ghz) * 1e9 / C0;
+        let (fp, cache) = match pre {
+            Some((fp, c)) => (fp, Some(c)),
+            None => (f_ghz, None),
+        };
+        let kp = 2.0 * std::f64::consts::PI * fp * 1e9 / C0;
         let shift = c64::new(k0 * k0 - kp * kp, 0.0);
-        iter_solve(n, trip, &cols, &node_gradients(&asm), &emass, shift)?
+        iter_solve(
+            n,
+            trip,
+            &cols,
+            &node_gradients(&asm),
+            &emass,
+            shift,
+            fp,
+            cache,
+        )?
     } else {
         sym_solve(n, trip, &cols)?
     };
@@ -2133,13 +2146,35 @@ fn node_gradients(asm: &Assembled) -> Vec<Vec<(u32, f64)>> {
     out
 }
 
-/// The iterative solver factors sweep points below this share of the
-/// adaptive frequency at that share instead (TRACE_FEM_FPRE overrides).
-fn pre_frac() -> f64 {
-    std::env::var("TRACE_FEM_FPRE")
-        .ok()
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(0.4)
+/// The iterative solver's single-precision factor, kept between sweep
+/// points that share its frequency.
+pub struct Precond {
+    f: f64,
+    n: usize,
+    d: Vec<f64>,
+    m: SymFactor<f32>,
+}
+
+/// The frequency whose factor preconditions a sweep point at `f`: the
+/// adaptive frequency, or for points below 40% of it (where single
+/// precision loses too much of the static field), 40% of it.
+/// TRACE_FEM_FPRE sets the share; TRACE_FEM_ANCHOR=0 factors every point.
+fn anchor(f: f64, f_adapt: f64) -> f64 {
+    let env = |k: &str, d: f64| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(d)
+    };
+    let lo = env("TRACE_FEM_FPRE", 0.4) * f_adapt;
+    if env("TRACE_FEM_ANCHOR", 1.0) == 0.0 {
+        return f.max(lo);
+    }
+    if f >= lo {
+        f_adapt
+    } else {
+        lo
+    }
 }
 
 /// Solves with the factor in single precision (half the memory of the
@@ -2154,36 +2189,59 @@ fn iter_solve(
     grad: &[Vec<(u32, f64)>],
     emass: &[[f32; 2]],
     shift: c64,
+    f_pre: f64,
+    cache: Option<&mut Option<Precond>>,
 ) -> Result<Vec<Vec<c64>>, String> {
-    // Scale to a unit diagonal first (D A D): the basis functions differ
-    // widely in size, and single precision keeps far more of the
-    // small-eigenvalue (low-frequency, gradient) part of a balanced matrix.
-    let mut diag = vec![0.0f64; n];
-    for t in &trip {
-        if t.row == t.col {
-            diag[t.row] += t.val.norm();
-        }
+    let mut local = None;
+    let slot = cache.unwrap_or(&mut local);
+    if slot
+        .as_ref()
+        .is_some_and(|p| p.n != n || (p.f - f_pre).abs() > 1e-9)
+    {
+        *slot = None;
     }
-    let d: Vec<f64> = diag
-        .iter()
-        .map(|&v| if v > 1e-300 { 1.0 / v.sqrt() } else { 1.0 })
-        .collect();
     let mut trip = trip;
-    for t in trip.iter_mut() {
-        t.val *= d[t.row] * d[t.col];
-    }
-    // The factor: of A + shift·εM (A at the preconditioner's frequency,
-    // where single precision still holds the gradient fields).
-    let sh = |trip: &mut [Triplet<usize, usize, c64>], sg: f64| {
-        if shift.norm() > 0.0 {
-            for (t, m) in trip.iter_mut().zip(emass) {
-                t.val += shift * c64::new(m[0] as f64, m[1] as f64) * (sg * d[t.row] * d[t.col]);
+    if slot.is_none() {
+        // Scale to a unit diagonal first (D A D): the basis functions
+        // differ widely in size, and single precision keeps far more of
+        // the small-eigenvalue (low-frequency, gradient) part of a
+        // balanced matrix.
+        let mut diag = vec![0.0f64; n];
+        for t in &trip {
+            if t.row == t.col {
+                diag[t.row] += t.val.norm();
             }
         }
+        let d: Vec<f64> = diag
+            .iter()
+            .map(|&v| if v > 1e-300 { 1.0 / v.sqrt() } else { 1.0 })
+            .collect();
+        // The factor: of A + shift·εM (A at the preconditioner's
+        // frequency, where single precision still holds the gradient
+        // fields).
+        // In place: scale and shift, factor, then take the shift off.
+        let em = |i: usize| {
+            emass
+                .get(i)
+                .map_or(czero(), |m| c64::new(m[0] as f64, m[1] as f64))
+        };
+        for (i, t) in trip.iter_mut().enumerate() {
+            t.val = (t.val + shift * em(i)) * (d[t.row] * d[t.col]);
+        }
+        let m = SymFactor::<f32>::new(n, &trip)?;
+        for (i, t) in trip.iter_mut().enumerate() {
+            t.val -= shift * em(i) * (d[t.row] * d[t.col]);
+        }
+        *slot = Some(Precond { f: f_pre, n, d, m });
+    } else if let Some(pc) = slot.as_ref() {
+        for t in trip.iter_mut() {
+            t.val *= pc.d[t.row] * pc.d[t.col];
+        }
+    }
+    let Some(pc) = slot.as_ref() else {
+        return Err("no preconditioner".into());
     };
-    sh(&mut trip, 1.0);
-    let m = SymFactor::<f32>::new(n, &trip)?;
-    sh(&mut trip, -1.0);
+    let (d, m) = (&pc.d, &pc.m);
     let a = Csr::new(n, trip);
     // Gradient space in the scaled unknowns: G' = D⁻¹ G; S = G'ᵀ A' G'.
     let g: Vec<Vec<(u32, f64)>> = grad
@@ -2258,7 +2316,7 @@ fn iter_solve(
         if std::env::var_os("TRACE_FEM_MESH").is_some() {
             eprintln!("  gmres: {it} iterations");
         }
-        out.push(y.iter().zip(&d).map(|(v, s)| v * s).collect());
+        out.push(y.iter().zip(d).map(|(v, s)| v * s).collect());
     }
     Ok(out)
 }
@@ -2505,7 +2563,7 @@ pub fn solve(
             setup.f_adapt,
             setup.order,
             setup.iterative,
-            0.0,
+            None,
         )?;
         last_unknowns = asm.n;
         let z0: Vec<f64> = asm.ports.iter().map(|p| p.info.z0).collect();
@@ -2606,6 +2664,9 @@ pub fn solve(
     };
     let mut out_s = Vec::new();
     let mut info = Vec::new();
+    // One single-precision factor serves the sweep points near its
+    // frequency (the iterative solver only).
+    let mut cache: Option<Precond> = None;
     for (k, &f) in sweep.iter().enumerate() {
         let (asm, _, s) = solve_at(
             model,
@@ -2613,7 +2674,7 @@ pub fn solve(
             f,
             setup.order,
             setup.iterative,
-            pre_frac() * setup.f_adapt,
+            Some((anchor(f, setup.f_adapt), &mut cache)),
         )?;
         let z0: Vec<f64> = asm.ports.iter().map(|p| p.info.z0).collect();
         let s = match setup.z_ref {

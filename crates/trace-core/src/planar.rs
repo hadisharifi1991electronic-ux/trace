@@ -292,10 +292,46 @@ pub fn model(
             "{open_vias} signal vias leave the layer and are left open"
         ));
     }
+    let (lumped, mut parts) = part_ports(board, &parts_pads, &xy, h, &mut notes);
+    // Lumped port indices count after all the wave ports.
+    let nw = ports.len();
+    for (k, p) in parts.iter_mut().enumerate() {
+        p.port = nw + k;
+    }
+    if ports.is_empty() {
+        return Err("no trace leaves the window: nothing to drive (widen the window so the line in and out cross its edge)".into());
+    }
+    let m = Model {
+        lo: [0.0; 3],
+        hi: [wx, wy, h + air],
+        walls: [Wall::Pec; 6],
+        er: 1.0,
+        solids,
+        sheets,
+        ports,
+        copper: lossy.then_some(Copper {
+            rough_um,
+            walls: [false, false, false, false, true, false],
+        }),
+        lumped,
+    };
+    Ok((m, parts, notes))
+}
+
+/// Two-pad parts: a lumped port across the gap between their pads, in the
+/// plane `z` (model metres; `xy` maps board mil to the model). Part ports
+/// count from 0 here; the caller adds the wave ports.
+pub(crate) fn part_ports(
+    board: &Board,
+    parts_pads: &std::collections::BTreeMap<u32, Vec<&crate::geometry::Pad>>,
+    xy: &dyn Fn(f64, f64) -> [f64; 2],
+    z: f64,
+    notes: &mut Vec<String>,
+) -> (Vec<Lumped>, Vec<Part>) {
     // Two-pad parts: a lumped port across the gap between their pads.
     let mut lumped = Vec::new();
     let mut parts = Vec::new();
-    for (c, pads) in &parts_pads {
+    for (c, pads) in parts_pads {
         let comp = &board.components[*c as usize];
         if pads.len() != 2 {
             continue;
@@ -351,40 +387,18 @@ pub fn model(
         parts.push(Part {
             designator: comp.designator.clone(),
             value,
-            port: ports.len() + lumped.len(),
+            port: lumped.len(),
         });
         lumped.push(Lumped {
             name: comp.designator.clone(),
-            z: h,
+            z,
             lo,
             hi,
             dir,
             r: 50.0,
         });
     }
-    // Lumped port indices count after all the wave ports.
-    let nw = ports.len();
-    for (k, p) in parts.iter_mut().enumerate() {
-        p.port = nw + k;
-    }
-    if ports.is_empty() {
-        return Err("no trace leaves the window: nothing to drive (widen the window so the line in and out cross its edge)".into());
-    }
-    let m = Model {
-        lo: [0.0; 3],
-        hi: [wx, wy, h + air],
-        walls: [Wall::Pec; 6],
-        er: 1.0,
-        solids,
-        sheets,
-        ports,
-        copper: lossy.then_some(Copper {
-            rough_um,
-            walls: [false, false, false, false, true, false],
-        }),
-        lumped,
-    };
-    Ok((m, parts, notes))
+    (lumped, parts)
 }
 
 /// What a part's value is as a load.

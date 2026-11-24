@@ -3,6 +3,60 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.97.0 (2026-11-24)
+
+Board cut-outs with many nets:
+
+- `trace cutout <board> <x0,y0,x1,y1>` (or `trace planar <board> all ...`):
+  a 3D FEM solve of a window of the board through every copper layer,
+  with every net in it. Traces, arcs, pads and pours sit on their own
+  layers; vias and through-hole pins are barrels with their real nets
+  (signal vias are no longer left open), with per-layer via pads.
+- Each trace that leaves the window over ground copper is a wave port,
+  referenced to the ground above and below it at the edge. A pair that
+  leaves side by side is one differential port; other close neighbours
+  share the gap. Two-pad parts on the top and bottom are lumped ports, as
+  in `planar`, so `--value` re-tunes them.
+- `via:NET[,HALF]` in place of the window centres it on NET's via (and
+  its pair's), +-120 mil by default.
+- A barrel through another net's pour that has no clearance there (a
+  negative plane, or lost voids) gets a ring, and a note says how many.
+- Prints every port's Z0, return loss and its strongest transmission.
+- `--order 1` (planar and cutout) for a lighter first-order solve of a
+  big window; S is referenced to 100 ohm when every port is a pair.
+- Checked on the CutiePi HDMI_D2 pair (TOP to L03 through its vias, six
+  layers, every net in a 90 mil window): 3 passes, 6 min, on 100 ohm
+  S21 -0.14 dB at 3 GHz and -0.32 dB at 6 GHz, S11 -24 / -16.5 dB. The
+  pair reads 108 ohm on L03 and 160 ohm on TOP. A single-ended
+  line through a 120 mil window passes -0.13 dB at 6 GHz.
+
+More line types in `trace fem`:
+
+- `trace fem cpw` and `trace fem cpwg`: coplanar waveguide, without and
+  with a plane under it (`g=` sets the gap to the coplanar grounds).
+- `s=SPACING` on microstrip, stripline, CPW or CPWG makes it an
+  edge-coupled pair, solved in the odd mode: Z0 is then the differential
+  impedance.
+- Checked: CPW (w 10, g 5 mil, thick Er 4) reads 73.8 ohm against 76.3
+  from conformal mapping, Er,eff 2.48 against 2.5; a microstrip pair reads
+  1.78x its single line, and CPWG reads below the bare microstrip.
+
+FEM solver:
+
+- The iterative solver no longer gives up when it stalls just short of
+  its 1e-9 target (anything under 1e-6 is taken).
+- A sweep point whose borrowed factor fails to precondition it (stall
+  or NaN) is factored at its own frequency instead of failing the run.
+- Pad and antipad edges stay in the first mesh: merged away, a via's
+  clearance ring closed up and shorted the via to the planes.
+
+FEM meshing:
+
+- Only the copper a port launches keeps its exact outline in the first
+  mesh (and where a trace meets its port face at an angle); the rest of a
+  cut-out's copper is refined by the passes. A dense window's first mesh
+  went from 281 M to 0.26 M tetrahedra.
+
 ## 0.96.0 (2026-11-24)
 
 Planar EM solver for traces and matching networks:

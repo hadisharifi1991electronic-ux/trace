@@ -17,10 +17,11 @@ on the board, for boards whose file has none.
 USAGE:
     trace inspect <board|file.SchDoc>           Summary of a board or sheet
     trace pairs <board> [max-skew]              Differential pair lengths and skew (default max-skew 5mil)
-    trace fem <waveguide|microstrip|stripline> [key=value ...] [-o out.s2p]
+    trace fem <waveguide|microstrip|stripline|cpw|cpwg> [key=value ...] [-o out.s2p]
                                                 3D FEM (HFSS-style): adaptive tetrahedral mesh to dS, wave ports,
                                                 S-parameter sweep. Keys: w h len (mil), er tand, a b (mm, waveguide;
-                                                len in mm too), f (adapt GHz), sweep=lo:hi:n, ds, passes, zref (0 = port Z0)
+                                                len in mm too), g (cpw/cpwg gap, mil), s (pair spacing, mil: odd mode,
+                                                Z0 differential), f (adapt GHz), sweep=lo:hi:n, ds, passes, zref (0 = port Z0)
     trace rules <board>                         Design rules by category and kind, in priority order
     trace rules <board> --net <net>             The rule of each kind that applies to a net
     trace rules <board> --check                 Rule problems and scope terms Trace does not judge
@@ -241,6 +242,15 @@ USAGE:
                                                 10 KB of memory each), the first mesh included.
                                                 <board> may be a stack-up file (.txt) alone: the via in that
                                                 stack-up, without a board
+    trace cutout <board> <x0,y0,x1,y1 | via:NET[,HALF]> [--fmax 6] [--fem-dof 400000] [--lossless] [--order 1|2]
+              [--value C1=2.2pF]... [out.sNp] [smith.svg]
+                                                3D FEM cut-out of a board window through every layer, with
+                                                every net in it: traces, arcs, pads and pours on each layer,
+                                                vias and pins as barrels with their real nets. Each trace that
+                                                leaves the window over ground is a wave port (a pair side by
+                                                side: one differential port); two-pad parts on the outer
+                                                layers are lumped ports as in planar. via:NET centres a
+                                                +-HALF mil (120) window on NET's via and its pair's.
     trace planar <board> <layer> <x0,y0,x1,y1> [--fmax 6] [--fem-dof 400000] [--lossless]
               [--value C1=2.2pF]... [out.sNp] [smith.svg]
                                                 Planar 3D FEM of a window (mil) of an outer layer: traces,
@@ -465,6 +475,7 @@ fn main() -> ExitCode {
         ["pdn", file, net, rest @ ..] => pdn_cmd(file, net, rest),
         ["via", file, from, to, rest @ ..] => via(file, from, to, rest),
         ["planar", file, layer, win, rest @ ..] => planar(file, layer, win, rest),
+        ["cutout", file, win, rest @ ..] => planar(file, "all", win, rest),
         ["zcheck", file, rest @ ..] => zcheck_cmd(file, rest),
         ["path" | "pathloss", file, rest @ ..] => path_cmd(file, rest),
         ["rf" | "rfreport", file, rest @ ..] => rf_cmd(file, rest),
@@ -1023,20 +1034,28 @@ fn fem_run(kind: &str, rest: &[&str]) -> Result<(), String> {
             };
             fem3d::waveguide(num("a", 22.86)?, num("b", 10.16)?, num("len", 20.0)?, slab)
         }
-        "microstrip" | "stripline" => {
-            let k = if kind == "microstrip" {
-                fem3d::LineKind::Microstrip
-            } else {
-                fem3d::LineKind::Stripline
+        "microstrip" | "stripline" | "cpw" | "cpwg" => {
+            let k = match kind {
+                "microstrip" => fem3d::LineKind::Microstrip,
+                "stripline" => fem3d::LineKind::Stripline,
+                "cpw" => fem3d::LineKind::Cpw,
+                _ => fem3d::LineKind::Cpwg,
             };
-            fem3d::line(
-                k,
-                num("w", 10.0)?,
-                num("h", 5.0)?,
-                num("er", 4.0)?,
-                num("tand", 0.0)?,
-                num("len", 300.0)?,
-            )
+            let gap = num("g", 5.0)?;
+            fem3d::line_spec(&fem3d::LineSpec {
+                kind: k,
+                w: num("w", 10.0)?,
+                h: num("h", 5.0)?,
+                er: num("er", 4.0)?,
+                tand: num("tand", 0.0)?,
+                len: num("len", 300.0)?,
+                gap,
+                // s=SPACING: an edge-coupled pair (differential Z0).
+                pair: match kv.get("s") {
+                    Some(v) => Some(v.parse::<f64>().map_err(|_| "s: not a number")?),
+                    None => None,
+                },
+            })
         }
         _ => return Err(format!("unknown model {kind}")),
     };
@@ -4162,23 +4181,89 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
     use trace_core::{fem3d, planar, smith};
     let b = board(file)?;
     let geo = b.layer_geometry();
-    let l = layer
-        .parse::<usize>()
-        .ok()
-        .and_then(|n| n.checked_sub(1))
-        .filter(|&n| n < geo.len())
-        .or_else(|| geo.iter().position(|g| g.name.eq_ignore_ascii_case(layer)))
-        .ok_or_else(|| format!("no copper layer {layer}"))? as u8;
-    let w: Vec<f64> = win
-        .split(',')
-        .map(|x| x.trim().parse::<f64>())
-        .collect::<Result<_, _>>()
-        .map_err(|_| "window: x0,y0,x1,y1 in mil")?;
+    // "all": a cut-out through every layer.
+    let all = layer.eq_ignore_ascii_case("all");
+    let l = if all {
+        0
+    } else {
+        layer
+            .parse::<usize>()
+            .ok()
+            .and_then(|n| n.checked_sub(1))
+            .filter(|&n| n < geo.len())
+            .or_else(|| geo.iter().position(|g| g.name.eq_ignore_ascii_case(layer)))
+            .ok_or_else(|| format!("no copper layer {layer} (or \"all\" for a cut-out)"))?
+            as u8
+    };
+    // "via:NET[,HALF]": a window HALF mil (default 120) about NET's first
+    // via, and its pair partner's vias beside it.
+    let w: Vec<f64> = if let Some(spec) = win.strip_prefix("via:") {
+        let (net, half) = match spec.rsplit_once(',') {
+            Some((n, h)) if h.parse::<f64>().is_ok() => (n, h.parse::<f64>().unwrap()),
+            _ => (spec, 120.0),
+        };
+        let id = b
+            .nets
+            .iter()
+            .position(|n| n.name.eq_ignore_ascii_case(net))
+            .ok_or_else(|| format!("no net {net}"))? as u32;
+        let partner = b
+            .diff_pairs
+            .iter()
+            .cloned()
+            .chain(trace_core::zcheck::name_pairs(&b))
+            .find_map(|p| {
+                if p.positive.eq_ignore_ascii_case(net) {
+                    Some(p.negative)
+                } else if p.negative.eq_ignore_ascii_case(net) {
+                    Some(p.positive)
+                } else {
+                    None
+                }
+            })
+            .and_then(|n| b.nets.iter().position(|x| x.name == n))
+            .map(|n| n as u32);
+        let vias = &b.geometry.vias;
+        let first = vias
+            .iter()
+            .find(|v| v.net == Some(id))
+            .ok_or_else(|| format!("net {net} has no via"))?;
+        let at = |v: &trace_core::geometry::Via| [v.at.x.mil(), v.at.y.mil()];
+        let c0 = at(first);
+        let near: Vec<[f64; 2]> = vias
+            .iter()
+            .filter(|v| v.net == Some(id) || (partner.is_some() && v.net == partner))
+            .map(at)
+            .filter(|p| (p[0] - c0[0]).hypot(p[1] - c0[1]) < 80.0)
+            .collect();
+        let c = [
+            near.iter().map(|p| p[0]).sum::<f64>() / near.len() as f64,
+            near.iter().map(|p| p[1]).sum::<f64>() / near.len() as f64,
+        ];
+        println!(
+            "Window about {} via(s) of {net}{} at ({:.1}, {:.1}) mil, +-{half} mil",
+            near.len(),
+            if partner.is_some() {
+                " and its pair"
+            } else {
+                ""
+            },
+            c[0],
+            c[1]
+        );
+        vec![c[0] - half, c[1] - half, c[0] + half, c[1] + half]
+    } else {
+        win.split(',')
+            .map(|x| x.trim().parse::<f64>())
+            .collect::<Result<_, _>>()
+            .map_err(|_| "window: x0,y0,x1,y1 in mil, or via:NET[,HALF]")?
+    };
     if w.len() != 4 {
-        return Err("window: x0,y0,x1,y1 in mil".into());
+        return Err("window: x0,y0,x1,y1 in mil, or via:NET[,HALF]".into());
     }
     let mut fmax = 6.0;
     let mut dof = 400_000usize;
+    let mut order = 2usize;
     let mut lossy = true;
     let mut values: Vec<(String, String)> = Vec::new();
     let mut outs: Vec<&str> = Vec::new();
@@ -4192,6 +4277,12 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
                     .and_then(|x| x.parse().ok())
                     .ok_or("--fem-dof N")?
             }
+            "--order" => {
+                order = it
+                    .next()
+                    .and_then(|x| x.parse().ok())
+                    .ok_or("--order 1|2")?
+            }
             "--lossless" => lossy = false,
             "--value" => {
                 let x = it.next().ok_or("--value REF=VALUE")?;
@@ -4202,10 +4293,16 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
             o => return Err(format!("unknown option {o}").into()),
         }
     }
-    let (model, parts, notes) =
-        planar::model(&b, [w[0], w[1], w[2], w[3]], l, lossy, 1.0).map_err(|e| e.to_string())?;
+    let win4 = [w[0], w[1], w[2], w[3]];
+    let (model, parts, notes) = if all {
+        trace_core::cutout::model(&b, win4, lossy, 1.0)
+    } else {
+        planar::model(&b, win4, l, lossy, 1.0)
+    }
+    .map_err(|e| e.to_string())?;
     println!(
-        "Planar 3D FEM: {} wave ports, {} parts as lumped ports, {} copper shapes",
+        "{} 3D FEM: {} wave ports, {} parts as lumped ports, {} copper shapes",
+        if all { "Cut-out" } else { "Planar" },
         model.ports.len(),
         parts.len(),
         model.sheets.len()
@@ -4213,11 +4310,34 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
     for n in &notes {
         println!("Note: {n}");
     }
+    if std::env::var_os("TRACE_CUTOUT_DEBUG").is_some() {
+        eprintln!("box {:?} {:?}", model.lo, model.hi);
+        for p in &model.ports {
+            eprintln!("{p:?}");
+            if let fem3d::Mode::Diff { plus, .. } | fem3d::Mode::Tem { signal: plus } = p.mode {
+                for s in model.sheets.iter().filter(|s| s.net == plus) {
+                    eprintln!("   sheet at {:.3e} {:?}", s.at, s.poly);
+                }
+            }
+        }
+    }
     let setup = fem3d::Setup {
         f_adapt: fmax,
         sweep: (1..=100).map(|k| fmax * k as f64 / 100.0).collect(),
-        z_ref: Some(50.0),
+        // Differential ports only: 100 ohm, as a pair is specified.
+        z_ref: Some(
+            if model
+                .ports
+                .iter()
+                .all(|p| matches!(p.mode, fem3d::Mode::Diff { .. }))
+            {
+                100.0
+            } else {
+                50.0
+            },
+        ),
         max_unknowns: dof,
+        order,
         ..fem3d::Setup::default()
     };
     let t0 = std::time::Instant::now();
@@ -4257,6 +4377,34 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
     let ext = planar::with_loads(&sol, &parts, &loads);
     let np = model.ports.len();
     let db = |z: trace_core::fdtd::Cx| 20.0 * z.abs().max(1e-12).log10();
+    if all || np > 2 {
+        // Each port: its Z0, return loss and where most of it goes.
+        let last = sol.f.len() - 1;
+        let picks = [last / 2, last];
+        println!(
+            "  Port                              Z0 (ohm)   {}",
+            picks
+                .iter()
+                .map(|&k| format!("@{:.2} GHz: Sii, best Sji (dB) to", sol.f[k]))
+                .collect::<Vec<_>>()
+                .join("   ")
+        );
+        for i in 0..np {
+            let z0 = sol.info.last().map_or(0.0, |x| x[i].z0);
+            let mut line = format!("  {:<34}{:7.1}", model.ports[i].name, z0);
+            for &k in &picks {
+                let s = &ext[k];
+                let best = (0..np)
+                    .filter(|&j| j != i)
+                    .max_by(|&a, &b| s[a * np + i].abs().total_cmp(&s[b * np + i].abs()));
+                line += &format!("   {:7.2}", db(s[i * np + i]));
+                if let Some(j) = best {
+                    line += &format!(" {:7.2} P{}", db(s[j * np + i]), j + 1);
+                }
+            }
+            println!("{line}");
+        }
+    }
     println!("  GHz     S11 (dB)  S21 (dB)");
     for (k, f) in sol.f.iter().enumerate() {
         if (k + 1) % 10 == 0 {

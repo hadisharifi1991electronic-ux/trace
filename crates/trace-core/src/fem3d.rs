@@ -505,17 +505,73 @@ impl Model {
                 }
             }
         }
+        // The nets the wave ports drive, with the port's face (axis, at).
+        let driven: Vec<(u32, usize, f64)> = self
+            .ports
+            .iter()
+            .flat_map(|p| {
+                let at = if p.high {
+                    self.hi[p.axis]
+                } else {
+                    self.lo[p.axis]
+                };
+                match p.mode {
+                    Mode::Tem { signal } => vec![(signal, p.axis, at)],
+                    Mode::Diff { plus, minus } => vec![(plus, p.axis, at), (minus, p.axis, at)],
+                    Mode::Te10 => Vec::new(),
+                }
+            })
+            .collect();
+        // Does sheet `s` reach a port face of its own net?
+        let at_port = |s: &Sheet| {
+            let (u, v) = others(s.axis);
+            driven.iter().any(|&(n, a, at)| {
+                if n != s.net || a == s.axis || s.poly.is_empty() {
+                    return false;
+                }
+                let k = if a == u {
+                    0
+                } else if a == v {
+                    1
+                } else {
+                    return false;
+                };
+                let lo = s.poly.iter().map(|p| p[k]).fold(f64::MAX, f64::min);
+                let hi = s.poly.iter().map(|p| p[k]).fold(f64::MIN, f64::max);
+                lo <= at + tol && hi >= at - tol
+            })
+        };
         for s in &self.sheets {
             br[s.axis].push(s.at);
             let (u, v) = others(s.axis);
-            // A signal sheet (a trace) keeps its outline: the wave ports
-            // take their mode from the mesh's own triangles, which must
-            // see the trace's width.
-            let keep = s.net != 0;
+            // A driven sheet that reaches its port (the trace a port
+            // launches) keeps its outline: the wave ports take their mode
+            // from the mesh's own triangles, which must see the trace's
+            // width. Other copper (a cut-out's many nets, the rest of a
+            // driven net's route) is detail the passes refine.
+            let keep = s.net != 0 && at_port(s);
             let to = if keep { &mut hard } else { &mut br };
             for p in &s.poly {
                 to[u].push(clamp(u, p[0]));
                 to[v].push(clamp(v, p[1]));
+            }
+            // Where its edges meet the port faces (a trace crossing at an
+            // angle has no corner there), so the port sees its width.
+            if keep {
+                for &(n, a, at) in &driven {
+                    if n != s.net || a == s.axis {
+                        continue;
+                    }
+                    let k = if a == u { 0 } else { 1 };
+                    let o = [u, v][1 - k];
+                    for i in 0..s.poly.len() {
+                        let (p, q) = (s.poly[i], s.poly[(i + 1) % s.poly.len()]);
+                        if (p[k] - at) * (q[k] - at) < 0.0 {
+                            let t = (at - p[k]) / (q[k] - p[k]);
+                            hard[o].push(clamp(o, p[1 - k] + (q[1 - k] - p[1 - k]) * t));
+                        }
+                    }
+                }
             }
             let caps: Vec<([f64; 2], f64)> = s
                 .holes
@@ -523,13 +579,15 @@ impl Model {
                 .flat_map(|(a, b, r)| [(*a, *r), (*b, *r)])
                 .chain(s.disc.iter().copied())
                 .collect();
+            // Pads and antipads keep their extents too: merged away, a
+            // via's clearance ring can close up and short it to a plane.
             for (c, r) in &caps {
                 hard[u].push(clamp(u, c[0]));
                 hard[v].push(clamp(v, c[1]));
-                br[u].push(clamp(u, c[0] - r));
-                br[u].push(clamp(u, c[0] + r));
-                br[v].push(clamp(v, c[1] - r));
-                br[v].push(clamp(v, c[1] + r));
+                hard[u].push(clamp(u, c[0] - r));
+                hard[u].push(clamp(u, c[0] + r));
+                hard[v].push(clamp(v, c[1] - r));
+                hard[v].push(clamp(v, c[1] + r));
             }
         }
         for p in &self.ports {
@@ -2338,6 +2396,12 @@ fn gmres(
                 s.done = true;
                 continue;
             }
+            // Stalled just short of the target (f32 factor round-off on
+            // a big, tangled model): still far below what moves S.
+            if s.it >= max_it && beta / s.bn < 1e-6 {
+                s.done = true;
+                continue;
+            }
             if s.it >= max_it {
                 return Err(format!(
                     "iterative solver: residual {:.1e} after {} iterations",
@@ -3125,14 +3189,32 @@ pub fn solve(
                        solved: &mut Vec<(f64, Vec<c64>, Vec<PortInfo>)>,
                        progress: &mut dyn FnMut(&str) -> bool|
      -> Result<(), String> {
-        let (asm, _, s) = solve_at(
+        let fa = anchor(f, setup.f_adapt);
+        let (asm, _, s) = match solve_at(
             model,
             &mesh,
             f,
             setup.order,
             setup.iterative,
-            Some((anchor(f, setup.f_adapt), &mut cache)),
-        )?;
+            Some((fa, &mut cache)),
+        ) {
+            Ok(x) => x,
+            // A factor from another frequency can fail to precondition
+            // a point (the iteration stalls or blows up): factor there.
+            Err(e) if e.starts_with("iterative solver") && (fa - f).abs() > 1e-9 => {
+                progress(&format!("sweep: {f:.4} GHz: {e}; factoring at this point"));
+                cache = None;
+                solve_at(
+                    model,
+                    &mesh,
+                    f,
+                    setup.order,
+                    setup.iterative,
+                    Some((f, &mut cache)),
+                )?
+            }
+            Err(e) => return Err(e),
+        };
         let z0 = port_infos(model, &asm)
             .iter()
             .map(|p| p.z0)
@@ -3267,49 +3349,128 @@ pub fn waveguide(a: f64, b: f64, len: f64, slab: Option<(f64, f64)>) -> Model {
 pub enum LineKind {
     Microstrip,
     Stripline,
+    /// Coplanar waveguide: grounds beside the strip, no plane under it.
+    Cpw,
+    /// Grounded coplanar: grounds beside the strip and a plane under it.
+    Cpwg,
 }
 
-/// A straight line `len` mil long: width `w`, dielectric `h` (microstrip:
-/// substrate height; stripline: the full plane-to-plane spacing with the
-/// strip in the middle), all in mil. The strip is a zero-thickness sheet.
-/// Microstrip has air above to 5h with a PEC lid (as a wave port needs a
-/// closed outline) and radiation side walls are not used: the box is
-/// shielded, wide enough (w + 10h) that the walls barely touch the field.
+/// A straight line `len` mil long: width `w`, dielectric `h` (microstrip,
+/// CPW, CPWG: substrate height; stripline: the full plane-to-plane spacing
+/// with the strip in the middle), all in mil. The strip is a zero-thickness
+/// sheet. Microstrip has air above to 5h with a PEC lid (as a wave port
+/// needs a closed outline) and radiation side walls are not used: the box
+/// is shielded, wide enough (w + 10h) that the walls barely touch the field.
 pub fn line(kind: LineKind, w: f64, h: f64, er: f64, tand: f64, len: f64) -> Model {
-    let width = w + 10.0 * h;
-    let (top, strip_z) = match kind {
-        LineKind::Microstrip => (6.0 * h, h),
-        LineKind::Stripline => (h, h / 2.0),
+    line_spec(&LineSpec {
+        kind,
+        w,
+        h,
+        er,
+        tand,
+        len,
+        gap: 0.0,
+        pair: None,
+    })
+}
+
+/// A line's cross-section, mil (see `line`).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct LineSpec {
+    pub kind: LineKind,
+    pub w: f64,
+    pub h: f64,
+    pub er: f64,
+    pub tand: f64,
+    pub len: f64,
+    /// CPW/CPWG: the gap from each strip to the coplanar ground.
+    pub gap: f64,
+    /// An edge-coupled pair at this spacing (edge to edge): the ports then
+    /// take the odd mode and Z0 is the differential impedance.
+    pub pair: Option<f64>,
+}
+
+/// The line of `spec`: single or a pair, any kind. Coplanar grounds run
+/// out to the side walls (perfect conductor, which stand in for the via
+/// fence joining a CPWG's grounds to its plane).
+pub fn line_spec(spec: &LineSpec) -> Model {
+    let LineSpec {
+        kind,
+        w,
+        h,
+        er,
+        tand,
+        len,
+        gap,
+        pair,
+    } = *spec;
+    let coplanar = matches!(kind, LineKind::Cpw | LineKind::Cpwg);
+    let span = match pair {
+        Some(s) => 2.0 * w + s,
+        None => w,
     };
-    let x0 = (width - w) / 2.0;
-    let mut solids = vec![Solid {
+    // Coplanar ground width: past where the field has died.
+    let gw = if coplanar {
+        (2.0 * (span + 2.0 * gap)).max(3.0 * h)
+    } else {
+        0.0
+    };
+    let width = if coplanar {
+        span + 2.0 * gap + 2.0 * gw
+    } else {
+        span + 10.0 * h
+    };
+    // Air under a CPW (no plane there), and over any outer line.
+    let air = if coplanar {
+        (5.0 * h).max(4.0 * (span + 2.0 * gap))
+    } else {
+        5.0 * h
+    };
+    let sub0 = if kind == LineKind::Cpw { air } else { 0.0 };
+    let (top, strip_z) = match kind {
+        LineKind::Stripline => (h, h / 2.0),
+        _ => (sub0 + h + air, sub0 + h),
+    };
+    let x0 = (width - span) / 2.0;
+    let box_ = |z0: f64, z1: f64, er: f64, tand: f64| Solid {
         shape: Shape::Box {
-            lo: [0.0, 0.0, 0.0],
-            hi: [width * MIL, len * MIL, h * MIL],
+            lo: [0.0, 0.0, z0 * MIL],
+            hi: [width * MIL, len * MIL, z1 * MIL],
         },
         fill: Fill::Dielectric { er, tand },
-    }];
-    if kind == LineKind::Microstrip {
-        solids.push(Solid {
-            shape: Shape::Box {
-                lo: [0.0, 0.0, h * MIL],
-                hi: [width * MIL, len * MIL, top * MIL],
-            },
-            fill: Fill::Dielectric { er: 1.0, tand: 0.0 },
-        });
+    };
+    let mut solids = vec![box_(sub0, sub0 + h, er, tand)];
+    if kind != LineKind::Stripline {
+        solids.push(box_(sub0 + h, top, 1.0, 0.0));
     }
-    let sheet = Sheet {
+    if kind == LineKind::Cpw {
+        solids.push(box_(0.0, sub0, 1.0, 0.0));
+    }
+    let strip = |xa: f64, xb: f64, net: u32| Sheet {
         axis: 2,
         at: strip_z * MIL,
         poly: vec![
-            [x0 * MIL, 0.0],
-            [(x0 + w) * MIL, 0.0],
-            [(x0 + w) * MIL, len * MIL],
-            [x0 * MIL, len * MIL],
+            [xa * MIL, 0.0],
+            [xb * MIL, 0.0],
+            [xb * MIL, len * MIL],
+            [xa * MIL, len * MIL],
         ],
         holes: Vec::new(),
         disc: None,
-        net: 1,
+        net,
+    };
+    let mut sheets = match pair {
+        Some(s) => vec![strip(x0, x0 + w, 1), strip(x0 + w + s, x0 + span, 2)],
+        None => vec![strip(x0, x0 + w, 1)],
+    };
+    if coplanar {
+        sheets.push(strip(0.0, x0 - gap, 0));
+        sheets.push(strip(x0 + span + gap, width, 0));
+    }
+    let mode = if pair.is_some() {
+        Mode::Diff { plus: 1, minus: 2 }
+    } else {
+        Mode::Tem { signal: 1 }
     };
     let port = |name: &str, high: bool| Port {
         name: name.into(),
@@ -3317,7 +3478,7 @@ pub fn line(kind: LineKind, w: f64, h: f64, er: f64, tand: f64, len: f64) -> Mod
         high,
         lo: [0.0, 0.0],
         hi: [width * MIL, top * MIL],
-        mode: Mode::Tem { signal: 1 },
+        mode,
         deembed: 0.0,
     };
     Model {
@@ -3326,7 +3487,7 @@ pub fn line(kind: LineKind, w: f64, h: f64, er: f64, tand: f64, len: f64) -> Mod
         walls: [Wall::Pec; 6],
         er: 1.0,
         solids,
-        sheets: vec![sheet],
+        sheets,
         ports: vec![port("P1", false), port("P2", true)],
         copper: None,
         lumped: Vec::new(),
@@ -3729,6 +3890,80 @@ mod tests {
             let g = interp_s(&solved, t)[0];
             assert!((g - f(t)).norm() < 1e-9, "{t}: {g} vs {}", f(t));
         }
+    }
+
+    #[test]
+    fn cpw_matches_conformal_mapping() {
+        // CPW w 10, g 5 mil on a thick (60 mil) Er 4 substrate: about the
+        // half-space value, Er,eff (Er + 1) / 2 and Z0 from K(k')/K(k).
+        let m = line_spec(&LineSpec {
+            kind: LineKind::Cpw,
+            w: 10.0,
+            h: 60.0,
+            er: 4.0,
+            tand: 0.0,
+            len: 150.0,
+            gap: 5.0,
+            pair: None,
+        });
+        let setup = Setup {
+            f_adapt: 2.0,
+            max_unknowns: 200_000,
+            delta_s: 0.005,
+            z_ref: None,
+            ..Setup::default()
+        };
+        let r = solve(&m, &setup, |_| true).unwrap();
+        let agm = |mut a: f64, mut b: f64| {
+            for _ in 0..30 {
+                (a, b) = ((a + b) / 2.0, (a * b).sqrt());
+            }
+            a
+        };
+        let kk = |k: f64| std::f64::consts::PI / (2.0 * agm(1.0, (1.0 - k * k).sqrt()));
+        let k: f64 = 10.0 / 20.0;
+        let z = 30.0 * std::f64::consts::PI / 2.5f64.sqrt() * kk((1.0 - k * k).sqrt()) / kk(k);
+        let i = r.info[0][0];
+        eprintln!("CPW Z0 {:.2} want {z:.2}, eeff {:.3}", i.z0, i.eeff);
+        assert!((i.eeff - 2.5).abs() < 0.15, "eeff {}", i.eeff);
+        assert!((i.z0 - z).abs() < 0.06 * z, "Z0 {}", i.z0);
+    }
+
+    #[test]
+    fn pairs_and_cpwg_ports() {
+        // An edge-coupled microstrip pair: Zdiff a bit under twice the
+        // single line's; a CPWG reads below the bare microstrip.
+        let setup = Setup {
+            f_adapt: 2.0,
+            max_passes: 3,
+            max_unknowns: 40_000,
+            z_ref: None,
+            ..Setup::default()
+        };
+        let z = |spec: LineSpec| solve(&line_spec(&spec), &setup, |_| true).unwrap().info[0][0].z0;
+        let base = LineSpec {
+            kind: LineKind::Microstrip,
+            w: 10.0,
+            h: 5.0,
+            er: 4.0,
+            tand: 0.0,
+            len: 100.0,
+            gap: 0.0,
+            pair: None,
+        };
+        let single = z(base);
+        let diff = z(LineSpec {
+            pair: Some(5.0),
+            ..base
+        });
+        let cpwg = z(LineSpec {
+            kind: LineKind::Cpwg,
+            gap: 4.0,
+            ..base
+        });
+        eprintln!("single {single:.1} diff {diff:.1} cpwg {cpwg:.1}");
+        assert!(diff > 1.4 * single && diff < 2.0 * single, "diff {diff}");
+        assert!(cpwg < single && cpwg > 0.7 * single, "cpwg {cpwg}");
     }
 
     #[test]

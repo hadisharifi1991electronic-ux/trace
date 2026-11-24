@@ -16,6 +16,7 @@ pub mod clear3d;
 pub mod compare;
 pub mod connectivity;
 pub mod constraints;
+pub mod cutout;
 pub mod drc;
 pub mod eco;
 pub mod edit;

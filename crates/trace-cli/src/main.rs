@@ -237,8 +237,8 @@ USAGE:
                                                 writes the model; --openems-read DIR reads a finished run
                                                 --check fem [--fem-dof N] also solves it with the 3D FEM solver
                                                 (HFSS-style: adaptive tetrahedra, second-order elements, wave
-                                                ports) and compares; N caps the unknowns (default 400000, about
-                                                30 KB of memory each), the first mesh included.
+                                                ports) and compares; N caps the unknowns (default 650000, about
+                                                10 KB of memory each), the first mesh included.
                                                 <board> may be a stack-up file (.txt) alone: the via in that
                                                 stack-up, without a board
     trace pairsize <board> <layer> [--zdiff 100] [--wmin W] [--wmax W] [--gap S] [--ghz 8] [--next D] [--xtalk 2]
@@ -1060,7 +1060,7 @@ fn fem_run(kind: &str, rest: &[&str]) -> Result<(), String> {
         sweep,
         delta_s: num("ds", 0.02)?,
         max_passes: num("passes", 10.0)? as usize,
-        max_unknowns: num("maxdof", 400_000.0)? as usize,
+        max_unknowns: num("maxdof", 650_000.0)? as usize,
         z_ref: if zref > 0.0 { Some(zref) } else { None },
         ..fem3d::Setup::default()
     };
@@ -4858,7 +4858,7 @@ fn fem_compare(
             (1..=n).map(|k| fmax * k as f64 / n as f64).collect()
         },
         z_ref: Some(r.z_ref),
-        max_unknowns: max_dof.unwrap_or(400_000),
+        max_unknowns: max_dof.unwrap_or(650_000),
         max_passes: std::env::var("TRACE_FEM_PASSES")
             .ok()
             .and_then(|v| v.parse().ok())

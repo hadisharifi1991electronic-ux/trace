@@ -173,7 +173,7 @@ impl Default for Setup {
             delta_s: 0.02,
             refine: 0.3,
             per_lambda: 6.0,
-            max_unknowns: 400_000,
+            max_unknowns: 650_000,
             z_ref: Some(50.0),
             order: 2,
             iterative: None,
@@ -1940,7 +1940,7 @@ struct Csr {
 impl Csr {
     /// From entries (duplicates add up).
     fn new(n: usize, mut trip: Vec<Triplet<usize, usize, c64>>) -> Csr {
-        trip.sort_unstable_by(|a, b| (a.row, a.col).cmp(&(b.row, b.col)));
+        trip.sort_unstable_by_key(|t| (t.row, t.col));
         let mut ptr = vec![0usize; n + 1];
         let mut col: Vec<u32> = Vec::with_capacity(trip.len() / 2);
         let mut val: Vec<c64> = Vec::with_capacity(trip.len() / 2);
@@ -1999,9 +1999,7 @@ fn gmres(
     const RESTART: usize = 30;
     let n = b.len();
     let norm = |v: &[c64]| v.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
-    let dotc = |u: &[c64], v: &[c64]| -> c64 {
-        u.iter().zip(v).map(|(p, q)| p.conj() * q).sum()
-    };
+    let dotc = |u: &[c64], v: &[c64]| -> c64 { u.iter().zip(v).map(|(p, q)| p.conj() * q).sum() };
     let bn = norm(b).max(1e-300);
     let mut tmp = vec![czero(); n];
     let mut w = vec![czero(); n];
@@ -2084,9 +2082,16 @@ fn gmres(
 
 /// The gradient of each free node's hat function, as Whitney unknowns
 /// (∇λm is the sum of the Whitney functions of the edges at m, +1 where
-/// the edge points into m). Nodes touching a PEC edge are left out.
+/// the edge points into m), then (second order) each edge-gradient
+/// function. Nodes touching a PEC edge are left out.
 fn node_gradients(asm: &Assembled) -> Vec<Vec<(u32, f64)>> {
-    let nn = asm.tets.iter().flatten().map(|&v| v as usize + 1).max().unwrap_or(0);
+    let nn = asm
+        .tets
+        .iter()
+        .flatten()
+        .map(|&v| v as usize + 1)
+        .max()
+        .unwrap_or(0);
     let mut cols: Vec<Vec<(u32, f64)>> = vec![Vec::new(); nn];
     let mut bad = vec![false; nn];
     for (t, d) in asm.tets.iter().zip(&asm.dof) {
@@ -2104,7 +2109,8 @@ fn node_gradients(asm: &Assembled) -> Vec<Vec<(u32, f64)>> {
             }
         }
     }
-    cols.into_iter()
+    let mut out: Vec<Vec<(u32, f64)>> = cols
+        .into_iter()
         .zip(bad)
         .filter(|(c, b)| !b && !c.is_empty())
         .map(|(mut c, _)| {
@@ -2112,7 +2118,19 @@ fn node_gradients(asm: &Assembled) -> Vec<Vec<(u32, f64)>> {
             c.dedup_by_key(|x| x.0);
             c
         })
-        .collect()
+        .collect();
+    // Second order: the edge functions ∇(λiλj) are gradients already.
+    if asm.order >= 2 {
+        let mut seen = vec![false; asm.n];
+        for d in &asm.dof {
+            for e in d[6..12].iter().flatten() {
+                if !std::mem::replace(&mut seen[*e as usize], true) {
+                    out.push(vec![(*e, 1.0)]);
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The iterative solver factors sweep points below this share of the
@@ -2481,7 +2499,14 @@ pub fn solve(
     let mut last_z0: Vec<f64> = Vec::new();
     loop {
         let t0 = std::time::Instant::now();
-        let (asm, sols, s) = solve_at(model, &mesh, setup.f_adapt, setup.order, setup.iterative, 0.0)?;
+        let (asm, sols, s) = solve_at(
+            model,
+            &mesh,
+            setup.f_adapt,
+            setup.order,
+            setup.iterative,
+            0.0,
+        )?;
         last_unknowns = asm.n;
         let z0: Vec<f64> = asm.ports.iter().map(|p| p.info.z0).collect();
         // Converge on the S-parameters the user gets (renormalised), and

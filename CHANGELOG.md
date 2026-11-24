@@ -3,6 +3,24 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.93.0 (2026-11-24)
+
+3D FEM: a low-memory solver, so big models converge:
+
+- Above 150,000 unknowns the FEM factors its matrix in single precision
+  (half the memory) and polishes the answer to full double precision with
+  flexible GMRES, typically in 3 to 8 iterations. Single precision alone
+  loses the static (gradient) part of the field at low frequencies, so
+  the polish solves that part exactly, and sweep points below 40% of the
+  adaptive frequency use a factor taken at that 40%. Same S-parameters
+  as the direct solver to 1e-6.
+- The default `--fem-dof` is now 650,000 (about 6.6 GB).
+- ADRV9026 RF pair via (TOP to BOTTOM): converged for the first time,
+  3 passes, 636,684 unknowns, 6.6 GB, 28 minutes for 10 frequencies. The
+  same run with the old solver needed about 12 GB. FEM vs FDTD: S11
+  within 2.7 dB (-14.9 vs -17.6 dB at 12 GHz), S21 within 0.07 dB,
+  passive.
+
 ## 0.92.0 (2026-11-24)
 
 3D FEM mesh fix, and a Smith chart:

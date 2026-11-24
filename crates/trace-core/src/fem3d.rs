@@ -158,6 +158,11 @@ pub struct Setup {
     pub z_ref: Option<f64>,
     /// Element order: 1 (Whitney) or 2 (HFSS's default).
     pub order: usize,
+    /// Interpolating sweep: solve only enough points that the next one
+    /// lands within this of the interpolated S (0: solve every point).
+    pub interp_tol: f64,
+    /// At most this many solved points in an interpolating sweep.
+    pub interp_max: usize,
     /// Linear solver: Some(true) the half-memory iterative one, Some(false)
     /// the direct one, None by size (iterative above 150k unknowns).
     pub iterative: Option<bool>,
@@ -176,6 +181,8 @@ impl Default for Setup {
             max_unknowns: 650_000,
             z_ref: Some(50.0),
             order: 2,
+            interp_tol: 0.005,
+            interp_max: 20,
             iterative: None,
         }
     }
@@ -211,6 +218,8 @@ pub struct Solution {
     pub f: Vec<f64>,
     /// Per frequency, S row by row.
     pub s: Vec<Vec<c64>>,
+    /// The frequencies actually solved (the rest are interpolated).
+    pub solved: Vec<f64>,
     pub info: Vec<Vec<PortInfo>>,
     pub z_ref: Option<f64>,
     pub tets: usize,
@@ -1571,7 +1580,14 @@ fn solve_at(
     iterative: Option<bool>,
     pre: Option<(f64, &mut Option<Precond>)>,
 ) -> Result<(Assembled, Vec<Vec<c64>>, Vec<c64>), String> {
+    let tm = std::time::Instant::now();
+    let tlog = |what: &str| {
+        if std::env::var_os("TRACE_FEM_TIME").is_some() {
+            eprintln!("  t {what}: {:.1} s", tm.elapsed().as_secs_f64());
+        }
+    };
     let asm = assemble_mesh(model, mesh, f_ghz, order)?;
+    tlog("assemble_mesh");
     let k0 = 2.0 * std::f64::consts::PI * f_ghz * 1e9 / C0;
     let n = asm.n;
     if n == 0 {
@@ -1675,6 +1691,7 @@ fn solve_at(
             cols[(r, np + p)] = c64::new(be[p][r], 0.0);
         }
     }
+    tlog("matrix");
     let y = if iter {
         let (fp, cache) = match pre {
             Some((fp, c)) => (fp, Some(c)),
@@ -1695,6 +1712,7 @@ fn solve_at(
     } else {
         sym_solve(n, trip, &cols)?
     };
+    tlog("solve");
     // A = A0 + U C Uᵀ, U = [b0 | be], C = diag(jβ/ee0, -jβ/ee).
     let mut cinv_d = vec![czero(); m2];
     for (p, pm) in asm.ports.iter().enumerate() {
@@ -1917,14 +1935,6 @@ impl<T: Real> SymFactor<T> {
             }
         }
     }
-
-    fn solve_vec(&self, v: &mut [c64]) {
-        let mut x = faer::Mat::<c64>::from_fn(v.len(), 1, |r, _| v[r]);
-        self.solve(&mut x);
-        for (r, o) in v.iter_mut().enumerate() {
-            *o = x[(r, 0)];
-        }
-    }
 }
 
 /// Solves the complex symmetric system (`trip`, both triangles given) for
@@ -1999,95 +2009,146 @@ impl Csr {
     }
 }
 
-/// Right-preconditioned restarted flexible GMRES for A x = b, to a relative
-/// residual of `tol`. Returns the iterations taken, or an error.
+/// Right-preconditioned restarted flexible GMRES for A x = b, for several
+/// right-hand sides in step, so the preconditioner works on all of them
+/// at once (`m` maps a batch of vectors to M⁻¹ of each). To a relative
+/// residual of `tol`; returns each system's iterations, or an error.
 fn gmres(
     a: &Csr,
-    m: &dyn Fn(&[c64], &mut [c64]),
-    b: &[c64],
-    x: &mut [c64],
+    m: &dyn Fn(&[&[c64]]) -> Vec<Vec<c64>>,
+    bs: &[Vec<c64>],
+    xs: &mut [Vec<c64>],
     tol: f64,
     max_it: usize,
-) -> Result<usize, String> {
-    const RESTART: usize = 30;
-    let n = b.len();
+) -> Result<Vec<usize>, String> {
+    const RESTART: usize = 25;
+    struct St {
+        v: Vec<Vec<c64>>,
+        zs: Vec<Vec<c64>>,
+        h: Vec<Vec<c64>>,
+        cs: Vec<c64>,
+        sn: Vec<c64>,
+        g: Vec<c64>,
+        k: usize,
+        it: usize,
+        bn: f64,
+        done: bool,
+        open: bool,
+    }
+    let n = a.n();
     let norm = |v: &[c64]| v.iter().map(|z| z.norm_sqr()).sum::<f64>().sqrt();
     let dotc = |u: &[c64], v: &[c64]| -> c64 { u.iter().zip(v).map(|(p, q)| p.conj() * q).sum() };
-    let bn = norm(b).max(1e-300);
+    let mut st: Vec<St> = bs
+        .iter()
+        .map(|b| St {
+            v: Vec::new(),
+            zs: Vec::new(),
+            h: Vec::new(),
+            cs: Vec::new(),
+            sn: Vec::new(),
+            g: Vec::new(),
+            k: 0,
+            it: 0,
+            bn: norm(b).max(1e-300),
+            done: false,
+            open: false,
+        })
+        .collect();
     let mut tmp = vec![czero(); n];
     let mut w = vec![czero(); n];
-    let mut z = vec![czero(); n];
-    let mut it = 0;
     loop {
-        a.mul(x, &mut tmp);
-        let r: Vec<c64> = b.iter().zip(&tmp).map(|(p, q)| p - q).collect();
-        let beta = norm(&r);
-        if beta / bn < tol {
-            return Ok(it);
+        // Restart: true residuals.
+        for (i, s) in st.iter_mut().enumerate() {
+            if s.done {
+                continue;
+            }
+            a.mul(&xs[i], &mut tmp);
+            let r: Vec<c64> = bs[i].iter().zip(&tmp).map(|(p, q)| p - q).collect();
+            let beta = norm(&r);
+            if beta / s.bn < tol {
+                s.done = true;
+                continue;
+            }
+            if s.it >= max_it {
+                return Err(format!(
+                    "iterative solver: residual {:.1e} after {} iterations",
+                    beta / s.bn,
+                    s.it
+                ));
+            }
+            s.v = vec![r.iter().map(|q| q / beta).collect()];
+            s.zs.clear();
+            s.h = vec![vec![czero(); RESTART]; RESTART + 1];
+            s.cs = vec![czero(); RESTART];
+            s.sn = vec![czero(); RESTART];
+            s.g = vec![czero(); RESTART + 1];
+            s.g[0] = c64::new(beta, 0.0);
+            s.k = 0;
+            s.open = true;
         }
-        if it >= max_it {
-            return Err(format!(
-                "iterative solver: residual {:.1e} after {it} iterations",
-                beta / bn
-            ));
+        if st.iter().all(|s| s.done) {
+            return Ok(st.iter().map(|s| s.it).collect());
         }
-        let mut v: Vec<Vec<c64>> = vec![r.iter().map(|q| q / beta).collect()];
-        let mut h = vec![vec![czero(); RESTART]; RESTART + 1];
-        // Flexible GMRES: keep M v (a single-precision M is linear only to
-        // its rounding, so it is not applied again to the combination).
-        let mut zs: Vec<Vec<c64>> = Vec::with_capacity(RESTART);
-        let (mut cs, mut sn) = (vec![czero(); RESTART], vec![czero(); RESTART]);
-        let mut g = vec![czero(); RESTART + 1];
-        g[0] = c64::new(beta, 0.0);
-        let mut k = 0;
-        while k < RESTART && it < max_it {
-            m(&v[k], &mut z);
-            a.mul(&z, &mut w);
-            zs.push(z.clone());
-            for j in 0..=k {
-                let hj = dotc(&v[j], &w);
-                h[j][k] = hj;
-                for (wi, vi) in w.iter_mut().zip(&v[j]) {
-                    *wi -= hj * vi;
+        while st.iter().any(|s| s.open) {
+            let act: Vec<usize> = (0..st.len()).filter(|&i| st[i].open).collect();
+            let zb = {
+                let vs: Vec<&[c64]> = act.iter().map(|&i| &st[i].v[st[i].k][..]).collect();
+                m(&vs)
+            };
+            for (&i, z) in act.iter().zip(zb) {
+                let s = &mut st[i];
+                let k = s.k;
+                a.mul(&z, &mut w);
+                s.zs.push(z);
+                for j in 0..=k {
+                    let hj = dotc(&s.v[j], &w);
+                    s.h[j][k] = hj;
+                    for (wi, vi) in w.iter_mut().zip(&s.v[j]) {
+                        *wi -= hj * vi;
+                    }
                 }
-            }
-            let wn = norm(&w);
-            h[k + 1][k] = c64::new(wn, 0.0);
-            for j in 0..k {
-                let t = cs[j].conj() * h[j][k] + sn[j].conj() * h[j + 1][k];
-                h[j + 1][k] = -sn[j] * h[j][k] + cs[j] * h[j + 1][k];
-                h[j][k] = t;
-            }
-            let (p, q) = (h[k][k], h[k + 1][k]);
-            let d = (p.norm_sqr() + q.norm_sqr()).sqrt().max(1e-300);
-            cs[k] = p / d;
-            sn[k] = q / d;
-            h[k][k] = c64::new(d, 0.0);
-            h[k + 1][k] = czero();
-            g[k + 1] = -sn[k] * g[k];
-            g[k] = cs[k].conj() * g[k];
-            it += 1;
-            k += 1;
-            if it % 25 == 0 && std::env::var_os("TRACE_FEM_MESH").is_some() {
-                eprintln!("  gmres {it}: residual {:.1e}", g[k].norm() / bn);
-            }
-            if g[k].norm() / bn < tol || wn < 1e-300 {
-                break;
-            }
-            v.push(w.iter().map(|q| q / wn).collect());
-        }
-        // Back-substitute and update x += M⁻¹ V y.
-        let mut y = vec![czero(); k];
-        for i in (0..k).rev() {
-            let mut acc = g[i];
-            for j in i + 1..k {
-                acc -= h[i][j] * y[j];
-            }
-            y[i] = acc / h[i][i];
-        }
-        for (j, yj) in y.iter().enumerate() {
-            for (xi, zi) in x.iter_mut().zip(&zs[j]) {
-                *xi += yj * zi;
+                let wn = norm(&w);
+                s.h[k + 1][k] = c64::new(wn, 0.0);
+                for j in 0..k {
+                    let t = s.cs[j].conj() * s.h[j][k] + s.sn[j].conj() * s.h[j + 1][k];
+                    s.h[j + 1][k] = -s.sn[j] * s.h[j][k] + s.cs[j] * s.h[j + 1][k];
+                    s.h[j][k] = t;
+                }
+                let (p, q) = (s.h[k][k], s.h[k + 1][k]);
+                let d = (p.norm_sqr() + q.norm_sqr()).sqrt().max(1e-300);
+                s.cs[k] = p / d;
+                s.sn[k] = q / d;
+                s.h[k][k] = c64::new(d, 0.0);
+                s.h[k + 1][k] = czero();
+                s.g[k + 1] = -s.sn[k] * s.g[k];
+                s.g[k] = s.cs[k].conj() * s.g[k];
+                s.it += 1;
+                s.k += 1;
+                if s.it.is_multiple_of(25) && std::env::var_os("TRACE_FEM_MESH").is_some() {
+                    eprintln!("  gmres {}: residual {:.1e}", s.it, s.g[s.k].norm() / s.bn);
+                }
+                if s.k < RESTART && s.it < max_it && s.g[s.k].norm() / s.bn >= tol && wn > 1e-300 {
+                    s.v.push(w.iter().map(|q| q / wn).collect());
+                    continue;
+                }
+                // End of the cycle: x += Z y.
+                s.open = false;
+                let kk = s.k;
+                let mut y = vec![czero(); kk];
+                for r in (0..kk).rev() {
+                    let mut acc = s.g[r];
+                    for j in r + 1..kk {
+                        acc -= s.h[r][j] * y[j];
+                    }
+                    y[r] = acc / s.h[r][r];
+                }
+                for (j, yj) in y.iter().enumerate() {
+                    for (xi, zi) in xs[i].iter_mut().zip(&s.zs[j]) {
+                        *xi += yj * zi;
+                    }
+                }
+                s.v.clear();
+                s.zs.clear();
             }
         }
     }
@@ -2153,6 +2214,73 @@ pub struct Precond {
     n: usize,
     d: Vec<f64>,
     m: SymFactor<f32>,
+}
+
+/// Floater-Hormann rational interpolation (degree up to 3) of y over the
+/// sorted nodes x, at t.
+fn fh_weights(x: &[f64]) -> Vec<f64> {
+    let n = x.len();
+    let d = 3.min(n.saturating_sub(1));
+    (0..n)
+        .map(|k| {
+            let mut w = 0.0;
+            for i in k.saturating_sub(d)..=k.min(n - 1 - d) {
+                let mut p = 1.0;
+                for j in i..=i + d {
+                    if j != k {
+                        p /= (x[k] - x[j]).abs();
+                    }
+                }
+                w += p;
+            }
+            if (k as i64 - d as i64) % 2 != 0 {
+                -w
+            } else {
+                w
+            }
+        })
+        .collect()
+}
+
+/// S at `f` from the solved points (rational interpolation; exact at a
+/// solved point).
+fn interp_s(solved: &[(f64, Vec<c64>, Vec<PortInfo>)], f: f64) -> Vec<c64> {
+    if let Some(p) = solved.iter().find(|p| (p.0 - f).abs() < 1e-12) {
+        return p.1.clone();
+    }
+    let x: Vec<f64> = solved.iter().map(|p| p.0).collect();
+    let w = fh_weights(&x);
+    let m = solved[0].1.len();
+    let mut num = vec![czero(); m];
+    let mut den = 0.0;
+    for ((xk, sk, _), wk) in solved.iter().zip(&w) {
+        let c = wk / (f - xk);
+        den += c;
+        for (o, v) in num.iter_mut().zip(sk) {
+            *o += v * c;
+        }
+    }
+    num.iter().map(|v| v / den).collect()
+}
+
+/// Port modes at `f`: linear between the solved points.
+fn interp_info(solved: &[(f64, Vec<c64>, Vec<PortInfo>)], f: f64) -> Vec<PortInfo> {
+    let k = solved
+        .partition_point(|p| p.0 < f)
+        .clamp(1, solved.len().max(2) - 1);
+    if solved.len() == 1 {
+        return solved[0].2.clone();
+    }
+    let (a, b) = (&solved[k - 1], &solved[k]);
+    let t = ((f - a.0) / (b.0 - a.0)).clamp(0.0, 1.0);
+    a.2.iter()
+        .zip(&b.2)
+        .map(|(p, q)| PortInfo {
+            z0: p.z0 + (q.z0 - p.z0) * t,
+            eeff: p.eeff + (q.eeff - p.eeff) * t,
+            beta: p.beta + (q.beta - p.beta) * t,
+        })
+        .collect()
 }
 
 /// The frequency whose factor preconditions a sweep point at `f`: the
@@ -2273,51 +2401,79 @@ fn iter_solve(
     }
     drop(owner);
     let ng = g.len();
+    let tm = std::time::Instant::now();
+    let tlog = |what: &str| {
+        if std::env::var_os("TRACE_FEM_TIME").is_some() {
+            eprintln!("  t   {what}: {:.1} s", tm.elapsed().as_secs_f64());
+        }
+    };
+    tlog("factor+csr+coarse matrix");
     let sf = if ng > 0 {
         Some(SymFactor::<f64>::new(ng, &st)?)
     } else {
         None
     };
     drop(st);
-    let coarse = |r: &[c64], z: &mut [c64]| {
+    // G S⁻¹ Gᵀ on a batch, added into zs.
+    let coarse = |rs: &[&[c64]], zs: &mut [Vec<c64>]| {
         let Some(sf) = &sf else { return };
-        let mut q: Vec<c64> = g
-            .iter()
-            .map(|c| c.iter().map(|&(e, w)| r[e as usize] * w).sum())
-            .collect();
-        sf.solve_vec(&mut q);
-        for (c, qm) in g.iter().zip(&q) {
-            for &(e, w) in c {
-                z[e as usize] += qm * w;
+        let mut q = faer::Mat::<c64>::from_fn(ng, rs.len(), |m, c| {
+            g[m].iter().map(|&(e, w)| rs[c][e as usize] * w).sum()
+        });
+        sf.solve(&mut q);
+        for (c, z) in zs.iter_mut().enumerate() {
+            for (m, col) in g.iter().enumerate() {
+                let qm = q[(m, c)];
+                for &(e, w) in col {
+                    z[e as usize] += qm * w;
+                }
             }
         }
     };
+    let resid = |rs: &[&[c64]], zs: &[Vec<c64>]| -> Vec<Vec<c64>> {
+        rs.iter()
+            .zip(zs)
+            .map(|(r, z)| {
+                let mut az = vec![czero(); n];
+                a.mul(z, &mut az);
+                r.iter().zip(&az).map(|(p, q)| p - q).collect()
+            })
+            .collect()
+    };
     // z = G S⁻¹ Gᵀ r, then the single-precision factor on what is left,
     // then the gradient part once more.
-    let pre = |r: &[c64], z: &mut [c64]| {
-        z.iter_mut().for_each(|v| *v = czero());
-        coarse(r, z);
-        let mut az = vec![czero(); n];
-        a.mul(z, &mut az);
-        let mut r2: Vec<c64> = r.iter().zip(&az).map(|(p, q)| p - q).collect();
-        m.solve_vec(&mut r2);
-        for (zi, ri) in z.iter_mut().zip(&r2) {
-            *zi += ri;
+    let pre = |rs: &[&[c64]]| -> Vec<Vec<c64>> {
+        let mut zs = vec![vec![czero(); n]; rs.len()];
+        coarse(rs, &mut zs);
+        let r2 = resid(rs, &zs);
+        let mut x = faer::Mat::<c64>::from_fn(n, rs.len(), |r, c| r2[c][r]);
+        drop(r2);
+        m.solve(&mut x);
+        for (c, z) in zs.iter_mut().enumerate() {
+            for (r, zr) in z.iter_mut().enumerate() {
+                *zr += x[(r, c)];
+            }
         }
-        a.mul(z, &mut az);
-        let r3: Vec<c64> = r.iter().zip(&az).map(|(p, q)| p - q).collect();
-        coarse(&r3, z);
+        drop(x);
+        let r3 = resid(rs, &zs);
+        let r3r: Vec<&[c64]> = r3.iter().map(|v| &v[..]).collect();
+        coarse(&r3r, &mut zs);
+        zs
     };
-    let mut out = Vec::with_capacity(rhs.ncols());
-    for c in 0..rhs.ncols() {
-        let b: Vec<c64> = (0..n).map(|r| rhs[(r, c)] * d[r]).collect();
-        let mut y = vec![czero(); n];
-        let it = gmres(&a, &pre, &b, &mut y, 1e-9, 300)?;
-        if std::env::var_os("TRACE_FEM_MESH").is_some() {
-            eprintln!("  gmres: {it} iterations");
-        }
-        out.push(y.iter().zip(d).map(|(v, s)| v * s).collect());
+    let bs: Vec<Vec<c64>> = (0..rhs.ncols())
+        .map(|c| (0..n).map(|r| rhs[(r, c)] * d[r]).collect())
+        .collect();
+    let mut ys = vec![vec![czero(); n]; bs.len()];
+    tlog("before gmres");
+    let its = gmres(&a, &pre, &bs, &mut ys, 1e-9, 300)?;
+    tlog("gmres");
+    if std::env::var_os("TRACE_FEM_MESH").is_some() {
+        eprintln!("  gmres: {its:?} iterations");
     }
+    let out = ys
+        .into_iter()
+        .map(|y| y.iter().zip(d).map(|(v, s)| v * s).collect())
+        .collect();
     Ok(out)
 }
 
@@ -2555,6 +2711,9 @@ pub fn solve(
     let mut converged = false;
     let mut last_unknowns;
     let mut last_z0: Vec<f64> = Vec::new();
+    // The iterative solver's factor; the last pass's is the final mesh's,
+    // so the sweep starts with it.
+    let mut cache: Option<Precond> = None;
     loop {
         let t0 = std::time::Instant::now();
         let (asm, sols, s) = solve_at(
@@ -2563,7 +2722,7 @@ pub fn solve(
             setup.f_adapt,
             setup.order,
             setup.iterative,
-            None,
+            Some((setup.f_adapt, &mut cache)),
         )?;
         last_unknowns = asm.n;
         let z0: Vec<f64> = asm.ports.iter().map(|p| p.info.z0).collect();
@@ -2662,12 +2821,15 @@ pub fn solve(
     } else {
         setup.sweep.clone()
     };
-    let mut out_s = Vec::new();
-    let mut info = Vec::new();
     // One single-precision factor serves the sweep points near its
-    // frequency (the iterative solver only).
-    let mut cache: Option<Precond> = None;
-    for (k, &f) in sweep.iter().enumerate() {
+    // frequency (the iterative solver only); the points that share one are
+    // solved together, the adaptive frequency's first (the last pass left
+    // its factor).
+    let mut solved: Vec<(f64, Vec<c64>, Vec<PortInfo>)> = Vec::new();
+    let mut solve_f = |f: f64,
+                       solved: &mut Vec<(f64, Vec<c64>, Vec<PortInfo>)>,
+                       progress: &mut dyn FnMut(&str) -> bool|
+     -> Result<(), String> {
         let (asm, _, s) = solve_at(
             model,
             &mesh,
@@ -2681,12 +2843,68 @@ pub fn solve(
             Some(z) => renormalise(&s, &z0, z),
             None => s,
         };
-        out_s.push(s);
-        info.push(asm.ports.iter().map(|p| p.info).collect());
-        if !progress(&format!("sweep {}/{}: {f} GHz", k + 1, sweep.len())) {
+        solved.push((f, s, asm.ports.iter().map(|p| p.info).collect()));
+        solved.sort_by(|a, b| a.0.total_cmp(&b.0));
+        if !progress(&format!(
+            "sweep: {f:.4} GHz solved ({} so far)",
+            solved.len()
+        )) {
             return Err("stopped".into());
         }
+        Ok(())
+    };
+    let lo = anchor(0.0, setup.f_adapt);
+    let (high, low): (Vec<f64>, Vec<f64>) = sweep.iter().partition(|&&f| f >= lo);
+    if setup.interp_tol > 0.0 && sweep.len() > 4 {
+        // Interpolating sweep: solve the ends of each band, then the middle
+        // of the widest gap, until two in a row land within interp_tol of
+        // what the solved points predict.
+        for band in [&high, &low] {
+            if band.is_empty() {
+                continue;
+            }
+            let (f0, f1) = band
+                .iter()
+                .fold((f64::MAX, f64::MIN), |(a, b), &f| (a.min(f), b.max(f)));
+            let mut pts = vec![f1, f0, 0.5 * (f0 + f1)];
+            pts.dedup_by(|a, b| (*a - *b).abs() < 1e-9);
+            for f in pts {
+                solve_f(f, &mut solved, &mut progress)?;
+            }
+            let mut good = 0;
+            while good < 2 && solved.len() < setup.interp_max {
+                let inb: Vec<f64> = solved
+                    .iter()
+                    .map(|p| p.0)
+                    .filter(|&f| f >= f0 - 1e-9 && f <= f1 + 1e-9)
+                    .collect();
+                let Some((ga, gb)) = inb
+                    .windows(2)
+                    .map(|w| (w[0], w[1]))
+                    .max_by(|x, y| (x.1 - x.0).total_cmp(&(y.1 - y.0)))
+                else {
+                    break;
+                };
+                let f = 0.5 * (ga + gb);
+                let guess = interp_s(&solved, f);
+                solve_f(f, &mut solved, &mut progress)?;
+                let got = &solved.iter().find(|p| (p.0 - f).abs() < 1e-12).unwrap().1;
+                let err = guess
+                    .iter()
+                    .zip(got)
+                    .map(|(a, b)| (a - b).norm())
+                    .fold(0.0, f64::max);
+                good = if err < setup.interp_tol { good + 1 } else { 0 };
+            }
+        }
+    } else {
+        for f in high.iter().rev().chain(low.iter().rev()) {
+            solve_f(*f, &mut solved, &mut progress)?;
+        }
     }
+    let out_s: Vec<Vec<c64>> = sweep.iter().map(|&f| interp_s(&solved, f)).collect();
+    let info: Vec<Vec<PortInfo>> = sweep.iter().map(|&f| interp_info(&solved, f)).collect();
+    let solved_f: Vec<f64> = solved.iter().map(|p| p.0).collect();
     Ok(Solution {
         ports: model.ports.iter().map(|p| p.name.clone()).collect(),
         passes,
@@ -2694,6 +2912,7 @@ pub fn solve(
         f: sweep,
         s: out_s,
         info,
+        solved: solved_f,
         z_ref: setup.z_ref,
         tets: mesh.tets.len(),
         unknowns: last_unknowns,
@@ -3148,6 +3367,24 @@ mod tests {
             for (x, y) in a.iter().zip(b) {
                 assert!((*x - *y).norm() < 1e-6, "{x} vs {y}");
             }
+        }
+    }
+
+    #[test]
+    fn sweep_interpolation_is_exact_for_cubics() {
+        let f = |x: f64| c64::new(1.0 + x - 0.3 * x * x + 0.02 * x * x * x, 0.5 * x);
+        let info = PortInfo {
+            z0: 50.0,
+            eeff: 1.0,
+            beta: 1.0,
+        };
+        let solved: Vec<(f64, Vec<c64>, Vec<PortInfo>)> = [0.5, 1.0, 2.5, 4.0, 7.0, 9.0]
+            .iter()
+            .map(|&x| (x, vec![f(x)], vec![info]))
+            .collect();
+        for t in [0.7, 3.3, 5.0, 8.9] {
+            let g = interp_s(&solved, t)[0];
+            assert!((g - f(t)).norm() < 1e-9, "{t}: {g} vs {}", f(t));
         }
     }
 }

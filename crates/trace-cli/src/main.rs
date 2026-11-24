@@ -4850,11 +4850,11 @@ fn fem_compare(
     let setup = fem3d::Setup {
         f_adapt: fmax,
         sweep: {
-            // TRACE_FEM_SWEEP=n: fewer sweep points (quick checks).
+            // TRACE_FEM_SWEEP=n: other sweep points (quick checks).
             let n: usize = std::env::var("TRACE_FEM_SWEEP")
                 .ok()
                 .and_then(|v| v.parse().ok())
-                .unwrap_or(10);
+                .unwrap_or(100);
             (1..=n).map(|k| fmax * k as f64 / n as f64).collect()
         },
         z_ref: Some(r.z_ref),
@@ -4869,6 +4869,11 @@ fn fem_compare(
             Ok("iter") => Some(true),
             _ => None,
         },
+        // TRACE_FEM_INTERP=0 solves every sweep point.
+        interp_tol: std::env::var("TRACE_FEM_INTERP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.005),
         ..fem3d::Setup::default()
     };
     println!("3D FEM check (HFSS-style: adaptive tetrahedra, second-order elements, wave ports):");
@@ -4891,10 +4896,22 @@ fn fem_compare(
         s.info[0][0].z0,
         s.info[0][1].z0
     );
+    if s.solved.len() < s.f.len() {
+        println!(
+            "  interpolating sweep: {} of {} frequencies solved, the rest interpolated",
+            s.solved.len(),
+            s.f.len()
+        );
+    }
     println!("  GHz     |S11| FDTD  FEM (dB)     |S21| FDTD  FEM (dB)");
+    // The table shows about ten of the points (the Touchstone has all).
+    let step = s.f.len().div_ceil(10).max(1);
     let mut d11: f64 = 0.0;
     let mut d21: f64 = 0.0;
     for (k, f) in s.f.iter().enumerate() {
+        if (k + 1) % step != 0 && k + 1 != s.f.len() {
+            continue;
+        }
         let i =
             r.f.iter()
                 .enumerate()

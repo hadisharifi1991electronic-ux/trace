@@ -574,11 +574,22 @@ impl Scene {
         }
         let box_lo = mv(model.lo);
         let box_hi = mv(model.hi);
+        // The laminate's top and bottom: outer copper sits on it, not in it.
+        let (lam_lo, lam_hi) = diel.iter().fold((f64::MAX, f64::MIN), |(a, b), d| {
+            (a.min(d.lo[2]), b.max(d.hi[2]))
+        });
         for sh in &model.sheets {
             let at = m(sh.at);
             // Keep the copper inside the box (a plane on a wall).
             let mut z0 = at - copper / 2.0;
             let mut z1 = at + copper / 2.0;
+            if sh.axis == 2 && (at - lam_hi).abs() < 0.2 {
+                z0 = at;
+                z1 = at + copper;
+            } else if sh.axis == 2 && (at - lam_lo).abs() < 0.2 {
+                z0 = at - copper;
+                z1 = at;
+            }
             if z0 < box_lo[sh.axis] {
                 z0 = box_lo[sh.axis];
                 z1 = z0 + copper;

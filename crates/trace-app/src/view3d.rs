@@ -1,13 +1,17 @@
-//! 3D board view: the board as a solder-masked slab with outer copper,
-//! silkscreen, holes and simple part bodies, drawn with OpenGL and turned
-//! with the mouse.
+//! 3D board view: the board as it is built. Laminate between copper layers
+//! at their stack-up heights, copper with its real thickness, plated
+//! barrels in every hole, solder mask, silkscreen and part bodies, drawn
+//! with OpenGL and turned with the mouse. X-ray makes the laminate clear so
+//! the inner layers show, and a section plane cuts the board open anywhere
+//! with the cut faces drawn solid.
 
 use crate::scene::{Geom, Scene, Slot, Source};
 use eframe::egui::{self, Color32, RichText};
 use eframe::glow::{self, HasContext};
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
-use trace_core::{LayerRef, PadShape, Side};
+use trace_core::{LayerKind, LayerRef, PadShape, Side};
 
 const MM_PER_MIL: f32 = 0.0254;
 
@@ -15,8 +19,20 @@ const MM_PER_MIL: f32 = 0.0254;
 #[derive(Clone, Copy)]
 struct Vert {
     p: [f32; 3],
+    /// Colour, and in alpha how shiny (0 matte, 255 polished metal).
     c: [u8; 4],
+    /// Normal, and in w what the vertex belongs to (see `TAG_*`).
     n: [i8; 4],
+}
+
+/// Belongs to nothing that can be hidden: parts, silkscreen, barrels.
+const TAG_MISC: i8 = 0;
+/// Laminate and solder mask: nearly clear in X-ray, where copper is
+/// half clear and only `TAG_MISC` stays solid.
+const TAG_DIEL: i8 = 100;
+/// Copper layer i is tagged 1 + i.
+fn layer_tag(i: usize) -> i8 {
+    1 + i.min(63) as i8
 }
 
 #[derive(Default)]
@@ -26,6 +42,10 @@ pub struct Mesh {
     /// Half the board's diagonal, mm.
     pub radius: f32,
     pub parts: usize,
+    /// Half the board's size in x and y, mm.
+    pub half: [f32; 2],
+    /// What the section plane cuts, when the mesh was built for one.
+    section: Option<Arc<CapSrc>>,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -67,21 +87,143 @@ impl MaskColor {
 }
 
 const FINISH: [u8; 3] = [214, 172, 82];
-const HOLE: [u8; 3] = [12, 12, 12];
+const COPPER: [u8; 3] = [206, 122, 72];
+const BARREL: [u8; 3] = [196, 116, 66];
 const EDGE: [u8; 3] = [190, 170, 120];
+const CORE: [u8; 3] = [214, 196, 140];
+const PREPREG: [u8; 3] = [184, 160, 102];
+const DRILL_WALL: [u8; 3] = [150, 136, 96];
 
-/// Height of each surface item above the laminate, mm. Exaggerated a little
-/// so the layers do not fight in the depth buffer.
-const Z_POUR: f32 = 0.012;
-const Z_TRACK: f32 = 0.018;
-const Z_PAD: f32 = 0.030;
-const Z_SILK: f32 = 0.040;
-const Z_HOLE: f32 = 0.050;
+/// Shine of polished copper and gold, and of everything else.
+const METAL: u8 = 255;
+const MATTE: u8 = 0;
+
+/// Gold finish on bare pads, above their copper, mm.
+const Z_FINISH: f32 = 0.004;
+/// Silkscreen above the outer copper, mm.
+const Z_SILK: f32 = 0.020;
+
+/// Heights of the board's copper and laminate, mm, board centred on z = 0.
+struct Stack {
+    /// Each copper layer's (bottom, top), top layer first.
+    cu: Vec<[f32; 2]>,
+    /// Each dielectric's (bottom, top) and whether it is a core.
+    diel: Vec<([f32; 2], bool)>,
+    /// The laminate's faces under the outer copper (bottom, top).
+    lam: [f32; 2],
+    /// Half the board's thickness.
+    half: f32,
+}
+
+fn stack(board: &trace_core::Board, n: usize) -> Stack {
+    let rows: Vec<&trace_core::StackLayer> = board
+        .stackup
+        .layers
+        .iter()
+        .filter(|l| matches!(l.kind, LayerKind::Copper | LayerKind::Dielectric))
+        .collect();
+    let ncu = rows
+        .iter()
+        .filter(|l| matches!(l.kind, LayerKind::Copper))
+        .count();
+    let th = |l: &trace_core::StackLayer| {
+        let t = l.thickness.mm() as f32;
+        if matches!(l.kind, LayerKind::Copper) && t <= 0.0 {
+            0.035
+        } else {
+            t.max(0.0)
+        }
+    };
+    let total: f32 = rows.iter().map(|l| th(l)).sum();
+    let mut cu = Vec::new();
+    let mut diel = Vec::new();
+    let half;
+    if ncu == n && total > 0.2 {
+        half = total / 2.0;
+        let mut z = half;
+        let mut cores = 0;
+        for l in rows {
+            let z0 = z - th(l);
+            if matches!(l.kind, LayerKind::Copper) {
+                cu.push([z0, z]);
+            } else if z0 < z {
+                let name = format!("{} {}", l.name, l.material.as_deref().unwrap_or(""))
+                    .to_ascii_lowercase();
+                let core = if name.contains("core") {
+                    true
+                } else if name.contains("prepreg") || name.contains("pp") {
+                    false
+                } else {
+                    cores += 1;
+                    cores % 2 == 1
+                };
+                diel.push(([z0, z], core));
+            }
+            z = z0;
+        }
+    } else {
+        let t = board.stackup.total_thickness().mm() as f32;
+        let total = if t > 0.2 { t } else { 1.6 };
+        half = total / 2.0;
+        let c = 0.035;
+        let gap = if n > 1 {
+            (total - n as f32 * c) / (n - 1) as f32
+        } else {
+            total - c
+        };
+        let mut z = half;
+        for i in 0..n.max(1) {
+            cu.push([z - c, z]);
+            z -= c;
+            if i + 1 < n.max(1) || n <= 1 {
+                diel.push(([z - gap, z], i % 2 == 1 || n <= 2));
+                z -= gap;
+            }
+        }
+    }
+    let lam_top = cu[0][0];
+    let lam_bot = if cu.len() > 1 {
+        cu[cu.len() - 1][1]
+    } else {
+        -half
+    };
+    Stack {
+        cu,
+        diel,
+        lam: [lam_bot, lam_top],
+        half,
+    }
+}
+
+/// A triangle in the board plane, mm.
+type Tri2 = [[f32; 2]; 3];
+
+/// What a section plane can cut through: 2D triangles (mm, board centred)
+/// with the heights they span and their colour.
+#[derive(Default)]
+struct CapSrc {
+    /// Copper on each layer: (bottom, top), colour, triangles.
+    layers: Vec<([f32; 2], [u8; 3], Vec<Tri2>)>,
+    /// The laminate, its holes left out.
+    board: Vec<[[f32; 2]; 3]>,
+    /// Dielectric slices: (bottom, top), colour.
+    slices: Vec<([f32; 2], [u8; 3])>,
+    /// Plated barrels: centre, inner and outer radius, (bottom, top).
+    barrels: Vec<([f32; 2], f32, f32, [f32; 2])>,
+}
 
 struct Builder {
     m: Mesh,
     cx: f32,
     cy: f32,
+    /// Tag and shine given to new vertices.
+    tag: i8,
+    shine: u8,
+    cap: Option<CapSrc>,
+}
+
+fn shade(c: [u8; 3], k: f32) -> [u8; 3] {
+    c.map(|v| (v as f32 * k).round().clamp(0.0, 255.0) as u8)
 }
 
 impl Builder {
@@ -93,8 +235,8 @@ impl Builder {
         let q = |v: f32| (v * 127.0).round().clamp(-127.0, 127.0) as i8;
         self.m.verts.push(Vert {
             p,
-            c: [c[0], c[1], c[2], 255],
-            n: [q(n[0]), q(n[1]), q(n[2]), 0],
+            c: [c[0], c[1], c[2], self.shine],
+            n: [q(n[0]), q(n[1]), q(n[2]), self.tag],
         });
         (self.m.verts.len() - 1) as u32
     }
@@ -114,9 +256,8 @@ impl Builder {
         }
     }
 
-    /// Triangles from a tessellator (mm, board-centred) at height z.
-    fn tris(&mut self, verts: &[[f32; 2]], tris: &[u32], z: f32, c: [u8; 3]) {
-        let nz = if z >= 0.0 { 1.0 } else { -1.0 };
+    /// Triangles (mm, board-centred) at height z, facing up or down.
+    fn face(&mut self, verts: &[[f32; 2]], tris: &[u32], z: f32, nz: f32, c: [u8; 3]) {
         let i0 = self.m.verts.len() as u32;
         for p in verts {
             self.vert([p[0], p[1], z], [0.0, 0.0, nz], c);
@@ -124,39 +265,129 @@ impl Builder {
         self.m.idx.extend(tris.iter().map(|t| i0 + t));
     }
 
-    fn circle(&mut self, x: f32, y: f32, r: f32, z: f32, c: [u8; 3]) {
-        let [x, y] = self.pt(x, y);
-        let r = r * MM_PER_MIL;
-        let n = segments(r);
-        let pts: Vec<[f32; 2]> = (0..n)
-            .map(|i| {
-                let a = i as f32 / n as f32 * std::f32::consts::TAU;
-                [x + r * a.cos(), y + r * a.sin()]
-            })
-            .collect();
-        self.fan(&pts, z, c);
+    /// Upright quad from a to b between heights z0 and z1.
+    fn wall(&mut self, a: [f32; 2], b: [f32; 2], z0: f32, z1: f32, c: [u8; 3]) {
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let l = dx.hypot(dy);
+        if l < 1e-7 {
+            return;
+        }
+        let n = [dy / l, -dx / l, 0.0];
+        let i0 = self.vert([a[0], a[1], z0], n, c);
+        self.vert([b[0], b[1], z0], n, c);
+        self.vert([b[0], b[1], z1], n, c);
+        self.vert([a[0], a[1], z1], n, c);
+        self.m
+            .idx
+            .extend_from_slice(&[i0, i0 + 1, i0 + 2, i0, i0 + 2, i0 + 3]);
     }
 
-    fn geom(&mut self, g: &Geom, z: f32, c: [u8; 3]) {
+    /// A solid of triangulated outline from z0 to z1: top, bottom and the
+    /// walls along its boundary (edges used by one triangle only). Copper
+    /// is remembered for the section plane when `layer` is given.
+    #[allow(clippy::too_many_arguments)]
+    fn slab(
+        &mut self,
+        verts: &[[f32; 2]],
+        tris: &[u32],
+        z0: f32,
+        z1: f32,
+        top: [u8; 3],
+        side: [u8; 3],
+        layer: Option<usize>,
+    ) {
+        if tris.len() < 3 {
+            return;
+        }
+        self.face(verts, tris, z1, 1.0, top);
+        self.face(verts, tris, z0, -1.0, side);
+        let mut edges: HashMap<(u32, u32), (u32, u32, u32)> = HashMap::new();
+        for t in tris.chunks_exact(3) {
+            for e in 0..3 {
+                let (a, b) = (t[e], t[(e + 1) % 3]);
+                let k = (a.min(b), a.max(b));
+                edges.entry(k).or_insert((a, b, 0)).2 += 1;
+            }
+        }
+        for (_, (a, b, n)) in edges {
+            if n == 1 {
+                self.wall(verts[a as usize], verts[b as usize], z0, z1, side);
+            }
+        }
+        if let (Some(l), Some(cap)) = (layer, self.cap.as_mut()) {
+            if let Some(dst) = cap.layers.get_mut(l) {
+                dst.2.extend(tris.chunks_exact(3).map(|t| {
+                    [
+                        verts[t[0] as usize],
+                        verts[t[1] as usize],
+                        verts[t[2] as usize],
+                    ]
+                }));
+            }
+        }
+    }
+
+    /// A convex ring of points as a solid.
+    #[allow(clippy::too_many_arguments)]
+    fn convex_slab(
+        &mut self,
+        pts: &[[f32; 2]],
+        z0: f32,
+        z1: f32,
+        top: [u8; 3],
+        side: [u8; 3],
+        layer: Option<usize>,
+    ) {
+        if pts.len() < 3 {
+            return;
+        }
+        let tris: Vec<u32> = (1..pts.len() as u32 - 1)
+            .flat_map(|i| [0, i, i + 1])
+            .collect();
+        self.slab(pts, &tris, z0, z1, top, side, layer);
+    }
+
+    /// A tube of radius r about (x, y) mm between z0 and z1.
+    fn tube(&mut self, x: f32, y: f32, r: f32, z0: f32, z1: f32, c: [u8; 3]) {
+        let n = segments(r).max(10);
+        let ring = circle_pts(x, y, r, n);
+        for i in 0..n {
+            let (a, b) = (ring[i], ring[(i + 1) % n]);
+            // Normals pointing out from the axis, for smooth shading.
+            let i0 = self.m.verts.len() as u32;
+            for (p, z) in [(a, z0), (b, z0), (b, z1), (a, z1)] {
+                let nn = [(p[0] - x) / r, (p[1] - y) / r, 0.0];
+                self.vert([p[0], p[1], z], nn, c);
+            }
+            self.m
+                .idx
+                .extend_from_slice(&[i0, i0 + 1, i0 + 2, i0, i0 + 2, i0 + 3]);
+        }
+    }
+
+    fn geom_ring(&self, g: &Geom) -> Vec<[f32; 2]> {
         match *g {
-            Geom::Circle { x, y, r } => self.circle(x, y, r, z, c),
+            Geom::Circle { x, y, r } => {
+                let [x, y] = self.pt(x, y);
+                let r = r * MM_PER_MIL;
+                circle_pts(x, y, r, segments(r))
+            }
             Geom::Rect { x, y, sx, sy, rot } => {
                 let (s, co) = rot.to_radians().sin_cos();
-                let pts: Vec<[f32; 2]> = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
+                [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)]
                     .iter()
                     .map(|(u, v)| {
                         let (u, v) = (u * sx / 2.0, v * sy / 2.0);
                         self.pt(x + u * co - v * s, y + u * s + v * co)
                     })
-                    .collect();
-                self.fan(&pts, z, c);
+                    .collect()
             }
             Geom::Seg { x1, y1, x2, y2, w } => {
                 let [ax, ay] = self.pt(x1, y1);
                 let [bx, by] = self.pt(x2, y2);
                 let r = w * MM_PER_MIL / 2.0;
                 if r <= 0.0 {
-                    return;
+                    return Vec::new();
                 }
                 let th = (by - ay).atan2(bx - ax);
                 let half = segments(r) / 2;
@@ -170,34 +401,34 @@ impl Builder {
                     let a = th - pi / 2.0 + pi * i as f32 / half as f32;
                     pts.push([bx + r * a.cos(), by + r * a.sin()]);
                 }
-                self.fan(&pts, z, c);
+                pts
             }
         }
     }
 
+    fn geom(&mut self, g: &Geom, z: f32, c: [u8; 3]) {
+        let pts = self.geom_ring(g);
+        self.fan(&pts, z, c);
+    }
+
     /// A box standing on the board from height z0 to z1 (both signed).
     fn block(&mut self, corners: &[[f32; 2]; 4], z0: f32, z1: f32, c: [u8; 3]) {
-        let top = c;
-        let side = [
-            (c[0] as f32 * 0.8) as u8,
-            (c[1] as f32 * 0.8) as u8,
-            (c[2] as f32 * 0.8) as u8,
-        ];
-        self.fan(corners, z1, top);
+        let side = shade(c, 0.8);
+        self.fan(corners, z1, c);
         for i in 0..4 {
             let (a, b) = (corners[i], corners[(i + 1) % 4]);
-            let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
-            let l = dx.hypot(dy).max(1e-9);
-            let n = [dy / l, -dx / l, 0.0];
-            let i0 = self.vert([a[0], a[1], z0], n, side);
-            self.vert([b[0], b[1], z0], n, side);
-            self.vert([b[0], b[1], z1], n, side);
-            self.vert([a[0], a[1], z1], n, side);
-            self.m
-                .idx
-                .extend_from_slice(&[i0, i0 + 1, i0 + 2, i0, i0 + 2, i0 + 3]);
+            self.wall(a, b, z0, z1, side);
         }
     }
+}
+
+fn circle_pts(x: f32, y: f32, r: f32, n: usize) -> Vec<[f32; 2]> {
+    (0..n)
+        .map(|i| {
+            let a = i as f32 / n as f32 * std::f32::consts::TAU;
+            [x + r * a.cos(), y + r * a.sin()]
+        })
+        .collect()
 }
 
 fn segments(r_mm: f32) -> usize {
@@ -243,6 +474,10 @@ pub struct Options {
     pub silk: bool,
     /// Rigid-flex bends folded this far, percent of their angle.
     pub fold: u8,
+    /// Clear laminate and mask, copper coloured by layer.
+    pub xray: bool,
+    /// Cut open by the section plane.
+    pub section: bool,
 }
 
 impl Default for Options {
@@ -252,6 +487,8 @@ impl Default for Options {
             parts: true,
             silk: true,
             fold: 0,
+            xray: false,
+            section: false,
         }
     }
 }
@@ -265,20 +502,81 @@ pub type Meshes = Arc<Vec<Option<Arc<trace_step::Mesh>>>>;
 pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
     let b = scene.bounds;
     let (cx, cy) = ((b[0] + b[2]) / 2.0, (b[1] + b[3]) / 2.0);
+    let section = opt.section && opt.fold == 0;
     let mut bld = Builder {
         m: Mesh::default(),
         cx,
         cy,
+        tag: TAG_MISC,
+        shine: MATTE,
+        cap: section.then(CapSrc::default),
     };
     bld.m.radius = ((b[2] - b[0]).hypot(b[3] - b[1]) / 2.0 * MM_PER_MIL).max(1.0);
+    bld.m.half = [
+        (b[2] - b[0]) / 2.0 * MM_PER_MIL,
+        (b[3] - b[1]) / 2.0 * MM_PER_MIL,
+    ];
     let board = &scene.board;
-    let th = board.stackup.total_thickness().mm() as f32;
-    let t = if th > 0.2 { th / 2.0 } else { 0.8 };
-    let n = scene.copper_count.max(1);
+    let n = scene.copper_count.max(1) as usize;
     let last = n - 1;
+    let st = stack(board, n);
+    let t = st.half;
     let (mask, mask_cu, silk) = opt.mask.colors();
+    // Inner copper only shows through clear laminate or a cut.
+    let inner = opt.xray || section;
+    let layer_color = |i: usize| -> [u8; 3] {
+        if !opt.xray {
+            return COPPER;
+        }
+        scene
+            .layers
+            .iter()
+            .find(|l| l.slot == Slot::Copper(i as u8))
+            .map_or(COPPER, |l| l.color)
+    };
+    // Top and side colour of copper on a layer.
+    let cu_color = |i: usize| -> ([u8; 3], [u8; 3]) {
+        if !opt.xray && (i == 0 || i == last) {
+            (mask_cu, shade(mask_cu, 0.82))
+        } else {
+            let c = layer_color(i);
+            (c, shade(c, 0.72))
+        }
+    };
+    let wanted = |i: usize| i == 0 || i == last || inner;
+    if let Some(cap) = bld.cap.as_mut() {
+        cap.layers = (0..n)
+            .map(|i| (st.cu[i], layer_color(i), Vec::new()))
+            .collect();
+        cap.slices = st
+            .diel
+            .iter()
+            .map(|(z, core)| (*z, if *core { CORE } else { PREPREG }))
+            .collect();
+        // Resin fills the copper layers between the copper.
+        for i in 1..last {
+            cap.slices.push((st.cu[i], PREPREG));
+        }
+    }
+    let g = &board.geometry;
+    let mil = |l: trace_core::Length| l.mil() as f32;
 
-    // Laminate: top and bottom faces plus the edge.
+    // Every hole through the laminate: centre (mm), drill radius, plated.
+    let mut holes: Vec<([f32; 2], f32, bool)> = Vec::new();
+    for pad in &g.pads {
+        let r = mil(pad.hole) / 2.0 * MM_PER_MIL;
+        if r > 0.0 {
+            holes.push((bld.pt(mil(pad.at.x), mil(pad.at.y)), r, !pad.fab.unplated));
+        }
+    }
+    for v in &g.vias {
+        let r = mil(v.hole) / 2.0 * MM_PER_MIL;
+        if r > 0.0 {
+            holes.push((bld.pt(mil(v.at.x), mil(v.at.y)), r, true));
+        }
+    }
+
+    // Laminate: top and bottom faces with the holes drilled, and the edge.
     let mut ring: Vec<[f32; 2]> = if scene.outline.len() >= 3 {
         scene.outline.iter().map(|p| bld.pt(p[0], p[1])).collect()
     } else {
@@ -292,48 +590,51 @@ pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
     if ring.len() > 3 && ring.first() == ring.last() {
         ring.pop();
     }
-    let (v, tr) = tessellate(std::slice::from_ref(&ring));
-    bld.tris(&v, &tr, t, mask);
-    bld.tris(&v, &tr, -t, mask);
-    let area: f32 = (0..ring.len())
-        .map(|i| {
-            let (a, c) = (ring[i], ring[(i + 1) % ring.len()]);
-            a[0] * c[1] - c[0] * a[1]
-        })
-        .sum();
-    let sign = if area >= 0.0 { 1.0 } else { -1.0 };
+    let mut rings = vec![ring.clone()];
+    for s in &scene.slots {
+        rings.push(s.iter().map(|p| bld.pt(p[0], p[1])).collect());
+    }
+    for &(c, r, _) in &holes {
+        rings.push(circle_pts(c[0], c[1], r, segments(r).max(10)));
+    }
+    let (mut v, mut tr) = tessellate(&rings);
+    if tr.is_empty() {
+        // Overlapping holes can upset the tessellator: a plain slab then.
+        (v, tr) = tessellate(std::slice::from_ref(&ring));
+    }
+    let [lam_bot, lam_top] = st.lam;
+    bld.tag = TAG_DIEL;
+    bld.face(&v, &tr, lam_top, 1.0, mask);
+    bld.face(&v, &tr, lam_bot, -1.0, mask);
     for i in 0..ring.len() {
         let (a, c) = (ring[i], ring[(i + 1) % ring.len()]);
-        let (dx, dy) = (c[0] - a[0], c[1] - a[1]);
-        let l = dx.hypot(dy);
-        if l < 1e-6 {
-            continue;
+        bld.wall(a, c, lam_bot, lam_top, EDGE);
+    }
+    for s in rings[1..1 + scene.slots.len()].iter().cloned() {
+        for i in 0..s.len() {
+            bld.wall(s[i], s[(i + 1) % s.len()], lam_bot, lam_top, EDGE);
         }
-        let nrm = [sign * dy / l, -sign * dx / l, 0.0];
-        let i0 = bld.vert([a[0], a[1], -t], nrm, EDGE);
-        bld.vert([c[0], c[1], -t], nrm, EDGE);
-        bld.vert([c[0], c[1], t], nrm, EDGE);
-        bld.vert([a[0], a[1], t], nrm, EDGE);
-        bld.m
-            .idx
-            .extend_from_slice(&[i0, i0 + 1, i0 + 2, i0, i0 + 2, i0 + 3]);
+    }
+    if let Some(cap) = bld.cap.as_mut() {
+        cap.board = tr
+            .chunks_exact(3)
+            .map(|t| [v[t[0] as usize], v[t[1] as usize], v[t[2] as usize]])
+            .collect();
+    }
+    bld.tag = TAG_MISC;
+    for &(c, r, plated) in &holes {
+        if !plated {
+            bld.tube(c[0], c[1], r, lam_bot, lam_top, DRILL_WALL);
+        }
     }
 
-    // Which outer face a copper slot sits on: +1 top, -1 bottom.
-    let face = |s: Slot| match s {
-        Slot::Copper(0) => Some(1.0),
-        Slot::Copper(i) if i == last && last > 0 => Some(-1.0),
+    let slot_layer = |s: Slot| match s {
+        Slot::Copper(i) if (i as usize) < n && wanted(i as usize) => Some(i as usize),
         _ => None,
     };
 
-    // Pours under the mask.
+    // Pours and planes.
     for f in &scene.fills {
-        let side = match f.slot {
-            Slot::TopSilk if opt.silk => Some((1.0, Z_SILK, silk)),
-            Slot::BottomSilk if opt.silk => Some((-1.0, Z_SILK, silk)),
-            s => face(s).map(|d| (d, Z_POUR, mask_cu)),
-        };
-        let Some((d, dz, col)) = side else { continue };
         let fb = f.bbox;
         if fb[2] < b[0] || fb[0] > b[2] || fb[3] < b[1] || fb[1] > b[3] {
             continue;
@@ -342,10 +643,30 @@ pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
             .iter()
             .map(|p| bld.pt(p[0], p[1]))
             .collect();
-        bld.tris(&pts, &scene.fill_tris[f.tris.clone()], d * (t + dz), col);
+        let tris = &scene.fill_tris[f.tris.clone()];
+        match f.slot {
+            Slot::TopSilk | Slot::BottomSilk if opt.silk => {
+                let z = if f.slot == Slot::TopSilk {
+                    st.cu[0][1] + Z_SILK
+                } else {
+                    -(st.cu[last][0].abs() + Z_SILK)
+                };
+                bld.face(&pts, tris, z, z.signum(), silk);
+            }
+            s => {
+                if let Some(i) = slot_layer(s) {
+                    let (top, side) = cu_color(i);
+                    bld.tag = layer_tag(i);
+                    bld.shine = if top == mask_cu { MATTE } else { METAL };
+                    bld.slab(&pts, tris, st.cu[i][0], st.cu[i][1], top, side, Some(i));
+                    bld.tag = TAG_MISC;
+                    bld.shine = MATTE;
+                }
+            }
+        }
     }
 
-    // Tracks and arcs under the mask, silkscreen on top of it.
+    // Tracks and arcs, silkscreen on top of the mask.
     for p in &scene.prims {
         if !matches!(p.source, Source::Track(_) | Source::Arc(_)) {
             continue;
@@ -356,38 +677,47 @@ pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
             continue;
         }
         match p.slot {
-            Slot::TopSilk if opt.silk => bld.geom(&p.geom, t + Z_SILK, silk),
-            Slot::BottomSilk if opt.silk => bld.geom(&p.geom, -(t + Z_SILK), silk),
+            Slot::TopSilk if opt.silk => bld.geom(&p.geom, st.cu[0][1] + Z_SILK, silk),
+            Slot::BottomSilk if opt.silk => bld.geom(&p.geom, st.cu[last][0] - Z_SILK, silk),
             s => {
-                if let Some(d) = face(s) {
-                    bld.geom(&p.geom, d * (t + Z_TRACK), mask_cu);
+                if let Some(i) = slot_layer(s) {
+                    let (top, side) = cu_color(i);
+                    let pts = bld.geom_ring(&p.geom);
+                    bld.tag = layer_tag(i);
+                    bld.shine = if top == mask_cu { MATTE } else { METAL };
+                    bld.convex_slab(&pts, st.cu[i][0], st.cu[i][1], top, side, Some(i));
+                    bld.tag = TAG_MISC;
+                    bld.shine = MATTE;
                 }
             }
         }
     }
 
-    // Pads: bare copper with a gold finish, and their holes.
-    let g = &board.geometry;
-    let mil = |l: trace_core::Length| l.mil() as f32;
+    // Pads: copper lands with a gold finish where they are bare, drilled
+    // through where they have a hole.
+    let bare = |i: usize| (i == 0 || i == last) && !opt.xray;
     for pad in &g.pads {
         let (x, y) = (mil(pad.at.x), mil(pad.at.y));
+        let hole = mil(pad.hole) / 2.0 * MM_PER_MIL;
         let mut lands: Vec<LandRef> = Vec::new();
-        let sides: &[(u8, f32)] = &[(0, 1.0), (last, -1.0)];
         match &pad.layer {
             LayerRef::AllCopper => {
-                for &(layer, d) in sides {
+                for layer in 0..n {
+                    if !wanted(layer) {
+                        continue;
+                    }
                     if pad.stack.is_empty() || last == 0 {
                         lands.push((
-                            d,
+                            layer,
                             pad.shape,
                             mil(pad.size_x),
                             mil(pad.size_y),
                             pad.rotation_deg as f32,
                             &pad.outline,
                         ));
-                    } else if let Some(l) = pad.stack.iter().find(|l| l.layer == layer) {
+                    } else if let Some(l) = pad.stack.iter().find(|l| l.layer as usize == layer) {
                         lands.push((
-                            d,
+                            layer,
                             l.shape,
                             mil(l.size_x),
                             mil(l.size_y),
@@ -397,16 +727,9 @@ pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
                     }
                 }
             }
-            LayerRef::Copper(i) => {
-                let d = if *i == 0 {
-                    1.0
-                } else if *i == last {
-                    -1.0
-                } else {
-                    continue;
-                };
+            LayerRef::Copper(i) if (*i as usize) < n && wanted(*i as usize) => {
                 lands.push((
-                    d,
+                    *i as usize,
                     pad.shape,
                     mil(pad.size_x),
                     mil(pad.size_y),
@@ -416,48 +739,107 @@ pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
             }
             _ => continue,
         }
-        for (d, shape, sx, sy, rot, outline) in lands {
-            let z = d * (t + Z_PAD);
-            if outline.len() >= 3 {
-                let ring: Vec<[f32; 2]> =
-                    outline.iter().map(|p| bld.pt(mil(p.x), mil(p.y))).collect();
-                let (v, tr) = tessellate(&[ring]);
-                bld.tris(&v, &tr, z, FINISH);
+        for (layer, shape, sx, sy, rot, outline) in lands {
+            let land: Vec<[f32; 2]> = if outline.len() >= 3 {
+                outline.iter().map(|p| bld.pt(mil(p.x), mil(p.y))).collect()
             } else {
-                bld.geom(&pad_geom(x, y, shape, sx, sy, rot), z, FINISH);
+                bld.geom_ring(&pad_geom(x, y, shape, sx, sy, rot))
+            };
+            let [z0, mut z1] = st.cu[layer];
+            let (top, side) = if bare(layer) {
+                z1 += if layer == 0 { Z_FINISH } else { 0.0 };
+                (FINISH, shade(COPPER, 0.85))
+            } else {
+                let c = layer_color(layer);
+                (c, shade(c, 0.72))
+            };
+            let z0 = if bare(layer) && layer == last && last > 0 {
+                z0 - Z_FINISH
+            } else {
+                z0
+            };
+            bld.tag = layer_tag(layer);
+            bld.shine = METAL;
+            if hole > 0.0 {
+                let c = bld.pt(x, y);
+                let rings = [land, circle_pts(c[0], c[1], hole, segments(hole).max(10))];
+                let (v, tr) = tessellate(&rings);
+                bld.slab(&v, &tr, z0, z1, top, side, Some(layer));
+            } else if outline.len() >= 3 {
+                let (v, tr) = tessellate(&[land]);
+                bld.slab(&v, &tr, z0, z1, top, side, Some(layer));
+            } else {
+                bld.convex_slab(&land, z0, z1, top, side, Some(layer));
             }
         }
-        let hole = mil(pad.hole);
-        if hole > 0.0 {
-            bld.circle(x, y, hole / 2.0, t + Z_HOLE, HOLE);
-            bld.circle(x, y, hole / 2.0, -(t + Z_HOLE), HOLE);
+        bld.tag = TAG_MISC;
+        bld.shine = MATTE;
+        if hole > 0.0 && !pad.fab.unplated {
+            let c = bld.pt(x, y);
+            barrel(&mut bld, c, hole, st.cu[last][0], st.cu[0][1]);
         }
     }
 
-    // Vias: tented copper rings with an open hole on each face they reach.
+    // Vias: annular rings on the layers they join, joined by a barrel.
     for v in &g.vias {
         let (x, y) = (mil(v.at.x), mil(v.at.y));
-        let ring_on = |layer: u8| {
+        let c = bld.pt(x, y);
+        let hole = mil(v.hole) / 2.0 * MM_PER_MIL;
+        let (lo, hi) = (
+            v.from_layer.min(v.to_layer) as usize,
+            (v.from_layer.max(v.to_layer) as usize).min(last),
+        );
+        let ring_on = |layer: usize| {
             v.rings
                 .iter()
-                .find(|r| r.0 == layer)
+                .find(|r| r.0 as usize == layer)
                 .map_or(mil(v.diameter), |r| mil(r.1))
+                / 2.0
+                * MM_PER_MIL
         };
-        let hole = mil(v.hole) / 2.0;
-        for (layer, d, reaches) in [
-            (0u8, 1.0, v.from_layer.min(v.to_layer) == 0),
-            (last, -1.0, v.from_layer.max(v.to_layer) >= last),
-        ] {
-            if !reaches {
+        for layer in lo..=hi {
+            if !wanted(layer) || v.drilled(layer as u8).is_some() {
                 continue;
             }
-            bld.circle(x, y, ring_on(layer) / 2.0, d * (t + Z_TRACK), mask_cu);
-            if hole > 0.0 {
-                bld.circle(x, y, hole, d * (t + Z_HOLE), HOLE);
+            let r = ring_on(layer);
+            if r <= hole + 1e-4 {
+                continue;
+            }
+            let (top, side) = cu_color(layer);
+            let rings = [
+                circle_pts(c[0], c[1], r, segments(r).max(12)),
+                circle_pts(c[0], c[1], hole, segments(hole).max(10)),
+            ];
+            let (vv, tr) = tessellate(&rings);
+            bld.tag = layer_tag(layer);
+            bld.shine = if top == mask_cu { MATTE } else { METAL };
+            bld.slab(
+                &vv,
+                &tr,
+                st.cu[layer][0],
+                st.cu[layer][1],
+                top,
+                side,
+                Some(layer),
+            );
+        }
+        bld.tag = TAG_MISC;
+        bld.shine = MATTE;
+        if hole > 0.0 {
+            // A backdrilled stub has no barrel left.
+            let top = v.fab.back_top.map_or(lo, |b| (b.keep as usize).min(last));
+            let bot = v
+                .fab
+                .back_bottom
+                .map_or(hi, |b| (b.keep as usize).min(last));
+            if top <= bot {
+                barrel(&mut bld, c, hole, st.cu[bot][0], st.cu[top][1]);
             }
         }
     }
 
+    bld.tag = TAG_MISC;
+    bld.shine = MATTE;
     if opt.parts {
         let placed = place_models(&mut bld, scene, t, models);
         bld.m.parts = placed.len() + bodies(&mut bld, scene, t, &placed);
@@ -467,7 +849,124 @@ pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
             fold_mesh(&mut bld, &f);
         }
     }
+    bld.m.section = bld.cap.take().map(Arc::new);
     bld.m
+}
+
+/// Plating thickness of a barrel, mm.
+const PLATING: f32 = 0.025;
+
+/// A plated barrel lining a drill of radius r from z0 to z1.
+fn barrel(bld: &mut Builder, c: [f32; 2], r: f32, z0: f32, z1: f32) {
+    let ri = (r - PLATING).max(r * 0.5);
+    bld.shine = METAL;
+    bld.tube(c[0], c[1], ri, z0, z1, BARREL);
+    bld.tube(c[0], c[1], r, z0, z1, shade(BARREL, 0.8));
+    bld.shine = MATTE;
+    if let Some(cap) = bld.cap.as_mut() {
+        cap.barrels.push((c, ri, r, [z0, z1]));
+    }
+}
+
+/// The faces the section plane leaves: the laminate, the copper and the
+/// barrels it cuts, drawn on the plane. `axis` 0 cuts across x at `pos`
+/// mm, 1 across y; `keep` is the side kept (+1 or -1 along the axis).
+fn caps(src: &CapSrc, axis: usize, pos: f32, keep: f32) -> Mesh {
+    let mut m = Mesh::default();
+    let o = 1 - axis;
+    let spans = |tris: &[[[f32; 2]; 3]]| -> Vec<[f32; 2]> {
+        let mut out: Vec<[f32; 2]> = Vec::new();
+        for t in tris {
+            let mut s = Vec::with_capacity(2);
+            for e in 0..3 {
+                let (a, b) = (t[e], t[(e + 1) % 3]);
+                let (da, db) = (a[axis] - pos, b[axis] - pos);
+                if (da < 0.0) != (db < 0.0) {
+                    let k = da / (da - db);
+                    s.push(a[o] + (b[o] - a[o]) * k);
+                }
+            }
+            if s.len() == 2 {
+                out.push([s[0].min(s[1]), s[0].max(s[1])]);
+            }
+        }
+        merge(out)
+    };
+    // Facing the viewer on the cut-away side; copper a hair in front of
+    // the laminate so the two do not fight.
+    let nrm = {
+        let mut n = [0.0f32; 3];
+        n[axis] = -keep;
+        n
+    };
+    let quad =
+        |m: &mut Mesh, s: [f32; 2], z: [f32; 2], c: [u8; 3], tag: i8, ahead: f32, shine: u8| {
+            let i0 = m.verts.len() as u32;
+            for (a, h) in [(s[0], z[0]), (s[1], z[0]), (s[1], z[1]), (s[0], z[1])] {
+                let mut p = [0.0f32; 3];
+                p[axis] = pos - keep * ahead;
+                p[o] = a;
+                p[2] = h;
+                let q = |v: f32| (v * 127.0).round() as i8;
+                m.verts.push(Vert {
+                    p,
+                    c: [c[0], c[1], c[2], shine],
+                    n: [q(nrm[0]), q(nrm[1]), q(nrm[2]), tag],
+                });
+            }
+            m.idx
+                .extend_from_slice(&[i0, i0 + 1, i0 + 2, i0, i0 + 2, i0 + 3]);
+        };
+    let board = spans(&src.board);
+    for (z, c) in &src.slices {
+        for s in &board {
+            quad(&mut m, *s, *z, *c, TAG_MISC, 0.0, MATTE);
+        }
+    }
+    for (i, (z, c, tris)) in src.layers.iter().enumerate() {
+        for s in spans(tris) {
+            quad(&mut m, s, *z, cut_copper(*c), layer_tag(i), 0.002, METAL);
+        }
+    }
+    for &(c, ri, ro, z) in &src.barrels {
+        let d = (c[axis] - pos).abs();
+        if d >= ro {
+            continue;
+        }
+        let so = (ro * ro - d * d).sqrt();
+        let parts: Vec<[f32; 2]> = if d < ri {
+            let si = (ri * ri - d * d).sqrt();
+            vec![[c[o] - so, c[o] - si], [c[o] + si, c[o] + so]]
+        } else {
+            vec![[c[o] - so, c[o] + so]]
+        };
+        for s in parts {
+            quad(&mut m, s, z, cut_copper(BARREL), TAG_MISC, 0.003, METAL);
+        }
+    }
+    m
+}
+
+/// Freshly cut copper is brighter than its oxidised faces.
+fn cut_copper(c: [u8; 3]) -> [u8; 3] {
+    if c == COPPER || c == BARREL {
+        [240, 158, 98]
+    } else {
+        c
+    }
+}
+
+/// Joins overlapping spans.
+fn merge(mut v: Vec<[f32; 2]>) -> Vec<[f32; 2]> {
+    v.sort_by(|a, b| a[0].total_cmp(&b[0]));
+    let mut out: Vec<[f32; 2]> = Vec::with_capacity(v.len());
+    for s in v {
+        match out.last_mut() {
+            Some(l) if s[0] <= l[1] + 1e-6 => l[1] = l[1].max(s[1]),
+            _ => out.push(s),
+        }
+    }
+    out
 }
 
 /// Bends the mesh at the board's bends: cuts the triangles along lines
@@ -550,8 +1049,8 @@ fn fold_mesh(bld: &mut Builder, f: &trace_core::flex::Fold) {
     }
 }
 
-/// Face (+1 top, -1 bottom), shape, size x and y, rotation and outline.
-type LandRef<'a> = (f32, PadShape, f32, f32, f32, &'a Vec<trace_core::Point>);
+/// Copper layer, shape, size x and y, rotation and outline.
+type LandRef<'a> = (usize, PadShape, f32, f32, f32, &'a Vec<trace_core::Point>);
 
 fn pad_geom(x: f32, y: f32, shape: PadShape, sx: f32, sy: f32, rot: f32) -> Geom {
     if shape == PadShape::Round && (sx - sy).abs() < 1e-3 {
@@ -642,7 +1141,7 @@ fn place_models(
             let c = mesh.colors[k];
             bld.m.verts.push(Vert {
                 p: [wp[0] as f32 + x, wp[1] as f32 + y, (wp[2] + z0) as f32],
-                c: [c[0], c[1], c[2], 255],
+                c: [c[0], c[1], c[2], 40],
                 n: [q(wn[0]), q(wn[1]), q(wn[2]), 0],
             });
         }
@@ -1014,20 +1513,29 @@ impl Camera {
 
 // ---- GPU ------------------------------------------------------------------
 
-struct Gpu {
-    program: glow::Program,
+struct Buffers {
     vao: glow::VertexArray,
     vbo: glow::Buffer,
     ebo: glow::Buffer,
     count: i32,
+}
+
+struct Gpu {
+    program: glow::Program,
+    board: Buffers,
+    caps: Buffers,
     u_mvp: Option<glow::UniformLocation>,
     u_eye: Option<glow::UniformLocation>,
+    u_mode: Option<glow::UniformLocation>,
+    u_clip: Option<glow::UniformLocation>,
+    u_hide: Option<glow::UniformLocation>,
 }
 
 #[derive(Default)]
 struct Shared {
     gpu: Option<Gpu>,
     upload: Option<Mesh>,
+    caps: Option<Mesh>,
     error: Option<String>,
 }
 
@@ -1098,15 +1606,44 @@ fn start_loader(models: &[trace_core::Model3d]) -> Arc<Loader> {
     loader
 }
 
+/// Where the section plane cuts: across x (axis 0) or y (1) at `pos` mm
+/// from the board's centre, keeping the low side unless flipped.
+#[derive(Clone, Copy, PartialEq)]
+pub struct Section {
+    pub axis: usize,
+    pub pos: f32,
+    pub flip: bool,
+}
+
+impl Section {
+    /// The side kept, +1 or -1 along the axis.
+    fn keep(&self) -> f32 {
+        if self.flip {
+            1.0
+        } else {
+            -1.0
+        }
+    }
+}
+
 pub struct View3d {
     pub camera: Camera,
     pub options: Options,
+    pub section: Section,
+    /// Copper layers hidden, by index.
+    pub hidden: [bool; 64],
     built: Option<(Options, bool, u64)>,
     loader: Option<Arc<Loader>>,
     models: Option<Arc<Vec<Option<Arc<trace_step::Mesh>>>>>,
     model_count: usize,
     radius: f32,
+    half: [f32; 2],
     parts: usize,
+    cut_src: Option<Arc<CapSrc>>,
+    cut_built: Option<(Section, usize)>,
+    /// Camera set from `apply_spec`, applied once the board is fitted:
+    /// yaw, pitch (degrees), zoom and target (mm).
+    pending_cam: Option<(f32, f32, f32, [f32; 3])>,
     shared: Arc<Mutex<Shared>>,
 }
 
@@ -1120,12 +1657,22 @@ impl Default for View3d {
                 target: [0.0; 3],
             },
             options: Options::default(),
+            section: Section {
+                axis: 0,
+                pos: 0.0,
+                flip: false,
+            },
+            hidden: [false; 64],
             built: None,
             loader: None,
             models: None,
             model_count: 0,
             radius: 50.0,
+            half: [25.0, 25.0],
             parts: 0,
+            cut_src: None,
+            cut_built: None,
+            pending_cam: None,
             shared: Arc::default(),
         }
     }
@@ -1137,6 +1684,52 @@ impl View3d {
         self.built = None;
         self.loader = None;
         self.models = None;
+        self.hidden = [false; 64];
+        self.section.pos = 0.0;
+    }
+
+    /// Sets the view from a spec such as
+    /// `xray,section,y,flip,pos=3.5,hide=2-13,yaw=30,pitch=40,zoom=2,at=1;2;0`
+    /// (for screenshots and tests; `TRACE_OPEN=3d:<spec>`).
+    pub fn apply_spec(&mut self, spec: &str) {
+        let (mut yaw, mut pitch, mut zoom, mut at) = (0.0, 55.0, 1.0, [0.0f32; 3]);
+        let mut cam = false;
+        for w in spec.split(',').map(str::trim) {
+            let (k, val) = w.split_once('=').unwrap_or((w, ""));
+            let f = val.parse::<f32>().unwrap_or(0.0);
+            match k {
+                "xray" => self.options.xray = true,
+                "section" => self.options.section = true,
+                "y" => self.section.axis = 1,
+                "flip" => self.section.flip = true,
+                "pos" => self.section.pos = f,
+                "noparts" => self.options.parts = false,
+                "nosilk" => self.options.silk = false,
+                "hide" => {
+                    for r in val.split(';') {
+                        let (a, b) = r.split_once('-').unwrap_or((r, r));
+                        if let (Ok(a), Ok(b)) = (a.parse::<usize>(), b.parse::<usize>()) {
+                            for i in a..=b.min(63) {
+                                self.hidden[i] = true;
+                            }
+                        }
+                    }
+                }
+                "yaw" => (yaw, cam) = (f, true),
+                "pitch" => (pitch, cam) = (f, true),
+                "zoom" => (zoom, cam) = (f.max(0.01), true),
+                "at" => {
+                    for (i, c) in val.split(';').take(3).enumerate() {
+                        at[i] = c.parse().unwrap_or(0.0);
+                    }
+                    cam = true;
+                }
+                _ => {}
+            }
+        }
+        if cam {
+            self.pending_cam = Some((yaw, pitch, zoom, at));
+        }
     }
 
     /// Build the mesh again from the same board (parts fitted changed).
@@ -1168,12 +1761,37 @@ impl View3d {
         if let Some(g) = self.shared.lock().ok().and_then(|mut s| s.gpu.take()) {
             unsafe {
                 gl.delete_program(g.program);
-                gl.delete_vertex_array(g.vao);
-                gl.delete_buffer(g.vbo);
-                gl.delete_buffer(g.ebo);
+                for b in [g.board, g.caps] {
+                    gl.delete_vertex_array(b.vao);
+                    gl.delete_buffer(b.vbo);
+                    gl.delete_buffer(b.ebo);
+                }
             }
         }
     }
+}
+
+unsafe fn buffers(gl: &glow::Context) -> Result<Buffers, String> {
+    let vao = gl.create_vertex_array()?;
+    let vbo = gl.create_buffer()?;
+    let ebo = gl.create_buffer()?;
+    gl.bind_vertex_array(Some(vao));
+    gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
+    gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ebo));
+    let stride = std::mem::size_of::<Vert>() as i32;
+    gl.enable_vertex_attrib_array(0);
+    gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, stride, 0);
+    gl.enable_vertex_attrib_array(1);
+    gl.vertex_attrib_pointer_f32(1, 4, glow::UNSIGNED_BYTE, true, stride, 12);
+    gl.enable_vertex_attrib_array(2);
+    gl.vertex_attrib_pointer_f32(2, 4, glow::BYTE, true, stride, 16);
+    gl.bind_vertex_array(None);
+    Ok(Buffers {
+        vao,
+        vbo,
+        ebo,
+        count: 0,
+    })
 }
 
 unsafe fn init(gl: &glow::Context) -> Result<Gpu, String> {
@@ -1199,12 +1817,25 @@ unsafe fn init(gl: &glow::Context) -> Result<Gpu, String> {
 {vin} vec4 a_col;
 {vin} vec4 a_nrm;
 uniform mat4 u_mvp;
+uniform float u_hide[64];
 {vout} vec3 v_col;
 {vout} vec3 v_nrm;
+{vout} vec3 v_pos;
+{vout} float v_shine;
+{vout} float v_tag;
+{vout} float v_hide;
 void main() {{
     gl_Position = u_mvp * vec4(a_pos, 1.0);
     v_col = a_col.rgb;
+    v_shine = a_col.a;
     v_nrm = a_nrm.xyz;
+    v_pos = a_pos;
+    float tag = floor(a_nrm.w * 127.0 + 0.5);
+    v_tag = tag;
+    v_hide = 0.0;
+    if (tag >= 1.0 && tag <= 64.0) {{
+        v_hide = u_hide[int(tag) - 1];
+    }}
 }}
 "
     );
@@ -1212,15 +1843,34 @@ void main() {{
         "{header}
 {fin} vec3 v_col;
 {fin} vec3 v_nrm;
+{fin} vec3 v_pos;
+{fin} float v_shine;
+{fin} float v_tag;
+{fin} float v_hide;
 uniform vec3 u_eye;
+uniform vec4 u_mode;
+uniform vec4 u_clip;
 {out}
 void main() {{
+    if (v_hide > 0.5) discard;
+    if (u_clip.w > 0.5 && dot(v_pos.xy, u_clip.xy) > u_clip.z) discard;
+    bool diel = v_tag > 99.5;
+    bool solid = v_tag < 0.5;
+    if (u_mode.x > 0.5 && u_mode.x < 1.5 && !solid) discard;
+    if (u_mode.x > 1.5 && solid) discard;
     vec3 n = normalize(v_nrm);
     if (dot(n, u_eye) < 0.0) n = -n;
     vec3 key = normalize(vec3(-0.35, -0.45, 0.82));
-    float l = 0.38 + 0.42 * max(dot(n, u_eye), 0.0) + 0.30 * abs(dot(n, key));
-    vec3 c = v_col * min(l, 1.15);
-    {frag} = vec4(c, 1.0);
+    float ne = max(dot(n, u_eye), 0.0);
+    float l = 0.38 + 0.42 * ne + 0.30 * abs(dot(n, key));
+    vec3 base = v_col * min(l, 1.15);
+    vec3 h = normalize(key + u_eye);
+    float sp = pow(max(dot(n, h), 0.0), 60.0);
+    float rim = pow(1.0 - ne, 4.0);
+    vec3 metal = base * 0.95 + v_col * (1.2 * sp + 0.25 * rim) + vec3(0.3 * sp);
+    vec3 c = mix(base, metal, v_shine);
+    float a = u_mode.x > 1.5 ? (diel ? u_mode.y : u_mode.z) : 1.0;
+    {frag} = vec4(c, a);
 }}
 ",
         out = if new { "out vec4 o_col;" } else { "" },
@@ -1249,35 +1899,24 @@ void main() {{
         gl.detach_shader(program, sh);
         gl.delete_shader(sh);
     }
-    let vao = gl.create_vertex_array()?;
-    let vbo = gl.create_buffer()?;
-    let ebo = gl.create_buffer()?;
-    gl.bind_vertex_array(Some(vao));
-    gl.bind_buffer(glow::ARRAY_BUFFER, Some(vbo));
-    gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(ebo));
-    let stride = std::mem::size_of::<Vert>() as i32;
-    gl.enable_vertex_attrib_array(0);
-    gl.vertex_attrib_pointer_f32(0, 3, glow::FLOAT, false, stride, 0);
-    gl.enable_vertex_attrib_array(1);
-    gl.vertex_attrib_pointer_f32(1, 4, glow::UNSIGNED_BYTE, true, stride, 12);
-    gl.enable_vertex_attrib_array(2);
-    gl.vertex_attrib_pointer_f32(2, 4, glow::BYTE, true, stride, 16);
-    gl.bind_vertex_array(None);
     Ok(Gpu {
         u_mvp: gl.get_uniform_location(program, "u_mvp"),
         u_eye: gl.get_uniform_location(program, "u_eye"),
+        u_mode: gl.get_uniform_location(program, "u_mode"),
+        u_clip: gl.get_uniform_location(program, "u_clip"),
+        u_hide: gl
+            .get_uniform_location(program, "u_hide[0]")
+            .or_else(|| gl.get_uniform_location(program, "u_hide")),
+        board: buffers(gl)?,
+        caps: buffers(gl)?,
         program,
-        vao,
-        vbo,
-        ebo,
-        count: 0,
     })
 }
 
-unsafe fn upload(gl: &glow::Context, gpu: &mut Gpu, m: &Mesh) {
+unsafe fn upload(gl: &glow::Context, b: &mut Buffers, m: &Mesh) {
     let bytes = |p: *const u8, n: usize| std::slice::from_raw_parts(p, n);
-    gl.bind_vertex_array(Some(gpu.vao));
-    gl.bind_buffer(glow::ARRAY_BUFFER, Some(gpu.vbo));
+    gl.bind_vertex_array(Some(b.vao));
+    gl.bind_buffer(glow::ARRAY_BUFFER, Some(b.vbo));
     gl.buffer_data_u8_slice(
         glow::ARRAY_BUFFER,
         bytes(
@@ -1286,7 +1925,7 @@ unsafe fn upload(gl: &glow::Context, gpu: &mut Gpu, m: &Mesh) {
         ),
         glow::STATIC_DRAW,
     );
-    gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(gpu.ebo));
+    gl.bind_buffer(glow::ELEMENT_ARRAY_BUFFER, Some(b.ebo));
     gl.buffer_data_u8_slice(
         glow::ELEMENT_ARRAY_BUFFER,
         bytes(
@@ -1296,8 +1935,21 @@ unsafe fn upload(gl: &glow::Context, gpu: &mut Gpu, m: &Mesh) {
         glow::STATIC_DRAW,
     );
     gl.bind_vertex_array(None);
-    gpu.count = m.idx.len() as i32;
+    b.count = m.idx.len() as i32;
 }
+
+unsafe fn draw(gl: &glow::Context, b: &Buffers) {
+    if b.count > 0 {
+        gl.bind_vertex_array(Some(b.vao));
+        gl.draw_elements(glow::TRIANGLES, b.count, glow::UNSIGNED_INT, 0);
+        gl.bind_vertex_array(None);
+    }
+}
+
+/// How clear the laminate and mask are in X-ray (alpha).
+const XRAY_ALPHA: f32 = 0.10;
+/// How solid copper is in X-ray, so the layers under it show too.
+const XRAY_COPPER: f32 = 0.5;
 
 /// Draws the 3D view in the central panel.
 pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
@@ -1337,20 +1989,50 @@ pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
         let first = v.built.is_none();
         let none: Vec<Option<Arc<trace_step::Mesh>>> = Vec::new();
         let models = v.models.clone();
-        let mesh = build(
+        let t0 = std::time::Instant::now();
+        let mut mesh = build(
             scene,
             v.options,
             models.as_deref().map_or(&none[..], |m| &m[..]),
         );
+        if std::env::var_os("TRACE_DEBUG3D").is_some() {
+            eprintln!(
+                "3D mesh: {} vertices, {} triangles in {:.0} ms",
+                mesh.verts.len(),
+                mesh.idx.len() / 3,
+                t0.elapsed().as_secs_f64() * 1e3
+            );
+        }
         v.radius = mesh.radius;
+        v.half = mesh.half;
         v.parts = mesh.parts;
+        v.cut_src = mesh.section.take();
+        v.cut_built = None;
         if first {
             v.camera.fit(mesh.radius);
+            if let Some((yaw, pitch, zoom, at)) = v.pending_cam.take() {
+                v.camera.yaw = yaw.to_radians();
+                v.camera.pitch = pitch.to_radians().clamp(-1.5605, 1.5605);
+                v.camera.dist /= zoom;
+                v.camera.target = at;
+            }
         }
         if let Ok(mut s) = v.shared.lock() {
             s.upload = Some(mesh);
         }
         v.built = Some((v.options, with_models, fold_sig));
+    }
+    let cutting = v.options.section && v.options.fold == 0;
+    if let (true, Some(src)) = (cutting, v.cut_src.clone()) {
+        let key = (v.section, Arc::as_ptr(&src) as usize);
+        if v.cut_built != Some(key) {
+            let s = v.section;
+            let m = caps(&src, s.axis, s.pos, s.keep());
+            if let Ok(mut sh) = v.shared.lock() {
+                sh.caps = Some(m);
+            }
+            v.cut_built = Some(key);
+        }
     }
 
     let (rect, resp) = ui.allocate_exact_size(ui.available_size(), egui::Sense::click_and_drag());
@@ -1363,6 +2045,7 @@ pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
                 i.key_pressed(egui::Key::T),
                 i.key_pressed(egui::Key::B),
                 i.key_pressed(egui::Key::F),
+                i.key_pressed(egui::Key::X),
             ),
         )
     });
@@ -1382,7 +2065,7 @@ pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
         cam.pitch = (cam.pitch + d.y * 0.008).clamp(-1.5605, 1.5605);
     }
     if resp.hovered() && scroll != 0.0 {
-        cam.dist = (cam.dist * (-scroll * 0.0015).exp()).clamp(v.radius * 0.02, v.radius * 30.0);
+        cam.dist = (cam.dist * (-scroll * 0.0015).exp()).clamp(v.radius * 0.003, v.radius * 30.0);
     }
     if resp.double_clicked() || (!typing && keys.2) {
         cam.fit(v.radius);
@@ -1399,12 +2082,32 @@ pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
             cam.pitch = -0.95;
         }
     }
+    if !typing && keys.3 {
+        v.options.xray = !v.options.xray;
+    }
 
     let painter = ui.painter_at(rect);
     painter.rect_filled(rect, 0.0, Color32::from_rgb(38, 42, 50));
     let mvp = cam.matrix(rect.width() / rect.height().max(1.0), v.radius);
     let eye = cam.eye_dir();
     let shared = v.shared.clone();
+    let xray = v.options.xray;
+    let clip = if cutting {
+        let s = v.section;
+        let k = -s.keep();
+        let mut c = [0.0f32; 4];
+        c[s.axis] = k;
+        c[2] = k * s.pos;
+        c[3] = 1.0;
+        c
+    } else {
+        [0.0; 4]
+    };
+    let hide: Vec<f32> = v
+        .hidden
+        .iter()
+        .map(|&h| if h { 1.0 } else { 0.0 })
+        .collect();
     let cb = eframe::egui_glow::CallbackFn::new(move |_info, painter| {
         let gl = painter.gl();
         let Ok(mut s) = shared.lock() else { return };
@@ -1416,11 +2119,17 @@ pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
                 }
             }
             let Shared {
-                gpu, upload: up, ..
+                gpu,
+                upload: up,
+                caps: cup,
+                ..
             } = &mut *s;
             let Some(gpu) = gpu.as_mut() else { return };
             if let Some(m) = up.take() {
-                upload(gl, gpu, &m);
+                upload(gl, &mut gpu.board, &m);
+            }
+            if let Some(m) = cup.take() {
+                upload(gl, &mut gpu.caps, &m);
             }
             gl.enable(glow::DEPTH_TEST);
             gl.depth_func(glow::LEQUAL);
@@ -1431,9 +2140,31 @@ pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
             gl.use_program(Some(gpu.program));
             gl.uniform_matrix_4_f32_slice(gpu.u_mvp.as_ref(), false, &mvp);
             gl.uniform_3_f32(gpu.u_eye.as_ref(), eye[0], eye[1], eye[2]);
-            gl.bind_vertex_array(Some(gpu.vao));
-            gl.draw_elements(glow::TRIANGLES, gpu.count, glow::UNSIGNED_INT, 0);
-            gl.bind_vertex_array(None);
+            gl.uniform_1_f32_slice(gpu.u_hide.as_ref(), &hide);
+            let mode =
+                |m: f32| gl.uniform_4_f32(gpu.u_mode.as_ref(), m, XRAY_ALPHA, XRAY_COPPER, 0.0);
+            let set_clip = |on: bool| {
+                let c = if on { clip } else { [0.0; 4] };
+                gl.uniform_4_f32(gpu.u_clip.as_ref(), c[0], c[1], c[2], c[3]);
+            };
+            mode(if xray { 1.0 } else { 0.0 });
+            set_clip(true);
+            draw(gl, &gpu.board);
+            if clip[3] > 0.0 {
+                set_clip(false);
+                draw(gl, &gpu.caps);
+                set_clip(true);
+            }
+            if xray {
+                // Copper and laminate last, see-through, over the solid parts.
+                gl.enable(glow::BLEND);
+                gl.blend_func(glow::SRC_ALPHA, glow::ONE_MINUS_SRC_ALPHA);
+                gl.depth_mask(false);
+                mode(2.0);
+                draw(gl, &gpu.board);
+                gl.depth_mask(true);
+                gl.disable(glow::BLEND);
+            }
             gl.disable(glow::DEPTH_TEST);
         }
     });
@@ -1455,6 +2186,19 @@ pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
     // Options in the corner.
     let g_bends = &scene.board.bends;
     let mut opt = v.options;
+    let mut sec = v.section;
+    let half = v.half;
+    let hidden = &mut v.hidden;
+    let n = scene.copper_count as usize;
+    let names: Vec<String> = (0..n.min(64))
+        .map(|i| {
+            scene
+                .layers
+                .iter()
+                .find(|l| l.slot == Slot::Copper(i as u8))
+                .map_or_else(|| format!("Copper {}", i + 1), |l| l.name.clone())
+        })
+        .collect();
     egui::Area::new(egui::Id::new("view3d_opts"))
         .fixed_pos(rect.left_top() + egui::vec2(10.0, 10.0))
         .order(egui::Order::Foreground)
@@ -1473,6 +2217,47 @@ pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
                     ui.checkbox(&mut opt.parts, "Parts");
                     ui.checkbox(&mut opt.silk, "Silkscreen");
                 });
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut opt.xray, "X-ray")
+                        .on_hover_text("Clear laminate and mask, so the inner layers show (X)");
+                    let can_cut = opt.fold == 0;
+                    ui.add_enabled(can_cut, egui::Checkbox::new(&mut opt.section, "Section"))
+                        .on_hover_text("Cut the board open with a plane and look at the cut face");
+                    ui.menu_button("Layers", |ui| {
+                        ui.horizontal(|ui| {
+                            if ui.small_button("All").clicked() {
+                                hidden.iter_mut().for_each(|h| *h = false);
+                            }
+                            if ui.small_button("None").clicked() {
+                                hidden[..names.len()].iter_mut().for_each(|h| *h = true);
+                            }
+                        });
+                        for (i, name) in names.iter().enumerate() {
+                            let mut on = !hidden[i];
+                            if ui.checkbox(&mut on, name).changed() {
+                                hidden[i] = !on;
+                            }
+                        }
+                    })
+                    .response
+                    .on_hover_text("Copper layers to draw");
+                });
+                if opt.section && opt.fold == 0 {
+                    ui.horizontal(|ui| {
+                        ui.label("Cut");
+                        ui.selectable_value(&mut sec.axis, 0, "across X");
+                        ui.selectable_value(&mut sec.axis, 1, "across Y");
+                        ui.checkbox(&mut sec.flip, "Other side");
+                    });
+                    let h = half[sec.axis].max(0.1);
+                    sec.pos = sec.pos.clamp(-h, h);
+                    ui.add(
+                        egui::Slider::new(&mut sec.pos, -h..=h)
+                            .suffix(" mm")
+                            .step_by(0.01)
+                            .text("from centre"),
+                    );
+                }
                 if !g_bends.is_empty() {
                     ui.horizontal(|ui| {
                         ui.label("Fold");
@@ -1482,7 +2267,7 @@ pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
                 }
                 ui.label(
                     RichText::new(
-                        "Drag to turn, right-drag to pan, scroll to zoom.\nT top, B flip over, F or double-click to reset.",
+                        "Drag to turn, right-drag to pan, scroll to zoom.\nT top, B flip over, X X-ray, F or double-click to reset.",
                     )
                     .small()
                     .weak(),
@@ -1517,7 +2302,42 @@ pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
             });
         });
     v.options = opt;
+    v.section = sec;
     if resp.dragged() || scroll != 0.0 {
         ui.ctx().request_repaint();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_section_cuts_laminate_copper_and_barrel() {
+        let sq = |x0: f32, x1: f32| -> Vec<Tri2> {
+            vec![
+                [[x0, -5.0], [x1, -5.0], [x1, 5.0]],
+                [[x0, -5.0], [x1, 5.0], [x0, 5.0]],
+            ]
+        };
+        let src = CapSrc {
+            layers: vec![([0.765, 0.8], COPPER, sq(-2.0, 2.0))],
+            board: sq(-10.0, 10.0),
+            slices: vec![([-0.765, 0.765], CORE)],
+            barrels: vec![([0.0, 3.0], 0.1, 0.125, [-0.8, 0.8])],
+        };
+        // Across y at 0: the laminate and the copper are each one span;
+        // the barrel at y = 3 is missed.
+        let m = caps(&src, 1, 0.0, -1.0);
+        assert_eq!(m.idx.len(), 2 * 6);
+        // Across x at 0: the barrel's two walls are cut too.
+        let m = caps(&src, 0, 0.0, -1.0);
+        assert_eq!(m.idx.len(), 4 * 6);
+        let xs: Vec<f32> = m.verts.iter().map(|v| v.p[0]).collect();
+        assert!(xs.iter().all(|x| x.abs() < 0.01));
+        assert_eq!(
+            merge(vec![[0.0, 1.0], [0.5, 2.0], [3.0, 4.0]]),
+            vec![[0.0, 2.0], [3.0, 4.0]]
+        );
     }
 }

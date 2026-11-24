@@ -3,6 +3,27 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.99.0 (2026-11-24)
+
+The whole-board 3D view, built as the board is:
+
+- Every copper layer sits at its stack-up height with its real
+  thickness: tracks, pours, planes and pads are solid copper with side
+  walls, not flat paint. Outer copper shows under the solder mask, bare
+  pads in gold.
+- Holes are drilled through the laminate, and every plated hole has its
+  barrel (with the plating thickness), joined to the annular rings on
+  each layer it reaches. Backdrilled stubs have no barrel left.
+- X-ray (button or X key): the laminate and mask go clear and the copper
+  half clear, coloured by layer, so the inner layers show through. A
+  Layers menu shows or hides each copper layer.
+- Section: cut the board open across x or y anywhere with a slider, and
+  keep either side. The cut face is drawn solid: core and prepreg
+  bands, every copper layer, and the barrels of the vias it passes
+  through.
+- `TRACE_OPEN=3d:<spec>` opens the 3D view set up for screenshots
+  (xray, section, y, flip, pos=, hide=, yaw=, pitch=, zoom=, at=).
+
 ## 0.98.0 (2026-11-24)
 
 Vias and cut-outs that look real, with their fields on them:

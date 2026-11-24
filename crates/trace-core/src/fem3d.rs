@@ -37,6 +37,52 @@ use faer::sparse::{SparseColMat, Triplet};
 
 const C0: f64 = 299_792_458.0;
 const ETA0: f64 = 376.730_313_668;
+
+/// Terminates ports of an n-port S (row by row): `loads` gives each
+/// terminated port and its reflection Γ (short -1, open 1, an impedance Z
+/// on reference R: (Z - R)/(Z + R)). The rest stay, in order.
+pub fn terminate(s: &[c64], n: usize, loads: &[(usize, c64)]) -> Vec<c64> {
+    let ti: Vec<usize> = loads.iter().map(|l| l.0).collect();
+    let keep: Vec<usize> = (0..n).filter(|k| !ti.contains(k)).collect();
+    let (ne, ni) = (keep.len(), ti.len());
+    if ni == 0 {
+        return s.to_vec();
+    }
+    // M = I - S_ii Γ; S' = S_ee + S_ei Γ M⁻¹ S_ie.
+    let mut m = vec![czero(); ni * ni];
+    for a in 0..ni {
+        for b in 0..ni {
+            m[a * ni + b] = if a == b { c64::new(1.0, 0.0) } else { czero() } - s[ti[a] * n + ti[b]] * loads[b].1;
+        }
+    }
+    let mi = cinv(&m, ni);
+    let mut out = vec![czero(); ne * ne];
+    for (r, &e) in keep.iter().enumerate() {
+        for (c, &f) in keep.iter().enumerate() {
+            let mut acc = s[e * n + f];
+            for a in 0..ni {
+                for b in 0..ni {
+                    acc += s[e * n + ti[a]] * loads[a].1 * mi[a * ni + b] * s[ti[b] * n + f];
+                }
+            }
+            out[r * ne + c] = acc;
+        }
+    }
+    out
+}
+
+/// Every port's mode: the wave ports', then the lumped ports' (Z0 = R).
+fn port_infos(model: &Model, asm: &Assembled) -> Vec<PortInfo> {
+    asm.ports
+        .iter()
+        .map(|p| p.info)
+        .chain(model.lumped.iter().map(|l| PortInfo {
+            z0: l.r,
+            eeff: 1.0,
+            beta: 0.0,
+        }))
+        .collect()
+}
 /// Largest ratio between neighbouring starting-grid gaps (thin copper and
 /// dielectrics would otherwise grade fine lines across the whole box; the
 /// adaptive passes refine where it matters).
@@ -139,6 +185,21 @@ pub struct Model {
     pub ports: Vec<Port>,
     /// Copper loss on the conductors (None: perfect conductor).
     pub copper: Option<Copper>,
+    /// Lumped ports (a part's two pads), after the wave ports in S.
+    pub lumped: Vec<Lumped>,
+}
+
+/// A lumped port: a rectangle in the plane z = `z` between two pads, its
+/// current along axis `dir` (0 x, 1 y), referenced to `r` ohms. The
+/// voltage is the field across it, positive at its high end.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Lumped {
+    pub name: String,
+    pub z: f64,
+    pub lo: [f64; 2],
+    pub hi: [f64; 2],
+    pub dir: usize,
+    pub r: f64,
 }
 
 /// Real copper: skin-effect surface resistance with roughness, added to
@@ -413,6 +474,13 @@ impl Model {
         }
         for s in &self.sheets {
             hard[s.axis].push(s.at);
+        }
+        for l in &self.lumped {
+            hard[2].push(l.z);
+            for k in 0..2 {
+                hard[k].push(l.lo[k]);
+                hard[k].push(l.hi[k]);
+            }
         }
         let clamp = |a: usize, v: f64| v.clamp(self.lo[a], self.hi[a]);
         for s in &self.solids {
@@ -1695,13 +1763,50 @@ fn solve_at(
             }
         }
     }
-    // Columns: [b0 of each port, be of each port].
+    // Lumped ports: a resistive sheet of R along the current (Zs = R w/l
+    // per square), its source the current I0 = 1 across it, and the
+    // functional that reads its voltage.
+    let nl = model.lumped.len();
+    let mut lsrc = vec![vec![czero(); n]; nl];
+    let mut lvolt = vec![vec![0.0f64; n]; nl];
+    for (li, lp) in model.lumped.iter().enumerate() {
+        let faces = lumped_faces(mesh, &asm, lp, model.tol());
+        if faces.is_empty() {
+            return Err(format!("lumped port {} has no mesh faces", lp.name));
+        }
+        let o = 1 - lp.dir;
+        let (len, wid) = (lp.hi[lp.dir] - lp.lo[lp.dir], lp.hi[o] - lp.lo[o]);
+        let zs = lp.r * wid / len;
+        let coef = c64::new(0.0, k0 * ETA0 / zs);
+        for bf in &faces {
+            let (area, tr) = face_traces(mesh, &asm, bf);
+            let d = &asm.dof[bf.tet];
+            for (q, (_, wq)) in Q_TRI4.iter().enumerate() {
+                for (ia, va) in &tr[q] {
+                    let Some(da) = d[*ia] else { continue };
+                    let wa = va[lp.dir] * wq * area;
+                    lsrc[li][da as usize] += c64::new(0.0, -k0 * ETA0 / wid) * wa;
+                    lvolt[li][da as usize] -= wa / wid;
+                    for (ic, vc) in &tr[q] {
+                        let Some(dc) = d[*ic] else { continue };
+                        trip.push(Triplet::new(da as usize, dc as usize, coef * (wa * vc[lp.dir])));
+                    }
+                }
+            }
+        }
+    }
+    // Columns: [b0 of each port, be of each port, each lumped source].
     let m2 = 2 * np;
-    let mut cols = faer::Mat::<c64>::zeros(n, m2);
+    let mut cols = faer::Mat::<c64>::zeros(n, m2 + nl);
     for p in 0..np {
         for r in 0..n {
             cols[(r, p)] = c64::new(b0[p][r], 0.0);
             cols[(r, np + p)] = c64::new(be[p][r], 0.0);
+        }
+    }
+    for l in 0..nl {
+        for r in 0..n {
+            cols[(r, m2 + l)] = lsrc[l][r];
         }
     }
     tlog("matrix");
@@ -1757,10 +1862,14 @@ fn solve_at(
     }
     let sinv = cinv(&sm, m2);
     // Excitation p: r = 2jβ b0_p, so A0⁻¹ r = 2jβ y[p]; x = z − Y S⁻¹ Uᵀ z.
-    let mut sols = Vec::with_capacity(np);
-    for (p, pm) in asm.ports.iter().enumerate() {
-        let k2 = c64::new(0.0, 2.0 * pm.info.beta);
-        let z: Vec<c64> = y[p].iter().map(|v| *v * k2).collect();
+    let mut sols = Vec::with_capacity(np + nl);
+    for p in 0..np + nl {
+        let z: Vec<c64> = if p < np {
+            let k2 = c64::new(0.0, 2.0 * asm.ports[p].info.beta);
+            y[p].iter().map(|v| *v * k2).collect()
+        } else {
+            y[m2 + p - np].clone()
+        };
         let utz: Vec<c64> = (0..m2)
             .map(|i| {
                 let u = ucol(i);
@@ -1789,10 +1898,21 @@ fn solve_at(
         }
         sols.push(x);
     }
-    // Mode voltages at each port for each excitation.
-    let mut s = vec![czero(); np * np];
-    for (pq, pm) in asm.ports.iter().enumerate() {
-        for pe in 0..np {
+    // S over the wave ports then the lumped ones, as power waves (peak
+    // phasors, power ½|a|²): a wave port's incident amplitude is norm for
+    // a unit mode, a lumped port's √R I0 / 2 (I0 = 1), its outgoing
+    // (2V - R I0)/(2√R).
+    let nt = np + nl;
+    let a_in = |pe: usize| -> f64 {
+        if pe < np {
+            asm.ports[pe].norm
+        } else {
+            model.lumped[pe - np].r.sqrt() / 2.0
+        }
+    };
+    let mut s = vec![czero(); nt * nt];
+    for pe in 0..nt {
+        for (pq, pm) in asm.ports.iter().enumerate() {
             let mut g = czero();
             for r in 0..n {
                 if b0[pq][r] != 0.0 {
@@ -1803,20 +1923,38 @@ fn solve_at(
             if pq == pe {
                 v -= c64::new(1.0, 0.0);
             }
-            let mut v = v * (pm.norm / asm.ports[pe].norm);
+            let mut v = v * (pm.norm / a_in(pe));
             // De-embed: move both reference planes inwards.
-            let shift = model.ports[pq].deembed * pm.info.beta
-                + model.ports[pe].deembed * asm.ports[pe].info.beta;
+            let mut shift = model.ports[pq].deembed * pm.info.beta;
+            if pe < np {
+                shift += model.ports[pe].deembed * asm.ports[pe].info.beta;
+            }
             v *= c64::new(shift.cos(), shift.sin());
-            s[pq * np + pe] = v;
+            s[pq * nt + pe] = v;
+        }
+        for (k, lp) in model.lumped.iter().enumerate() {
+            let vk: c64 = lvolt[k]
+                .iter()
+                .zip(&sols[pe])
+                .filter(|(w, _)| **w != 0.0)
+                .map(|(w, x)| x * *w)
+                .sum();
+            let src = if pe == np + k { lp.r } else { 0.0 };
+            let mut b = (vk * 2.0 - src) / (2.0 * lp.r.sqrt());
+            if pe < np {
+                let shift = model.ports[pe].deembed * asm.ports[pe].info.beta;
+                b *= c64::new(shift.cos(), shift.sin());
+            }
+            s[(np + k) * nt + pe] = b / a_in(pe);
         }
     }
+    let np = nt;
     // Copper: each excitation's surface loss takes its share off the
     // power that gets through (the reflection barely moves).
     if model.copper.is_some() {
         let loss = copper_loss(model, mesh, &asm, &sols, f_ghz);
         for (pe, l) in loss.iter().enumerate() {
-            let p_in = 0.5 * asm.ports[pe].norm * asm.ports[pe].norm;
+            let p_in = 0.5 * a_in(pe) * a_in(pe);
             let eta = l / p_in.max(1e-300);
             let t: f64 = (0..np)
                 .filter(|&q| q != pe)
@@ -1831,6 +1969,28 @@ fn solve_at(
         }
     }
     Ok((asm, sols, s))
+}
+
+/// The mesh faces on a lumped port's rectangle (each once).
+fn lumped_faces(mesh: &Mesh, asm: &Assembled, lp: &Lumped, tol: f64) -> Vec<BFace> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out = Vec::new();
+    let inside = |p: &[f64; 3]| {
+        (p[2] - lp.z).abs() < tol
+            && p[0] >= lp.lo[0] - tol
+            && p[0] <= lp.hi[0] + tol
+            && p[1] >= lp.lo[1] - tol
+            && p[1] <= lp.hi[1] + tol
+    };
+    for (ti, t) in asm.tets.iter().enumerate() {
+        for (a, b, c) in LOCAL_FACES {
+            let f = [t[a], t[b], t[c]];
+            if f.iter().all(|&v| inside(&mesh.nodes[v as usize])) && seen.insert(f) {
+                out.push(BFace { f, tet: ti, local: [a, b, c] });
+            }
+        }
+    }
+    out
 }
 
 /// Per excitation, the power (W, for a unit mode) the conductors'
@@ -2825,7 +2985,7 @@ pub fn solve(
             Some((setup.f_adapt, &mut cache)),
         )?;
         last_unknowns = asm.n;
-        let z0: Vec<f64> = asm.ports.iter().map(|p| p.info.z0).collect();
+        let z0 = port_infos(model, &asm).iter().map(|p| p.z0).collect::<Vec<f64>>();
         // Converge on the S-parameters the user gets (renormalised), and
         // on the ports' Z0 to within 0.5% (HFSS's port accuracy).
         let s = match setup.z_ref {
@@ -2956,12 +3116,12 @@ pub fn solve(
             setup.iterative,
             Some((anchor(f, setup.f_adapt), &mut cache)),
         )?;
-        let z0: Vec<f64> = asm.ports.iter().map(|p| p.info.z0).collect();
+        let z0 = port_infos(model, &asm).iter().map(|p| p.z0).collect::<Vec<f64>>();
         let s = match setup.z_ref {
             Some(z) => renormalise(&s, &z0, z),
             None => s,
         };
-        solved.push((f, s, asm.ports.iter().map(|p| p.info).collect()));
+        solved.push((f, s, port_infos(model, &asm)));
         solved.sort_by(|a, b| a.0.total_cmp(&b.0));
         if !progress(&format!(
             "sweep: {f:.4} GHz solved ({} so far)",
@@ -3024,7 +3184,12 @@ pub fn solve(
     let info: Vec<Vec<PortInfo>> = sweep.iter().map(|&f| interp_info(&solved, f)).collect();
     let solved_f: Vec<f64> = solved.iter().map(|p| p.0).collect();
     Ok(Solution {
-        ports: model.ports.iter().map(|p| p.name.clone()).collect(),
+        ports: model
+            .ports
+            .iter()
+            .map(|p| p.name.clone())
+            .chain(model.lumped.iter().map(|l| l.name.clone()))
+            .collect(),
         passes,
         converged,
         f: sweep,
@@ -3074,6 +3239,7 @@ pub fn waveguide(a: f64, b: f64, len: f64, slab: Option<(f64, f64)>) -> Model {
         sheets: Vec::new(),
         ports: vec![port("P1", false), port("P2", true)],
         copper: None,
+        lumped: Vec::new(),
     }
 }
 
@@ -3143,6 +3309,7 @@ pub fn line(kind: LineKind, w: f64, h: f64, er: f64, tand: f64, len: f64) -> Mod
         sheets: vec![sheet],
         ports: vec![port("P1", false), port("P2", true)],
         copper: None,
+        lumped: Vec::new(),
     }
 }
 
@@ -3348,6 +3515,7 @@ pub fn via(stackup: &crate::Stackup, setup: &crate::fdtd::ViaSetup) -> Result<Mo
             rough_um: setup.rough_um,
             walls: [false, false, false, false, air_bot <= 0.0, air_top <= 0.0],
         }),
+        lumped: Vec::new(),
     })
 }
 
@@ -3543,5 +3711,56 @@ mod tests {
         });
         let r = solve(&m, &setup, |_| true).unwrap();
         assert!(-20.0 * r.s[0][2].norm().log10() > 1.5 * db);
+    }
+
+    #[test]
+    fn lumped_port_in_a_gap() {
+        // A microstrip with a 10 mil gap in the middle, a lumped port
+        // across it: shorted it is the whole line, open it blocks.
+        let mut m = line(LineKind::Microstrip, 10.0, 5.0, 4.0, 0.0, 200.0);
+        let sh = m.sheets[0].clone();
+        let (y0, y1) = (95.0 * MIL, 105.0 * MIL);
+        let half = |a: f64, b: f64| {
+            let mut s = sh.clone();
+            let (x0, x1) = (s.poly[0][0], s.poly[1][0]);
+            s.poly = vec![[x0, a], [x1, a], [x1, b], [x0, b]];
+            s
+        };
+        m.sheets = vec![half(0.0, y0), half(y1, 200.0 * MIL)];
+        let (x0, x1) = (sh.poly[0][0], sh.poly[1][0]);
+        m.lumped.push(Lumped {
+            name: "L1".into(),
+            z: sh.at,
+            lo: [x0, y0],
+            hi: [x1, y1],
+            dir: 1,
+            r: 50.0,
+        });
+        let setup = Setup {
+            f_adapt: 5.0,
+            max_unknowns: std::env::var("LP_DOF").ok().and_then(|v| v.parse().ok()).unwrap_or(50_000),
+            z_ref: None,
+            ..Setup::default()
+        };
+        let r = solve(&m, &setup, |_| true).unwrap();
+        assert_eq!(r.n(), 3);
+        let s = &r.s[0];
+        for i in 0..3 {
+            eprintln!("{:?}", (0..3).map(|j| format!("{:.3}∠{:.0}", s[i * 3 + j].norm(), s[i * 3 + j].arg().to_degrees())).collect::<Vec<_>>());
+        }
+        // Reciprocal and passive.
+        for (i, j) in [(0, 1), (0, 2), (1, 2)] {
+            assert!((s[i * 3 + j] - s[j * 3 + i]).norm() < 0.06, "S{i}{j}");
+        }
+        for c in 0..3 {
+            let p: f64 = (0..3).map(|q| s[q * 3 + c].norm_sqr()).sum();
+            eprintln!("column {c} power {p:.4}");
+            assert!(p < 1.05, "column {c} power {p}");
+        }
+        let short = terminate(s, 3, &[(2, c64::new(-1.0, 0.0))]);
+        let open = terminate(s, 3, &[(2, c64::new(1.0, 0.0))]);
+        eprintln!("short S21 {:.4} S11 {:.4}, open S21 {:.4}", short[2].norm(), short[0].norm(), open[2].norm());
+        assert!(short[2].norm() > 0.97, "shorted S21 {}", short[2].norm());
+        assert!(open[2].norm() < 0.5, "open S21 {}", open[2].norm());
     }
 }

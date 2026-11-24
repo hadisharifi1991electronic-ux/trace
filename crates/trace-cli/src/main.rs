@@ -456,6 +456,7 @@ fn main() -> ExitCode {
         ["ir", file, net, rest @ ..] => ir(file, net, rest),
         ["pdn", file, net, rest @ ..] => pdn_cmd(file, net, rest),
         ["via", file, from, to, rest @ ..] => via(file, from, to, rest),
+        ["planar", file, layer, win, rest @ ..] => planar(file, layer, win, rest),
         ["zcheck", file, rest @ ..] => zcheck_cmd(file, rest),
         ["path" | "pathloss", file, rest @ ..] => path_cmd(file, rest),
         ["rf" | "rfreport", file, rest @ ..] => rf_cmd(file, rest),
@@ -4141,6 +4142,127 @@ fn zcheck_cmd(file: &str, rest: &[&str]) -> Res {
     if let Some(o) = out {
         std::fs::write(o, rep.csv(&geo))?;
         println!("Wrote {o}");
+    }
+    Ok(())
+}
+
+/// `trace planar board LAYER x0,y0,x1,y1 [options] [out.sNp] [smith.svg]`:
+/// the board's copper in that window (mil) on an outer layer, solved in
+/// 3D with each two-pad part as a lumped port, then the parts' values
+/// put in (or `--value R=V` in their place).
+fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
+    use trace_core::{fem3d, planar, smith};
+    let b = board(file)?;
+    let geo = b.layer_geometry();
+    let l = layer
+        .parse::<usize>()
+        .ok()
+        .and_then(|n| n.checked_sub(1))
+        .filter(|&n| n < geo.len())
+        .or_else(|| geo.iter().position(|g| g.name.eq_ignore_ascii_case(layer)))
+        .ok_or_else(|| format!("no copper layer {layer}"))? as u8;
+    let w: Vec<f64> = win
+        .split(',')
+        .map(|x| x.trim().parse::<f64>())
+        .collect::<Result<_, _>>()
+        .map_err(|_| "window: x0,y0,x1,y1 in mil")?;
+    if w.len() != 4 {
+        return Err("window: x0,y0,x1,y1 in mil".into());
+    }
+    let mut fmax = 6.0;
+    let mut dof = 400_000usize;
+    let mut lossy = true;
+    let mut values: Vec<(String, String)> = Vec::new();
+    let mut outs: Vec<&str> = Vec::new();
+    let mut it = rest.iter();
+    while let Some(a) = it.next() {
+        match *a {
+            "--fmax" => fmax = it.next().and_then(|x| x.parse().ok()).ok_or("--fmax GHz")?,
+            "--fem-dof" => dof = it.next().and_then(|x| x.parse().ok()).ok_or("--fem-dof N")?,
+            "--lossless" => lossy = false,
+            "--value" => {
+                let x = it.next().ok_or("--value REF=VALUE")?;
+                let (r, v) = x.split_once('=').ok_or("--value REF=VALUE")?;
+                values.push((r.to_string(), v.to_string()));
+            }
+            o if !o.starts_with("--") => outs.push(o),
+            o => return Err(format!("unknown option {o}").into()),
+        }
+    }
+    let (model, parts, notes) =
+        planar::model(&b, [w[0], w[1], w[2], w[3]], l, lossy, 1.0).map_err(|e| e.to_string())?;
+    println!(
+        "Planar 3D FEM: {} wave ports, {} parts as lumped ports, {} copper shapes",
+        model.ports.len(),
+        parts.len(),
+        model.sheets.len()
+    );
+    for n in &notes {
+        println!("Note: {n}");
+    }
+    let setup = fem3d::Setup {
+        f_adapt: fmax,
+        sweep: (1..=100).map(|k| fmax * k as f64 / 100.0).collect(),
+        z_ref: Some(50.0),
+        max_unknowns: dof,
+        ..fem3d::Setup::default()
+    };
+    let t0 = std::time::Instant::now();
+    let sol = fem3d::solve(&model, &setup, |m| {
+        eprintln!("  {m}");
+        true
+    })?;
+    println!(
+        "  {} after {} passes, {} unknowns, {:.0} s",
+        if sol.converged { "converged" } else { "not converged" },
+        sol.passes.len(),
+        sol.unknowns,
+        t0.elapsed().as_secs_f64()
+    );
+    let loads: Vec<Option<planar::Load>> = parts
+        .iter()
+        .map(|p| {
+            let v = values
+                .iter()
+                .find(|x| x.0.eq_ignore_ascii_case(&p.designator))
+                .map_or(p.value.as_str(), |x| x.1.as_str());
+            planar::parse_load(&p.designator, v)
+        })
+        .collect();
+    for (p, ld) in parts.iter().zip(&loads) {
+        println!(
+            "  {}: {}",
+            p.designator,
+            ld.map_or(format!("value {:?} not read: left open", p.value), |x| x.text())
+        );
+    }
+    let ext = planar::with_loads(&sol, &parts, &loads);
+    let np = model.ports.len();
+    let db = |z: trace_core::fdtd::Cx| 20.0 * z.abs().max(1e-12).log10();
+    println!("  GHz     S11 (dB)  S21 (dB)");
+    for (k, f) in sol.f.iter().enumerate() {
+        if (k + 1) % 10 == 0 {
+            let s = &ext[k];
+            println!(
+                "  {f:6.2}  {:8.2}  {}",
+                db(s[0]),
+                if np > 1 { format!("{:8.2}", db(s[np])) } else { "-".into() }
+            );
+        }
+    }
+    for o in &outs {
+        if o.ends_with(".svg") {
+            let c = smith::Curve {
+                name: format!("{} S11 with the parts", model.ports[0].name),
+                points: sol.f.iter().zip(&ext).map(|(&f, s)| (f, s[0])).collect(),
+            };
+            std::fs::write(o, smith::svg(&[c], &[fmax / 2.0, fmax], 50.0, file))?;
+            println!("  Saved {o}");
+        } else {
+            // The full S, lumped ports included, for re-tuning later.
+            std::fs::write(o, sol.touchstone())?;
+            println!("  Saved {o} ({} ports: the wave ports, then the parts)", sol.n());
+        }
     }
     Ok(())
 }

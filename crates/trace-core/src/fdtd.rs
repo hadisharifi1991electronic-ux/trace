@@ -370,7 +370,7 @@ pub(crate) struct Stack {
     pub(crate) names: Vec<String>,
 }
 
-fn stack(stackup: &Stackup) -> Stack {
+pub(crate) fn stack(stackup: &Stackup) -> Stack {
     let mut z = 0.0;
     let mut sheet: Vec<f64> = Vec::new();
     let mut slabs: Vec<(f64, f64, f64, f64)> = Vec::new();

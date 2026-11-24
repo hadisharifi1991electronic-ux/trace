@@ -58,6 +58,7 @@ pub mod schematic;
 pub mod select;
 pub mod shape;
 pub mod sim;
+pub mod planar;
 pub mod smith;
 pub mod stackfile;
 pub mod stitch;

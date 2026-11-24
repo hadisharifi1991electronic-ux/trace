@@ -3,6 +3,26 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.95.0 (2026-11-24)
+
+3D FEM: real copper and laminate loss:
+
+- Copper loss on every conductor in the model (planes, barrels, pads,
+  traces, both sides of a sheet, and a box wall that is a real plane):
+  skin-effect surface resistance with the stack-up's roughness
+  (Hammerstad), from the solved field's surface current, taken off the
+  power that gets through. Checked on a microstrip: the fields' electric
+  and magnetic energy agree and the strip and ground carry the same
+  current.
+- The laminate's Df goes into the FEM as a complex permittivity
+  (exact at every frequency, unlike the FDTD's mid-band conductivity).
+  Both are on with the via's metal loss (the default).
+- ADRV9026 RF pair via, converged: FEM S21 -0.150 dB at 6 GHz and
+  -0.334 dB at 12 GHz (lossless -0.095 / -0.234). The FDTD adds only the
+  barrel's loss, analytically; the FEM now counts every copper surface.
+- With losses on, the power-balance warning looks only for gain (loss is
+  real).
+
 ## 0.94.0 (2026-11-24)
 
 3D FEM: a fast, interpolating frequency sweep:

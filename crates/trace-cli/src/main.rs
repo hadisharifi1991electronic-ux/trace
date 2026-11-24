@@ -4932,12 +4932,26 @@ fn fem_compare(
             db(b21)
         );
     }
-    println!("  largest difference: S11 {d11:.2} dB, S21 {d21:.3} dB (FEM copper is lossless)");
-    // Lossless copper and (by default) lossless laminate: any power gain
-    // or loss is the mesh's error, mostly at the ports.
+    println!(
+        "  largest difference: S11 {d11:.2} dB, S21 {d21:.3} dB{}",
+        if v.lossy || v.metal_loss {
+            " (FEM: copper loss on every conductor, roughness included, and the laminate's Df)"
+        } else {
+            " (lossless)"
+        }
+    );
+    // Lossless: any power gain or loss is the mesh's error, mostly at the
+    // ports. Lossy: only gain is (loss is real).
     let worst =
         s.s.iter()
-            .map(|m| (m[0].norm_sqr() + m[2].norm_sqr() - 1.0).abs())
+            .map(|m| {
+                let p = m[0].norm_sqr() + m[2].norm_sqr() - 1.0;
+                if v.lossy || v.metal_loss {
+                    p.max(0.0)
+                } else {
+                    p.abs()
+                }
+            })
             .fold(0.0f64, f64::max);
     if !s.converged || worst > 0.02 {
         println!(

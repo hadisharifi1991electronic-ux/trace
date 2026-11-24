@@ -137,6 +137,19 @@ pub struct Model {
     pub solids: Vec<Solid>,
     pub sheets: Vec<Sheet>,
     pub ports: Vec<Port>,
+    /// Copper loss on the conductors (None: perfect conductor).
+    pub copper: Option<Copper>,
+}
+
+/// Real copper: skin-effect surface resistance with roughness, added to
+/// the lossless solution as the power its surface current dissipates.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Copper {
+    /// RMS roughness, µm (Hammerstad); 0 smooth.
+    pub rough_um: f64,
+    /// Which PEC walls are real copper (a plane the box sits on), by face
+    /// as `walls`.
+    pub walls: [bool; 6],
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -1798,7 +1811,94 @@ fn solve_at(
             s[pq * np + pe] = v;
         }
     }
+    // Copper: each excitation's surface loss takes its share off the
+    // power that gets through (the reflection barely moves).
+    if model.copper.is_some() {
+        let loss = copper_loss(model, mesh, &asm, &sols, f_ghz);
+        for (pe, l) in loss.iter().enumerate() {
+            let p_in = 0.5 * asm.ports[pe].norm * asm.ports[pe].norm;
+            let eta = l / p_in.max(1e-300);
+            let t: f64 = (0..np)
+                .filter(|&q| q != pe)
+                .map(|q| s[q * np + pe].norm_sqr())
+                .sum();
+            if t > 1e-12 {
+                let k = ((t - eta).max(0.0) / t).sqrt();
+                for q in (0..np).filter(|&q| q != pe) {
+                    s[q * np + pe] *= k;
+                }
+            }
+        }
+    }
     Ok((asm, sols, s))
+}
+
+/// Per excitation, the power (W, for a unit mode) the conductors'
+/// surface resistance dissipates: ½ Rs ∫ |n × H|² over every face of the
+/// field region that lies on copper, both sides of a sheet.
+fn copper_loss(
+    model: &Model,
+    mesh: &Mesh,
+    asm: &Assembled,
+    sols: &[Vec<c64>],
+    f_ghz: f64,
+) -> Vec<f64> {
+    let Some(cu) = model.copper else {
+        return vec![0.0; sols.len()];
+    };
+    const RHO: f64 = 1.72e-8;
+    const MU0: f64 = 4.0e-7 * std::f64::consts::PI;
+    let f = f_ghz * 1e9;
+    let w = 2.0 * std::f64::consts::PI * f;
+    let rs = (w * MU0 * RHO / 2.0).sqrt() * crate::sim::loss::rough(f, cu.rough_um);
+    let edge_ix = |i: usize, j: usize| LOCAL_EDGES.iter().position(|&e| e == (i, j)).unwrap();
+    let mut out = vec![0.0; sols.len()];
+    let mut b = Vec::new();
+    for (ti, (t, d)) in asm.tets.iter().zip(&asm.dof).enumerate() {
+        // Inside a conductor: no field.
+        if d[..6].iter().all(|x| x.is_none()) {
+            continue;
+        }
+        let pts = tet_nodes(mesh, t);
+        let mut geo = None;
+        for (a, bb, c) in LOCAL_FACES {
+            if d[edge_ix(a, bb)].is_some()
+                || d[edge_ix(a, c)].is_some()
+                || d[edge_ix(bb, c)].is_some()
+            {
+                continue;
+            }
+            let fp = [pts[a], pts[bb], pts[c]];
+            // On a box wall: only a wall that is a real plane counts.
+            let wall = (0..3).find_map(|ax| {
+                for (hi, v) in [(false, model.lo[ax]), (true, model.hi[ax])] {
+                    if fp.iter().all(|p| (p[ax] - v).abs() < 1e-12) {
+                        return Some(2 * ax + hi as usize);
+                    }
+                }
+                None
+            });
+            if wall.is_some_and(|k| !cu.walls[k]) {
+                continue;
+            }
+            let (n, area, _) = tri_geo(fp);
+            let g = geo.get_or_insert_with(|| tet_geo(pts));
+            for (lq, wq) in &Q_TRI4 {
+                let mut l = [0.0; 4];
+                l[a] = lq[0];
+                l[bb] = lq[1];
+                l[c] = lq[2];
+                for (p, sol) in sols.iter().enumerate() {
+                    let (_, curl) = field_at(asm, g, ti, sol, &l, &mut b);
+                    // |H| = |∇×E| / (ωμ0); tangential part.
+                    let hn = curl[0] * n[0] + curl[1] * n[1] + curl[2] * n[2];
+                    let h2 = curl.iter().map(|z| z.norm_sqr()).sum::<f64>() - hn.norm_sqr();
+                    out[p] += 0.5 * rs * h2.max(0.0) / (w * MU0).powi(2) * wq * area;
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The factor's number type: f64, or f32 for half the memory (then
@@ -2973,6 +3073,7 @@ pub fn waveguide(a: f64, b: f64, len: f64, slab: Option<(f64, f64)>) -> Model {
         solids,
         sheets: Vec::new(),
         ports: vec![port("P1", false), port("P2", true)],
+        copper: None,
     }
 }
 
@@ -3041,6 +3142,7 @@ pub fn line(kind: LineKind, w: f64, h: f64, er: f64, tand: f64, len: f64) -> Mod
         solids,
         sheets: vec![sheet],
         ports: vec![port("P1", false), port("P2", true)],
+        copper: None,
     }
 }
 
@@ -3102,7 +3204,11 @@ pub fn via(stackup: &crate::Stackup, setup: &crate::fdtd::ViaSetup) -> Result<Mo
             },
             fill: Fill::Dielectric {
                 er: s.2,
-                tand: if setup.lossy { s.3 } else { 0.0 },
+                tand: if setup.lossy || setup.metal_loss {
+                    s.3
+                } else {
+                    0.0
+                },
             },
         });
     }
@@ -3238,6 +3344,10 @@ pub fn via(stackup: &crate::Stackup, setup: &crate::fdtd::ViaSetup) -> Result<Mo
         solids,
         sheets,
         ports: vec![port("P1", false), port("P2", true)],
+        copper: (setup.lossy || setup.metal_loss).then_some(Copper {
+            rough_um: setup.rough_um,
+            walls: [false, false, false, false, air_bot <= 0.0, air_top <= 0.0],
+        }),
     })
 }
 
@@ -3404,5 +3514,34 @@ mod tests {
             let g = interp_s(&solved, t)[0];
             assert!((g - f(t)).norm() < 1e-9, "{t}: {g} vs {}", f(t));
         }
+    }
+
+    #[test]
+    fn copper_loss_on_a_microstrip() {
+        // 20 mil on 5 mil Er 4, 400 mil at 5 GHz, smooth copper on the
+        // strip (both sides) and the ground: about 0.044 dB, all of it
+        // the copper's (the fields check out: electric and magnetic
+        // energy agree, and the strip and ground carry the same current).
+        let mut m = line(LineKind::Microstrip, 20.0, 5.0, 4.0, 0.0, 400.0);
+        m.copper = Some(Copper {
+            rough_um: 0.0,
+            walls: [false, false, false, false, true, false],
+        });
+        let setup = Setup {
+            f_adapt: 5.0,
+            max_unknowns: 60_000,
+            z_ref: None,
+            ..Setup::default()
+        };
+        let r = solve(&m, &setup, |_| true).unwrap();
+        let db = -20.0 * r.s[0][2].norm().log10();
+        assert!(db > 0.035 && db < 0.055, "copper loss {db} dB");
+        // Rough copper loses more.
+        m.copper = Some(Copper {
+            rough_um: 2.0,
+            walls: [false, false, false, false, true, false],
+        });
+        let r = solve(&m, &setup, |_| true).unwrap();
+        assert!(-20.0 * r.s[0][2].norm().log10() > 1.5 * db);
     }
 }

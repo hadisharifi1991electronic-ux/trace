@@ -52,7 +52,8 @@ pub fn terminate(s: &[c64], n: usize, loads: &[(usize, c64)]) -> Vec<c64> {
     let mut m = vec![czero(); ni * ni];
     for a in 0..ni {
         for b in 0..ni {
-            m[a * ni + b] = if a == b { c64::new(1.0, 0.0) } else { czero() } - s[ti[a] * n + ti[b]] * loads[b].1;
+            m[a * ni + b] = if a == b { c64::new(1.0, 0.0) } else { czero() }
+                - s[ti[a] * n + ti[b]] * loads[b].1;
         }
     }
     let mi = cinv(&m, ni);
@@ -1789,7 +1790,11 @@ fn solve_at(
                     lvolt[li][da as usize] -= wa / wid;
                     for (ic, vc) in &tr[q] {
                         let Some(dc) = d[*ic] else { continue };
-                        trip.push(Triplet::new(da as usize, dc as usize, coef * (wa * vc[lp.dir])));
+                        trip.push(Triplet::new(
+                            da as usize,
+                            dc as usize,
+                            coef * (wa * vc[lp.dir]),
+                        ));
                     }
                 }
             }
@@ -1986,7 +1991,11 @@ fn lumped_faces(mesh: &Mesh, asm: &Assembled, lp: &Lumped, tol: f64) -> Vec<BFac
         for (a, b, c) in LOCAL_FACES {
             let f = [t[a], t[b], t[c]];
             if f.iter().all(|&v| inside(&mesh.nodes[v as usize])) && seen.insert(f) {
-                out.push(BFace { f, tet: ti, local: [a, b, c] });
+                out.push(BFace {
+                    f,
+                    tet: ti,
+                    local: [a, b, c],
+                });
             }
         }
     }
@@ -2985,7 +2994,10 @@ pub fn solve(
             Some((setup.f_adapt, &mut cache)),
         )?;
         last_unknowns = asm.n;
-        let z0 = port_infos(model, &asm).iter().map(|p| p.z0).collect::<Vec<f64>>();
+        let z0 = port_infos(model, &asm)
+            .iter()
+            .map(|p| p.z0)
+            .collect::<Vec<f64>>();
         // Converge on the S-parameters the user gets (renormalised), and
         // on the ports' Z0 to within 0.5% (HFSS's port accuracy).
         let s = match setup.z_ref {
@@ -2996,6 +3008,11 @@ pub fn solve(
             .iter()
             .zip(&z0)
             .any(|(a, b)| (a - b).abs() > 0.005 * b);
+        let z_text = z0
+            .iter()
+            .map(|z| format!("{z:.1}"))
+            .collect::<Vec<_>>()
+            .join(" / ");
         last_z0 = z0;
         let delta = passes.last().map(|p| max_delta(&p.s, &s));
         passes.push(Pass {
@@ -3006,7 +3023,7 @@ pub fn solve(
             seconds: t0.elapsed().as_secs_f64(),
         });
         let line = format!(
-            "pass {}: {} tetrahedra, {} unknowns, dS {}, {:.1} s",
+            "pass {}: {} tetrahedra, {} unknowns, dS {}, {:.1} s; port Z0 {z_text} ohm",
             passes.len(),
             mesh.tets.len(),
             asm.n,
@@ -3116,7 +3133,10 @@ pub fn solve(
             setup.iterative,
             Some((anchor(f, setup.f_adapt), &mut cache)),
         )?;
-        let z0 = port_infos(model, &asm).iter().map(|p| p.z0).collect::<Vec<f64>>();
+        let z0 = port_infos(model, &asm)
+            .iter()
+            .map(|p| p.z0)
+            .collect::<Vec<f64>>();
         let s = match setup.z_ref {
             Some(z) => renormalise(&s, &z0, z),
             None => s,
@@ -3409,9 +3429,28 @@ pub fn via(stackup: &crate::Stackup, setup: &crate::fdtd::ViaSetup) -> Result<Mo
     let rect = |x0: f64, x1: f64, y0: f64, y1: f64| vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
     for l in 0..nl {
         if m.planes[l] {
+            // A plane is one sheet at its copper's top face; when the
+            // nearest signal layer is below it, the field sees its bottom
+            // face instead (else a bottom microstrip over a plane reads
+            // the plane's thickness as extra gap and its Z0 high).
+            let near = if l.abs_diff(m.from) <= l.abs_diff(m.to) {
+                m.from
+            } else {
+                m.to
+            };
+            let t_pl = if near > l {
+                stackup
+                    .copper_layers()
+                    .nth(l)
+                    .map(|c| c.thickness.mil())
+                    .unwrap_or(0.0)
+                    * MIL
+            } else {
+                0.0
+            };
             sheets.push(Sheet {
                 axis: 2,
-                at: z(l),
+                at: z(l) - t_pl,
                 poly: rect(lo[0], hi[0], lo[1], hi[1]),
                 holes: if setup.antipad_oval && sig.len() == 2 {
                     vec![(sig[0], sig[1], m.ra * MIL)]
@@ -3738,28 +3777,23 @@ mod tests {
         });
         let setup = Setup {
             f_adapt: 5.0,
-            max_unknowns: std::env::var("LP_DOF").ok().and_then(|v| v.parse().ok()).unwrap_or(50_000),
+            max_unknowns: 50_000,
             z_ref: None,
             ..Setup::default()
         };
         let r = solve(&m, &setup, |_| true).unwrap();
         assert_eq!(r.n(), 3);
         let s = &r.s[0];
-        for i in 0..3 {
-            eprintln!("{:?}", (0..3).map(|j| format!("{:.3}∠{:.0}", s[i * 3 + j].norm(), s[i * 3 + j].arg().to_degrees())).collect::<Vec<_>>());
-        }
         // Reciprocal and passive.
         for (i, j) in [(0, 1), (0, 2), (1, 2)] {
             assert!((s[i * 3 + j] - s[j * 3 + i]).norm() < 0.06, "S{i}{j}");
         }
         for c in 0..3 {
             let p: f64 = (0..3).map(|q| s[q * 3 + c].norm_sqr()).sum();
-            eprintln!("column {c} power {p:.4}");
             assert!(p < 1.05, "column {c} power {p}");
         }
         let short = terminate(s, 3, &[(2, c64::new(-1.0, 0.0))]);
         let open = terminate(s, 3, &[(2, c64::new(1.0, 0.0))]);
-        eprintln!("short S21 {:.4} S11 {:.4}, open S21 {:.4}", short[2].norm(), short[0].norm(), open[2].norm());
         assert!(short[2].norm() > 0.97, "shorted S21 {}", short[2].norm());
         assert!(open[2].norm() < 0.5, "open S21 {}", open[2].norm());
     }

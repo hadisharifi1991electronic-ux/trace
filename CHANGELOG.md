@@ -3,6 +3,33 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.96.0 (2026-11-24)
+
+Planar EM solver for traces and matching networks:
+
+- `trace planar <board> <layer> <x0,y0,x1,y1>`: a 3D FEM solve of a
+  window of an outer layer (traces, pads, pours, ground vias down to the
+  next layer's plane). Each trace that leaves the window is a wave port.
+- Each two-pad part (a series or shunt L, C or R) becomes a lumped port,
+  and its value goes in after the solve, from the board or from
+  `--value C1=2.2pF`. A matching network can be re-tuned without solving
+  again. Values like 1.5nH, 4p7, 0R, 49.9 and DNP are understood.
+- Writes the full N-port Touchstone (wave ports and parts) and a Smith
+  chart of S11 with the parts fitted.
+- Checked: a 1 pF series capacitor in a 50 ohm microstrip matches the
+  circuit result from 1 to 4 GHz; shorted and open gaps behave.
+- Lumped ports in the FEM (resistive sheets, generalized S) and
+  `fem3d::terminate` to load any port.
+
+FEM ports:
+
+- Each adaptive pass now prints every port's Z0, so you can see if the
+  ports settle.
+- Fixed the top/bottom port Z0 mismatch on symmetric stack-ups: a plane
+  sat at its copper's top face even when the trace was below it, so a
+  bottom microstrip saw the plane's thickness as extra gap. ADRV pair:
+  125.4 / 127.0 ohm (was 125.7 / 129.1).
+
 ## 0.95.0 (2026-11-24)
 
 3D FEM: real copper and laminate loss:

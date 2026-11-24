@@ -66,8 +66,14 @@ pub fn model(
         let (lo, hi) = (a.min(b).max(0.0), a.max(b).min(h));
         if hi > lo {
             solids.push(Solid {
-                shape: Shape::Box { lo: [0.0, 0.0, lo], hi: [wx, wy, hi] },
-                fill: Fill::Dielectric { er: s.2, tand: if lossy { s.3 } else { 0.0 } },
+                shape: Shape::Box {
+                    lo: [0.0, 0.0, lo],
+                    hi: [wx, wy, hi],
+                },
+                fill: Fill::Dielectric {
+                    er: s.2,
+                    tand: if lossy { s.3 } else { 0.0 },
+                },
             });
         }
     }
@@ -111,10 +117,14 @@ pub fn model(
     let mut sheets = Vec::new();
     let mut ports = Vec::new();
     let pname = |net: Option<u32>| {
-        net.and_then(|n| board.nets.get(n as usize)).map_or("?".to_string(), |x| x.name.clone())
+        net.and_then(|n| board.nets.get(n as usize))
+            .map_or("?".to_string(), |x| x.name.clone())
     };
     for t in geo.tracks.iter().filter(|t| on_layer(&t.layer) && !t.text) {
-        let (a, b) = ([t.start.x.mil(), t.start.y.mil()], [t.end.x.mil(), t.end.y.mil()]);
+        let (a, b) = (
+            [t.start.x.mil(), t.start.y.mil()],
+            [t.end.x.mil(), t.end.y.mil()],
+        );
         let w = t.width.mil();
         if !inwin(a[0], a[1], w) && !inwin(b[0], b[1], w) {
             continue;
@@ -153,13 +163,26 @@ pub fn model(
                 let along = if axis == 0 { 1 } else { 0 };
                 let at = |s: f64| -> f64 {
                     // Where the track meets the face, along the other axis.
-                    let face = if axis == 0 { if high { x1 } else { x0 } } else if high { y1 } else { y0 };
+                    let face = if axis == 0 {
+                        if high {
+                            x1
+                        } else {
+                            x0
+                        }
+                    } else if high {
+                        y1
+                    } else {
+                        y0
+                    };
                     let (pa, qa) = (p[axis], q[axis]);
                     let k = ((face - pa) / (qa - pa)).clamp(0.0, 1.0);
                     p[along] + (q[along] - p[along]) * k + s
                 };
                 let half = w / 2.0 + 3.0 * h / MIL;
-                let (lo_a, hi_a) = (if along == 0 { x0 } else { y0 }, if along == 0 { x1 } else { y1 });
+                let (lo_a, hi_a) = (
+                    if along == 0 { x0 } else { y0 },
+                    if along == 0 { x1 } else { y1 },
+                );
                 let (c0, c1) = ((at(-half)).max(lo_a), (at(half)).min(hi_a));
                 ports.push(Port {
                     name: format!("P{} {}", ports.len() + 1, pname(t.net)),
@@ -174,7 +197,8 @@ pub fn model(
         }
     }
     // Pads.
-    let mut parts_pads: std::collections::BTreeMap<u32, Vec<&crate::geometry::Pad>> = Default::default();
+    let mut parts_pads: std::collections::BTreeMap<u32, Vec<&crate::geometry::Pad>> =
+        Default::default();
     for p in geo.pads.iter().filter(|p| on_layer(&p.layer)) {
         let (cx, cy) = (p.at.x.mil(), p.at.y.mil());
         let (sx, sy) = (p.size_x.mil(), p.size_y.mil());
@@ -186,13 +210,19 @@ pub fn model(
         }
         let net = mnet(p.net);
         if !p.outline.is_empty() {
-            sheets.push(sheet(p.outline.iter().map(|q| xy(q.x.mil(), q.y.mil())).collect(), net));
+            sheets.push(sheet(
+                p.outline.iter().map(|q| xy(q.x.mil(), q.y.mil())).collect(),
+                net,
+            ));
         } else if p.shape == PadShape::Round && (sx - sy).abs() < 1e-6 {
             let mut s = sheet(Vec::new(), net);
             s.disc = Some((xy(cx, cy), sx / 2.0 * MIL));
             sheets.push(s);
         } else {
-            let (c, sn) = (p.rotation_deg.to_radians().cos(), p.rotation_deg.to_radians().sin());
+            let (c, sn) = (
+                p.rotation_deg.to_radians().cos(),
+                p.rotation_deg.to_radians().sin(),
+            );
             let corner = |u: f64, v: f64| xy(cx + u * c - v * sn, cy + u * sn + v * c);
             sheets.push(sheet(
                 vec![
@@ -258,7 +288,9 @@ pub fn model(
         }
     }
     if open_vias > 0 {
-        notes.push(format!("{open_vias} signal vias leave the layer and are left open"));
+        notes.push(format!(
+            "{open_vias} signal vias leave the layer and are left open"
+        ));
     }
     // Two-pad parts: a lumped port across the gap between their pads.
     let mut lumped = Vec::new();
@@ -285,10 +317,18 @@ pub fn model(
         let ext = |p: &crate::geometry::Pad| -> [f64; 2] {
             let r = (p.rotation_deg.rem_euclid(180.0) - 90.0).abs() < 45.0;
             let (sx, sy) = (p.size_x.mil(), p.size_y.mil());
-            if r { [sy, sx] } else { [sx, sy] }
+            if r {
+                [sy, sx]
+            } else {
+                [sx, sy]
+            }
         };
         let (ea, eb) = (ext(a), ext(b));
-        let (lo_p, hi_p, el, eh) = if [ca, cb][0][dir] <= [ca, cb][1][dir] { (ca, cb, ea, eb) } else { (cb, ca, eb, ea) };
+        let (lo_p, hi_p, el, eh) = if [ca, cb][0][dir] <= [ca, cb][1][dir] {
+            (ca, cb, ea, eb)
+        } else {
+            (cb, ca, eb, ea)
+        };
         let mut g0 = lo_p[dir] + el[dir] / 2.0;
         let mut g1 = hi_p[dir] - eh[dir] / 2.0;
         if g1 - g0 < 1.0 {
@@ -361,7 +401,11 @@ pub enum Load {
 /// load (the designator's letter says L, C or R when the value has no
 /// unit).
 pub fn parse_load(designator: &str, value: &str) -> Option<Load> {
-    let v = value.trim().to_ascii_lowercase().replace(['µ', 'μ'], "u").replace(' ', "");
+    let v = value
+        .trim()
+        .to_ascii_lowercase()
+        .replace(['µ', 'μ'], "u")
+        .replace(' ', "");
     if v.is_empty() {
         return None;
     }
@@ -371,30 +415,36 @@ pub fn parse_load(designator: &str, value: &str) -> Option<Load> {
     if ["short", "0", "0r", "0ohm", "0ω"].contains(&v.as_str()) {
         return Some(Load::Short);
     }
-    let end = v.find(|c: char| !(c.is_ascii_digit() || c == '.')).unwrap_or(v.len());
+    let end = v
+        .find(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .unwrap_or(v.len());
     let num: f64 = v[..end].parse().ok()?;
     let rest = &v[end..];
-    let (mul, tail) = match rest.chars().next() {
-        Some('p') => (1e-12, &rest[1..]),
-        Some('n') => (1e-9, &rest[1..]),
-        Some('u') => (1e-6, &rest[1..]),
-        Some('m') => (1e-3, &rest[1..]),
-        Some('k') => (1e3, &rest[1..]),
-        _ => (1.0, rest),
+    let (exp, tail) = match rest.chars().next() {
+        Some('p') => (-12, &rest[1..]),
+        Some('n') => (-9, &rest[1..]),
+        Some('u') => (-6, &rest[1..]),
+        Some('m') => (-3, &rest[1..]),
+        Some('k') => (3, &rest[1..]),
+        _ => (0, rest),
     };
     // 4n7: the prefix stands for the point.
     let (num, tail) = match tail.find(|c: char| !c.is_ascii_digit()) {
         Some(0) | None if tail.chars().all(|c| c.is_ascii_digit()) && !tail.is_empty() => {
-            (format!("{}.{}", v[..end].to_string(), tail).parse().unwrap_or(num), "")
+            (format!("{}.{}", &v[..end], tail).parse().unwrap_or(num), "")
         }
         _ => (num, tail),
     };
-    let x = num * mul;
+    // Scaled as text, so 1.5n is exactly 1.5e-9.
+    let x: f64 = format!("{num}e{exp}").parse().unwrap_or(num);
     let kind = match tail.chars().next() {
         Some('h') => 'l',
         Some('f') => 'c',
         Some('r') | Some('ω') | Some('o') => 'r',
-        _ => designator.chars().next().map_or('r', |c| c.to_ascii_lowercase()),
+        _ => designator
+            .chars()
+            .next()
+            .map_or('r', |c| c.to_ascii_lowercase()),
     };
     Some(match kind {
         'l' => Load::L(x),
@@ -467,5 +517,107 @@ mod tests {
         assert_eq!(parse_load("C9", "DNP"), Some(Load::Open));
         let g = Load::R(50.0).gamma(1.0, 50.0);
         assert!(g.norm() < 1e-12);
+    }
+}
+
+#[cfg(test)]
+mod board_tests {
+    use super::*;
+    use crate::{Component, Length, Net, Pad, Point, Track};
+
+    /// A 50 Ω microstrip broken by C1 (two pads, one each side of a gap).
+    fn board() -> Board {
+        let mut b = Board {
+            stackup: crate::stackfile::parse(
+                "TOP, copper, 1.4mil\nCore, dielectric, 10mil, 3.5, 0.0\nL2, copper, 1.4mil\n",
+            )
+            .expect("stack-up"),
+            ..Default::default()
+        };
+        for name in ["RF_IN", "RF_OUT"] {
+            b.nets.push(Net {
+                name: name.into(),
+                routed_length: Length(0),
+                via_length: Length(0),
+                vias: 0,
+                pads: 0,
+                pieces: 1,
+                has_pour: false,
+            });
+        }
+        let mut c = Component {
+            designator: "C1".into(),
+            footprint: String::new(),
+            library_ref: None,
+            x: Length(0),
+            y: Length(0),
+            rotation_deg: 0.0,
+            side: crate::Side::Top,
+            sheet: None,
+            params: Default::default(),
+        };
+        c.params.insert("Value".into(), "1pF".into());
+        b.components.push(c);
+        let pad = |name: &str, x: f64, net: u32| Pad {
+            layer: LayerRef::Copper(0),
+            net: Some(net),
+            component: Some(0),
+            name: name.into(),
+            at: Point::mil(x, 50.0),
+            size_x: Length::from_mil(16.0),
+            size_y: Length::from_mil(22.0),
+            hole: Length(0),
+            shape: PadShape::Rect,
+            rotation_deg: 0.0,
+            outline: Vec::new(),
+            stack: Vec::new(),
+            fab: Default::default(),
+        };
+        b.geometry.pads.push(pad("1", 88.0, 0));
+        b.geometry.pads.push(pad("2", 112.0, 1));
+        let tr = |x0: f64, x1: f64, net: u32| Track {
+            layer: LayerRef::Copper(0),
+            net: Some(net),
+            start: Point::mil(x0, 50.0),
+            end: Point::mil(x1, 50.0),
+            width: Length::from_mil(22.0),
+            component: None,
+            text: false,
+        };
+        // Square caps add half a width: stop short of the pads' centres.
+        b.geometry.tracks.push(tr(-20.0, 80.0, 0));
+        b.geometry.tracks.push(tr(120.0, 220.0, 1));
+        b
+    }
+
+    #[test]
+    fn a_series_capacitor_in_a_microstrip() {
+        let (m, parts, _) = model(&board(), [0.0, 0.0, 200.0, 100.0], 0, false, 0.0).unwrap();
+        assert_eq!(m.ports.len(), 2);
+        assert_eq!(parts.len(), 1);
+        assert_eq!(parts[0].port, 2);
+        let setup = fem3d::Setup {
+            f_adapt: 4.0,
+            sweep: vec![1.0, 2.0, 4.0],
+            max_unknowns: 60_000,
+            z_ref: Some(50.0),
+            ..fem3d::Setup::default()
+        };
+        let sol = fem3d::solve(&m, &setup, |_| true).unwrap();
+        let short = with_loads(&sol, &parts, &[Some(Load::Short)]);
+        let open = with_loads(&sol, &parts, &[Some(Load::Open)]);
+        let cap = with_loads(&sol, &parts, &[parse_load("C1", "1pF")]);
+        for (k, &f) in sol.f.iter().enumerate() {
+            // A series C between two 50 Ω lines.
+            let x = 1.0 / (2.0 * std::f64::consts::PI * f * 1e9 * 1e-12);
+            let want = 100.0 / (100.0f64.powi(2) + x * x).sqrt();
+            let (s21, o21, c21) = (short[k][2].abs(), open[k][2].abs(), cap[k][2].abs());
+            assert!(s21 > 0.9, "{f} GHz short S21 {s21}");
+            assert!(o21 < 0.35, "{f} GHz open S21 {o21}");
+            assert!(
+                (c21 - want).abs() < 0.1,
+                "{f} GHz 1 pF S21 {c21} want {want}"
+            );
+        }
     }
 }

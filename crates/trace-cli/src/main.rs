@@ -241,6 +241,14 @@ USAGE:
                                                 10 KB of memory each), the first mesh included.
                                                 <board> may be a stack-up file (.txt) alone: the via in that
                                                 stack-up, without a board
+    trace planar <board> <layer> <x0,y0,x1,y1> [--fmax 6] [--fem-dof 400000] [--lossless]
+              [--value C1=2.2pF]... [out.sNp] [smith.svg]
+                                                Planar 3D FEM of a window (mil) of an outer layer: traces,
+                                                pads, pours and ground vias over the next layer's plane. Each
+                                                trace leaving the window is a wave port; each two-pad part is a
+                                                lumped port, so its value (from the board, or --value) goes in
+                                                afterwards: re-tune a matching network without solving again.
+                                                Writes the full N-port and a Smith chart of S11 with the parts.
     trace pairsize <board> <layer> [--zdiff 100] [--wmin W] [--wmax W] [--gap S] [--ghz 8] [--next D] [--xtalk 2]
                                                 Every track width and gap on a layer that gives the target Zdiff
                                                 (2D field solver), ranked by loss, with crosstalk and etch
@@ -4178,7 +4186,12 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
     while let Some(a) = it.next() {
         match *a {
             "--fmax" => fmax = it.next().and_then(|x| x.parse().ok()).ok_or("--fmax GHz")?,
-            "--fem-dof" => dof = it.next().and_then(|x| x.parse().ok()).ok_or("--fem-dof N")?,
+            "--fem-dof" => {
+                dof = it
+                    .next()
+                    .and_then(|x| x.parse().ok())
+                    .ok_or("--fem-dof N")?
+            }
             "--lossless" => lossy = false,
             "--value" => {
                 let x = it.next().ok_or("--value REF=VALUE")?;
@@ -4214,7 +4227,11 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
     })?;
     println!(
         "  {} after {} passes, {} unknowns, {:.0} s",
-        if sol.converged { "converged" } else { "not converged" },
+        if sol.converged {
+            "converged"
+        } else {
+            "not converged"
+        },
         sol.passes.len(),
         sol.unknowns,
         t0.elapsed().as_secs_f64()
@@ -4233,7 +4250,8 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
         println!(
             "  {}: {}",
             p.designator,
-            ld.map_or(format!("value {:?} not read: left open", p.value), |x| x.text())
+            ld.map_or(format!("value {:?} not read: left open", p.value), |x| x
+                .text())
         );
     }
     let ext = planar::with_loads(&sol, &parts, &loads);
@@ -4246,7 +4264,11 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
             println!(
                 "  {f:6.2}  {:8.2}  {}",
                 db(s[0]),
-                if np > 1 { format!("{:8.2}", db(s[np])) } else { "-".into() }
+                if np > 1 {
+                    format!("{:8.2}", db(s[np]))
+                } else {
+                    "-".into()
+                }
             );
         }
     }
@@ -4261,7 +4283,10 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
         } else {
             // The full S, lumped ports included, for re-tuning later.
             std::fs::write(o, sol.touchstone())?;
-            println!("  Saved {o} ({} ports: the wave ports, then the parts)", sol.n());
+            println!(
+                "  Saved {o} ({} ports: the wave ports, then the parts)",
+                sol.n()
+            );
         }
     }
     Ok(())

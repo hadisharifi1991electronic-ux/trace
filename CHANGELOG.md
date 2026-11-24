@@ -27,8 +27,9 @@ FEM ports:
   ports settle.
 - Fixed the top/bottom port Z0 mismatch on symmetric stack-ups: a plane
   sat at its copper's top face even when the trace was below it, so a
-  bottom microstrip saw the plane's thickness as extra gap. ADRV pair:
-  125.4 / 127.0 ohm (was 125.7 / 129.1).
+  bottom microstrip saw the plane's thickness as extra gap. ADRV pair,
+  converged: 126.3 / 125.8 ohm (was 126.3 / 130.8), S unchanged (S11
+  within 2.7 dB of the FDTD).
 
 ## 0.95.0 (2026-11-24)
 

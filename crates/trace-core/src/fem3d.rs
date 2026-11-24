@@ -3378,15 +3378,42 @@ pub fn via(stackup: &crate::Stackup, setup: &crate::fdtd::ViaSetup) -> Result<Mo
     } else {
         0.0
     };
+    // A plane is one sheet at its copper's top face; when the nearest
+    // signal layer is below it, the field sees its bottom face instead
+    // (else a bottom microstrip over a plane reads the plane's thickness
+    // as extra gap and its Z0 high). The slabs meet at the moved sheet,
+    // so no sliver of mesh is left at the copper's other face.
+    let plane_drop = |l: usize| -> f64 {
+        let near = if l.abs_diff(m.from) <= l.abs_diff(m.to) {
+            m.from
+        } else {
+            m.to
+        };
+        if m.planes[l] && near > l {
+            stackup
+                .copper_layers()
+                .nth(l)
+                .map(|c| c.thickness.mil())
+                .unwrap_or(0.0)
+        } else {
+            0.0
+        }
+    };
+    let at_sheet = |zm: f64| -> f64 {
+        (0..nl)
+            .find(|&l| (m.st.sheet[l] - zm).abs() < 1e-9)
+            .map_or(0.0, plane_drop)
+    };
     for (i, s) in m.st.slabs.iter().enumerate() {
         let top = if i == 0 {
             s.0 + t_top.min(s.1 - s.0)
         } else {
-            s.0
+            s.0 + at_sheet(s.0)
         };
+        let s1 = s.1 + at_sheet(s.1);
         solids.push(Solid {
             shape: Shape::Box {
-                lo: [lo[0], lo[1], -s.1 * MIL],
+                lo: [lo[0], lo[1], -s1 * MIL],
                 hi: [hi[0], hi[1], -top * MIL],
             },
             fill: Fill::Dielectric {
@@ -3429,28 +3456,9 @@ pub fn via(stackup: &crate::Stackup, setup: &crate::fdtd::ViaSetup) -> Result<Mo
     let rect = |x0: f64, x1: f64, y0: f64, y1: f64| vec![[x0, y0], [x1, y0], [x1, y1], [x0, y1]];
     for l in 0..nl {
         if m.planes[l] {
-            // A plane is one sheet at its copper's top face; when the
-            // nearest signal layer is below it, the field sees its bottom
-            // face instead (else a bottom microstrip over a plane reads
-            // the plane's thickness as extra gap and its Z0 high).
-            let near = if l.abs_diff(m.from) <= l.abs_diff(m.to) {
-                m.from
-            } else {
-                m.to
-            };
-            let t_pl = if near > l {
-                stackup
-                    .copper_layers()
-                    .nth(l)
-                    .map(|c| c.thickness.mil())
-                    .unwrap_or(0.0)
-                    * MIL
-            } else {
-                0.0
-            };
             sheets.push(Sheet {
                 axis: 2,
-                at: z(l) - t_pl,
+                at: z(l) - plane_drop(l) * MIL,
                 poly: rect(lo[0], hi[0], lo[1], hi[1]),
                 holes: if setup.antipad_oval && sig.len() == 2 {
                     vec![(sig[0], sig[1], m.ra * MIL)]

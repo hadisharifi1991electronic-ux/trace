@@ -2548,7 +2548,7 @@ fn gmres(
             }
             // Stalled just short of the target (f32 factor round-off on
             // a big, tangled model): still far below what moves S.
-            if s.it >= max_it && beta / s.bn < 1e-6 {
+            if s.it >= max_it && beta / s.bn < 1e-4 {
                 s.done = true;
                 continue;
             }
@@ -3199,14 +3199,27 @@ pub fn solve(
     let mut cache: Option<Precond> = None;
     loop {
         let t0 = std::time::Instant::now();
-        let (asm, sols, s) = solve_at(
+        let (asm, sols, s) = match solve_at(
             model,
             &mesh,
             setup.f_adapt,
             setup.order,
             setup.iterative,
             Some((setup.f_adapt, &mut cache)),
-        )?;
+        ) {
+            Ok(x) => x,
+            // The single-precision factor could not carry the iteration
+            // (a tangled cut-out with lumped ports): solve directly in
+            // double precision instead.
+            Err(e) if e.starts_with("iterative solver") && setup.iterative != Some(true) => {
+                if !progress(&format!("{e}; solving directly (double precision)")) {
+                    return Err("stopped".into());
+                }
+                cache = None;
+                solve_at(model, &mesh, setup.f_adapt, setup.order, Some(false), None)?
+            }
+            Err(e) => return Err(e),
+        };
         last_unknowns = asm.n;
         let z0 = port_infos(model, &asm)
             .iter()
@@ -3361,7 +3374,19 @@ pub fn solve(
                     setup.order,
                     setup.iterative,
                     Some((f, &mut cache)),
-                )?
+                )
+                .or_else(|e| {
+                    if e.starts_with("iterative solver") {
+                        progress(&format!("sweep: {f:.4} GHz: {e}; solving directly"));
+                        solve_at(model, &mesh, f, setup.order, Some(false), None)
+                    } else {
+                        Err(e)
+                    }
+                })?
+            }
+            Err(e) if e.starts_with("iterative solver") => {
+                progress(&format!("sweep: {f:.4} GHz: {e}; solving directly"));
+                solve_at(model, &mesh, f, setup.order, Some(false), None)?
             }
             Err(e) => return Err(e),
         };
@@ -3445,14 +3470,20 @@ pub fn solve(
         Some(ask) => {
             progress(&format!("fields at {:.3} GHz for the 3D view", ask.f_ghz));
             let fa = anchor(ask.f_ghz, setup.f_adapt);
-            let (asm, sols, _) = solve_at(
+            let (asm, sols, _) = match solve_at(
                 model,
                 &mesh,
                 ask.f_ghz,
                 setup.order,
                 setup.iterative,
                 Some((fa, &mut cache)),
-            )?;
+            ) {
+                Ok(x) => x,
+                Err(e) if e.starts_with("iterative solver") => {
+                    solve_at(model, &mesh, ask.f_ghz, setup.order, Some(false), None)?
+                }
+                Err(e) => return Err(e),
+            };
             let p = ask.port.min(sols.len().saturating_sub(1));
             sols.get(p).map(|sol| {
                 field_grid(

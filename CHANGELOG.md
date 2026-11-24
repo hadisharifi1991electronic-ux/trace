@@ -3,6 +3,17 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.98.1 (2026-11-24)
+
+- 3D FEM: when the half-memory iterative solver cannot converge (seen on a
+  DAC39RF12 EVM cut-out with four lumped ports: residual 1e-1, or stalled
+  at 3e-6 after 300 iterations), a pass, a sweep point or the field solve
+  now falls back to the direct double-precision solve instead of
+  stopping. A residual that stalls below 1e-4 is accepted (far below
+  what moves S).
+- 3D view: outer-layer copper sits on top of the laminate (it was centred
+  on the surface, half in the air).
+
 ## 0.98.0 (2026-11-24)
 
 Vias and cut-outs that look real, with their fields on them:

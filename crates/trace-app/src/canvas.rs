@@ -481,7 +481,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     _ => None,
                 });
             if let Some((ti, layer)) = picked {
-                tune_preview(&mut app.router, &mut app.cm, scene, ti, layer);
+                tune_preview(
+                    &mut app.router,
+                    &mut app.cm,
+                    scene,
+                    ti,
+                    layer,
+                    [x as f64, y as f64],
+                );
             }
         }
     }
@@ -1002,8 +1009,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         } else {
             Color32::from_rgb(255, 220, 120)
         };
-        for piece in &p.pieces {
-            let (a, b) = (piece.start(), piece.end());
+        for (a, b) in p.swaps.iter().flat_map(|s| &s.1).flat_map(|q| q.chords()) {
             draw(
                 &mut shapes,
                 &view,
@@ -1016,6 +1022,10 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 },
                 color,
             );
+        }
+        // The length gauge beside the cursor, as Altium shows while tuning.
+        if let Some(at) = resp.hover_pos() {
+            tune_gauge(&mut shapes, ui, at, &p.gauge, p.hit.is_some());
         }
     }
 
@@ -1781,14 +1791,147 @@ fn pair_start(
     ))
 }
 
-/// Works out the meander for track `ti` that brings its net to the target.
+/// The tuning gauge: a box beside the cursor with the length (or skew)
+/// now, with the bumps placed, and the goal, over a bar that fills as
+/// the goal is reached; green within tolerance, amber short, red when the
+/// bumps would break clearance or overshoot.
+fn tune_gauge(
+    shapes: &mut Vec<Shape>,
+    ui: &egui::Ui,
+    at: Pos2,
+    g: &crate::router::Gauge,
+    hit: bool,
+) {
+    let fonts = ui.fonts(|f| f.clone());
+    let text = g.text();
+    let galley = fonts.layout_no_wrap(text.clone(), egui::FontId::monospace(12.0), Color32::WHITE);
+    let pad = 6.0;
+    let w = galley.size().x + 2.0 * pad;
+    let h = galley.size().y + 2.0 * pad + 8.0;
+    let min = at + egui::vec2(18.0, 18.0);
+    let r = egui::Rect::from_min_size(min, egui::vec2(w.max(160.0), h));
+    let over = !g.phase && g.after > g.goal + g.tol.max(0.5);
+    let color = if hit || over {
+        Color32::from_rgb(240, 80, 70)
+    } else if g.ok() {
+        Color32::from_rgb(90, 210, 120)
+    } else {
+        Color32::from_rgb(255, 200, 80)
+    };
+    shapes.push(Shape::rect_filled(
+        r,
+        4.0,
+        Color32::from_rgba_unmultiplied(20, 22, 28, 225),
+    ));
+    shapes.push(Shape::rect_stroke(r, 4.0, Stroke::new(1.0_f32, color)));
+    shapes.push(Shape::galley(
+        r.min + egui::vec2(pad, pad),
+        galley,
+        Color32::WHITE,
+    ));
+    let bar = egui::Rect::from_min_size(
+        egui::pos2(r.min.x + pad, r.max.y - pad - 5.0),
+        egui::vec2(r.width() - 2.0 * pad, 5.0),
+    );
+    shapes.push(Shape::rect_filled(bar, 2.0, Color32::from_gray(60)));
+    let f = (g.progress().min(1.0)) as f32;
+    let mut fill = bar;
+    fill.set_width(bar.width() * f);
+    shapes.push(Shape::rect_filled(fill, 2.0, color));
+}
+
+/// Bumps on the straight track a-b that add `need`, placed about the
+/// cursor (as Altium builds them where you point) on as short a stretch as
+/// holds them, the rest of the track left straight. Where the full height
+/// would come too close to other copper, lower bumps are tried; failing
+/// all, the full height is returned with the place it hits.
+fn local_bumps(
+    obstacles: &trace_core::route::Obstacles,
+    (layer, net, width, clearance): (u8, u32, f64, f64),
+    (a, b): ([f64; 2], [f64; 2]),
+    cursor: [f64; 2],
+    need: f64,
+    (amp, space, flip, style): (f64, f64, bool, trace_core::route::TuneStyle),
+) -> (
+    Vec<trace_core::route::Piece>,
+    f64,
+    Option<trace_core::route::Hit>,
+) {
+    use trace_core::route::{tune_pattern, Piece, TuneStyle};
+    let len = (b[0] - a[0]).hypot(b[1] - a[1]);
+    if len < 1e-6 {
+        return (vec![Piece::Line(a, b)], 0.0, None);
+    }
+    let u = [(b[0] - a[0]) / len, (b[1] - a[1]) / len];
+    let at = |t: f64| [a[0] + u[0] * t, a[1] + u[1] * t];
+    let mid = ((cursor[0] - a[0]) * u[0] + (cursor[1] - a[1]) * u[1]).clamp(0.0, len);
+    let pitch = if style == TuneStyle::Sawtooth {
+        space
+    } else {
+        2.0 * space
+    };
+    let build = |h: f64| -> (Vec<Piece>, f64) {
+        if style == TuneStyle::Trombone {
+            return tune_pattern(a, b, need, h, space, flip, style);
+        }
+        let mut best = (vec![Piece::Line(a, b)], 0.0);
+        let mut n = 1.0;
+        loop {
+            let span = (n * pitch + space).min(len);
+            let s0 = (mid - span / 2.0).clamp(0.0, len - span);
+            let s1 = s0 + span;
+            let (v, added) = tune_pattern(at(s0), at(s1), need, h, space, flip, style);
+            if added > best.1 {
+                let mut out = Vec::new();
+                if s0 > 1e-6 {
+                    out.push(Piece::Line(a, at(s0)));
+                }
+                out.extend(v);
+                if s1 < len - 1e-6 {
+                    out.push(Piece::Line(at(s1), b));
+                }
+                best = (out, added);
+            }
+            if best.1 >= need - 0.01 || span >= len {
+                return best;
+            }
+            n += 1.0;
+        }
+    };
+    let full = build(amp);
+    let mut first_hit = None;
+    for k in [1.0, 0.7, 0.5, 0.35, 0.25] {
+        let h = amp * k;
+        if h < 1.5 * width && k < 1.0 {
+            break;
+        }
+        let (v, added) = if k == 1.0 { full.clone() } else { build(h) };
+        if added <= 0.0 {
+            continue;
+        }
+        let hit = trace_core::bus::bumps_hit(obstacles, layer, net, (a, b), width, &v, clearance);
+        match hit {
+            None => return (v, added, None),
+            Some(h) if first_hit.is_none() => first_hit = Some(h),
+            _ => {}
+        }
+    }
+    (full.0, full.1, first_hit)
+}
+
+/// Works out the tuning bumps for track `ti` in the tuning mode chosen:
+/// meanders that bring its net (or its pair's mean) to the target, or
+/// phase bumps that bring its pair's skew to zero.
 fn tune_preview(
     router: &mut crate::router::Router,
     cm: &mut crate::cm::Cm,
     scene: &Scene,
     ti: usize,
     layer: u8,
+    cursor: [f64; 2],
 ) {
+    use crate::router::{Gauge, TuneMode, TunePreview};
+    use trace_core::bus::{self, TuneOpts};
     let board = &scene.board;
     let Some(t) = board.geometry.tracks.get(ti) else {
         return;
@@ -1797,69 +1940,221 @@ fn tune_preview(
         router.message = Some("That track has no net.".into());
         return;
     };
-    let length = board.net_length(net).mil();
-    let (target, why) = match router.tune.target {
-        Some(v) => (v, "your target".to_string()),
-        None => match cm.tune_target(board, net, t).or_else(|| {
-            // A pair net with no rule: match its partner.
-            let (_, partner) = scene.pair_of.get(&board.nets[net as usize].name)?;
-            let p = *scene.net_by_name.get(partner)?;
-            Some((board.net_length(p).mil(), format!("partner {partner}")))
-        }) {
-            Some(t) => t,
-            None => {
-                router.message = Some(format!(
-                    "No Constraint Manager group gives {} a length; tick Target and type one.",
-                    board.nets[net as usize].name
-                ));
-                return;
-            }
-        },
-    };
-    let extra = target - length;
-    if extra <= 0.5 {
-        router.message = Some(format!(
-            "{} is {:.1} mil, already at its target of {:.1} mil ({why}).",
-            board.nets[net as usize].name, length, target
-        ));
-        return;
-    }
-    router.message = None;
+    let name = |n: u32| board.nets[n as usize].name.clone();
+    let len = |n: u32| board.net_length(n).mil();
+    let length = len(net);
     let width = t.width.mil();
-    let tune = &router.tune;
-    let space = if tune.space > 0.0 {
-        tune.space
-    } else {
-        4.0 * width
-    };
     let (a, b) = (
         [t.start.x.mil(), t.start.y.mil()],
         [t.end.x.mil(), t.end.y.mil()],
     );
-    let (pieces, added) = trace_core::route::meander(a, b, extra, tune.amp, space, tune.flip);
-    let clearance = router.clearance;
-    let obstacles = router.obstacles(board);
-    let mut hit = None;
-    for p in &pieces {
-        if let Some(h) =
-            obstacles.check_track(layer, p.start(), p.end(), width, Some(net), clearance)
-        {
-            hit = Some(h);
-            break;
-        }
-    }
-    router.tune.preview = Some(crate::router::TunePreview {
-        track: ti,
-        layer,
-        net,
-        width,
-        pieces,
-        added,
-        length,
-        target,
-        why,
-        hit,
+    // The pair the net is a leg of: (pair name, positive, negative, partner).
+    let pair = scene.pair_of.get(&name(net)).and_then(|(pname, _)| {
+        let d = board.diff_pairs.iter().find(|d| &d.name == pname)?;
+        let p = *scene.net_by_name.get(&d.positive)?;
+        let n = *scene.net_by_name.get(&d.negative)?;
+        Some((pname.clone(), p, n, if p == net { n } else { p }))
     });
+    let (tol, max_skew) = cm.tune_limits(board, net);
+    let mode = router.tune.mode;
+    let space = if router.tune.space > 0.0 {
+        router.tune.space
+    } else {
+        4.0 * width
+    };
+    let clearance = router.clearance;
+    let opts = TuneOpts {
+        amp: router.tune.amp,
+        space: Some(space),
+        clearance,
+        style: router.tune.style,
+    };
+    if mode != TuneMode::Single && pair.is_none() {
+        router.message = Some(format!(
+            "{} is not a leg of a differential pair; pick Net length to tune it alone.",
+            name(net)
+        ));
+        return;
+    }
+    // The target length from the box or the Constraint Manager.
+    let target_of = |cm: &mut crate::cm::Cm, n: u32, partner: bool| match router.tune.target {
+        Some(v) => Some((v, "your target".to_string())),
+        None => cm.tune_target(board, n, t, partner),
+    };
+    let preview = match (mode, &pair) {
+        (TuneMode::Phase, Some((pname, p, n, partner))) => {
+            let other = len(*partner);
+            let need = other - length;
+            if need <= 0.5 {
+                router.message = Some(format!(
+                    "{} is the longer leg of {pname} ({:.1} vs {:.1} mil); point at {} to phase tune it.",
+                    name(net),
+                    length,
+                    other,
+                    name(*partner)
+                ));
+                return;
+            }
+            let amp = if router.tune.phase_amp > 0.0 {
+                router.tune.phase_amp
+            } else {
+                3.0 * width
+            };
+            let flip = bus::away_from(board, ti, *partner).unwrap_or(false) ^ router.tune.flip;
+            let obstacles = router.obstacles(board);
+            let (pieces, added, hit) = local_bumps(
+                obstacles,
+                (layer, net, width, clearance),
+                (a, b),
+                cursor,
+                need,
+                (amp, space, flip, opts.style),
+            );
+            let skew = len(*p) - len(*n);
+            let after = skew + if net == *p { added } else { -added };
+            TunePreview {
+                layer,
+                net,
+                width,
+                swaps: vec![(ti, pieces)],
+                added,
+                length,
+                target: other,
+                why: format!("partner {}", name(*partner)),
+                hit,
+                gauge: Gauge {
+                    title: pname.clone(),
+                    before: skew,
+                    after,
+                    goal: 0.0,
+                    tol: max_skew.unwrap_or(0.5),
+                    skew: Some((skew, after)),
+                    max_skew,
+                    phase: true,
+                },
+            }
+        }
+        (TuneMode::Pair, Some((pname, p, n, _))) => {
+            let mean = (len(*p) + len(*n)) / 2.0;
+            let best = [*p, *n]
+                .into_iter()
+                .filter_map(|x| target_of(cm, x, false))
+                .max_by(|x, y| x.0.total_cmp(&y.0));
+            let Some((target, why)) = best else {
+                router.message = Some(format!(
+                    "No Constraint Manager group gives {pname} a length; tick Target and type one."
+                ));
+                return;
+            };
+            let need = target - mean;
+            if need <= 0.5 {
+                router.message = Some(format!(
+                    "{pname} is {mean:.1} mil (mean), already at its target of {target:.1} mil ({why})."
+                ));
+                return;
+            }
+            let flip = router.tune.flip;
+            let obstacles = router.obstacles(board);
+            let Some((swaps, (ap, an))) =
+                bus::tune_pair_at(board, obstacles, (*p, *n), ti, need, flip, &opts)
+            else {
+                router.message = Some(format!(
+                    "No room for {pname} meanders here on this side: Space tries the other side, \
+                     or lower Height. The pair must run side by side along this track."
+                ));
+                return;
+            };
+            let skew = len(*p) - len(*n);
+            let added = (ap + an) / 2.0;
+            TunePreview {
+                layer,
+                net,
+                width,
+                swaps,
+                added,
+                length: mean,
+                target,
+                why,
+                hit: None,
+                gauge: Gauge {
+                    title: pname.clone(),
+                    before: mean,
+                    after: mean + added,
+                    goal: target,
+                    tol: tol.unwrap_or(0.0),
+                    skew: Some((skew, skew + ap - an)),
+                    max_skew,
+                    phase: false,
+                },
+            }
+        }
+        _ => {
+            let found = target_of(cm, net, true).or_else(|| {
+                // A pair net with no rule: match its partner.
+                let (_, _, _, partner) = pair.as_ref()?;
+                Some((len(*partner), format!("partner {}", name(*partner))))
+            });
+            let Some((target, why)) = found else {
+                router.message = Some(format!(
+                    "No Constraint Manager group gives {} a length; tick Target and type one.",
+                    name(net)
+                ));
+                return;
+            };
+            let extra = target - length;
+            if extra <= 0.5 {
+                router.message = Some(format!(
+                    "{} is {:.1} mil, already at its target of {:.1} mil ({why}).",
+                    name(net),
+                    length,
+                    target
+                ));
+                return;
+            }
+            // A pair leg tuned alone bumps away from its partner first.
+            let away = pair
+                .as_ref()
+                .and_then(|(_, _, _, q)| bus::away_from(board, ti, *q))
+                .unwrap_or(false);
+            let flip = away ^ router.tune.flip;
+            let obstacles = router.obstacles(board);
+            let (pieces, added, hit) = local_bumps(
+                obstacles,
+                (layer, net, width, clearance),
+                (a, b),
+                cursor,
+                extra,
+                (opts.amp, space, flip, opts.style),
+            );
+            let skew = pair.as_ref().map(|(_, p, n, _)| {
+                let s = len(*p) - len(*n);
+                (s, s + if net == *p { added } else { -added })
+            });
+            TunePreview {
+                layer,
+                net,
+                width,
+                swaps: vec![(ti, pieces)],
+                added,
+                length,
+                target,
+                why,
+                hit,
+                gauge: Gauge {
+                    title: name(net),
+                    before: length,
+                    after: length + added,
+                    goal: target,
+                    tol: tol.unwrap_or(0.0),
+                    skew,
+                    max_skew,
+                    phase: false,
+                },
+            }
+        }
+    };
+    router.message = None;
+    router.tune.preview = Some(preview);
 }
 
 /// The part being dragged where it will go, the tracks that stretch to

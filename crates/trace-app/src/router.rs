@@ -11,7 +11,7 @@
 use trace_core::bus;
 use trace_core::edit::{Edit, History};
 use trace_core::push::{self, Pushed, Pusher};
-use trace_core::route::{self, Corner, Hit, Obstacles, Piece, ViaKind, P};
+use trace_core::route::{self, Corner, Hit, Obstacles, Piece, TuneStyle, ViaKind, P};
 use trace_core::walk::{self, Ask};
 use trace_core::{Arc, Board, LayerRef, Length, Point, Track, Via};
 
@@ -220,61 +220,150 @@ impl Active {
     }
 }
 
+/// What interactive tuning adds length to, as Altium's three tuning
+/// tools: one net, both legs of a pair together, or a pair's shorter leg
+/// alone to remove its skew.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TuneMode {
+    #[default]
+    Single,
+    Pair,
+    Phase,
+}
+
+impl TuneMode {
+    pub const ALL: [TuneMode; 3] = [TuneMode::Single, TuneMode::Pair, TuneMode::Phase];
+    pub fn label(self) -> &'static str {
+        match self {
+            TuneMode::Single => "Net length",
+            TuneMode::Pair => "Pair length",
+            TuneMode::Phase => "Pair phase (skew)",
+        }
+    }
+    pub fn tip(self) -> &'static str {
+        match self {
+            TuneMode::Single => "Meanders on one net to bring it to its target length",
+            TuneMode::Pair => {
+                "Both legs of a differential pair meander together, at their gap, to bring \
+                 the pair's mean length to its target"
+            }
+            TuneMode::Phase => {
+                "Small bumps on the shorter leg of a pair, on the side away from its partner, \
+                 to bring the skew between the legs to zero. Point near where the skew comes from"
+            }
+        }
+    }
+}
+
 /// Length tuning settings and the meander following the cursor.
 pub struct Tune {
     /// Length to reach, mil; `None` takes it from the Constraint Manager.
     pub target: Option<f64>,
     pub amp: f64,
     pub space: f64,
+    /// Height of phase tuning bumps; 0 is 3 × the track width.
+    pub phase_amp: f64,
     pub flip: bool,
+    pub style: TuneStyle,
+    pub mode: TuneMode,
     pub preview: Option<TunePreview>,
 }
 
+/// The live readout of the tuning under the cursor: a length against its
+/// target (net or pair mean), or a pair's skew.
+pub struct Gauge {
+    /// Net or pair name.
+    pub title: String,
+    /// Length (or, phase tuning, |skew|) now and with the bumps placed.
+    pub before: f64,
+    pub after: f64,
+    /// Length aimed at (0 for skew).
+    pub goal: f64,
+    /// How far from the goal still passes.
+    pub tol: f64,
+    /// Pair skew now and after (positive minus negative), and its limit.
+    pub skew: Option<(f64, f64)>,
+    pub max_skew: Option<f64>,
+    pub phase: bool,
+}
+
+impl Gauge {
+    /// How far the tuning has got: 1 at the goal.
+    pub fn progress(&self) -> f64 {
+        if self.phase {
+            let s0 = self.before.abs().max(1e-9);
+            (1.0 - self.after.abs() / s0).clamp(0.0, 1.0)
+        } else if self.goal > 0.0 {
+            (self.after / self.goal).clamp(0.0, 1.2)
+        } else {
+            0.0
+        }
+    }
+    /// Within tolerance once the bumps are placed.
+    pub fn ok(&self) -> bool {
+        let len_ok = if self.phase {
+            self.after.abs() <= self.tol.max(0.5)
+        } else {
+            (self.after - self.goal).abs() <= self.tol.max(0.5)
+        };
+        let skew_ok = match (self.skew, self.max_skew) {
+            (Some((_, s)), Some(m)) => s.abs() <= m,
+            _ => true,
+        };
+        len_ok && skew_ok
+    }
+    pub fn text(&self) -> String {
+        let mut s = if self.phase {
+            format!(
+                "{}  skew {:.1} to {:.1} mil",
+                self.title,
+                self.before,
+                self.after + 0.0
+            )
+        } else {
+            format!(
+                "{}  {:.1} to {:.1} / {:.1} mil",
+                self.title, self.before, self.after, self.goal
+            )
+        };
+        if !self.phase && self.tol > 0.0 {
+            s.push_str(&format!(" ±{:.1}", self.tol));
+        }
+        if let (Some((a, b)), false) = (self.skew, self.phase) {
+            s.push_str(&format!("  skew {a:.1} to {:.1}", b + 0.0));
+        }
+        if let Some(m) = self.max_skew {
+            s.push_str(&format!(" (max {m:.1})"));
+        }
+        s
+    }
+}
+
 pub struct TunePreview {
-    pub track: usize,
     pub layer: u8,
     pub net: u32,
     pub width: f64,
-    pub pieces: Vec<Piece>,
+    /// Tracks replaced and the pieces that take their place.
+    pub swaps: Vec<(usize, Vec<Piece>)>,
     pub added: f64,
     pub length: f64,
     pub target: f64,
     pub why: String,
     pub hit: Option<Hit>,
+    pub gauge: Gauge,
 }
 
 impl TunePreview {
-    /// Removes the straight track and puts the meander in its place.
+    /// Removes the straight tracks and puts the bumps in their place.
     pub fn edits(&self, board: &Board) -> Vec<Edit> {
-        let Some(old) = board.geometry.tracks.get(self.track) else {
+        if self
+            .swaps
+            .iter()
+            .any(|(i, _)| *i >= board.geometry.tracks.len())
+        {
             return Vec::new();
-        };
-        let mut edits = vec![Edit::RemoveTrack {
-            index: self.track,
-            track: old.clone(),
-        }];
-        let start = board.geometry.tracks.len() - 1;
-        for (k, p) in self.pieces.iter().enumerate() {
-            edits.push(Edit::InsertTrack {
-                index: start + k,
-                track: Track {
-                    component: None,
-                    layer: old.layer.clone(),
-                    net: old.net,
-                    start: Point {
-                        x: Length::from_mil(p.start()[0]),
-                        y: Length::from_mil(p.start()[1]),
-                    },
-                    end: Point {
-                        x: Length::from_mil(p.end()[0]),
-                        y: Length::from_mil(p.end()[1]),
-                    },
-                    width: old.width,
-                    text: false,
-                },
-            });
         }
-        edits
+        bus::swap_edits(board, &self.swaps)
     }
 }
 
@@ -331,7 +420,10 @@ impl Router {
                 target: None,
                 amp: 40.0,
                 space: 0.0,
+                phase_amp: 0.0,
                 flip: false,
+                style: TuneStyle::Accordion,
+                mode: TuneMode::Single,
                 preview: None,
             },
             width: route::DEFAULT_WIDTH,

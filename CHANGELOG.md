@@ -3,6 +3,33 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.106.0 (2026-11-25)
+
+Length and phase tuning, as Altium's three tuning tools:
+
+- The tuning bar picks what to tune (Route menu, or Shift+T while
+  tuning): **Net length** (one net, as before), **Pair length** (both legs
+  of a differential pair meander together at their gap, to the pair's
+  mean target, choosing the bumps that keep the skew) and **Pair phase**
+  (small bumps on the shorter leg, on the side away from its partner,
+  until the legs are the same length; height 3 track widths by default).
+- Five bump styles (Tab while tuning): accordion, mitered (45° corners),
+  rounded (arcs, semicircles when tall enough), trombone (one wide
+  detour) and sawtooth. Each is sized to add just the length needed.
+- Bumps are built where you point on the track, on as short a stretch as
+  holds them (the rest stays straight), and drop to a lower height where
+  the full one would come too close to other copper. A pair leg tuned on
+  its own bumps away from its partner (Space still flips it).
+- A gauge by the cursor shows the length (or skew) now and with the bumps,
+  the target with its match tolerance, and the pair's skew against its
+  limit from the Constraint Manager: green when it passes, amber when
+  short, red over or too close to other copper. 1 / 2 change the spacing,
+  3 / 4 the height.
+- `trace match` takes `--style`, `--space` and `--skew` (phase tuning of
+  each pair named). On the DAC39RF12 EVM the 13 pairs over 2 mil skew
+  (up to 16.5 mil) come to 0.0 mil with phase bumps, with the same 296
+  DRC results before and after.
+
 ## 0.105.0 (2026-11-25)
 
 Board cut-outs that fit in a PC's memory:

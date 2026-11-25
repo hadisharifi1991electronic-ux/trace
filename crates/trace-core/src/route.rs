@@ -223,6 +223,213 @@ pub fn meander(a: P, b: P, extra: f64, amp: f64, space: f64, flip: bool) -> (Vec
     (pieces, 2.0 * h * bumps as f64)
 }
 
+/// The shape of the bumps that length tuning adds, as Altium offers them.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum TuneStyle {
+    /// Square bumps.
+    #[default]
+    Accordion,
+    /// Bumps with 45° corners.
+    Mitered,
+    /// Bumps with round corners (semicircles when tall enough).
+    Rounded,
+    /// One wide detour beside the track, with 45° corners.
+    Trombone,
+    /// Triangles.
+    Sawtooth,
+}
+
+impl TuneStyle {
+    pub const ALL: [TuneStyle; 5] = [
+        TuneStyle::Accordion,
+        TuneStyle::Mitered,
+        TuneStyle::Rounded,
+        TuneStyle::Trombone,
+        TuneStyle::Sawtooth,
+    ];
+    pub fn label(self) -> &'static str {
+        match self {
+            TuneStyle::Accordion => "Accordion",
+            TuneStyle::Mitered => "Mitered",
+            TuneStyle::Rounded => "Rounded",
+            TuneStyle::Trombone => "Trombone",
+            TuneStyle::Sawtooth => "Sawtooth",
+        }
+    }
+    pub fn parse(s: &str) -> Option<Self> {
+        Self::ALL
+            .into_iter()
+            .find(|t| t.label().eq_ignore_ascii_case(s))
+    }
+}
+
+/// Tuning bumps of `style` that replace the straight track from `a` to
+/// `b` and add `extra` mil of length, as [`meander`] does for square
+/// bumps: at most `amp` high, `space` apart, on the other side with
+/// `flip`. Returns the pieces (round corners are arcs) and the length
+/// actually added.
+pub fn tune_pattern(
+    a: P,
+    b: P,
+    extra: f64,
+    amp: f64,
+    space: f64,
+    flip: bool,
+    style: TuneStyle,
+) -> (Vec<Piece>, f64) {
+    if style == TuneStyle::Accordion {
+        return meander(a, b, extra, amp, space, flip);
+    }
+    let len = (b[0] - a[0]).hypot(b[1] - a[1]);
+    let straight = (vec![Piece::Line(a, b)], 0.0);
+    if extra <= 0.0 || len < 2.0 * space || amp <= 0.0 || space <= 0.0 {
+        return straight;
+    }
+    let u = [(b[0] - a[0]) / len, (b[1] - a[1]) / len];
+    let k = if flip { -1.0 } else { 1.0 };
+    let n = [-u[1] * k, u[0] * k];
+    let at = |t: f64, up: f64| [a[0] + u[0] * t + n[0] * up, a[1] + u[1] * t + n[1] * up];
+    let shape = |h: f64, bumps: usize| -> Vec<Piece> {
+        let mut pts = vec![a];
+        match style {
+            TuneStyle::Sawtooth => {
+                let lead = (len - space * bumps as f64) / 2.0;
+                pts.push(at(lead, 0.0));
+                for i in 0..bumps {
+                    pts.push(at(lead + (i as f64 + 0.5) * space, h));
+                    pts.push(at(lead + (i as f64 + 1.0) * space, 0.0));
+                }
+                pts.push(b);
+                return polyline(&pts);
+            }
+            TuneStyle::Trombone => {
+                pts.extend([
+                    at(space, 0.0),
+                    at(space, h),
+                    at(len - space, h),
+                    at(len - space, 0.0),
+                ]);
+            }
+            _ => {
+                let used = 2.0 * space * bumps as f64 - space;
+                let mut t = (len - used) / 2.0;
+                pts.push(at(t, 0.0));
+                for i in 0..bumps {
+                    pts.push(at(t, h));
+                    t += space;
+                    pts.push(at(t, h));
+                    pts.push(at(t, 0.0));
+                    if i + 1 < bumps {
+                        t += space;
+                        pts.push(at(t, 0.0));
+                    }
+                }
+            }
+        }
+        pts.push(b);
+        let round = style == TuneStyle::Rounded;
+        corners(&pts, if round { 1.0 } else { 0.5 }, round)
+    };
+    let added = |v: &[Piece]| v.iter().map(Piece::length).sum::<f64>() - len;
+    let bumps = match style {
+        TuneStyle::Trombone => usize::from(len >= 3.0 * space),
+        _ => {
+            let pitch = if style == TuneStyle::Sawtooth {
+                space
+            } else {
+                2.0 * space
+            };
+            let room = ((len - space) / pitch).floor().max(0.0) as usize;
+            let per = added(&shape(amp, 1));
+            if per <= 1e-6 {
+                0
+            } else {
+                ((extra / per).ceil() as usize).min(room)
+            }
+        }
+    };
+    if bumps == 0 {
+        return straight;
+    }
+    let full = shape(amp, bumps);
+    let most = added(&full);
+    if most <= extra {
+        return (full, most);
+    }
+    // The height that adds just `extra` (the length grows with height).
+    let (mut lo, mut hi) = (0.0, amp);
+    for _ in 0..50 {
+        let mid = (lo + hi) / 2.0;
+        if added(&shape(mid, bumps)) < extra {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let v = shape(hi, bumps);
+    let got = added(&v);
+    (v, got)
+}
+
+/// Straight pieces through `pts`, leaving out empty ones.
+fn polyline(pts: &[P]) -> Vec<Piece> {
+    pts.windows(2)
+        .filter(|w| (w[0][0] - w[1][0]).hypot(w[0][1] - w[1][1]) > 1e-9)
+        .map(|w| Piece::Line(w[0], w[1]))
+        .collect()
+}
+
+/// The path through `pts` with each inner corner rounded (`round`) or cut
+/// at 45°, using `frac` of the half legs either side so that neighbouring
+/// corners never overlap.
+fn corners(pts: &[P], frac: f64, round: bool) -> Vec<Piece> {
+    let mut v: Vec<P> = Vec::with_capacity(pts.len());
+    for &p in pts {
+        if v.last()
+            .is_none_or(|q: &P| (q[0] - p[0]).hypot(q[1] - p[1]) > 1e-9)
+        {
+            v.push(p);
+        }
+    }
+    if v.len() < 3 {
+        return polyline(&v);
+    }
+    let mid = |p: P, q: P| [(p[0] + q[0]) / 2.0, (p[1] + q[1]) / 2.0];
+    let k = v.len() - 1;
+    let mut out = Vec::new();
+    for i in 1..k {
+        let a = if i == 1 { v[0] } else { mid(v[i - 1], v[i]) };
+        let b = if i == k - 1 {
+            v[k]
+        } else {
+            mid(v[i], v[i + 1])
+        };
+        let part = if round {
+            fillet(a, v[i], b, frac)
+        } else {
+            chamfer(a, v[i], b, frac)
+        };
+        out.extend(part.unwrap_or_else(|| polyline(&[a, v[i], b])));
+    }
+    out
+}
+
+/// Cuts the corner at `m` between legs to `a` and `b` with a straight
+/// piece `frac` of the shorter leg back from it.
+fn chamfer(a: P, m: P, b: P, frac: f64) -> Option<Vec<Piece>> {
+    let (la, lb) = (
+        (a[0] - m[0]).hypot(a[1] - m[1]),
+        (b[0] - m[0]).hypot(b[1] - m[1]),
+    );
+    if la < 1e-6 || lb < 1e-6 {
+        return None;
+    }
+    let t = la.min(lb) * frac.clamp(0.05, 1.0);
+    let p1 = [m[0] + (a[0] - m[0]) / la * t, m[1] + (a[1] - m[1]) / la * t];
+    let p2 = [m[0] + (b[0] - m[0]) / lb * t, m[1] + (b[1] - m[1]) / lb * t];
+    Some(polyline(&[a, p1, p2, b]))
+}
+
 /// A route shifted sideways by `d` (positive = to the left of the way it
 /// runs), as for one track of a differential pair along a centre line.
 /// Sharp corners between straight runs meet at their mitre; other breaks
@@ -1257,6 +1464,48 @@ mod tests {
         // Too short a track: as much as fits.
         let (_, added) = meander([0.0, 0.0], [100.0, 0.0], 500.0, 40.0, 30.0, true);
         assert!((added - 80.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn every_tuning_style_adds_the_length_asked() {
+        for style in TuneStyle::ALL {
+            for flip in [false, true] {
+                // One trombone needs a taller detour for the same length.
+                let amp = if style == TuneStyle::Trombone {
+                    100.0
+                } else {
+                    40.0
+                };
+                let (v, added) =
+                    tune_pattern([0.0, 0.0], [1000.0, 0.0], 150.0, amp, 30.0, flip, style);
+                let total: f64 = v.iter().map(|p| p.length()).sum();
+                assert!((added - 150.0).abs() < 1e-3, "{style:?}: {added}");
+                assert!((total - 1150.0).abs() < 1e-3, "{style:?}: {total}");
+                assert_eq!(v.first().unwrap().start(), [0.0, 0.0]);
+                let e = v.last().unwrap().end();
+                assert!((e[0] - 1000.0).abs() < 1e-9 && e[1].abs() < 1e-9);
+                // Connected end to end, and no higher than asked.
+                for w in v.windows(2) {
+                    let (p, q) = (w[0].end(), w[1].start());
+                    assert!((p[0] - q[0]).hypot(p[1] - q[1]) < 1e-6, "{style:?} gap");
+                }
+                for p in &v {
+                    for (s, _) in p.chords() {
+                        assert!(s[1].abs() <= amp + 1e-6, "{style:?} too high");
+                    }
+                }
+            }
+        }
+        let (v, _) = tune_pattern(
+            [0.0, 0.0],
+            [1000.0, 0.0],
+            100.0,
+            40.0,
+            30.0,
+            false,
+            TuneStyle::Rounded,
+        );
+        assert!(v.iter().any(|p| matches!(p, Piece::Arc { .. })));
     }
 
     #[test]

@@ -8,11 +8,13 @@
 //! narrower than the lanes, as a fan-out does.
 
 use crate::edit::Edit;
-use crate::route::{self, seg_seg, Obstacles, Piece, P};
+use crate::route::{self, seg_seg, Obstacles, Piece, TuneStyle, P};
 
 /// A pair meander tried: its skew, the two legs and their lengths.
 type PairTry = (f64, Vec<Piece>, Vec<Piece>, f64, f64);
-use crate::{Board, LayerRef, Length, Point, Track};
+/// Tracks to replace, each with the pieces that take its place.
+pub type Swaps = Vec<(usize, Vec<Piece>)>;
+use crate::{Arc, Board, LayerRef, Length, Point, Track};
 
 /// Orders bus starts (pad centre, net) across the bus: along the line the
 /// pads lie on (their principal axis), so neighbouring pads get
@@ -168,14 +170,7 @@ impl Matched {
 /// lower one is tried, then the other side, then the next track. `amp` is
 /// the tallest meander, `space` the step along the track (`None`: four
 /// track widths).
-pub fn match_lengths(
-    board: &Board,
-    nets: &[u32],
-    target: Option<f64>,
-    amp: f64,
-    space: Option<f64>,
-    clearance: f64,
-) -> Matched {
+pub fn match_lengths(board: &Board, nets: &[u32], target: Option<f64>, o: &TuneOpts) -> Matched {
     let pairs = pairs_in(board, nets);
     let paired: std::collections::HashSet<u32> = pairs.iter().flat_map(|&(p, n)| [p, n]).collect();
     let len_of = |n: u32| board.net_length(n).mil();
@@ -187,7 +182,6 @@ pub fn match_lengths(
             .fold(0.0, f64::max)
     });
     let obstacles = Obstacles::new(board);
-    let g = &board.geometry;
     // New copper so far: layer, ends, half width, net.
     let mut placed: Vec<(u8, P, P, f64, u32)> = Vec::new();
     // Tracks replaced and their meanders.
@@ -200,7 +194,8 @@ pub fn match_lengths(
             &obstacles,
             (p, n),
             target - (lp + ln) / 2.0,
-            (lp - ln, amp, space, clearance),
+            lp - ln,
+            o,
             &mut placed,
             &mut swaps,
         );
@@ -215,116 +210,29 @@ pub fn match_lengths(
             after: ln + added.1,
         });
     }
-    let lengths: Vec<f64> = nets.iter().map(|&n| len_of(n)).collect();
-    for (&net, &before) in nets.iter().zip(&lengths) {
+    for &net in nets {
         if paired.contains(&net) {
             continue;
         }
-        let mut need = target - before;
-        let mut tracks: Vec<(usize, u8, P, P, f64)> = g
-            .tracks
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| t.net == Some(net) && !t.text && t.component.is_none())
-            .filter_map(|(i, t)| match t.layer {
-                LayerRef::Copper(l) => Some((
-                    i,
-                    l,
-                    [t.start.x.mil(), t.start.y.mil()],
-                    [t.end.x.mil(), t.end.y.mil()],
-                    t.width.mil(),
-                )),
-                _ => None,
-            })
-            .collect();
-        let len = |a: P, b: P| (b[0] - a[0]).hypot(b[1] - a[1]);
-        tracks.sort_by(|x, y| len(y.2, y.3).total_cmp(&len(x.2, x.3)));
-        for (ti, layer, a, b, w) in tracks {
-            if need <= 0.5 {
-                break;
-            }
-            let step = space.unwrap_or(4.0 * w).max(w + clearance);
-            // Copper the track is already closer to than the clearance (a
-            // pair's partner at the pair gap): a meander may stay as close
-            // to it, no closer.
-            let base = obstacles.check_track(layer, a, b, w, Some(net), clearance);
-            let skip = [Some(net), base.as_ref().and_then(|h| h.net)];
-            let floor = base.as_ref().map_or(clearance, |h| h.gap - 0.01);
-            let mut best: Option<(Vec<Piece>, f64)> = None;
-            'search: for k in [1.0, 0.7, 0.5, 0.35, 0.25] {
-                let h = amp * k;
-                if h < 2.0 * w {
-                    break;
-                }
-                for flip in [false, true] {
-                    let (pieces, added) = route::meander(a, b, need, h, step, flip);
-                    if added <= 0.0 {
-                        continue;
-                    }
-                    let clear = pieces.iter().all(|p| {
-                        let (s, e) = (p.start(), p.end());
-                        let own = obstacles.check_track(layer, s, e, w, Some(net), clearance);
-                        own.is_none_or(|h| h.net == skip[1] && h.gap >= floor)
-                            && obstacles
-                                .check_pair_track(layer, s, e, w, &skip, clearance)
-                                .is_none()
-                            && placed.iter().all(|&(l, c, d, r, n)| {
-                                l != layer
-                                    || n == net
-                                    || seg_seg(s, e, c, d) - r - w / 2.0 >= clearance - 1e-3
-                            })
-                    });
-                    if clear {
-                        best = Some((pieces, added));
-                        break 'search;
-                    }
-                }
-            }
-            if let Some((pieces, added)) = best {
-                for p in &pieces {
-                    placed.push((layer, p.start(), p.end(), w / 2.0, net));
-                }
-                need -= added;
-                swaps.push((ti, pieces));
-            }
-        }
+        let before = len_of(net);
+        let added = tune_net(
+            board,
+            &obstacles,
+            net,
+            target - before,
+            o,
+            None,
+            &mut placed,
+            &mut swaps,
+        );
         report.push(Tuned {
             net,
             before,
-            after: target - need.max(0.0),
+            after: before + added,
         });
-    }
-    // Remove the replaced tracks from the highest index down, then add the
-    // meanders at the end.
-    swaps.sort_by_key(|x| std::cmp::Reverse(x.0));
-    let mut edits = Vec::new();
-    for (ti, _) in &swaps {
-        edits.push(Edit::RemoveTrack {
-            index: *ti,
-            track: g.tracks[*ti].clone(),
-        });
-    }
-    let mut at = g.tracks.len() - swaps.len();
-    let pt = |p: P| Point {
-        x: Length::from_mil(p[0]),
-        y: Length::from_mil(p[1]),
-    };
-    for (ti, pieces) in &swaps {
-        let old = &g.tracks[*ti];
-        for p in pieces {
-            edits.push(Edit::InsertTrack {
-                index: at,
-                track: Track {
-                    start: pt(p.start()),
-                    end: pt(p.end()),
-                    ..old.clone()
-                },
-            });
-            at += 1;
-        }
     }
     Matched {
-        edits,
+        edits: swap_edits(board, &swaps),
         nets: report,
         target,
         pairs,
@@ -438,133 +346,193 @@ fn coupled(board: &Board, p: u32, n: u32, used: &std::collections::HashSet<usize
     out
 }
 
-/// Meanders a pair's coupled runs together to add `need` mil to its mean
-/// length, keeping the legs at their gap and choosing the side that best
-/// keeps (or improves) the pair's skew. Returns the length added to each
-/// leg. `opts` is (skew now, positive minus negative; tallest meander;
-/// step along the track; clearance).
-fn tune_pair(
+/// Tuning settings: tallest bump, step along the track (`None`: four
+/// track widths), clearance to other copper, and the bump shape.
+#[derive(Clone, Copy, Debug)]
+pub struct TuneOpts {
+    pub amp: f64,
+    pub space: Option<f64>,
+    pub clearance: f64,
+    pub style: TuneStyle,
+}
+
+/// A pair run meandered: the new positive and negative tracks (the run's
+/// untouched ends included), the legs alone, and the length each gains.
+struct PairRun {
+    newp: Vec<Piece>,
+    newn: Vec<Piece>,
+    lp: Vec<Piece>,
+    ln: Vec<Piece>,
+    added: (f64, f64),
+}
+
+/// Meanders the coupled run `c` of pair (p, n) to add `need` to the pair's
+/// mean length, trying the sides in `flips` and lower bumps where full ones
+/// do not fit; of those that keep clear, the one that leaves the least skew
+/// (`skew` now, positive minus negative) wins.
+#[allow(clippy::too_many_arguments)]
+fn pair_run(
     board: &Board,
     obstacles: &Obstacles,
+    c: &Coupled,
     (p, n): (u32, u32),
-    mut need: f64,
-    (mut skew, amp, space, clearance): (f64, f64, Option<f64>, f64),
-    placed: &mut Vec<(u8, P, P, f64, u32)>,
-    swaps: &mut Vec<(usize, Vec<Piece>)>,
-) -> (f64, f64) {
+    need: f64,
+    skew: f64,
+    o: &TuneOpts,
+    placed: &[(u8, P, P, f64, u32)],
+    flips: &[bool],
+) -> Option<PairRun> {
     let g = &board.geometry;
-    let mut used = std::collections::HashSet::new();
-    let mut added = (0.0, 0.0);
     let skip = [Some(p), Some(n)];
-    let pt = |c: &Coupled, s: f64, across: f64| {
+    let pt = |s: f64, across: f64| {
         let nrm = [-c.u[1], c.u[0]];
         [
             c.a[0] + c.u[0] * s + nrm[0] * across,
             c.a[1] + c.u[1] * s + nrm[1] * across,
         ]
     };
+    let (wp, wn) = (g.tracks[c.ip].width.mil(), g.tracks[c.jn].width.mil());
+    let w = wp.max(wn);
+    // Bumps wide enough that the inner leg's stays open.
+    let step = o
+        .space
+        .unwrap_or(4.0 * w)
+        .max(c.d.abs() + 2.0 * w + o.clearance);
+    let (c0, c1) = (pt(c.span.0, c.d / 2.0), pt(c.span.1, c.d / 2.0));
+    let mut best: Option<PairTry> = None;
+    for k in [1.0, 0.7, 0.5, 0.35, 0.25] {
+        let h = o.amp * k;
+        if h < 2.0 * w + c.d.abs() {
+            break;
+        }
+        for &flip in flips {
+            let (centre, add) = route::tune_pattern(c0, c1, need, h, step, flip, o.style);
+            if add <= 0.0 {
+                continue;
+            }
+            // The positive runs at 0 across, the negative at d.
+            let lp = route::offset(&centre, -c.d / 2.0);
+            let ln = route::offset(&centre, c.d / 2.0);
+            let run = c.span.1 - c.span.0;
+            let sum = |v: &[Piece]| v.iter().map(Piece::length).sum::<f64>();
+            let (ap, an) = (sum(&lp) - run, sum(&ln) - run);
+            let clear = |leg: &[Piece], wl: f64, net: u32| {
+                leg.iter().flat_map(Piece::chords).all(|(s, e)| {
+                    obstacles
+                        .check_pair_track(c.layer, s, e, wl, &skip, o.clearance)
+                        .is_none()
+                        && placed.iter().all(|&(l, a, b, r, other)| {
+                            l != c.layer
+                                || other == net
+                                || other == p
+                                || other == n
+                                || seg_seg(s, e, a, b) - r - wl / 2.0 >= o.clearance - 1e-3
+                        })
+                })
+            };
+            if !(clear(&lp, wp, p) && clear(&ln, wn, n)) {
+                continue;
+            }
+            let new_skew = skew + ap - an;
+            if best
+                .as_ref()
+                .is_none_or(|b| new_skew.abs() < (skew + b.3 - b.4).abs())
+            {
+                best = Some((add, lp, ln, ap, an));
+            }
+        }
+        if best.is_some() {
+            break;
+        }
+    }
+    let (_, lp, ln, ap, an) = best?;
+    // Whole new tracks: the untouched ends, then the legs.
+    let tp = &g.tracks[c.ip];
+    let tn = &g.tracks[c.jn];
+    let ps = [tp.start.x.mil(), tp.start.y.mil()];
+    let pe = [tp.end.x.mil(), tp.end.y.mil()];
+    let mut newp = Vec::new();
+    if c.span.0 > 1e-6 {
+        newp.push(Piece::Line(ps, pt(c.span.0, 0.0)));
+    }
+    newp.extend(lp.iter().copied());
+    if pt(c.span.1, 0.0) != pe {
+        newp.push(Piece::Line(pt(c.span.1, 0.0), pe));
+    }
+    let along = |q: P| (q[0] - c.a[0]) * c.u[0] + (q[1] - c.a[1]) * c.u[1];
+    let (ns, ne) = {
+        let s = [tn.start.x.mil(), tn.start.y.mil()];
+        let e = [tn.end.x.mil(), tn.end.y.mil()];
+        if along(s) <= along(e) {
+            (s, e)
+        } else {
+            (e, s)
+        }
+    };
+    let mut newn = Vec::new();
+    if along(ns) < c.span.0 - 1e-6 {
+        newn.push(Piece::Line(ns, pt(c.span.0, c.d)));
+    }
+    newn.extend(ln.iter().copied());
+    if along(ne) > c.span.1 + 1e-6 {
+        newn.push(Piece::Line(pt(c.span.1, c.d), ne));
+    }
+    Some(PairRun {
+        newp,
+        newn,
+        lp,
+        ln,
+        added: (ap, an),
+    })
+}
+
+/// Meanders a pair's coupled runs together to add `need` mil to its mean
+/// length, keeping the legs at their gap and choosing the side that best
+/// keeps (or improves) the pair's skew (`skew` now, positive minus
+/// negative). Returns the length added to each leg.
+#[allow(clippy::too_many_arguments)]
+fn tune_pair(
+    board: &Board,
+    obstacles: &Obstacles,
+    (p, n): (u32, u32),
+    mut need: f64,
+    mut skew: f64,
+    o: &TuneOpts,
+    placed: &mut Vec<(u8, P, P, f64, u32)>,
+    swaps: &mut Vec<(usize, Vec<Piece>)>,
+) -> (f64, f64) {
+    let g = &board.geometry;
+    let mut used = std::collections::HashSet::new();
+    let mut added = (0.0, 0.0);
     while need > 0.5 {
         let runs = coupled(board, p, n, &used);
         let mut done = false;
         for c in &runs {
-            let (wp, wn) = (g.tracks[c.ip].width.mil(), g.tracks[c.jn].width.mil());
-            let w = wp.max(wn);
-            // Bumps wide enough that the inner leg's stays open.
-            let step = space
-                .unwrap_or(4.0 * w)
-                .max(c.d.abs() + 2.0 * w + clearance);
-            let (c0, c1) = (pt(c, c.span.0, c.d / 2.0), pt(c, c.span.1, c.d / 2.0));
-            let mut best: Option<PairTry> = None;
-            for k in [1.0, 0.7, 0.5, 0.35, 0.25] {
-                let h = amp * k;
-                if h < 2.0 * w + c.d.abs() {
-                    break;
-                }
-                for flip in [false, true] {
-                    let (centre, add) = route::meander(c0, c1, need, h, step, flip);
-                    if add <= 0.0 {
-                        continue;
-                    }
-                    // The positive runs at 0 across, the negative at d.
-                    let lp = route::offset(&centre, -c.d / 2.0);
-                    let ln = route::offset(&centre, c.d / 2.0);
-                    let run = c.span.1 - c.span.0;
-                    let sum = |v: &[Piece]| v.iter().map(Piece::length).sum::<f64>();
-                    let (ap, an) = (sum(&lp) - run, sum(&ln) - run);
-                    let clear = |leg: &[Piece], wl: f64, net: u32| {
-                        leg.iter().all(|q| {
-                            let (s, e) = (q.start(), q.end());
-                            obstacles
-                                .check_pair_track(c.layer, s, e, wl, &skip, clearance)
-                                .is_none()
-                                && placed.iter().all(|&(l, a, b, r, other)| {
-                                    l != c.layer
-                                        || other == net
-                                        || other == p
-                                        || other == n
-                                        || seg_seg(s, e, a, b) - r - wl / 2.0 >= clearance - 1e-3
-                                })
-                        })
-                    };
-                    if !(clear(&lp, wp, p) && clear(&ln, wn, n)) {
-                        continue;
-                    }
-                    let new_skew = skew + ap - an;
-                    if best
-                        .as_ref()
-                        .is_none_or(|b| new_skew.abs() < (skew + b.3 - b.4).abs())
-                    {
-                        best = Some((add, lp, ln, ap, an));
-                    }
-                }
-                if best.is_some() {
-                    break;
-                }
-            }
-            let Some((_, lp, ln, ap, an)) = best else {
+            let Some(r) = pair_run(
+                board,
+                obstacles,
+                c,
+                (p, n),
+                need,
+                skew,
+                o,
+                placed,
+                &[false, true],
+            ) else {
                 continue;
             };
-            // Whole new tracks: the untouched ends, then the legs.
-            let tp = &g.tracks[c.ip];
-            let tn = &g.tracks[c.jn];
-            let ps = [tp.start.x.mil(), tp.start.y.mil()];
-            let pe = [tp.end.x.mil(), tp.end.y.mil()];
-            let mut newp = Vec::new();
-            if c.span.0 > 1e-6 {
-                newp.push(Piece::Line(ps, pt(c, c.span.0, 0.0)));
+            let (wp, wn) = (g.tracks[c.ip].width.mil(), g.tracks[c.jn].width.mil());
+            for (s, e) in r.lp.iter().flat_map(Piece::chords) {
+                placed.push((c.layer, s, e, wp / 2.0, p));
             }
-            newp.extend(lp.iter().copied());
-            if pt(c, c.span.1, 0.0) != pe {
-                newp.push(Piece::Line(pt(c, c.span.1, 0.0), pe));
-            }
-            let along = |q: P| (q[0] - c.a[0]) * c.u[0] + (q[1] - c.a[1]) * c.u[1];
-            let (ns, ne) = {
-                let s = [tn.start.x.mil(), tn.start.y.mil()];
-                let e = [tn.end.x.mil(), tn.end.y.mil()];
-                if along(s) <= along(e) {
-                    (s, e)
-                } else {
-                    (e, s)
-                }
-            };
-            let mut newn = Vec::new();
-            if along(ns) < c.span.0 - 1e-6 {
-                newn.push(Piece::Line(ns, pt(c, c.span.0, c.d)));
-            }
-            newn.extend(ln.iter().copied());
-            if along(ne) > c.span.1 + 1e-6 {
-                newn.push(Piece::Line(pt(c, c.span.1, c.d), ne));
-            }
-            for q in &lp {
-                placed.push((c.layer, q.start(), q.end(), wp / 2.0, p));
-            }
-            for q in &ln {
-                placed.push((c.layer, q.start(), q.end(), wn / 2.0, n));
+            for (s, e) in r.ln.iter().flat_map(Piece::chords) {
+                placed.push((c.layer, s, e, wn / 2.0, n));
             }
             used.insert(c.ip);
             used.insert(c.jn);
-            swaps.push((c.ip, newp));
-            swaps.push((c.jn, newn));
+            swaps.push((c.ip, r.newp));
+            swaps.push((c.jn, r.newn));
+            let (ap, an) = r.added;
             added.0 += ap;
             added.1 += an;
             skew += ap - an;
@@ -577,6 +545,298 @@ fn tune_pair(
         }
     }
     added
+}
+
+/// Interactive pair tuning: meanders the coupled run of pair (p, n) that
+/// track `track` (of either leg) belongs to, on the side `flip`, to add
+/// `need` to the pair's mean length. Returns the tracks replaced with
+/// their new pieces, and the length each leg gains.
+pub fn tune_pair_at(
+    board: &Board,
+    obstacles: &Obstacles,
+    (p, n): (u32, u32),
+    track: usize,
+    need: f64,
+    flip: bool,
+    o: &TuneOpts,
+) -> Option<(Swaps, (f64, f64))> {
+    let runs = coupled(board, p, n, &Default::default());
+    let c = runs.iter().find(|c| c.ip == track || c.jn == track)?;
+    let skew = board.net_length(p).mil() - board.net_length(n).mil();
+    let r = pair_run(board, obstacles, c, (p, n), need, skew, o, &[], &[flip])?;
+    Some((vec![(c.ip, r.newp), (c.jn, r.newn)], r.added))
+}
+
+/// Which side tuning bumps on track `track` go to keep away from the
+/// tracks of net `partner` beside it: the `flip` for [`route::tune_pattern`],
+/// or `None` when no partner track runs alongside.
+pub fn away_from(board: &Board, track: usize, partner: u32) -> Option<bool> {
+    let g = &board.geometry;
+    let t = g.tracks.get(track)?;
+    let (a, b) = (
+        [t.start.x.mil(), t.start.y.mil()],
+        [t.end.x.mil(), t.end.y.mil()],
+    );
+    let len = (b[0] - a[0]).hypot(b[1] - a[1]);
+    if len < 1e-6 {
+        return None;
+    }
+    let u = [(b[0] - a[0]) / len, (b[1] - a[1]) / len];
+    let nrm = [-u[1], u[0]];
+    let reach = 3.0 * t.width.mil() + 40.0;
+    let mut best: Option<(f64, f64)> = None;
+    for o in g
+        .tracks
+        .iter()
+        .filter(|o| o.net == Some(partner) && o.layer == t.layer)
+    {
+        for q in [
+            [o.start.x.mil(), o.start.y.mil()],
+            [o.end.x.mil(), o.end.y.mil()],
+        ] {
+            let along = (q[0] - a[0]) * u[0] + (q[1] - a[1]) * u[1];
+            let across = (q[0] - a[0]) * nrm[0] + (q[1] - a[1]) * nrm[1];
+            let off = (-along).max(along - len).max(0.0);
+            let d = across.abs() + off;
+            if d < reach && best.is_none_or(|(bd, _)| d < bd) {
+                best = Some((d, across));
+            }
+        }
+    }
+    // Unflipped bumps go to the left (positive across).
+    best.map(|(_, across)| across > 0.0)
+}
+
+/// Adds up to `need` mil to `net` with bumps on its straight tracks,
+/// longest first, keeping clear of other copper and of `placed`. With
+/// `partner` (a pair leg being phase tuned), bumps go away from the
+/// partner first. Returns the length added.
+#[allow(clippy::too_many_arguments)]
+fn tune_net(
+    board: &Board,
+    obstacles: &Obstacles,
+    net: u32,
+    mut need: f64,
+    o: &TuneOpts,
+    partner: Option<u32>,
+    placed: &mut Vec<(u8, P, P, f64, u32)>,
+    swaps: &mut Vec<(usize, Vec<Piece>)>,
+) -> f64 {
+    let g = &board.geometry;
+    let start = need;
+    let taken: std::collections::HashSet<usize> = swaps.iter().map(|s| s.0).collect();
+    let mut tracks: Vec<(usize, u8, P, P, f64)> = g
+        .tracks
+        .iter()
+        .enumerate()
+        .filter(|(i, t)| {
+            t.net == Some(net) && !t.text && t.component.is_none() && !taken.contains(i)
+        })
+        .filter_map(|(i, t)| match t.layer {
+            LayerRef::Copper(l) => Some((
+                i,
+                l,
+                [t.start.x.mil(), t.start.y.mil()],
+                [t.end.x.mil(), t.end.y.mil()],
+                t.width.mil(),
+            )),
+            _ => None,
+        })
+        .collect();
+    let len = |a: P, b: P| (b[0] - a[0]).hypot(b[1] - a[1]);
+    tracks.sort_by(|x, y| len(y.2, y.3).total_cmp(&len(x.2, x.3)));
+    for (ti, layer, a, b, w) in tracks {
+        if need <= 0.5 {
+            break;
+        }
+        let step = o.space.unwrap_or(4.0 * w).max(w + o.clearance);
+        // Copper the track is already closer to than the clearance (a
+        // pair's partner at the pair gap): a meander may stay as close
+        // to it, no closer.
+        let base = obstacles.check_track(layer, a, b, w, Some(net), o.clearance);
+        let skip = [Some(net), base.as_ref().and_then(|h| h.net)];
+        let floor = base.as_ref().map_or(o.clearance, |h| h.gap - 0.01);
+        let away = partner.and_then(|q| away_from(board, ti, q));
+        let flips = match away {
+            Some(f) => [f, !f],
+            None => [false, true],
+        };
+        let mut best: Option<(Vec<Piece>, f64)> = None;
+        'search: for k in [1.0, 0.7, 0.5, 0.35, 0.25] {
+            let h = o.amp * k;
+            if h < 2.0 * w {
+                break;
+            }
+            for flip in flips {
+                let (pieces, added) = route::tune_pattern(a, b, need, h, step, flip, o.style);
+                if added <= 0.0 {
+                    continue;
+                }
+                let clear = pieces.iter().flat_map(Piece::chords).all(|(s, e)| {
+                    let own = obstacles.check_track(layer, s, e, w, Some(net), o.clearance);
+                    own.is_none_or(|h| h.net == skip[1] && h.gap >= floor)
+                        && obstacles
+                            .check_pair_track(layer, s, e, w, &skip, o.clearance)
+                            .is_none()
+                        && placed.iter().all(|&(l, c, d, r, n)| {
+                            l != layer
+                                || n == net
+                                || seg_seg(s, e, c, d) - r - w / 2.0 >= o.clearance - 1e-3
+                        })
+                });
+                if clear {
+                    best = Some((pieces, added));
+                    break 'search;
+                }
+            }
+        }
+        if let Some((pieces, added)) = best {
+            for (s, e) in pieces.iter().flat_map(Piece::chords) {
+                placed.push((layer, s, e, w / 2.0, net));
+            }
+            need -= added;
+            swaps.push((ti, pieces));
+        }
+    }
+    start - need
+}
+
+/// The first place where `pieces`, put in for net `net`'s straight track
+/// a-b of width `w`, come closer to other copper than `clearance`. Copper
+/// the track was already closer to (a pair partner at its gap) may stay
+/// as close, no closer.
+#[allow(clippy::too_many_arguments)]
+pub fn bumps_hit(
+    obstacles: &Obstacles,
+    layer: u8,
+    net: u32,
+    (a, b): (P, P),
+    w: f64,
+    pieces: &[Piece],
+    clearance: f64,
+) -> Option<route::Hit> {
+    let base = obstacles.check_track(layer, a, b, w, Some(net), clearance);
+    let skip = [Some(net), base.as_ref().and_then(|h| h.net)];
+    let floor = base.as_ref().map_or(clearance, |h| h.gap - 0.01);
+    // Stretches still on the old track are where it was already.
+    let on_track = |q: P| route::point_seg(q, a, b) < 1e-6;
+    for (s, e) in pieces.iter().flat_map(Piece::chords) {
+        if on_track(s) && on_track(e) {
+            continue;
+        }
+        if let Some(h) = obstacles.check_track(layer, s, e, w, Some(net), clearance) {
+            if !(h.net == skip[1] && h.gap >= floor) {
+                return Some(h);
+            }
+        }
+        if let Some(h) = obstacles.check_pair_track(layer, s, e, w, &skip, clearance) {
+            return Some(h);
+        }
+    }
+    None
+}
+
+/// Edits that replace each track of `swaps` with its new pieces (tracks,
+/// and arcs for round corners) on the same layer, net and width: removals
+/// from the highest index down, then the new copper at the end.
+pub fn swap_edits(board: &Board, swaps: &[(usize, Vec<Piece>)]) -> Vec<Edit> {
+    let g = &board.geometry;
+    let mut swaps: Vec<&(usize, Vec<Piece>)> = swaps.iter().collect();
+    swaps.sort_by_key(|x| std::cmp::Reverse(x.0));
+    let mut edits = Vec::new();
+    for (ti, _) in &swaps {
+        edits.push(Edit::RemoveTrack {
+            index: *ti,
+            track: g.tracks[*ti].clone(),
+        });
+    }
+    let mut at = g.tracks.len() - swaps.len();
+    let mut ai = g.arcs.len();
+    let pt = |p: P| Point {
+        x: Length::from_mil(p[0]),
+        y: Length::from_mil(p[1]),
+    };
+    for (ti, pieces) in &swaps {
+        let old = &g.tracks[*ti];
+        for p in pieces {
+            match *p {
+                Piece::Line(s, e) => {
+                    edits.push(Edit::InsertTrack {
+                        index: at,
+                        track: Track {
+                            start: pt(s),
+                            end: pt(e),
+                            ..old.clone()
+                        },
+                    });
+                    at += 1;
+                }
+                Piece::Arc {
+                    c,
+                    r,
+                    start_deg,
+                    end_deg,
+                    ..
+                } => {
+                    edits.push(Edit::InsertArc {
+                        index: ai,
+                        arc: Arc {
+                            component: None,
+                            layer: old.layer.clone(),
+                            net: old.net,
+                            center: pt(c),
+                            radius: Length::from_mil(r),
+                            start_deg,
+                            end_deg,
+                            width: old.width,
+                        },
+                    });
+                    ai += 1;
+                }
+            }
+        }
+    }
+    edits
+}
+
+/// Phase (skew) tuning of a differential pair: bumps on the shorter leg,
+/// on the side away from its partner, until both legs are the same
+/// length. Bumps keep `clearance` from other copper and never come closer
+/// to the partner than the pair's gap.
+pub fn phase_match(board: &Board, (p, n): (u32, u32), o: &TuneOpts) -> Matched {
+    let (lp, ln) = (board.net_length(p).mil(), board.net_length(n).mil());
+    let (short, long) = if lp < ln { (p, n) } else { (n, p) };
+    let obstacles = Obstacles::new(board);
+    let mut placed = Vec::new();
+    let mut swaps = Vec::new();
+    let added = tune_net(
+        board,
+        &obstacles,
+        short,
+        (lp - ln).abs(),
+        o,
+        Some(long),
+        &mut placed,
+        &mut swaps,
+    );
+    let before = |x: u32| board.net_length(x).mil();
+    Matched {
+        edits: swap_edits(board, &swaps),
+        nets: vec![
+            Tuned {
+                net: p,
+                before: lp,
+                after: before(p) + if short == p { added } else { 0.0 },
+            },
+            Tuned {
+                net: n,
+                before: ln,
+                after: before(n) + if short == n { added } else { 0.0 },
+            },
+        ],
+        target: lp.max(ln),
+        pairs: Vec::new(),
+    }
 }
 
 #[cfg(test)]
@@ -610,6 +870,15 @@ mod tests {
             if (a[1] - b[1]).abs() > 1e-6 {
                 assert!(((b[0] - a[0]).abs() - (b[1] - a[1]).abs()).abs() < 1e-6);
             }
+        }
+    }
+
+    fn opts(amp: f64, clearance: f64) -> TuneOpts {
+        TuneOpts {
+            amp,
+            space: None,
+            clearance,
+            style: TuneStyle::Accordion,
         }
     }
 
@@ -654,7 +923,7 @@ mod tests {
     #[test]
     fn group_lengths_meet_the_longest() {
         let mut b = board();
-        let m = match_lengths(&b, &[0, 1, 2], None, 40.0, None, 5.0);
+        let m = match_lengths(&b, &[0, 1, 2], None, &opts(40.0, 5.0));
         assert!((m.target - 1200.0).abs() < 1e-6);
         assert_eq!(m.short(1.0).count(), 0, "{:?}", m.nets);
         let mut h = crate::edit::History::default();
@@ -674,7 +943,7 @@ mod tests {
         b.geometry.tracks[1].start.y = Length::from_mil(20.0);
         b.geometry.tracks[1].end.y = Length::from_mil(20.0);
         crate::connectivity::analyse(&mut b);
-        let m = match_lengths(&b, &[0], Some(1100.0), 40.0, None, 5.0);
+        let m = match_lengths(&b, &[0], Some(1100.0), &opts(40.0, 5.0));
         let obs = Obstacles::new(&b);
         let mut checked = 0;
         for e in &m.edits {
@@ -708,7 +977,7 @@ mod tests {
         b.geometry.tracks[2].start = Point::mil(0.0, 400.0);
         b.geometry.tracks[2].end = Point::mil(1200.0, 400.0);
         crate::connectivity::analyse(&mut b);
-        let m = match_lengths(&b, &[0, 1, 2], None, 60.0, None, 5.0);
+        let m = match_lengths(&b, &[0, 1, 2], None, &opts(60.0, 5.0));
         assert_eq!(m.pairs, vec![(0, 1)]);
         assert!((m.target - 1200.0).abs() < 1e-6);
         assert_eq!(m.short(2.0).count(), 0, "{:?}", m.nets);
@@ -736,6 +1005,45 @@ mod tests {
         for (a0, a1) in legs(0) {
             for &(b0, b1) in &legs(1) {
                 assert!(seg_seg(a0, a1, b0, b1) > 8.0 - 0.01);
+            }
+        }
+    }
+
+    #[test]
+    fn phase_tuning_bumps_the_short_leg_away_from_its_partner() {
+        let mut b = board();
+        b.diff_pairs.push(crate::DiffPair {
+            name: "D".into(),
+            positive: "D0".into(),
+            negative: "D1".into(),
+        });
+        // D0 is 30 mil shorter than D1; the pair runs 8 mil apart.
+        for (i, y, x1) in [(0usize, 0.0, 970.0), (1, 8.0, 1000.0)] {
+            let t = &mut b.geometry.tracks[i];
+            t.start = Point::mil(0.0, y);
+            t.end = Point::mil(x1, y);
+        }
+        b.geometry.tracks[2].start = Point::mil(0.0, 400.0);
+        b.geometry.tracks[2].end = Point::mil(1200.0, 400.0);
+        crate::connectivity::analyse(&mut b);
+        assert_eq!(away_from(&b, 0, 1), Some(true));
+        for style in TuneStyle::ALL {
+            let mut o = opts(25.0, 5.0);
+            o.style = style;
+            let m = phase_match(&b, (0, 1), &o);
+            let mut c = b.clone();
+            let mut h = crate::edit::History::default();
+            h.apply(&mut c, "phase", m.edits);
+            crate::connectivity::analyse(&mut c);
+            let (p, n) = (c.net_length(0).mil(), c.net_length(1).mil());
+            assert!((p - n).abs() < 1.0, "{style:?}: skew {}", p - n);
+            assert!((n - 1000.0).abs() < 1e-6);
+            // Every bump is below the pair (away from D1 at y = 8).
+            for t in c.geometry.tracks.iter().filter(|t| t.net == Some(0)) {
+                assert!(
+                    t.start.y.mil() <= 1e-6 && t.end.y.mil() <= 1e-6,
+                    "{style:?}"
+                );
             }
         }
     }

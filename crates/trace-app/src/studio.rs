@@ -562,6 +562,8 @@ impl Accel {
                 (T, "T", "Interactive routing"),
                 (I, "I", "Differential pair routing"),
                 (R, "R", "Interactive length tuning"),
+                (P, "P", "Interactive diff pair length tuning"),
+                (H, "H", "Interactive diff pair phase tuning"),
                 (A, "A", "Autoroute…"),
                 (F, "F", "Fanout…"),
                 (U, "U", "Unroute the selected net"),
@@ -992,7 +994,18 @@ impl App {
                 self.set_tool(Tool::Route);
                 self.router.pairs = true;
             }
-            "Interactive length tuning" => self.set_tool(Tool::Tune),
+            "Interactive length tuning" => {
+                self.router.tune.mode = crate::router::TuneMode::Single;
+                self.set_tool(Tool::Tune);
+            }
+            "Interactive diff pair length tuning" => {
+                self.router.tune.mode = crate::router::TuneMode::Pair;
+                self.set_tool(Tool::Tune);
+            }
+            "Interactive diff pair phase tuning" => {
+                self.router.tune.mode = crate::router::TuneMode::Phase;
+                self.set_tool(Tool::Tune);
+            }
             "Via" => {
                 if self.router.active.is_some() {
                     self.place_via(false);

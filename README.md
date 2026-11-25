@@ -188,7 +188,14 @@ checker and simulator all read.
   single layer mode; + / - next and previous layer)
 - tune lengths (the Tune button, or T): click a straight track to add
   meanders until the net meets its target from the Constraint Manager, its
-  pair partner or the Target box; Space puts them on the other side
+  pair partner or the Target box; Space puts them on the other side. The
+  tuning bar picks what to tune (Shift+T): one net, both legs of a pair
+  together (its mean length), or a pair's phase (small bumps on the
+  shorter leg, away from its partner, until the skew is zero), and the
+  bump style (Tab): accordion, mitered, rounded, trombone or sawtooth. A
+  gauge by the cursor shows the length (or skew) now, with the bumps, and
+  the goal with its tolerance and skew limit: green when it passes. 1 / 2
+  change the spacing, 3 / 4 the height, as in Altium
 - check impedance (the Impedance button, or I): the board's stack-up with
   editable thickness and Er per layer, the trace width for the single-ended
   target and the width and gap for the differential target on each copper
@@ -298,9 +305,12 @@ trace drc board.PcbDoc [--all]   design rule check: clearance, shorts, width, un
                                  plane voids and splits, crosstalk between parallel tracks)
 trace impedance board.PcbDoc     stack-up widths for 50 Ω and 100 Ω pairs, and each pair's Zdiff
 trace match board.PcbDoc D0,D1,D2 [out.tracepcb] [--target 1500mil] [--amp 40mil]
+              [--space L] [--style accordion|mitered|rounded|trombone|sawtooth] [--skew]
                                  match the nets' lengths to the longest (or the target) with meanders where
                                  they fit; with out, save the board tuned. A pair's name (or both legs) tunes
-                                 the pair together: one meander on both legs, keeping its gap and skew
+                                 the pair together: one meander on both legs, keeping its gap and skew.
+                                 --skew phase tunes each pair instead: bumps on the shorter leg, away
+                                 from the partner, until both legs are the same length
 trace stubs board.PcbDoc [out.tracepcb]   via stubs longer than their rule allows; with out, backdrill them,
                                  pour again and save the board
 trace stitch board.PcbDoc GND out.tracepcb [--grid 100mil] [--stagger] [--via 16/8] [--layers 1-6]
@@ -653,8 +663,10 @@ pairs: it reads in about 0.3 s. A 22-layer Allegro board with 2,079 parts and
   than part parameters are left out. The BOM groups parts by value, part
   number, maker, description and footprint; it does not know variants or
   parts not fitted.
-- Length tuning places one row of square meanders on one straight track
-  at a time; pick another track if one is too short for the length needed.
+- Length tuning places one row of bumps on one straight track (or one
+  straight coupled run of a pair) at a time; pick another track if one is
+  too short for the length needed. Bumps are not drawn round arcs or
+  along tracks at an angle to each other.
 - Matching a bus (Match bus, `trace match`) tunes each net on its own,
   longest straight tracks first: a meander keeps the clearance from other
   copper and from the meanders placed for the other nets, and may stay as

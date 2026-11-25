@@ -668,14 +668,31 @@ impl App {
         if item(ui, has, "Interactive differential pair routing", "U, I", "") {
             self.run_command("Differential pair routing");
         }
-        if item(
-            ui,
-            has,
-            "Interactive length tuning",
-            "T",
-            "Meanders to the target length",
-        ) {
-            self.set_tool(Tool::Tune);
+        use crate::router::TuneMode;
+        for (label, key, tip, mode) in [
+            (
+                "Interactive length tuning",
+                "T",
+                "Meanders on one net to the target length",
+                TuneMode::Single,
+            ),
+            (
+                "Interactive diff pair length tuning",
+                "",
+                "Both legs of a pair meander together to the target length",
+                TuneMode::Pair,
+            ),
+            (
+                "Interactive diff pair phase tuning",
+                "",
+                "Small bumps on a pair's shorter leg to remove its skew",
+                TuneMode::Phase,
+            ),
+        ] {
+            if item(ui, has, label, key, tip) {
+                self.router.tune.mode = mode;
+                self.set_tool(Tool::Tune);
+            }
         }
         ui.separator();
         if item(

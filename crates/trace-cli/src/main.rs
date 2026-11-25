@@ -46,11 +46,14 @@ USAGE:
     trace panel <board> <cols>x<rows> <out.tracepcb> [--gap 2mm] [--rail 5mm] [--tabs N] [--vscore]
                                                 Panel of copies with rails, fiducials, tooling holes, and
                                                 tabs with mouse bites (or V-score lines); then fab or odb it
-    trace match <board> <net|pair,...> [out.tracepcb] [--target L] [--amp L]
+    trace match <board> <net|pair,...> [out.tracepcb] [--target L] [--amp L] [--space L]
+                [--style accordion|mitered|rounded|trombone|sawtooth] [--skew]
                                                 Match the nets' lengths (to the longest, or the target) with
                                                 meanders where they fit; with out, save the board tuned. A
                                                 differential pair (named, or both nets given) is tuned as a pair:
-                                                both legs meander together and its mean length is matched
+                                                both legs meander together and its mean length is matched.
+                                                --skew: phase tune each pair's skew instead, with small bumps on its
+                                                shorter leg away from the partner (height 3 track widths by default)
     trace sim <board> <U1.pin> <U2.pin> --ibis drv.ibs [--rx-ibis rx.ibs] [--model M] [--rx-model M]
               [--rate 1G] [--bits N] [--corner typ|min|max] [--term 50|50@0.9|100diff] [--single]
               [--df 0.02] [--rough 1um] [--lossless] [--no-xtalk] [--formulas] [out.svg]
@@ -1996,9 +1999,13 @@ fn stubs(file: &str, out: Option<&str>) -> Res {
 }
 
 fn match_nets(file: &str, nets: &str, rest: &[&str]) -> Res {
+    use trace_core::bus::{self, TuneOpts};
+    use trace_core::route::TuneStyle;
     let mut b = board(file)?;
     let mut out = None;
-    let (mut target, mut amp) = (None, 40.0);
+    let (mut target, mut amp, mut space) = (None, None, None);
+    let mut style = TuneStyle::Accordion;
+    let mut phase = false;
     let mut it = rest.iter();
     while let Some(&a) = it.next() {
         let len = |v: Option<&&str>| -> Result<f64, Box<dyn std::error::Error>> {
@@ -2007,7 +2014,15 @@ fn match_nets(file: &str, nets: &str, rest: &[&str]) -> Res {
         };
         match a {
             "--target" => target = Some(len(it.next())?),
-            "--amp" => amp = len(it.next())?,
+            "--amp" => amp = Some(len(it.next())?),
+            "--space" => space = Some(len(it.next())?),
+            "--skew" => phase = true,
+            "--style" => {
+                let v = it.next().ok_or("--style needs a style")?;
+                style = TuneStyle::parse(v).ok_or(format!(
+                    "unknown style {v} (accordion, mitered, rounded, trombone, sawtooth)"
+                ))?;
+            }
             _ if out.is_none() && !a.starts_with("--") => out = Some(a),
             _ => return Err(format!("unknown option {a}").into()),
         }
@@ -2025,37 +2040,90 @@ fn match_nets(file: &str, nets: &str, rest: &[&str]) -> Res {
         ids.push(id(name).ok_or(format!("no net {name}"))?);
     }
     let clearance = trace_core::route::board_clearance(&b);
-    let m = trace_core::bus::match_lengths(&b, &ids, target, amp, None, clearance);
-    for &(p, n) in &m.pairs {
-        println!(
-            "  pair {} / {}: tuned together, mean {:.1} mil, skew {:.1} mil",
-            b.nets[p as usize].name,
-            b.nets[n as usize].name,
-            m.length_of(p),
-            m.nets.iter().find(|t| t.net == p).map_or(0.0, |t| t.after)
-                - m.nets.iter().find(|t| t.net == n).map_or(0.0, |t| t.after)
-        );
-    }
-    println!("Target {:.1} mil", m.target);
-    for t in &m.nets {
-        let short = m.target - m.length_of(t.net);
-        println!(
-            "  {:<28} {:>9.1} -> {:>9.1}{}",
-            b.nets[t.net as usize].name,
-            t.before,
-            t.after,
-            if short > 1.0 {
-                format!("  ({short:.1} mil short: no room for meanders)")
-            } else {
-                String::new()
+    let names: Vec<String> = b.nets.iter().map(|n| n.name.clone()).collect();
+    let name = |n: u32| names[n as usize].clone();
+    let edits = if phase {
+        let pairs = bus::pairs_in(&b, &ids);
+        if pairs.is_empty() {
+            return Err("--skew needs differential pairs (a pair name, or both its nets)".into());
+        }
+        let mut edits = Vec::new();
+        for (p, n) in pairs {
+            // Small bumps, as Altium's phase tuning places.
+            let w = b
+                .geometry
+                .tracks
+                .iter()
+                .find(|t| t.net == Some(p))
+                .map_or(5.0, |t| t.width.mil());
+            let o = TuneOpts {
+                amp: amp.unwrap_or(3.0 * w),
+                space,
+                clearance,
+                style,
+            };
+            let m = bus::phase_match(&b, (p, n), &o);
+            let after = |x: u32| m.nets.iter().find(|t| t.net == x).map_or(0.0, |t| t.after);
+            let (bp, bn) = (b.net_length(p).mil(), b.net_length(n).mil());
+            let short = if bp < bn { p } else { n };
+            println!(
+                "  pair {} / {}: skew {:.1} -> {:.1} mil (bumps on {}: {:.1} -> {:.1} mil, {})",
+                name(p),
+                name(n),
+                bp - bn,
+                after(p) - after(n),
+                name(short),
+                bp.min(bn),
+                after(short),
+                style.label()
+            );
+            // Pairs are tuned one by one on the board as it stands.
+            for e in &m.edits {
+                e.apply(&mut b);
             }
-        );
-    }
-    if let Some(out) = out {
-        let edits = m.edits;
-        for e in &edits {
+            trace_core::connectivity::analyse(&mut b);
+            edits.extend(m.edits);
+        }
+        edits
+    } else {
+        let o = TuneOpts {
+            amp: amp.unwrap_or(40.0),
+            space,
+            clearance,
+            style,
+        };
+        let m = bus::match_lengths(&b, &ids, target, &o);
+        for &(p, n) in &m.pairs {
+            println!(
+                "  pair {} / {}: tuned together, mean {:.1} mil, skew {:.1} mil",
+                name(p),
+                name(n),
+                m.length_of(p),
+                m.nets.iter().find(|t| t.net == p).map_or(0.0, |t| t.after)
+                    - m.nets.iter().find(|t| t.net == n).map_or(0.0, |t| t.after)
+            );
+        }
+        println!("Target {:.1} mil ({})", m.target, style.label());
+        for t in &m.nets {
+            let short = m.target - m.length_of(t.net);
+            println!(
+                "  {:<28} {:>9.1} -> {:>9.1}{}",
+                name(t.net),
+                t.before,
+                t.after,
+                if short > 1.0 {
+                    format!("  ({short:.1} mil short: no room for meanders)")
+                } else {
+                    String::new()
+                }
+            );
+        }
+        for e in &m.edits {
             e.apply(&mut b);
         }
+        m.edits
+    };
+    if let Some(out) = out {
         if let Some(e) = trace_core::pour::repour_after(&b, &edits) {
             e.apply(&mut b);
         }

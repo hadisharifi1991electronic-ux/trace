@@ -359,6 +359,33 @@ impl App {
                 if let [a, b, c, d] = v[..] {
                     app.schem.focus_on([a, b, c, d]);
                 }
+            } else if let Some(rest) = w.strip_prefix("tune:") {
+                // tune:mode,style,layer,x,y,scale[,target]: the tuning tool in that
+                // mode and style on copper layer `layer` (from 0), the view
+                // centred on (x, y) mil (for screenshots).
+                let v: Vec<&str> = rest.split(',').map(str::trim).collect();
+                if let Some(t) = v.get(6).and_then(|t| t.parse().ok()) {
+                    app.router.tune.target = Some(t);
+                }
+                if let [mode, style, layer, x, y, s, ..] = v[..] {
+                    use crate::router::TuneMode;
+                    app.router.tune.mode = match mode {
+                        "pair" => TuneMode::Pair,
+                        "phase" => TuneMode::Phase,
+                        _ => TuneMode::Single,
+                    };
+                    if let Some(st) = trace_core::route::TuneStyle::parse(style) {
+                        app.router.tune.style = st;
+                    }
+                    app.set_tool(Tool::Tune);
+                    if let Ok(l) = layer.parse() {
+                        app.active = Slot::Copper(l);
+                    }
+                    if let (Ok(x), Ok(y), Ok(s)) = (x.parse(), y.parse(), s.parse()) {
+                        app.needs_fit = false;
+                        app.focus = Some(Focus::Point([x, y], s));
+                    }
+                }
             } else if let Some(rest) = w.strip_prefix("at:") {
                 // at:x,y,scale: the board view centred on (x, y) mil at
                 // `scale` pixels per mil.
@@ -2061,70 +2088,104 @@ impl App {
     }
 
     fn tune_bar(&mut self, ui: &mut egui::Ui) {
+        use crate::router::TuneMode;
+        use trace_core::route::TuneStyle;
         let t = &mut self.router.tune;
-        let mut own = t.target.is_some();
-        ui.checkbox(&mut own, "Target")
-            .on_hover_text("Off: the target comes from the Constraint Manager (matched groups, minimum lengths, pair partners)");
-        if own != t.target.is_some() {
-            t.target = own.then(|| t.preview.as_ref().map(|p| p.target).unwrap_or(1000.0));
-        }
-        if let Some(v) = t.target.as_mut() {
-            ui.add(
-                egui::DragValue::new(v)
-                    .speed(1.0)
-                    .range(1.0..=100_000.0)
-                    .max_decimals(1)
-                    .suffix(" mil"),
-            );
+        egui::ComboBox::from_id_salt("tune_mode")
+            .width(130.0)
+            .selected_text(t.mode.label())
+            .show_ui(ui, |ui| {
+                for m in TuneMode::ALL {
+                    ui.selectable_value(&mut t.mode, m, m.label())
+                        .on_hover_text(m.tip());
+                }
+            })
+            .response
+            .on_hover_text("What to tune (Shift+T cycles)");
+        egui::ComboBox::from_id_salt("tune_style")
+            .width(95.0)
+            .selected_text(t.style.label())
+            .show_ui(ui, |ui| {
+                for st in TuneStyle::ALL {
+                    ui.selectable_value(&mut t.style, st, st.label());
+                }
+            })
+            .response
+            .on_hover_text("Shape of the bumps (Tab cycles)");
+        if t.mode != TuneMode::Phase {
+            let mut own = t.target.is_some();
+            ui.checkbox(&mut own, "Target")
+                .on_hover_text("Off: the target comes from the Constraint Manager (matched groups, minimum lengths, pair partners)");
+            if own != t.target.is_some() {
+                t.target = own.then(|| t.preview.as_ref().map(|p| p.target).unwrap_or(1000.0));
+            }
+            if let Some(v) = t.target.as_mut() {
+                ui.add(
+                    egui::DragValue::new(v)
+                        .speed(1.0)
+                        .range(1.0..=100_000.0)
+                        .max_decimals(1)
+                        .suffix(" mil"),
+                );
+            } else {
+                ui.label(RichText::new("from constraints").weak());
+            }
         } else {
-            ui.label(RichText::new("from constraints").weak());
+            ui.label(RichText::new("target: partner's length").weak());
         }
         ui.label("Height");
-        ui.add(
-            egui::DragValue::new(&mut t.amp)
-                .speed(0.5)
-                .range(2.0..=1000.0)
-                .max_decimals(1)
-                .suffix(" mil"),
-        )
-        .on_hover_text("Largest height of a meander bump");
+        let auto = |v: f64, _| {
+            if v <= 0.0 {
+                "auto".into()
+            } else {
+                format!("{v:.1} mil")
+            }
+        };
+        if t.mode == TuneMode::Phase {
+            ui.add(
+                egui::DragValue::new(&mut t.phase_amp)
+                    .speed(0.5)
+                    .range(0.0..=200.0)
+                    .max_decimals(1)
+                    .custom_formatter(auto),
+            )
+            .on_hover_text(
+                "Height of the phase bumps; auto is 3 × the track width (3 and 4 change it)",
+            );
+        } else {
+            ui.add(
+                egui::DragValue::new(&mut t.amp)
+                    .speed(0.5)
+                    .range(2.0..=1000.0)
+                    .max_decimals(1)
+                    .suffix(" mil"),
+            )
+            .on_hover_text("Largest height of a meander bump (3 and 4 change it)");
+        }
         ui.label("Spacing");
         ui.add(
             egui::DragValue::new(&mut t.space)
                 .speed(0.5)
                 .range(0.0..=1000.0)
                 .max_decimals(1)
-                .custom_formatter(|v, _| {
-                    if v <= 0.0 {
-                        "auto".into()
-                    } else {
-                        format!("{v:.1} mil")
-                    }
-                }),
+                .custom_formatter(auto),
         )
         .on_hover_text(
-            "Centre-to-centre distance between bump sides; auto is 4 × the track width (a 3W gap)",
+            "Centre-to-centre distance between bump sides; auto is 4 × the track width (a 3W gap). 1 and 2 change it",
         );
         ui.separator();
         let text = match (&t.preview, &self.router.message) {
             (Some(p), _) => {
-                let name = self
-                    .scene
-                    .as_ref()
-                    .and_then(|s| s.board.nets.get(p.net as usize))
-                    .map(|n| n.name.clone())
-                    .unwrap_or_default();
-                let short = p.target - p.length - p.added;
-                let mut s = format!(
-                    "{name}: {:.1} to {:.1} mil, target {:.1} ({})",
-                    p.length,
-                    p.length + p.added,
-                    p.target,
-                    p.why
-                );
+                let g = &p.gauge;
+                let mut s = format!("{} ({})", g.text(), p.why);
+                let short = if g.phase {
+                    g.after.abs()
+                } else {
+                    g.goal - g.after
+                };
                 if p.added <= 0.0 {
-                    s.push_str(" · this track is too short for a meander at this spacing; lower Spacing or pick a longer track");
-                } else if short > 0.5 {
+                    s.push_str(" · this track is too short for bumps at this spacing; lower Spacing or pick a longer track");
+                } else if short > g.tol.max(0.5) {
                     s.push_str(&format!(" · {short:.1} mil short, tune another track too"));
                 }
                 if p.hit.is_some() {
@@ -2132,17 +2193,72 @@ impl App {
                 }
                 RichText::new(s).color(if p.hit.is_some() {
                     Color32::from_rgb(255, 120, 100)
+                } else if g.ok() {
+                    Color32::from_rgb(120, 220, 140)
                 } else {
                     Color32::from_rgb(255, 220, 120)
                 })
             }
             (None, Some(m)) => RichText::new(m).color(Color32::from_rgb(255, 120, 100)),
-            (None, None) => RichText::new(
-                "Point at a straight track of the net and click to add meanders · Space: other side",
-            )
+            (None, None) => RichText::new(match t.mode {
+                TuneMode::Phase => "Point at the shorter leg of a pair and click to add phase bumps · Space: other side",
+                TuneMode::Pair => "Point at a straight run of a pair and click to meander both legs · Space: other side",
+                TuneMode::Single => "Point at a straight track of the net and click to add meanders · Space: other side",
+            })
             .weak(),
         };
         ui.label(text);
+    }
+
+    /// Keys while tuning, as in Altium: 1/2 spacing down/up, 3/4 height
+    /// down/up, Tab the bump style, Shift+T the mode.
+    fn tune_keys(&mut self, ctx: &egui::Context) {
+        use crate::router::TuneMode;
+        use trace_core::route::TuneStyle;
+        if ctx.wants_keyboard_input() {
+            return;
+        }
+        let (k1, k2, k3, k4, tab, mode) = ctx.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Num1),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Num2),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Num3),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Num4),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Tab),
+                i.consume_key(egui::Modifiers::SHIFT, egui::Key::T),
+            )
+        });
+        let t = &mut self.router.tune;
+        let width = t.preview.as_ref().map_or(5.0, |p| p.width);
+        let step = (width / 2.0).max(1.0);
+        if k1 || k2 {
+            let now = if t.space > 0.0 { t.space } else { 4.0 * width };
+            t.space = (now + if k2 { step } else { -step }).max(width + 1.0);
+        }
+        if k3 || k4 {
+            let d = if k4 { step } else { -step };
+            if t.mode == TuneMode::Phase {
+                let now = if t.phase_amp > 0.0 {
+                    t.phase_amp
+                } else {
+                    3.0 * width
+                };
+                t.phase_amp = (now + d).max(width);
+            } else {
+                t.amp = (t.amp + d).max(2.0 * width);
+            }
+        }
+        if tab {
+            let i = TuneStyle::ALL
+                .iter()
+                .position(|s| *s == t.style)
+                .unwrap_or(0);
+            t.style = TuneStyle::ALL[(i + 1) % TuneStyle::ALL.len()];
+        }
+        if mode {
+            let i = TuneMode::ALL.iter().position(|m| *m == t.mode).unwrap_or(0);
+            t.mode = TuneMode::ALL[(i + 1) % TuneMode::ALL.len()];
+        }
     }
 
     fn route_bar(&mut self, ui: &mut egui::Ui) {
@@ -2338,9 +2454,12 @@ impl App {
             board,
             &nets,
             t.target,
-            t.amp,
-            space,
-            self.router.clearance,
+            &trace_core::bus::TuneOpts {
+                amp: t.amp,
+                space,
+                clearance: self.router.clearance,
+                style: t.style,
+            },
         );
         let name = |n: u32| board.nets[n as usize].name.clone();
         let short: Vec<String> = m
@@ -3101,7 +3220,7 @@ impl eframe::App for App {
             if redo && self.router.active.is_none() {
                 self.redo();
             }
-            if ctx.input(|i| i.key_pressed(egui::Key::T)) {
+            if ctx.input(|i| i.key_pressed(egui::Key::T) && !i.modifiers.shift) {
                 self.set_tool(if self.tool == Tool::Tune {
                     Tool::Select
                 } else {
@@ -3110,6 +3229,9 @@ impl eframe::App for App {
             }
             if corner && self.tool == Tool::Tune {
                 self.router.tune.flip = !self.router.tune.flip;
+            }
+            if self.tool == Tool::Tune {
+                self.tune_keys(ctx);
             }
             if route_key {
                 self.set_tool(if self.tool == Tool::Route {

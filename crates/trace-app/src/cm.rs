@@ -111,12 +111,14 @@ impl Cm {
     /// why: the match target of a matched group (for a delay match, the
     /// length that brings its delay there at the speed of the track's
     /// layer), a minimum length, or its pair partner when the group limits
-    /// skew. The largest of these wins.
+    /// skew (unless `partner` is off, as for tuning a pair's mean length).
+    /// The largest of these wins.
     pub fn tune_target(
         &mut self,
         board: &Board,
         net: u32,
         track: &trace_core::Track,
+        partner: bool,
     ) -> Option<(f64, String)> {
         let groups = self.set.groups.clone();
         let results = self.results(board).clone();
@@ -161,7 +163,7 @@ impl Cm {
             if let Some(m) = g.limits.min_length {
                 offer(m.mil(), format!("minimum of {}", g.name));
             }
-            if g.limits.max_skew.is_some() {
+            if partner && g.limits.max_skew.is_some() {
                 if let Some(p) = r
                     .nets
                     .iter()
@@ -172,6 +174,28 @@ impl Cm {
             }
         }
         best
+    }
+
+    /// The tightest length-match tolerance (mil) and the tightest pair skew
+    /// limit (mil) of the enabled groups that hold `net`, for the tuning
+    /// gauge.
+    pub fn tune_limits(&mut self, board: &Board, net: u32) -> (Option<f64>, Option<f64>) {
+        let groups = self.set.groups.clone();
+        let results = self.results(board).clone();
+        let (mut tol, mut skew): (Option<f64>, Option<f64>) = (None, None);
+        let min = |a: Option<f64>, b: f64| Some(a.map_or(b, |a| a.min(b)));
+        for (g, r) in groups.iter().zip(&results) {
+            if !g.enabled || !r.nets.iter().any(|n| n.net == net) {
+                continue;
+            }
+            if let (false, Some(t)) = (g.limits.by_delay, g.limits.match_tolerance) {
+                tol = min(tol, t.mil());
+            }
+            if let Some(s) = g.limits.max_skew {
+                skew = min(skew, s.mil());
+            }
+        }
+        (tol, skew)
     }
 
     /// Every failing net of every group, with what is wrong, for the
@@ -801,7 +825,7 @@ mod tests {
             source: String::new(),
         });
         let t = b.geometry.tracks[1].clone();
-        let (target, why) = cm.tune_target(&b, 1, &t).expect("a target");
+        let (target, why) = cm.tune_target(&b, 1, &t, true).expect("a target");
         // Same layer, so the same speed: B goes to A's length.
         assert!((target - 1000.0).abs() < 0.01, "{target} {why}");
         assert!(why.contains("ps"), "{why}");

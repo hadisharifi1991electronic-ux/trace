@@ -152,6 +152,12 @@ USAGE:
                                                 copper layer, mid-dielectric and side views through the hottest
                                                 point (--at X,Y mm; --planes all for every slab; --maps picks);
                                                 maps.gif sweeps the cut down the layers (--sweep x|y: side views)
+                  [--ir NET=AMPS[@SOURCE][:VOLTS]]... [--no-couple]
+                                                coupled with the DC IR drop: each rail's copper loss (I²R in its
+                                                planes, tracks and vias) heats the board where it is lost, and the
+                                                hotter copper's resistivity (+0.393 %/K) feeds back into the drop
+                                                until the hottest point settles; loads shared by pad count, source
+                                                guessed and volts read from the net name unless given
     trace bus <board> NETS... --from U1 [--to U5] --rate MT/S [--strobe DQS0] [--swing 0.8] [--rise PS]
               [--setup PS] [--hold PS] [--mask 136mV,0.2UI] [--offset 0.5 | --edge-aligned] [--no-xtalk]
               [--vias-3d] [--prbs 7] [timing.svg] [bits.csv] [report.txt]
@@ -3773,10 +3779,14 @@ fn thermal_cmd(file: &str, rest: &[&str]) -> Res {
     let mut at: Option<[f64; 2]> = None;
     let mut decades = 3.0;
     let mut sweep = thermfield::Sweep::Depth;
+    let mut irs: Vec<&str> = Vec::new();
+    let mut couple = true;
     let mut it = rest.iter();
     while let Some(&a) = it.next() {
         let mut val = || it.next().copied().ok_or(format!("{a} needs a value"));
         match a {
+            "--ir" => irs.push(val()?),
+            "--no-couple" => couple = false,
             "--power" => {
                 for p in val()?.split(',') {
                     setup.sources.push(thermal::parse_power(&b, p)?);
@@ -3885,8 +3895,31 @@ fn thermal_cmd(file: &str, rest: &[&str]) -> Res {
         },
         setup.ambient_c
     );
+    let rails = irs
+        .iter()
+        .map(|spec| ir_rail(&b, spec))
+        .collect::<Result<Vec<_>, _>>()?;
     let t = std::time::Instant::now();
-    let r = if check {
+    let r = if !rails.is_empty() {
+        if check {
+            println!("(--check is skipped with --ir)");
+        }
+        let mut es = trace_core::etherm::Setup::new(rails, setup.clone());
+        es.couple = couple;
+        let er = trace_core::etherm::solve(&b, &es)?;
+        eprintln!("  coupled solve in {:.1} s", t.elapsed().as_secs_f64());
+        let text = er.report(&b);
+        print!("{text}");
+        for o in outs
+            .iter()
+            .filter(|o| o.to_ascii_lowercase().ends_with(".txt"))
+        {
+            std::fs::write(o, &text)?;
+            println!("Wrote {o}");
+        }
+        outs.retain(|o| !o.to_ascii_lowercase().ends_with(".txt"));
+        er.thermal
+    } else if check {
         let mc = thermal::check_mesh(&b, &setup)?;
         println!(
             "Grid check (cells {:.2} and {:.2} mm):",
@@ -3899,8 +3932,10 @@ fn thermal_cmd(file: &str, rest: &[&str]) -> Res {
     } else {
         thermal::solve(&b, &setup)?
     };
-    eprintln!("  solved in {:.1} s", t.elapsed().as_secs_f64());
-    print!("{}", r.report());
+    if irs.is_empty() {
+        eprintln!("  solved in {:.1} s", t.elapsed().as_secs_f64());
+        print!("{}", r.report());
+    }
     let title = format!(
         "{}: temperatures",
         Path::new(file)
@@ -3934,6 +3969,41 @@ fn thermal_cmd(file: &str, rest: &[&str]) -> Res {
         println!("Wrote {o}");
     }
     Ok(())
+}
+
+/// A rail for `trace thermal --ir NET=AMPS[@SOURCE][:VOLTS]`: loads
+/// shared by pad count, as `trace ir` does.
+fn ir_rail(b: &Board, spec: &str) -> Result<trace_core::pi::Setup, Box<dyn std::error::Error>> {
+    let (net, rest) = spec
+        .split_once('=')
+        .ok_or(format!("--ir wants NET=AMPS[@SOURCE][:VOLTS], not {spec}"))?;
+    let (rest, volts) = match rest.split_once(':') {
+        Some((r, v)) => (
+            r,
+            Some(
+                v.trim_end_matches(['V', 'v'])
+                    .parse::<f64>()
+                    .map_err(|_| format!("not a voltage: {v}"))?,
+            ),
+        ),
+        None => (rest, None),
+    };
+    let (total, source) = match rest.split_once('@') {
+        Some((a, s)) => (a, Some(s)),
+        None => (rest, None),
+    };
+    let total = amps(total).ok_or(format!("not a current: {total}"))?;
+    let s = trace_core::etherm::rail(b, net, total, source, volts)?;
+    let (id, volts, source) = (s.net, s.volts, s.source);
+    println!(
+        "{}: {:.3} V from {}, {:.3} A shared by {} loads",
+        b.nets[id as usize].name,
+        volts,
+        b.components[source].designator,
+        total,
+        s.loads.len()
+    );
+    Ok(s)
 }
 
 fn bus_cmd(file: &str, rest: &[&str]) -> Res {

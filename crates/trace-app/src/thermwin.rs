@@ -17,14 +17,37 @@ struct Row {
     sink_text: String,
 }
 
+/// A supply whose copper loss (IR drop) heats the board.
+struct RailRow {
+    net: String,
+    amps: f64,
+    /// 0: from the net's name.
+    volts: f64,
+    source: String,
+}
+
 /// A drawn map: size, scale, plane name, value span.
 type MapView = ([f32; 2], TScale, String, Option<(f64, f64)>);
 
-type Solved = Result<(thermal::Result, Option<Vec<(String, f64, f64)>>), String>;
+type Solved = Result<
+    (
+        thermal::Result,
+        Option<Vec<(String, f64, f64)>>,
+        Option<String>,
+    ),
+    String,
+>;
 
 pub struct ThermalWindow {
     pub open: bool,
     rows: Vec<Row>,
+    rails: Vec<RailRow>,
+    /// Hot copper's resistivity fed back into the IR drop.
+    couple: bool,
+    /// The coupled solve's summary (rails cold and hot, passes).
+    ir_text: Option<String>,
+    /// Solve on the next frame (`TRACE_OPEN=thermal:...`).
+    solve_now: bool,
     pick: String,
     ambient: f64,
     speed: f64,
@@ -53,6 +76,10 @@ impl Default for ThermalWindow {
         ThermalWindow {
             open: false,
             rows: Vec::new(),
+            rails: Vec::new(),
+            couple: true,
+            ir_text: None,
+            solve_now: false,
             pick: String::new(),
             ambient: 25.0,
             speed: 0.0,
@@ -75,6 +102,32 @@ impl Default for ThermalWindow {
 }
 
 impl ThermalWindow {
+    /// Opens with these rails (`NET=AMPS[@SOURCE][:VOLTS]`, `;` between)
+    /// and solves at once (for screenshots).
+    pub fn preset(&mut self, spec: &str) {
+        for r in spec.split(';').filter(|r| !r.trim().is_empty()) {
+            let (net, rest) = r.split_once('=').unwrap_or((r, "1"));
+            let (rest, volts) = rest.split_once(':').unwrap_or((rest, "0"));
+            let (amps, source) = rest.split_once('@').unwrap_or((rest, ""));
+            self.rails.push(RailRow {
+                net: net.trim().into(),
+                amps: amps
+                    .trim()
+                    .trim_end_matches(['A', 'a'])
+                    .parse()
+                    .unwrap_or(1.0),
+                volts: volts
+                    .trim()
+                    .trim_end_matches(['V', 'v'])
+                    .parse()
+                    .unwrap_or(0.0),
+                source: source.trim().into(),
+            });
+        }
+        self.open = true;
+        self.solve_now = true;
+    }
+
     pub fn show(&mut self, ctx: &egui::Context, board: &Board, selected: Option<u32>) {
         if !self.open {
             return;
@@ -83,10 +136,11 @@ impl ThermalWindow {
             match rx.try_recv() {
                 Ok(r) => {
                     match r {
-                        Ok((res, bars)) => {
+                        Ok((res, bars, ir)) => {
                             self.layer = 0;
                             self.result = Some(res);
                             self.bars = bars;
+                            self.ir_text = ir;
                             self.error = None;
                         }
                         Err(e) => self.error = Some(e),
@@ -222,6 +276,68 @@ impl ThermalWindow {
         if let Some(k) = remove {
             self.rows.remove(k);
         }
+        // Supplies whose copper loss heats the board.
+        ui.horizontal(|ui| {
+            ui.label(RichText::new("IR-drop heating").strong())
+                .on_hover_text(
+                "Each rail's DC current is solved through its planes, tracks and vias; the I²R \
+                 lost in the copper heats the board where it is lost, and the hotter copper's \
+                 resistivity (+0.393 %/K) feeds back into the drop until it settles. Loads share \
+                 the current by pad count.",
+            );
+            if ui.button("Add rail").clicked() {
+                self.rails.push(RailRow {
+                    net: String::new(),
+                    amps: 1.0,
+                    volts: 0.0,
+                    source: String::new(),
+                });
+            }
+            ui.add_enabled(
+                !self.rails.is_empty(),
+                egui::Checkbox::new(&mut self.couple, "resistivity follows temperature"),
+            );
+        });
+        let mut drop_rail = None;
+        if !self.rails.is_empty() {
+            egui::Grid::new("therm-rails")
+                .num_columns(5)
+                .spacing([10.0, 4.0])
+                .show(ui, |ui| {
+                    for h in ["Net", "Current", "Volts", "Source", ""] {
+                        ui.label(RichText::new(h).strong());
+                    }
+                    ui.end_row();
+                    for (k, r) in self.rails.iter_mut().enumerate() {
+                        ui.add(egui::TextEdit::singleline(&mut r.net).desired_width(140.0));
+                        ui.add(
+                            egui::DragValue::new(&mut r.amps)
+                                .speed(0.05)
+                                .range(0.0..=500.0)
+                                .suffix(" A"),
+                        );
+                        ui.add(
+                            egui::DragValue::new(&mut r.volts)
+                                .speed(0.01)
+                                .range(0.0..=60.0)
+                                .suffix(" V"),
+                        )
+                        .on_hover_text("0: read from the net's name (1V8 = 1.8 V), else 1 V");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut r.source)
+                                .desired_width(70.0)
+                                .hint_text("guess"),
+                        );
+                        if ui.small_button("✖").on_hover_text("Remove").clicked() {
+                            drop_rail = Some(k);
+                        }
+                        ui.end_row();
+                    }
+                });
+        }
+        if let Some(k) = drop_rail {
+            self.rails.remove(k);
+        }
         ui.horizontal(|ui| {
             ui.label("Ambient");
             ui.add(
@@ -247,21 +363,50 @@ impl ThermalWindow {
             );
         });
         ui.horizontal(|ui| {
-            let ok = !self.rows.is_empty() && self.running.is_none();
-            if ui.add_enabled(ok, egui::Button::new("Solve")).clicked() {
-                match self.setup() {
-                    Ok(setup) => {
+            let ok = (!self.rows.is_empty() || !self.rails.is_empty()) && self.running.is_none();
+            let now = std::mem::take(&mut self.solve_now) && ok;
+            if ui.add_enabled(ok, egui::Button::new("Solve")).clicked() || now {
+                let rails: Result<Vec<_>, String> = self
+                    .rails
+                    .iter()
+                    .filter(|r| !r.net.trim().is_empty())
+                    .map(|r| {
+                        trace_core::etherm::rail(
+                            board,
+                            &r.net,
+                            r.amps,
+                            Some(r.source.as_str()),
+                            Some(r.volts),
+                        )
+                    })
+                    .collect();
+                match self.setup().and_then(|s| rails.map(|r| (s, r))) {
+                    Ok((setup, rails)) => {
                         let b = board.clone();
                         let check = self.check;
+                        let couple = self.couple;
                         let (tx, rx) = mpsc::channel();
                         let c = ctx.clone();
                         let token = crate::jobs::start(ui.ctx(), "thermal");
                         std::thread::spawn(move || {
                             let _g = token.install();
-                            let r = if check {
-                                thermal::check_mesh(&b, &setup).map(|m| (m.fine, Some(m.error)))
+                            let r = if !rails.is_empty() {
+                                let mut es = trace_core::etherm::Setup::new(rails, setup);
+                                es.couple = couple;
+                                trace_core::etherm::solve(&b, &es).map(|r| {
+                                    let text = r.report(&b);
+                                    let ir: String = text
+                                        .lines()
+                                        .take_while(|l| !l.starts_with("Part "))
+                                        .map(|l| format!("{l}\n"))
+                                        .collect();
+                                    (r.thermal, None, Some(ir))
+                                })
+                            } else if check {
+                                thermal::check_mesh(&b, &setup)
+                                    .map(|m| (m.fine, Some(m.error), None))
                             } else {
-                                thermal::solve(&b, &setup).map(|r| (r, None))
+                                thermal::solve(&b, &setup).map(|r| (r, None, None))
                             };
                             let _ = tx.send(r);
                             c.request_repaint();
@@ -324,6 +469,9 @@ impl ThermalWindow {
             "Hottest board point {:.1} °C; air film top {:.1} W/m²K ({:.1} with radiation), bottom {:.1} ({:.1}); heat out: board {:.2} W, cases {:.2} W, heatsinks {:.2} W (balance {:+.3} %)",
             r.board_max.0, r.h_top.0, r.h_top.1, r.h_bottom.0, r.h_bottom.1, r.out_board, r.out_cases, r.out_sinks, r.balance_pct
         ));
+        if let Some(t) = &self.ir_text {
+            ui.label(RichText::new(t).monospace().size(11.0));
+        }
         for n in &r.notes {
             ui.weak(n);
         }

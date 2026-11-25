@@ -23,6 +23,7 @@ pub mod edit;
 pub mod emfield;
 pub mod emi;
 pub mod erc;
+pub mod etherm;
 pub mod eye;
 pub mod fanout;
 pub mod fdtd;

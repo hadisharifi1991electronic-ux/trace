@@ -162,6 +162,15 @@ pub struct Source {
     pub heatsink: Option<Heatsink>,
 }
 
+/// Heat given off in the copper itself (Joule heating from a supply's
+/// current): copper layer (top first), where (mm), W.
+#[derive(Clone, Copy, Debug)]
+pub struct Heat {
+    pub layer: usize,
+    pub at: [f64; 2],
+    pub watts: f64,
+}
+
 /// How the air moves.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Air {
@@ -189,6 +198,8 @@ pub struct Setup {
     /// A fixed heat transfer coefficient on both board faces, W/m²·K,
     /// with no radiation (for checks against exact answers).
     pub fixed_h: Option<f64>,
+    /// Heat dissipated in the copper (IR drop in planes and tracks).
+    pub joule: Vec<Heat>,
 }
 
 impl Setup {
@@ -202,6 +213,7 @@ impl Setup {
             k_diel: None,
             plating_mm: 0.025,
             fixed_h: None,
+            joule: Vec::new(),
         }
     }
 }
@@ -262,6 +274,8 @@ pub struct Result {
     pub out_cases: f64,
     pub out_sinks: f64,
     pub balance_pct: f64,
+    /// Copper (Joule) loss put into the board, W.
+    pub joule_w: f64,
     pub iterations: usize,
     pub nodes: usize,
     pub notes: Vec<String>,
@@ -487,7 +501,7 @@ const K_CU: f64 = 390.0;
 /// Solves the board's temperatures.
 pub fn solve(board: &Board, setup: &Setup) -> std::result::Result<Result, String> {
     let g = &board.geometry;
-    if setup.sources.is_empty() {
+    if setup.sources.is_empty() && setup.joule.iter().all(|h| h.watts <= 0.0) {
         return Err("no part dissipates power: give at least one --power".into());
     }
     let mut notes = Vec::new();
@@ -507,6 +521,9 @@ pub fn solve(board: &Board, setup: &Setup) -> std::result::Result<Result, String
         for t in &g.tracks {
             grow([t.start.x.mm(), t.start.y.mm()]);
             grow([t.end.x.mm(), t.end.y.mm()]);
+        }
+        for p in g.polygons.iter().flat_map(|p| &p.outline) {
+            grow([p.x.mm(), p.y.mm()]);
         }
         notes.push("no board outline: the copper's extent is used".into());
     }
@@ -1096,6 +1113,30 @@ pub fn solve(board: &Board, setup: &Setup) -> std::result::Result<Result, String
             sink,
         });
     }
+    // Copper loss: into the copper slab of its layer, at its cell.
+    let mut joule: Vec<(usize, f64)> = Vec::new();
+    let mut joule_off = 0.0;
+    {
+        let mut by_node: std::collections::HashMap<usize, f64> = Default::default();
+        for h in setup.joule.iter().filter(|h| h.watts > 0.0) {
+            match cell_of(h.at).filter(|&c| on_board[c]) {
+                Some(c) if h.layer < nl => {
+                    *by_node.entry(node(slab_of_cu[h.layer], c)).or_insert(0.0) += h.watts
+                }
+                _ => joule_off += h.watts,
+            }
+        }
+        joule.extend(by_node);
+        joule.sort_by_key(|j| j.0);
+    }
+    let joule_w: f64 = joule.iter().map(|j| j.1).sum();
+    total_w += joule_w;
+    if joule_off > 1e-6 {
+        notes.push(format!(
+            "{:.3} W of copper loss lies off the board's grid and was left out",
+            joule_off
+        ));
+    }
     // Board faces that convect: top and bottom cells not under a source's
     // body on that side; edges.
     let mut no_top = vec![false; per];
@@ -1264,6 +1305,9 @@ pub fn solve(board: &Board, setup: &Setup) -> std::result::Result<Result, String
         for (k, s) in setup.sources.iter().enumerate() {
             rhs[srcs[k].j] += s.watts;
         }
+        for &(n, w) in &joule {
+            rhs[n] += w;
+        }
         let next = pcg(&diag, &links, &rhs, t.clone(), n_nodes);
         crate::cancel::check()?;
         let change = next
@@ -1396,6 +1440,9 @@ pub fn solve(board: &Board, setup: &Setup) -> std::result::Result<Result, String
                 source[sl][c] += (g_jb * f * (t[sr.j] - t[n])).max(0.0) as f32;
             }
         }
+        for &(n, w) in &joule {
+            source[n / nb][cells[n % nb]] += w as f32;
+        }
         // Heat to air from each face cell (convection and radiation).
         let mut air_top = vec![f32::NAN; per];
         let mut air_bot = vec![f32::NAN; per];
@@ -1462,6 +1509,7 @@ pub fn solve(board: &Board, setup: &Setup) -> std::result::Result<Result, String
         out_cases: out.1,
         out_sinks: out.2,
         balance_pct: balance,
+        joule_w,
         iterations,
         nodes: n_nodes,
         notes,
@@ -1716,6 +1764,12 @@ impl Result {
             self.board_max.1[1],
             self.ambient_c
         );
+        if self.joule_w > 0.0 {
+            s += &format!(
+                "Copper loss (IR drop) heating the board: {:.3} W\n",
+                self.joule_w
+            );
+        }
         s += &format!(
             "Air film: top {:.1} W/m²K ({:.1} with radiation), bottom {:.1} ({:.1})\n",
             self.h_top.0, self.h_top.1, self.h_bottom.0, self.h_bottom.1

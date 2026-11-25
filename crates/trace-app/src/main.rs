@@ -350,6 +350,10 @@ impl App {
                         app.message = Some(app.model3d.open_via(b, v));
                     }
                 }
+            } else if let Some(rest) = w.strip_prefix("thermal:") {
+                // thermal:NET=AMPS[@SRC][:V];...: the thermal window solving
+                // those rails' IR-drop heating.
+                app.thermal.preset(rest);
             } else if let Some(rest) = w.strip_prefix("schat:") {
                 // schat:x0,y0,x1,y1: the schematic showing that box (mil).
                 let v: Vec<f32> = rest

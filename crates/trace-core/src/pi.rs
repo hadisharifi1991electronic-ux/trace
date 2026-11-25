@@ -16,6 +16,41 @@ use std::collections::HashMap;
 
 /// Copper resistivity at 20 °C, Ω·m.
 pub const RHO: f64 = 1.72e-8;
+/// Copper's temperature coefficient of resistance near 20 °C, 1/K
+/// (annealed copper, IEC 60028: 0.00393).
+pub const ALPHA: f64 = 0.00393;
+
+/// Copper resistivity at `t_c` °C, Ω·m.
+pub fn rho_at(t_c: f64) -> f64 {
+    RHO * (1.0 + ALPHA * (t_c - 20.0)).max(0.1)
+}
+
+/// The board's temperature, per copper layer, to set the copper's
+/// resistivity from (a thermal solve's maps).
+#[derive(Clone, Debug)]
+pub struct TempMap {
+    /// Grid: lower left corner (mm), cell (mm), columns, rows.
+    pub origin: [f64; 2],
+    pub cell: f64,
+    pub cols: usize,
+    pub rows: usize,
+    /// °C per cell for each copper layer, top first; NaN off the board.
+    pub layers: Vec<Vec<f32>>,
+}
+
+impl TempMap {
+    /// The temperature on copper layer `l` at `p` (mil), if known.
+    pub fn at(&self, l: usize, p: [f64; 2]) -> Option<f64> {
+        let m = self.layers.get(l)?;
+        let i = ((p[0] * 0.0254 - self.origin[0]) / self.cell).floor();
+        let j = ((p[1] * 0.0254 - self.origin[1]) / self.cell).floor();
+        if i < 0.0 || j < 0.0 || i as usize >= self.cols || j as usize >= self.rows {
+            return None;
+        }
+        let v = m[j as usize * self.cols + i as usize];
+        v.is_finite().then_some(v as f64)
+    }
+}
 const MIL: f64 = 25.4e-6;
 
 /// What to solve.
@@ -31,6 +66,9 @@ pub struct Setup {
     pub plating_mil: f64,
     /// Largest grid size, mil; finer where the copper is small.
     pub max_cell_mil: f64,
+    /// The copper's temperature (None: 20 °C everywhere); its
+    /// resistivity rises 0.393 %/K.
+    pub temp: Option<TempMap>,
 }
 
 impl Setup {
@@ -42,6 +80,7 @@ impl Setup {
             loads: Vec::new(),
             plating_mil: 0.8,
             max_cell_mil: 10.0,
+            temp: None,
         }
     }
 }
@@ -89,6 +128,9 @@ pub struct Result {
     pub worst_track: Option<([f64; 2], f64, f64)>,
     /// Number of vias of the net that carry current between layers.
     pub vias: usize,
+    /// Where the copper's loss is dissipated: copper layer, point (mil),
+    /// W, one entry per grid node that loses any.
+    pub heat: Vec<(u8, [f64; 2], f64)>,
     pub notes: Vec<String>,
 }
 
@@ -432,6 +474,21 @@ pub fn solve(board: &Board, setup: &Setup) -> std::result::Result<Result, String
         }
     }
     let n = nodes.len();
+    // Hot copper conducts less: scale each link by the resistivity at its
+    // mid point (the via barrels at their two ends' mean).
+    if let Some(tm) = &setup.temp {
+        for (a, b, gab) in links.iter_mut() {
+            let ((la, ca), (lb, cb)) = (nodes[*a], nodes[*b]);
+            let ta = tm.at(la as usize, center(ca % cols, ca / cols));
+            let tb = tm.at(lb as usize, center(cb % cols, cb / cols));
+            let t = match (ta, tb) {
+                (Some(x), Some(y)) => (x + y) / 2.0,
+                (Some(x), None) | (None, Some(x)) => x,
+                _ => continue,
+            };
+            *gab *= RHO / rho_at(t);
+        }
+    }
     // Pads of the source and loads, by part.
     let part_cells = |part: usize, id: &Vec<Vec<u32>>| -> Vec<Vec<usize>> {
         net_pads
@@ -596,12 +653,16 @@ pub fn solve(board: &Board, setup: &Setup) -> std::result::Result<Result, String
     for &(li, w, p) in &track_link {
         is_track.insert(li, (w, p));
     }
+    let mut node_w = vec![0.0f64; n];
     for (li, &(a, b, gab)) in links.iter().enumerate() {
         if !(v[a].is_finite() && v[b].is_finite()) {
             continue;
         }
         let i = (v[a] - v[b]) * gab;
-        loss_w += i * (v[a] - v[b]);
+        let w = i * (v[a] - v[b]);
+        loss_w += w;
+        node_w[a] += w / 2.0;
+        node_w[b] += w / 2.0;
         if let Some(&vi) = is_via.get(&li) {
             let at = g.vias[vi].at;
             if worst_via.is_none_or(|w| i.abs() > w.1) {
@@ -640,6 +701,13 @@ pub fn solve(board: &Board, setup: &Setup) -> std::result::Result<Result, String
             });
         }
     }
+    let heat: Vec<(u8, [f64; 2], f64)> = (0..n)
+        .filter(|&k| node_w[k] > 0.0)
+        .map(|k| {
+            let (l, c) = nodes[k];
+            (l, center(c % cols, c / cols), node_w[k])
+        })
+        .collect();
     let unreached = (0..n).filter(|&k| !reach[k]).count();
     if unreached * 200 >= n {
         notes.push(format!(
@@ -660,6 +728,7 @@ pub fn solve(board: &Board, setup: &Setup) -> std::result::Result<Result, String
         worst_via,
         worst_track,
         vias: net_vias,
+        heat,
         notes,
     })
 }
@@ -1018,6 +1087,65 @@ mod tests {
             "{} {}",
             r.loss_w,
             drop
+        );
+    }
+
+    fn strip() -> Board {
+        let mut b = board_with(2);
+        b.geometry.polygons.push(rect(0, 0.0, 0.0, 2000.0, 200.0));
+        b.geometry
+            .pads
+            .push(pad(0, 10.0, 100.0, 20.0, 200.0, LayerRef::Copper(0)));
+        b.geometry
+            .pads
+            .push(pad(1, 1990.0, 100.0, 20.0, 200.0, LayerRef::Copper(0)));
+        b
+    }
+
+    #[test]
+    fn hot_copper_drops_more_and_heat_adds_up_to_the_loss() {
+        let b = strip();
+        let mut s = Setup::new(0, 0, 1.0);
+        s.loads.push((1, 2.0));
+        let cold = solve(&b, &s).unwrap();
+        let w: f64 = cold.heat.iter().map(|h| h.2).sum();
+        assert!((w - cold.loss_w).abs() < 1e-9 * cold.loss_w.max(1.0));
+        // The whole strip at 120 °C: ρ up by 39.3 %.
+        s.temp = Some(TempMap {
+            origin: [-10.0, -10.0],
+            cell: 1.0,
+            cols: 100,
+            rows: 30,
+            layers: vec![vec![120.0; 3000]; 2],
+        });
+        let hot = solve(&b, &s).unwrap();
+        let ratio = (1.0 - hot.loads[0].v_mean) / (1.0 - cold.loads[0].v_mean);
+        assert!((ratio - 1.393).abs() < 0.002, "{ratio}");
+    }
+
+    #[test]
+    fn coupled_solve_heats_the_strip_and_settles() {
+        let b = strip();
+        let mut s = Setup::new(0, 0, 1.0);
+        s.loads.push((1, 20.0));
+        let mut th = crate::thermal::Setup::new();
+        th.fixed_h = Some(50.0);
+        let r = crate::etherm::solve(&b, &crate::etherm::Setup::new(vec![s], th)).unwrap();
+        assert!(r.converged, "{:?}", r.passes);
+        // The heat put in is the hot loss, and it all leaves the board.
+        assert!((r.thermal.joule_w - r.rails[0].loss_w).abs() < 1e-6 * r.rails[0].loss_w);
+        assert!(
+            r.thermal.balance_pct.abs() < 0.5,
+            "{}",
+            r.thermal.balance_pct
+        );
+        // Warmer copper: more loss, consistent with the mean rise.
+        let rise = r.thermal.board_max.0 - 25.0;
+        assert!(rise > 1.0, "{rise}");
+        let gain = r.rails[0].loss_w / r.cold[0].loss_w - 1.0;
+        assert!(
+            gain > 0.0 && gain < ALPHA * (rise + 5.0) + 1e-3,
+            "{gain} {rise}"
         );
     }
 

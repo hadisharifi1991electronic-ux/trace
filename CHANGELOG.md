@@ -3,6 +3,32 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.107.0 (2026-11-25)
+
+Coupled thermal and electrical simulation: heat from IR drop in planes
+and tracks feeds into the thermal map.
+
+- Each supply rail's DC drop is solved through its planes, tracks and
+  via barrels as before, and the I²R lost in every piece of copper is now
+  put into the 3D thermal grid as heat, in that layer's copper, where it
+  is lost (alongside the parts' own power).
+- The board's temperature then sets the copper's resistivity
+  (+0.393 %/K from 20 °C) link by link for the next DC solve, which
+  raises the drop and the loss; the passes repeat until the hottest point
+  moves less than 0.05 K (usually 3 passes).
+- Thermal window: an **IR-drop heating** section (Add rail: net, total
+  current, volts, source; loads share the current by pad count as in
+  `trace ir`), with "resistivity follows temperature". The result shows
+  each rail's loss and worst drop cold and hot, the loads that sag most,
+  and the passes. The power-density map now shows the copper loss too.
+- `trace thermal <board> --ir NET=AMPS[@SOURCE][:VOLTS] ... [--no-couple]`;
+  parts' `--power` is optional when rails are given.
+- The thermal solve now finds a board's extent from its pours too when it
+  has no outline.
+- CutiePi, VBAT 5 A + 3V3 3 A, no other heat: 0.099 W of copper loss,
+  hottest point 27.5 °C at a neck, the drops grow 0.7 mV (25.4 to 26.1
+  and 32.5 to 33.3 mV) once the copper is warm.
+
 ## 0.106.0 (2026-11-25)
 
 Length and phase tuning, as Altium's three tuning tools:

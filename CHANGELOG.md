@@ -3,6 +3,21 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.100.0 (2026-11-25)
+
+- 3D view: vector plots, like HFSS's. With |E| or |H| on the cut, arrows
+  on a regular grid over the face show the field's direction, sized and
+  coloured by its strength (the map underneath is dimmed so they read);
+  a field mostly through the face shows as a dot (out toward you) or a
+  cross (into it). With the surface current, evenly spaced current-flow
+  lines are traced over the visible copper with heads along them showing
+  which way the current runs. Both are taken at the phase shown (0 deg in
+  magnitude mode) and move through the cycle when animated.
+- App: 3D model window > "Arrows" (|E|, |H|) or "Flow lines" (surface
+  current) next to the overlay buttons; saved PNGs and GIFs include them.
+- Command line: `--vectors` with `--render` on any FEM command, e.g.
+  `trace via board L1 L8 --check fem --render e.gif --field e --vectors`.
+
 ## 0.99.1 (2026-11-24)
 
 - 3D FEM: when the half-memory iterative solver cannot converge (seen on a

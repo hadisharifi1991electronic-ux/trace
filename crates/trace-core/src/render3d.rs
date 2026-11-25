@@ -104,6 +104,9 @@ pub struct View {
     /// Rays per pixel along each axis (1 for a quick look, 2 smooth).
     pub samples: usize,
     pub laminate: bool,
+    /// Vector plot on top of the overlay: E or H arrows on the cut face,
+    /// current-flow lines on the copper (at `phase`, else at 0 degrees).
+    pub vectors: bool,
     pub title: String,
 }
 
@@ -123,6 +126,7 @@ impl Default for View {
             shadows: true,
             samples: 2,
             laminate: true,
+            vectors: false,
             title: String::new(),
         }
     }
@@ -1029,6 +1033,8 @@ fn cast(sc: &Scene, paint: Option<&Paint>, v: &View, cam: &Cam, d: V, sy: f64) -
             };
             let tt = emfield::scale_t(val, top, pt.range, 20.0);
             let heat = lin(emfield::colour(tt));
+            // Under arrows the map is dimmed so they read on top.
+            let heat = if v.vectors { mul(heat, 0.30) } else { heat };
             let lam = sc.laminate_at(p).unwrap_or([0.05, 0.05, 0.06]);
             col = lerp3(mul(lam, 0.35), heat, if tt > 0.0 { 0.92 } else { 0.0 });
             t_end = tc;
@@ -1165,6 +1171,13 @@ pub fn render(sc: &Scene, fields: Option<&FieldGrid>, v: &View) -> Raster {
         let px = srgb([tone(c[0]), tone(c[1]), tone(c[2])]);
         r.rgb[i * 3..i * 3 + 3].copy_from_slice(&px);
     }
+    if let (Some(pt), true) = (paint.as_ref(), v.vectors) {
+        match v.overlay {
+            Overlay::E | Overlay::H => cut_arrows(&mut r, sc, &cam, v, pt),
+            Overlay::J => flow_lines(&mut r, sc, &cam, v, pt),
+            Overlay::None => {}
+        }
+    }
     decorate(&mut r, sc, &cam, v, paint.as_ref());
     r
 }
@@ -1273,7 +1286,15 @@ fn decorate(r: &mut Raster, sc: &Scene, cam: &Cam, v: &View, paint: Option<&Pain
                 pt.g.f_ghz,
                 pt.g.port,
                 ph
-            )
+            ) + match (v.vectors, o) {
+                (true, Overlay::J) => ", flow lines",
+                (true, _) => ", arrows",
+                _ => "",
+            } + if v.vectors && v.phase.is_none() {
+                " at 0 deg"
+            } else {
+                ""
+            }
         }
         _ => "Copper, laminate and wave ports".into(),
     };
@@ -1350,6 +1371,481 @@ pub fn frames(sc: &Scene, fields: Option<&FieldGrid>, v: &View, n: usize) -> Vec
         .collect()
 }
 
+// ---- Vector plots: arrows on the cut, current-flow lines on the copper ----
+
+/// The instant real vector of a phasor field (Re{v e^{j phase}}).
+fn instant(v: &[c64; 3], rot: c64) -> V {
+    [(v[0] * rot).re, (v[1] * rot).re, (v[2] * rot).re]
+}
+
+/// Mixes `c` into the pixel at (x, y) with weight `a`.
+fn blend(r: &mut Raster, x: i64, y: i64, c: [u8; 3], a: f64) {
+    if a <= 0.0 || x < 0 || y < 0 || x as usize >= r.w || y as usize >= r.h {
+        return;
+    }
+    let a = a.min(1.0);
+    let i = (y as usize * r.w + x as usize) * 3;
+    for (px, ck) in r.rgb[i..i + 3].iter_mut().zip(c) {
+        let o = *px as f64;
+        *px = (o + (ck as f64 - o) * a).round() as u8;
+    }
+}
+
+/// An anti-aliased stroke `wd` px wide with round ends.
+fn stroke(r: &mut Raster, a: [f64; 2], b: [f64; 2], wd: f64, c: [u8; 3], alpha: f64) {
+    let hw = wd / 2.0;
+    let x0 = (a[0].min(b[0]) - hw - 1.0).floor() as i64;
+    let x1 = (a[0].max(b[0]) + hw + 1.0).ceil() as i64;
+    let y0 = (a[1].min(b[1]) - hw - 1.0).floor() as i64;
+    let y1 = (a[1].max(b[1]) + hw + 1.0).ceil() as i64;
+    if x1 < 0 || y1 < 0 || x0 >= r.w as i64 || y0 >= r.h as i64 {
+        return;
+    }
+    for y in y0.max(0)..=y1.min(r.h as i64 - 1) {
+        for x in x0.max(0)..=x1.min(r.w as i64 - 1) {
+            let p = [x as f64 + 0.5, y as f64 + 0.5];
+            let d = seg_dist2(a, b, p).sqrt();
+            let cov = (hw + 0.5 - d).clamp(0.0, 1.0);
+            blend(r, x, y, c, cov * alpha);
+        }
+    }
+}
+
+/// Like `stroke`, into a coverage mask (keeping the larger value).
+#[allow(clippy::too_many_arguments)]
+fn cover(m: &mut [f32], w: usize, h: usize, a: [f64; 2], b: [f64; 2], wd: f64, alpha: f64) {
+    let hw = wd / 2.0;
+    let x0 = ((a[0].min(b[0]) - hw - 1.0).floor() as i64).max(0);
+    let x1 = ((a[0].max(b[0]) + hw + 1.0).ceil() as i64).min(w as i64 - 1);
+    let y0 = ((a[1].min(b[1]) - hw - 1.0).floor() as i64).max(0);
+    let y1 = ((a[1].max(b[1]) + hw + 1.0).ceil() as i64).min(h as i64 - 1);
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let p = [x as f64 + 0.5, y as f64 + 0.5];
+            let cov = (hw + 0.5 - seg_dist2(a, b, p).sqrt()).clamp(0.0, 1.0) * alpha;
+            let c = &mut m[y as usize * w + x as usize];
+            *c = c.max(cov as f32);
+        }
+    }
+}
+
+/// An anti-aliased filled triangle.
+fn triangle(r: &mut Raster, p: [[f64; 2]; 3], c: [u8; 3], alpha: f64) {
+    let area = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]);
+    if area.abs() < 1e-6 {
+        return;
+    }
+    let s = area.signum();
+    let x0 = p.iter().map(|q| q[0]).fold(f64::MAX, f64::min).floor() as i64 - 1;
+    let x1 = p.iter().map(|q| q[0]).fold(f64::MIN, f64::max).ceil() as i64 + 1;
+    let y0 = p.iter().map(|q| q[1]).fold(f64::MAX, f64::min).floor() as i64 - 1;
+    let y1 = p.iter().map(|q| q[1]).fold(f64::MIN, f64::max).ceil() as i64 + 1;
+    for y in y0.max(0)..=y1.min(r.h as i64 - 1) {
+        for x in x0.max(0)..=x1.min(r.w as i64 - 1) {
+            let q = [x as f64 + 0.5, y as f64 + 0.5];
+            let mut dmin = f64::MAX;
+            for k in 0..3 {
+                let (a, b) = (p[k], p[(k + 1) % 3]);
+                let e = [b[0] - a[0], b[1] - a[1]];
+                let l = e[0].hypot(e[1]).max(1e-9);
+                // Signed distance inside the edge.
+                let d = s * (e[0] * (q[1] - a[1]) - e[1] * (q[0] - a[0])) / l;
+                dmin = dmin.min(d);
+            }
+            blend(r, x, y, c, (dmin + 0.5).clamp(0.0, 1.0) * alpha);
+        }
+    }
+}
+
+/// An arrow from `a` to `b` with a dark rim so it reads on any colour.
+fn arrow(r: &mut Raster, a: [f64; 2], b: [f64; 2], wd: f64, c: [u8; 3]) {
+    let d = [b[0] - a[0], b[1] - a[1]];
+    let l = d[0].hypot(d[1]);
+    if l < 1.0 {
+        return;
+    }
+    let u = [d[0] / l, d[1] / l];
+    let nrm = [-u[1], u[0]];
+    let hl = (l * 0.42).min(wd * 6.0).max(wd * 2.2);
+    let hw = hl * 0.48;
+    let base = [b[0] - u[0] * hl, b[1] - u[1] * hl];
+    let tri = |grow: f64| {
+        [
+            [b[0] + u[0] * grow, b[1] + u[1] * grow],
+            [
+                base[0] + nrm[0] * (hw + grow) - u[0] * grow,
+                base[1] + nrm[1] * (hw + grow) - u[1] * grow,
+            ],
+            [
+                base[0] - nrm[0] * (hw + grow) - u[0] * grow,
+                base[1] - nrm[1] * (hw + grow) - u[1] * grow,
+            ],
+        ]
+    };
+    let dark = [10, 10, 14];
+    stroke(r, a, base, wd + 2.0, dark, 0.55);
+    triangle(r, tri(1.0), dark, 0.55);
+    stroke(r, a, base, wd, c, 1.0);
+    triangle(r, tri(0.0), c, 1.0);
+}
+
+/// Pixels per mil at `p` across the picture.
+fn px_per_mil(cam: &Cam, p: V, w: usize, h: usize) -> f64 {
+    match (cam.project(p, w, h), cam.project(add(p, cam.r), w, h)) {
+        (Some(a), Some(b)) => (b[0] - a[0]).hypot(b[1] - a[1]),
+        _ => 0.0,
+    }
+}
+
+/// E or H arrows on a regular grid over the cut face (the air and
+/// laminate part of it), coloured and sized by the field's strength.
+fn cut_arrows(r: &mut Raster, sc: &Scene, cam: &Cam, v: &View, pt: &Paint) {
+    let Some((ax, at)) = v.cut else {
+        return;
+    };
+    let (w, h) = (r.w, r.h);
+    let (ua, wa) = across(ax);
+    let mut mid = sc.centre();
+    mid[ax] = at;
+    let ppm = px_per_mil(cam, mid, w, h);
+    if ppm <= 0.0 {
+        return;
+    }
+    let gap_px = (h as f64 / 30.0).max(12.0);
+    let mut gap = gap_px / ppm;
+    let (lu, lw) = (sc.hi[ua] - sc.lo[ua], sc.hi[wa] - sc.lo[wa]);
+    // At most about 6000 arrows.
+    while (lu / gap) * (lw / gap) > 6000.0 {
+        gap *= 1.25;
+    }
+    let is_e = v.overlay == Overlay::E;
+    let top = if is_e { pt.top_e } else { pt.top_h };
+    // Toward the eye: + or - along the cut's axis.
+    let to_eye = if cam.eye[ax] < at { -1.0 } else { 1.0 };
+    let wd = (h as f64 / 420.0).clamp(1.2, 3.0);
+    let nu = (lu / gap).floor() as usize;
+    let nw = (lw / gap).floor() as usize;
+    let off_u = (lu - (nu as f64 - 1.0) * gap) / 2.0;
+    let off_w = (lw - (nw as f64 - 1.0) * gap) / 2.0;
+    // (strength, tail, tip, direction, full length in px)
+    type Arrow = (f64, [f64; 2], [f64; 2], V, f64);
+    let mut list: Vec<Arrow> = Vec::new();
+    for i in 0..nu {
+        for j in 0..nw {
+            let mut p = [0.0; 3];
+            p[ax] = at;
+            p[ua] = sc.lo[ua] + off_u + i as f64 * gap;
+            p[wa] = sc.lo[wa] + off_w + j as f64 * gap;
+            if sc.in_copper(p) {
+                continue;
+            }
+            let (e, hh) = pt.g.at(mul(p, MIL));
+            let f = instant(if is_e { &e } else { &hh }, pt.rot);
+            let m = dot(f, f).sqrt();
+            let t = emfield::scale_t(m, top, pt.range, 20.0).min(1.0);
+            if t <= 0.05 {
+                continue;
+            }
+            let dir = mul(f, 1.0 / m);
+            let len = gap * 0.9 * (0.35 + 0.65 * t);
+            let a = sub(p, mul(dir, len / 2.0));
+            let b = add(p, mul(dir, len / 2.0));
+            if let (Some(sa), Some(sb)) = (cam.project(a, w, h), cam.project(b, w, h)) {
+                list.push((t, sa, sb, dir, len * ppm));
+            }
+        }
+    }
+    // Weak ones first so strong ones sit on top.
+    list.sort_by(|a, b| a.0.total_cmp(&b.0));
+    for (t, sa, sb, dir, full) in list {
+        let c = emfield::colour(0.38 + 0.62 * t);
+        let l = (sb[0] - sa[0]).hypot(sb[1] - sa[1]);
+        if l < 0.3 * full {
+            // Mostly through the cut: a dot (out toward the eye) or a
+            // cross (into the face).
+            let m = [(sa[0] + sb[0]) / 2.0, (sa[1] + sb[1]) / 2.0];
+            let rr = (full * 0.22).clamp(2.0, gap_px * 0.25);
+            let out = dir[ax] * to_eye > 0.0;
+            for k in 0..24 {
+                let a0 = k as f64 / 24.0 * std::f64::consts::TAU;
+                let a1 = (k + 1) as f64 / 24.0 * std::f64::consts::TAU;
+                stroke(
+                    r,
+                    [m[0] + rr * a0.cos(), m[1] + rr * a0.sin()],
+                    [m[0] + rr * a1.cos(), m[1] + rr * a1.sin()],
+                    wd,
+                    c,
+                    1.0,
+                );
+            }
+            if out {
+                stroke(r, m, m, rr * 0.9, c, 1.0);
+            } else {
+                let q = rr * 0.7;
+                stroke(r, [m[0] - q, m[1] - q], [m[0] + q, m[1] + q], wd, c, 1.0);
+                stroke(r, [m[0] - q, m[1] + q], [m[0] + q, m[1] - q], wd, c, 1.0);
+            }
+        } else {
+            arrow(r, sa, sb, wd, c);
+        }
+    }
+}
+
+/// What a pixel's centre ray sees, for the flow lines: the screen
+/// direction and strength of the surface current there.
+#[derive(Clone, Copy)]
+struct FlowPx {
+    dir: [f32; 2],
+    t: f32,
+}
+
+/// The first copper surface along a ray (cut face excluded), as
+/// `cast` sees it.
+fn first_copper(sc: &Scene, v: &View, o: V, d: V) -> Option<(V, V)> {
+    let inv = [1.0 / d[0], 1.0 / d[1], 1.0 / d[2]];
+    let (bt0, bt1) = box_range(sc.lo, sc.hi, o, inv);
+    if bt0 > bt1 || bt1 < 0.0 {
+        return None;
+    }
+    let mut t0 = bt0.max(0.0);
+    if let Some((ax, at)) = v.cut {
+        let tp = (at - o[ax]) * inv[ax];
+        let toward = if o[ax] < at { d[ax] > 0.0 } else { d[ax] < 0.0 };
+        if !toward {
+            return None;
+        }
+        if tp > t0 {
+            if tp < bt1 && sc.in_copper(add(o, mul(d, tp))) {
+                return None;
+            }
+            t0 = tp;
+        }
+    }
+    let eps = 1e-6 * sc.radius();
+    let (th, n) = sc.trace(o, d, t0 + eps, bt1)?;
+    let nf = if dot(n, d) > 0.0 { mul(n, -1.0) } else { n };
+    Some((add(o, mul(d, th)), nf))
+}
+
+/// Current-flow lines on the copper: evenly spaced streamlines of the
+/// surface current n x H, traced in the picture over the visible copper.
+fn flow_lines(r: &mut Raster, sc: &Scene, cam: &Cam, v: &View, pt: &Paint) {
+    let (w, h) = (r.w, r.h);
+    // A coarse map of the current, one ray per cell.
+    let g = 2usize;
+    let (gw, gh) = (w.div_ceil(g), h.div_ceil(g));
+    let mut map: Vec<Option<FlowPx>> = vec![None; gw * gh];
+    let threads = std::thread::available_parallelism().map_or(4, |n| n.get());
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let out = std::sync::Mutex::new(&mut map);
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            scope.spawn(|| loop {
+                let y = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if y >= gh {
+                    break;
+                }
+                let mut row = vec![None; gw];
+                for (x, cell) in row.iter_mut().enumerate() {
+                    let sx = ((x * g) as f64 + g as f64 / 2.0) / w as f64;
+                    let sy = ((y * g) as f64 + g as f64 / 2.0) / h as f64;
+                    let d = cam.ray(sx, sy);
+                    let Some((p, nf)) = first_copper(sc, v, cam.eye, d) else {
+                        continue;
+                    };
+                    let q = add(p, mul(nf, pt.g.h / MIL * 0.9));
+                    let (_, hh) = pt.g.at(mul(q, MIL));
+                    let hr = instant(&hh, pt.rot);
+                    // J = n x H, along the surface.
+                    let j = cross(nf, hr);
+                    let m = dot(j, j).sqrt();
+                    let t = emfield::scale_t(m, pt.top_h, pt.range, 20.0);
+                    if t <= 0.0 {
+                        continue;
+                    }
+                    let (Some(a), Some(b)) = (
+                        cam.project(p, w, h),
+                        cam.project(add(p, mul(j, 0.05 * sc.radius() / m)), w, h),
+                    ) else {
+                        continue;
+                    };
+                    let s = [b[0] - a[0], b[1] - a[1]];
+                    let l = s[0].hypot(s[1]);
+                    if l < 1e-6 {
+                        continue;
+                    }
+                    *cell = Some(FlowPx {
+                        dir: [(s[0] / l) as f32, (s[1] / l) as f32],
+                        t: t.min(1.0) as f32,
+                    });
+                }
+                let mut o = out.lock().unwrap();
+                o[y * gw..(y + 1) * gw].copy_from_slice(&row);
+            });
+        }
+    });
+    let at = |p: [f64; 2]| -> Option<FlowPx> {
+        if p[0] < 0.0 || p[1] < 0.0 {
+            return None;
+        }
+        let (x, y) = ((p[0] / g as f64) as usize, (p[1] / g as f64) as usize);
+        if x >= gw || y >= gh {
+            return None;
+        }
+        map[y * gw + x]
+    };
+    let sep = (h as f64 / 42.0).max(7.0);
+    let test = sep * 0.5;
+    let min_t = 0.12f32;
+    // Points of the lines drawn so far, in cells `test` wide.
+    let (cw, ch) = ((w as f64 / test) as usize + 1, (h as f64 / test) as usize + 1);
+    let mut occ: Vec<Vec<[f64; 2]>> = vec![Vec::new(); cw * ch];
+    let cell = |p: [f64; 2]| -> Option<usize> {
+        if p[0] < 0.0 || p[1] < 0.0 {
+            return None;
+        }
+        let (x, y) = ((p[0] / test) as usize, (p[1] / test) as usize);
+        (x < cw && y < ch).then_some(y * cw + x)
+    };
+    let free = |occ: &Vec<Vec<[f64; 2]>>, p: [f64; 2], lim: f64| -> bool {
+        let (x, y) = ((p[0] / test) as i64, (p[1] / test) as i64);
+        for yy in y - 1..=y + 1 {
+            for xx in x - 1..=x + 1 {
+                if xx < 0 || yy < 0 || xx >= cw as i64 || yy >= ch as i64 {
+                    continue;
+                }
+                for q in &occ[yy as usize * cw + xx as usize] {
+                    if (q[0] - p[0]).hypot(q[1] - p[1]) < lim {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    };
+    // Seeds on a grid, strongest current first.
+    let mut seeds: Vec<(f32, [f64; 2])> = Vec::new();
+    let step = sep * 0.5;
+    let mut y = step / 2.0;
+    while y < h as f64 {
+        let mut x = step / 2.0;
+        while x < w as f64 {
+            if let Some(f) = at([x, y]) {
+                if f.t >= min_t {
+                    seeds.push((f.t, [x, y]));
+                }
+            }
+            x += step;
+        }
+        y += step;
+    }
+    seeds.sort_by(|a, b| b.0.total_cmp(&a.0));
+    let ds = 1.0;
+    let max_steps = 4 * (w + h);
+    let mut lines: Vec<(Vec<[f64; 2]>, Vec<f32>)> = Vec::new();
+    for (_, s0) in seeds {
+        if !free(&occ, s0, sep) {
+            continue;
+        }
+        let mut halves: [Vec<([f64; 2], f32)>; 2] = [Vec::new(), Vec::new()];
+        for (k, sign) in [1.0f64, -1.0].into_iter().enumerate() {
+            let mut p = s0;
+            let mut prev: Option<[f64; 2]> = None;
+            for _ in 0..max_steps {
+                let Some(f) = at(p) else { break };
+                if f.t < min_t {
+                    break;
+                }
+                let mut d = [f.dir[0] as f64 * sign, f.dir[1] as f64 * sign];
+                // Midpoint step.
+                let pm = [p[0] + d[0] * ds / 2.0, p[1] + d[1] * ds / 2.0];
+                if let Some(fm) = at(pm) {
+                    let dm = [fm.dir[0] as f64 * sign, fm.dir[1] as f64 * sign];
+                    if dm[0] * d[0] + dm[1] * d[1] > 0.0 {
+                        d = dm;
+                    }
+                }
+                if let Some(pd) = prev {
+                    // A turn back on itself (a current null): stop.
+                    if pd[0] * d[0] + pd[1] * d[1] < 0.2 {
+                        break;
+                    }
+                }
+                prev = Some(d);
+                halves[k].push((p, f.t));
+                p = [p[0] + d[0] * ds, p[1] + d[1] * ds];
+                if !free(&occ, p, test) {
+                    break;
+                }
+                // Closed loops.
+                if halves[k].len() > 30 && (p[0] - s0[0]).hypot(p[1] - s0[1]) < ds * 1.5 {
+                    break;
+                }
+            }
+        }
+        let [fwd, back] = halves;
+        let mut pts: Vec<[f64; 2]> = back.iter().rev().map(|x| x.0).collect();
+        let mut ts: Vec<f32> = back.iter().rev().map(|x| x.1).collect();
+        pts.extend(fwd.iter().skip(1).map(|x| x.0));
+        ts.extend(fwd.iter().skip(1).map(|x| x.1));
+        if pts.len() < (sep * 1.5) as usize {
+            continue;
+        }
+        for p in &pts {
+            if let Some(c) = cell(*p) {
+                occ[c].push(*p);
+            }
+        }
+        lines.push((pts, ts));
+    }
+    let wd = (h as f64 / 520.0).clamp(1.0, 2.4);
+    let gap = sep * 5.0;
+    // The lines go into coverage masks first (a dark rim, then the line),
+    // so the many short steps do not pile up their transparency.
+    let mut rim = vec![0f32; w * h];
+    let mut ink = vec![0f32; w * h];
+    for (pts, ts) in &lines {
+        for k in 1..pts.len() {
+            let t = ts[k] as f64;
+            cover(&mut rim, w, h, pts[k - 1], pts[k], wd + 2.0, 0.40 * t.sqrt());
+            cover(&mut ink, w, h, pts[k - 1], pts[k], wd, 0.35 + 0.6 * t);
+        }
+    }
+    for (i, (a, b)) in rim.iter().zip(&ink).enumerate() {
+        let (x, y) = ((i % w) as i64, (i / w) as i64);
+        blend(r, x, y, [10, 10, 14], *a as f64);
+        blend(r, x, y, [240, 246, 255], *b as f64);
+    }
+    for (pts, ts) in &lines {
+        // Arrow heads along the line, toward the current's flow.
+        let mut s = 0.0;
+        let mut next_at = gap * 0.5;
+        for k in 1..pts.len() {
+            s += (pts[k][0] - pts[k - 1][0]).hypot(pts[k][1] - pts[k - 1][1]);
+            if s >= next_at && k + 2 < pts.len() {
+                next_at += gap;
+                let b = pts[(k + 2).min(pts.len() - 1)];
+                let a = pts[k.saturating_sub(4)];
+                let t = ts[k] as f64;
+                let d = [b[0] - a[0], b[1] - a[1]];
+                let l = d[0].hypot(d[1]).max(1e-9);
+                let u = [d[0] / l, d[1] / l];
+                let n = [-u[1], u[0]];
+                let hl = wd * 4.5;
+                let tip = [pts[k][0] + u[0] * hl * 0.5, pts[k][1] + u[1] * hl * 0.5];
+                let bs = [tip[0] - u[0] * hl, tip[1] - u[1] * hl];
+                let hw = hl * 0.5;
+                triangle(
+                    r,
+                    [tip, [bs[0] + n[0] * hw, bs[1] + n[1] * hw], [bs[0] - n[0] * hw, bs[1] - n[1] * hw]],
+                    [240, 246, 255],
+                    0.45 + 0.55 * t,
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1380,5 +1876,44 @@ mod tests {
         vc.cut = Some(sc.default_cut());
         let rc = render(&sc, None, &vc);
         assert_eq!(rc.w, 120);
+    }
+
+    #[test]
+    fn arrows_and_flow_lines_draw_on_a_made_up_field() {
+        let model = fem3d::line(fem3d::LineKind::Microstrip, 10.0, 5.0, 4.0, 0.0, 30.0);
+        let sc = Scene::new(&model, 1.4, 1.0);
+        // A uniform field: E up, H across the strip.
+        let n = [8usize, 8, 8];
+        let lo = [sc.lo[0] * MIL, sc.lo[1] * MIL, sc.lo[2] * MIL];
+        let h = (0..3).map(|a| (sc.hi[a] - sc.lo[a]) * MIL / 7.0).fold(0.0, f64::max);
+        let cnt = n[0] * n[1] * n[2];
+        let g = FieldGrid {
+            f_ghz: 6.0,
+            port: "P1".into(),
+            lo,
+            h,
+            n,
+            e: vec![[0.0, 0.0, 0.0, 0.0, 1.0, 0.0]; cnt],
+            hf: vec![[1.0, 0.0, 0.0, 0.0, 0.0, 0.0]; cnt],
+        };
+        let mut v = View {
+            w: 240,
+            h: 160,
+            samples: 1,
+            overlay: Overlay::E,
+            cut: Some(sc.default_cut()),
+            ..View::default()
+        };
+        let plain = render(&sc, Some(&g), &v);
+        v.vectors = true;
+        let arrows = render(&sc, Some(&g), &v);
+        assert_ne!(plain.rgb, arrows.rgb);
+        v.overlay = Overlay::J;
+        v.cut = None;
+        v.vectors = false;
+        let plain = render(&sc, Some(&g), &v);
+        v.vectors = true;
+        let lines = render(&sc, Some(&g), &v);
+        assert_ne!(plain.rgb, lines.rgb);
     }
 }

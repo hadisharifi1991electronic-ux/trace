@@ -211,6 +211,18 @@ impl Model3dWindow {
                         .suffix(" dB")
                         .text("range"),
                 );
+                if self.view.overlay != Overlay::None {
+                    let name = if self.view.overlay == Overlay::J {
+                        "Flow lines"
+                    } else {
+                        "Arrows"
+                    };
+                    ui.checkbox(&mut self.view.vectors, name).on_hover_text(
+                        "Vector plot: E or H arrows on the cut (dot: out of the face, cross: \
+                         into it), or current-flow lines on the copper; at the phase shown \
+                         (0 deg in magnitude mode). Animate to watch them through a cycle.",
+                    );
+                }
                 ui.checkbox(&mut self.animate, "Animate");
                 let mut inst = self.view.phase.is_some();
                 if ui.checkbox(&mut inst, "Instant").changed() {

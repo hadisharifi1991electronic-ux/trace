@@ -254,6 +254,32 @@ pub struct Slot {
     pub error: Option<String>,
     /// Box of each shape, for skipping what is off screen.
     boxes: Vec<[f32; 4]>,
+    /// Junction dots the sheet does not store (`Drawing::auto_junctions`),
+    /// with a hash of the wiring they were found from.
+    auto: (u64, Vec<Pt>),
+}
+
+impl Slot {
+    /// Finds the unstored junction dots again when the wiring changed.
+    fn refresh_junctions(&mut self) {
+        use std::hash::{Hash, Hasher};
+        let Some(s) = &self.sheet else { return };
+        let d = &s.drawing;
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for w in &d.wires {
+            for p in w {
+                p.map(f64::to_bits).hash(&mut h);
+            }
+            u64::MAX.hash(&mut h);
+        }
+        for p in d.pins.iter().map(|p| &p.at).chain(&d.junctions) {
+            p.map(f64::to_bits).hash(&mut h);
+        }
+        let h = h.finish();
+        if h != self.auto.0 {
+            self.auto = (h, d.auto_junctions());
+        }
+    }
 }
 
 /// What the person picked on a sheet, for the app to act on.
@@ -429,6 +455,47 @@ fn on_line_near(lines: &[Vec<[f64; 2]>], p: [f64; 2], catch: f64) -> Option<[f64
         }
     }
     best.map(|b| b.0)
+}
+
+/// The sheet's 100 mil grid, faint, fading in as it opens up, with every
+/// tenth line a little stronger.
+fn paint_grid(painter: &egui::Painter, view: View, paper: Rect, size: [f64; 2], paper_c: Color32) {
+    const STEP: f32 = 100.0;
+    let gap = STEP * view.scale;
+    if gap < 6.0 {
+        return;
+    }
+    // Lines a shade darker than the paper; bluish on light paper.
+    let fade = ((gap - 6.0) / 14.0).clamp(0.0, 1.0);
+    let ink = if paper_c.r() as u32 + paper_c.g() as u32 + paper_c.b() as u32 > 380 {
+        Color32::from_rgb(90, 110, 150)
+    } else {
+        Color32::from_rgb(200, 200, 210)
+    };
+    let minor = Stroke::new(1.0_f32, ink.gamma_multiply(0.10 * fade));
+    let major = Stroke::new(1.0_f32, ink.gamma_multiply(0.22));
+    let clip = paper.intersect(painter.clip_rect());
+    if clip.width() <= 0.0 || clip.height() <= 0.0 {
+        return;
+    }
+    let a = view.to_board(clip.min);
+    let b = view.to_board(clip.max);
+    let (x0, x1) = (a[0].min(b[0]).max(0.0), a[0].max(b[0]).min(size[0] as f32));
+    let (y0, y1) = (a[1].min(b[1]).max(0.0), a[1].max(b[1]).min(size[1] as f32));
+    let mut i = (x0 / STEP).ceil() as i64;
+    while (i as f32) * STEP <= x1 {
+        let x = view.to_screen(i as f32 * STEP, 0.0).x.round() + 0.5;
+        let s = if i % 10 == 0 { major } else { minor };
+        painter.line_segment([Pos2::new(x, clip.min.y), Pos2::new(x, clip.max.y)], s);
+        i += 1;
+    }
+    let mut j = (y0 / STEP).ceil() as i64;
+    while (j as f32) * STEP <= y1 {
+        let y = view.to_screen(0.0, j as f32 * STEP).y.round() + 0.5;
+        let s = if j % 10 == 0 { major } else { minor };
+        painter.line_segment([Pos2::new(clip.min.x, y), Pos2::new(clip.max.x, y)], s);
+        j += 1;
+    }
 }
 
 fn rgb(c: [u8; 3]) -> Color32 {
@@ -675,6 +742,7 @@ impl Schematics {
                 sheet: None,
                 error: None,
                 boxes: Vec::new(),
+                auto: Default::default(),
             })
             .collect();
         let (tx, rx) = channel();
@@ -715,6 +783,14 @@ impl Schematics {
         } else {
             self.open(vec![path.to_path_buf()], None, ctx);
         }
+    }
+
+    /// Shows the box `[x0, y0, x1, y1]` (mil, or fractions of the sheet
+    /// when all are 0..1) once the sheet is drawn
+    /// (`TRACE_OPEN=schat:x0,y0,x1,y1`, for screenshots).
+    pub fn focus_on(&mut self, b: [f32; 4]) {
+        self.needs_fit = false;
+        self.focus = Some(b);
     }
 
     pub fn with_libs(libs: crate::symlib::Libraries) -> Self {
@@ -948,6 +1024,7 @@ impl Schematics {
                     .collect(),
                 error: None,
                 sheet: None,
+                auto: Default::default(),
             });
             let base = s.synced.unwrap_or_else(|| synced(&s.sheet.drawing));
             self.original
@@ -2311,6 +2388,9 @@ impl Schematics {
         scene: Option<&Scene>,
     ) -> Option<Pick> {
         self.poll();
+        if let Some(slot) = self.slots.get_mut(self.current) {
+            slot.refresh_junctions();
+        }
         self.update_highlight(board_net, scene);
         if self.sel_net.is_some() && board_net != self.picked {
             self.sel_net = None;
@@ -2341,7 +2421,12 @@ impl Schematics {
                 .fit_rect([0.0, 0.0, size[0] as f32, size[1] as f32], 0.96);
             self.needs_fit = false;
         }
-        if let Some(b) = self.focus.take() {
+        if let Some(mut b) = self.focus.take() {
+            // A box given in fractions of the sheet (from `focus_on`).
+            if b.iter().all(|v| (0.0..=1.0).contains(v)) {
+                let [w, h] = [size[0] as f32, size[1] as f32];
+                b = [b[0] * w, b[1] * h, b[2] * w, b[3] * h];
+            }
             self.view.fit_rect(b, 0.9);
         }
         // Zoom about the cursor, pan by dragging.
@@ -2438,7 +2523,18 @@ impl Schematics {
             view.to_screen(0.0, 0.0),
             view.to_screen(size[0] as f32, size[1] as f32),
         );
+        // The sheet lies on the desk with a soft shadow under it.
+        for (k, a) in [(18.0, 16u8), (11.0, 26), (6.0, 38), (2.5, 55)] {
+            painter.rect_filled(
+                paper
+                    .translate(egui::vec2(k * 0.45, k * 0.7))
+                    .expand(k * 0.5),
+                k,
+                Color32::from_black_alpha(a),
+            );
+        }
         painter.rect_filled(paper, 0.0, rgb(sheet.drawing.paper));
+        paint_grid(&painter, view, paper, size, rgb(sheet.drawing.paper));
         // Pictures next, under the drawing.
         for (ii, im) in sheet.drawing.images.iter().enumerate() {
             let tex = self.textures.entry((cur, ii)).or_insert_with(|| {
@@ -2539,6 +2635,10 @@ impl Schematics {
             }
         }
         let px = |w: f64| ((w as f32) * view.scale).max(1.0);
+        // Filled part bodies cast a small shadow, painted under everything.
+        let mut shadows: Vec<Shape> = Vec::new();
+        let lift = (30.0 * view.scale).clamp(1.5, 6.0);
+        let shade = Color32::from_black_alpha(40);
         // Buses, harnesses and their kin are drawn from their lists.
         let (xs, xt) = d.bus_harness_graphics();
         let all_shapes = d
@@ -2563,6 +2663,9 @@ impl Schematics {
             }
             let fill = sh.fill.map(rgb);
             let to = |p: &[f64; 2]| view.to_screen(p[0] as f32, p[1] as f32);
+            // Part bodies, and boxes such as notes and sheet symbols.
+            let body =
+                fill.is_some() && (sh.part.is_some() || matches!(sh.geom, SchGeom::Rect { .. }));
             match &sh.geom {
                 SchGeom::Line(v) => {
                     let pts: Vec<Pos2> = v.iter().map(to).collect();
@@ -2574,6 +2677,16 @@ impl Schematics {
                             (25.0 * view.scale).max(2.0),
                         ));
                     } else {
+                        // Wires end and turn round, as a pen draws them.
+                        if sh.wire.is_some() && stroke.width >= 2.5 {
+                            for &p in &pts {
+                                shapes.push(Shape::circle_filled(
+                                    p,
+                                    stroke.width * 0.5,
+                                    stroke.color,
+                                ));
+                            }
+                        }
                         shapes.push(Shape::line(pts, stroke));
                     }
                 }
@@ -2587,7 +2700,19 @@ impl Schematics {
                         for t in triangulate(&pts) {
                             mesh.add_triangle(t[0] as u32, t[1] as u32, t[2] as u32);
                         }
+                        if body {
+                            let mut m = mesh.clone();
+                            m.vertices.iter_mut().for_each(|v| {
+                                v.pos += egui::vec2(lift, lift);
+                                v.color = shade;
+                            });
+                            shadows.push(Shape::mesh(m));
+                        }
                         shapes.push(Shape::mesh(mesh));
+                        // A mesh has hard edges; a hairline smooths them.
+                        if stroke == Stroke::NONE {
+                            shapes.push(Shape::closed_line(pts.clone(), Stroke::new(1.0_f32, f)));
+                        }
                     }
                     if sh.dashed {
                         let mut closed = pts.clone();
@@ -2606,10 +2731,33 @@ impl Schematics {
                     let rr = Rect::from_two_pos(to(min), to(max));
                     let round = (r[0].max(r[1]) as f32 * view.scale).min(rr.height() / 2.0);
                     if let Some(f) = fill {
+                        if body {
+                            shadows.push(Shape::rect_filled(
+                                rr.translate(egui::vec2(lift, lift)),
+                                round,
+                                shade,
+                            ));
+                        }
                         shapes.push(Shape::rect_filled(rr, round, f));
                     }
                     if stroke != Stroke::NONE {
                         shapes.push(Shape::rect_stroke(rr, round, stroke));
+                    }
+                }
+                SchGeom::Arc { c, r, start, end }
+                    if end - start >= 359.99 && (r[0] - r[1]).abs() < 1e-6 =>
+                {
+                    // A circle: smooth, and a junction dot never vanishes.
+                    let mut rad = r[0] as f32 * view.scale;
+                    if fill.is_some() && sh.part.is_none() && sh.wire.is_none() && sh.tag.is_none()
+                    {
+                        rad = rad.max(1.6);
+                    }
+                    if let Some(f) = fill {
+                        shapes.push(Shape::circle_filled(to(c), rad, f));
+                    }
+                    if stroke != Stroke::NONE {
+                        shapes.push(Shape::circle_stroke(to(c), rad, stroke));
                     }
                 }
                 SchGeom::Arc { c, r, start, end } => {
@@ -2642,15 +2790,60 @@ impl Schematics {
                 }
             }
         }
-        // Text, skipped when too small to read.
+        // Junction dots Altium draws without storing them, in the wire colour.
+        let dot = (20.0 * view.scale).max(1.6);
+        let wire_c: HashMap<u32, Color32> = d
+            .shapes
+            .iter()
+            .filter_map(|sh| Some((sh.wire?, rgb(sh.stroke?))))
+            .collect();
+        for p in &slot.auto.1 {
+            let at = view.to_screen(p[0] as f32, p[1] as f32);
+            if !rect.expand(dot).contains(at) {
+                continue;
+            }
+            // The colour of a wire ending here, lit with its net.
+            let near = |q: &Pt| (q[0] - p[0]).hypot(q[1] - p[1]) < 1.0;
+            let w = d
+                .wires
+                .iter()
+                .position(|w| w.first().is_some_and(near) || w.last().is_some_and(near));
+            let c = match w {
+                Some(w) if net_of_wire.get(&(w as u32)).is_some_and(|&ni| lit(ni)) => HIGHLIGHT,
+                Some(w) => wire_c.get(&(w as u32)).copied().unwrap_or(rgb(WIRE_COLOR)),
+                None => rgb(WIRE_COLOR),
+            };
+            shapes.push(Shape::circle_filled(at, dot, c));
+        }
+        // Text; too small to read, it shows as a faint stroke where it lies.
         for t in d.texts.iter().chain(xt.iter()) {
             let size = t.size as f32 * view.scale;
-            if size < 3.5 {
+            if size < 1.2 {
                 continue;
             }
             let reach = (t.size * (t.text.len() as f64 + 2.0)) as f32;
             let (ax, ay) = (t.at[0] as f32, t.at[1] as f32);
             if !overlaps([ax - reach, ay - reach, ax + reach, ay + reach], vis) {
+                continue;
+            }
+            if size < 3.5 {
+                let w = size * 0.55 * t.text.chars().count() as f32;
+                let h = size * 0.7;
+                let fx = [0.0, 0.5, 1.0][(t.just % 3) as usize];
+                let fy = [1.0, 0.5, 0.0][(t.just / 3).min(2) as usize];
+                let rr = Rect::from_min_size(Pos2::new(-w * fx, -h * fy), egui::vec2(w, h));
+                let angle = -(t.rot as f32) * std::f32::consts::FRAC_PI_2;
+                let (sn, cs) = angle.sin_cos();
+                let anchor = view.to_screen(ax, ay);
+                let turn = |p: Pos2| anchor + egui::vec2(p.x * cs - p.y * sn, p.x * sn + p.y * cs);
+                let mid = rr.center().y;
+                shapes.push(Shape::line_segment(
+                    [
+                        turn(Pos2::new(rr.min.x, mid)),
+                        turn(Pos2::new(rr.max.x, mid)),
+                    ],
+                    Stroke::new(h * 0.55, rgb(t.color).gamma_multiply(0.3)),
+                ));
                 continue;
             }
             let font = FontId::proportional(size * 0.92);
@@ -2672,6 +2865,7 @@ impl Schematics {
                 egui::epaint::TextShape::new(pos, galley, rgb(t.color)).with_angle(angle),
             ));
         }
+        painter.extend(shadows);
         painter.extend(shapes);
 
         // Selected wire and label, the wire being drawn.
@@ -3694,6 +3888,7 @@ mod tests {
             sheet: Some(sheet),
             error: None,
             boxes: Vec::new(),
+            auto: Default::default(),
         });
         assert_eq!(s.save_altium(&out), Ok(1));
         let back = trace_altium::read_schdoc(out.join("Main.SchDoc")).unwrap();

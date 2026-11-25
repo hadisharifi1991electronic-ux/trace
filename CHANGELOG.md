@@ -3,6 +3,25 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.104.0 (2026-11-25)
+
+- Schematic view polished to match the board view: the sheet lies on the
+  desk with a soft shadow, a faint 100 mil grid (every inch a little
+  stronger) fades in as you zoom, and part bodies and boxes cast a small
+  shadow on the paper.
+- Junction dots where wires meet in a T, as Altium draws them: Altium does
+  not save these dots, so sheets like rx_rf showed none. A wire ending on
+  another wire or on its corner, or three ends and pins at one point, get
+  a dot in the wire's colour (lit with its net); crossings and plain
+  corners do not.
+- Smoother drawing: circles (junctions, pin bubbles) are drawn round and
+  antialiased and never vanish when zoomed out, filled shapes get smooth
+  edges, and thick wires have round ends and corners.
+- Text too small to read shows as a faint stroke where it lies, so a
+  zoomed-out sheet still shows where the labels are.
+- `TRACE_OPEN=schat:x0,y0,x1,y1` opens the schematic on a box (mil, or
+  fractions of the sheet), for screenshots.
+
 ## 0.103.0 (2026-11-25)
 
 - 3D view looks like a real board: the solder mask is glossy, with a soft

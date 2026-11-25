@@ -564,6 +564,86 @@ impl Dsu {
 }
 
 impl Drawing {
+    /// Where three or more connections meet with no junction stored: a
+    /// wire end on the middle (or a corner) of another wire, or three
+    /// wire ends and pins at one point. Altium draws these dots itself
+    /// and does not save them, so the view adds them.
+    pub fn auto_junctions(&self) -> Vec<Pt> {
+        use std::collections::HashMap;
+        let key = |p: Pt| (p[0].round() as i64, p[1].round() as i64);
+        // Count of connections at each wire end.
+        let mut ends: HashMap<(i64, i64), (u32, Pt)> = HashMap::new();
+        for w in self.wires.iter().filter(|w| w.len() >= 2) {
+            for p in [w[0], w[w.len() - 1]] {
+                ends.entry(key(p)).or_insert((0, p)).0 += 1;
+            }
+        }
+        if ends.is_empty() {
+            return Vec::new();
+        }
+        for pin in &self.pins {
+            if let Some(e) = ends.get_mut(&key(pin.at)) {
+                e.0 += 1;
+            }
+        }
+        // Ends by row and by column, to find those lying along a segment.
+        let mut by_y: HashMap<i64, Vec<(i64, i64)>> = HashMap::new();
+        let mut by_x: HashMap<i64, Vec<(i64, i64)>> = HashMap::new();
+        for &k in ends.keys() {
+            by_y.entry(k.1).or_default().push(k);
+            by_x.entry(k.0).or_default().push(k);
+        }
+        let mut through: Vec<(i64, i64)> = Vec::new();
+        for w in self.wires.iter().filter(|w| w.len() >= 2) {
+            // Inner corners: the wire passes through, two connections.
+            for &p in &w[1..w.len() - 1] {
+                if ends.contains_key(&key(p)) {
+                    through.push(key(p));
+                }
+            }
+            for s in w.windows(2) {
+                let (a, b) = (key(s[0]), key(s[1]));
+                let inside = |k: &(i64, i64)| *k != a && *k != b;
+                if a.1 == b.1 {
+                    let (lo, hi) = (a.0.min(b.0), a.0.max(b.0));
+                    if let Some(v) = by_y.get(&a.1) {
+                        through.extend(v.iter().filter(|k| k.0 > lo && k.0 < hi && inside(k)));
+                    }
+                } else if a.0 == b.0 {
+                    let (lo, hi) = (a.1.min(b.1), a.1.max(b.1));
+                    if let Some(v) = by_x.get(&a.0) {
+                        through.extend(v.iter().filter(|k| k.1 > lo && k.1 < hi && inside(k)));
+                    }
+                } else {
+                    // A slanted segment: test every end against it.
+                    let (dx, dy) = ((b.0 - a.0) as f64, (b.1 - a.1) as f64);
+                    let l2 = dx * dx + dy * dy;
+                    for k in ends.keys().filter(|k| inside(k)) {
+                        let (px, py) = ((k.0 - a.0) as f64, (k.1 - a.1) as f64);
+                        let t = (px * dx + py * dy) / l2;
+                        if t > 0.0 && t < 1.0 && (px * dy - py * dx).abs() / l2.sqrt() < 1.0 {
+                            through.push(*k);
+                        }
+                    }
+                }
+            }
+        }
+        for k in through {
+            if let Some(e) = ends.get_mut(&k) {
+                e.0 += 2;
+            }
+        }
+        let stored: std::collections::HashSet<(i64, i64)> =
+            self.junctions.iter().map(|&p| key(p)).collect();
+        let mut out: Vec<Pt> = ends
+            .into_iter()
+            .filter(|(k, (n, _))| *n >= 3 && !stored.contains(k))
+            .map(|(_, (_, p))| p)
+            .collect();
+        out.sort_by(|a, b| a[0].total_cmp(&b[0]).then(a[1].total_cmp(&b[1])));
+        out
+    }
+
     /// Works out the sheet's nets: wires join where an end or a junction
     /// lies on another wire, pins and tags join the wire they touch, and
     /// tags with the same text join each other.
@@ -877,6 +957,36 @@ impl Drawing {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn auto_junctions_at_tees_not_crossings() {
+        let d = Drawing {
+            wires: vec![
+                vec![[0.0, 0.0], [100.0, 0.0]],
+                vec![[50.0, 0.0], [50.0, 50.0]],  // tee: a dot
+                vec![[0.0, 20.0], [100.0, 20.0]], // crossing: no dot
+                vec![[200.0, 0.0], [300.0, 0.0]],
+                vec![[300.0, 0.0], [300.0, 100.0]], // corner of two ends: no dot
+                vec![[0.0, 100.0], [100.0, 100.0], [100.0, 200.0]],
+                vec![[100.0, 100.0], [150.0, 100.0]], // on a corner: a dot
+            ],
+            pins: vec![SchPin {
+                at: [200.0, 0.0],
+                base: [210.0, 0.0],
+                part: 0,
+                name: String::new(),
+                number: "1".into(),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        assert_eq!(d.auto_junctions(), vec![[50.0, 0.0], [100.0, 100.0]]);
+        let stored = Drawing {
+            junctions: vec![[50.0, 0.0]],
+            ..d.clone()
+        };
+        assert_eq!(stored.auto_junctions(), vec![[100.0, 100.0]]);
+    }
 
     #[test]
     fn joins_tees_and_labels() {

@@ -350,6 +350,15 @@ impl App {
                         app.message = Some(app.model3d.open_via(b, v));
                     }
                 }
+            } else if let Some(rest) = w.strip_prefix("schat:") {
+                // schat:x0,y0,x1,y1: the schematic showing that box (mil).
+                let v: Vec<f32> = rest
+                    .split(',')
+                    .filter_map(|s| s.trim().parse().ok())
+                    .collect();
+                if let [a, b, c, d] = v[..] {
+                    app.schem.focus_on([a, b, c, d]);
+                }
             } else if let Some(rest) = w.strip_prefix("at:") {
                 // at:x,y,scale: the board view centred on (x, y) mil at
                 // `scale` pixels per mil.

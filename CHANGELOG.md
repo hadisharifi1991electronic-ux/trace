@@ -3,6 +3,21 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.101.0 (2026-11-25)
+
+- 3D models straight from the board. Right-click a via on the PCB and
+  choose "3D model of this via": a cut-out +-120 mil about the via and
+  its pair partner's vias, through every copper layer with every net in
+  it, opens in the 3D model window (turn it, cut it open, solve and paint
+  its fields). The same is in View > "3D model of the selected via" for a
+  via you clicked.
+- View > "3D model of an area…" (or right-click > the same): drag a box
+  on the board and it opens as a 3D cut-out, as `trace cutout` builds it
+  (wave ports where traces leave, two-pad parts as lumped ports). A box
+  drawn with Shift+drag can be opened too (right-click > "3D model of the
+  box drawn"). Boxes up to 1500 mil a side, since the solver meshes
+  everything in them.
+
 ## 0.100.0 (2026-11-25)
 
 - 3D view: vector plots, like HFSS's. With |E| or |H| on the cut, arrows

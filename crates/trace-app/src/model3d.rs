@@ -10,6 +10,9 @@ use std::sync::{mpsc, Arc, Mutex};
 use trace_core::fem3d::{self, FieldGrid, Model};
 use trace_core::render3d::{self, Overlay, Scene, View};
 
+/// The largest cut-out side (mil) the app opens.
+const MAX_SIDE: f64 = 1500.0;
+
 type Solved = Result<Option<FieldGrid>, String>;
 
 struct Run {
@@ -82,6 +85,65 @@ impl Model3dWindow {
         self.tex = None;
         self.note = None;
         self.open = true;
+    }
+
+    /// Opens the cut-out `win` (x0, y0, x1, y1 mil) of `board` through
+    /// every copper layer; gives the status line to show.
+    pub fn open_cutout(
+        &mut self,
+        board: &trace_core::Board,
+        win: [f64; 4],
+        what: Option<&str>,
+    ) -> (String, bool) {
+        let (w, h) = ((win[2] - win[0]).abs(), (win[3] - win[1]).abs());
+        if w < 5.0 || h < 5.0 {
+            return ("The box is too small for a 3D model.".into(), true);
+        }
+        if w.max(h) > MAX_SIDE {
+            return (
+                format!(
+                    "The box is {w:.0} x {h:.0} mil; draw one up to {MAX_SIDE:.0} mil a side \
+                     (the 3D solver meshes everything in it)."
+                ),
+                true,
+            );
+        }
+        match trace_core::cutout::model(board, win, true, 1.0) {
+            Ok((m, parts, _notes)) => {
+                let ports = m.ports.len() + m.lumped.len();
+                let title = match what {
+                    Some(t) => t.to_string(),
+                    None => format!("Cut-out {w:.0} x {h:.0} mil"),
+                };
+                self.set_model(m, &title, 6.0);
+                (
+                    format!(
+                        "{title}: {ports} port(s) ({} part(s) as lumped ports). \
+                         Solve fields in the 3D model window.",
+                        parts.len()
+                    ),
+                    false,
+                )
+            }
+            Err(e) => (format!("3D model: {e}"), true),
+        }
+    }
+
+    /// Opens a cut-out about via `via` and its pair partner.
+    pub fn open_via(&mut self, board: &trace_core::Board, via: usize) -> (String, bool) {
+        let Some((win, n, pair)) = trace_core::cutout::around_via(board, via, 120.0) else {
+            return ("No such via.".into(), true);
+        };
+        let net = board.geometry.vias[via]
+            .net
+            .and_then(|n| board.nets.get(n as usize))
+            .map_or("no net".to_string(), |n| n.name.clone());
+        let title = format!(
+            "Via{} of {net}{}",
+            if n > 1 { "s" } else { "" },
+            if pair { " and its pair" } else { "" }
+        );
+        self.open_cutout(board, win, Some(&title))
     }
 
     pub fn show(&mut self, ctx: &egui::Context) {

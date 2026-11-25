@@ -188,7 +188,7 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                 }
             });
             let single_part = app.edit.sel.parts.len() == 1 && app.edit.sel.len() == 1;
-            if ui.input(|i| i.modifiers.shift) {
+            if app.box3d || ui.input(|i| i.modifiers.shift) {
                 app.edit.boxing = Some([x, y]);
             } else if in_sel && !single_part {
                 app.edit.dragging = Some([x, y]);
@@ -266,6 +266,15 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
                     a[0].max(b[0]) as f64,
                     a[1].max(b[1]) as f64,
                 ];
+                app.last_box = Some(bx);
+                if app.box3d {
+                    // View > 3D model of an area: the box is the cut-out.
+                    app.box3d = false;
+                    app.message = Some(app.model3d.open_cutout(&scene.board, bx, None));
+                    app.edit.boxing = None;
+                    app.edit.dragging = None;
+                    return;
+                }
                 let found = trace_core::select::Sel::in_box(&scene.board, bx, b[0] < a[0]);
                 if ui.input(|i| i.modifiers.command) {
                     app.edit.sel.add(&found);
@@ -289,6 +298,61 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         let d = resp.drag_delta();
         app.view.tx += d.x;
         app.view.ty += d.y;
+    }
+
+    // Right click: a 3D model of the via under the pointer, of the box
+    // last drawn, or of a box to draw.
+    if resp.secondary_clicked() {
+        app.menu_at = resp.interact_pointer_pos().map(|p| app.view.to_board(p));
+    }
+    let mut want: Option<Want3d> = None;
+    let via_here = app.menu_at.and_then(|[x, y]| {
+        let tol = 4.0 / app.view.scale as f64;
+        via_at(&scene.board, [x as f64, y as f64], tol)
+    });
+    resp.context_menu(|ui| {
+        if ui
+            .add_enabled(
+                via_here.is_some(),
+                egui::Button::new("3D model of this via"),
+            )
+            .on_hover_text("A cut-out about the via (and its pair partner) through every layer")
+            .clicked()
+        {
+            want = via_here.map(Want3d::Via);
+            ui.close_menu();
+        }
+        if ui
+            .add_enabled(
+                app.last_box.is_some(),
+                egui::Button::new("3D model of the box drawn"),
+            )
+            .on_hover_text("The last box you drew with Shift+drag, through every layer")
+            .clicked()
+        {
+            want = app.last_box.map(Want3d::Box);
+            ui.close_menu();
+        }
+        if ui
+            .button("3D model of an area…")
+            .on_hover_text("Drag a box on the board; it opens as a 3D cut-out")
+            .clicked()
+        {
+            want = Some(Want3d::Arm);
+            ui.close_menu();
+        }
+    });
+    match want {
+        Some(Want3d::Via(v)) => app.message = Some(app.model3d.open_via(&scene.board, v)),
+        Some(Want3d::Box(b)) => app.message = Some(app.model3d.open_cutout(&scene.board, b, None)),
+        Some(Want3d::Arm) => {
+            app.box3d = true;
+            app.message = Some((
+                "Drag a box over the area to see in 3D (Escape cancels).".into(),
+                false,
+            ));
+        }
+        None => {}
     }
 
     let view = app.view;
@@ -1785,4 +1849,28 @@ pub fn select_hint(sel: &trace_core::select::Sel) -> String {
         "Selected {}. Drag to move, arrows nudge, Ctrl+R turns, Delete removes, Ctrl+C copies; Edit > Align lines them up.",
         sel.describe()
     )
+}
+
+enum Want3d {
+    Via(usize),
+    Box([f64; 4]),
+    Arm,
+}
+
+/// The via under `p` (board mil), `tol` mil about its pad.
+pub fn via_at(board: &trace_core::Board, p: [f64; 2], tol: f64) -> Option<usize> {
+    board
+        .geometry
+        .vias
+        .iter()
+        .enumerate()
+        .map(|(i, v)| {
+            (
+                i,
+                (v.at.x.mil() - p[0]).hypot(v.at.y.mil() - p[1]) - v.diameter.mil() / 2.0,
+            )
+        })
+        .filter(|x| x.1 <= tol)
+        .min_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|x| x.0)
 }

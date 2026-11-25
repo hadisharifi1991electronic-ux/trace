@@ -41,6 +41,55 @@ fn in_poly(v: &[[f64; 2]], p: [f64; 2]) -> bool {
     inside
 }
 
+/// A window `half` mil about via `via` and the vias beside it (within
+/// 80 mil) on its own net and on its differential pair partner's net, as
+/// (x0, y0, x1, y1) mil, with how many vias it centres on and whether a
+/// partner was found.
+pub fn around_via(board: &Board, via: usize, half: f64) -> Option<([f64; 4], usize, bool)> {
+    let vias = &board.geometry.vias;
+    let first = vias.get(via)?;
+    let partner = first.net.and_then(|id| {
+        let net = &board.nets.get(id as usize)?.name;
+        board
+            .diff_pairs
+            .iter()
+            .cloned()
+            .chain(crate::zcheck::name_pairs(board))
+            .find_map(|p| {
+                if p.positive.eq_ignore_ascii_case(net) {
+                    Some(p.negative)
+                } else if p.negative.eq_ignore_ascii_case(net) {
+                    Some(p.positive)
+                } else {
+                    None
+                }
+            })
+            .and_then(|n| board.nets.iter().position(|x| x.name == n))
+            .map(|n| n as u32)
+    });
+    let at = |v: &crate::geometry::Via| [v.at.x.mil(), v.at.y.mil()];
+    let c0 = at(first);
+    let near: Vec<[f64; 2]> = vias
+        .iter()
+        .filter(|v| {
+            (first.net.is_some() && v.net == first.net) || (partner.is_some() && v.net == partner)
+        })
+        .map(at)
+        .filter(|p| (p[0] - c0[0]).hypot(p[1] - c0[1]) < 80.0)
+        .chain(first.net.is_none().then_some(c0))
+        .collect();
+    let n = near.len() as f64;
+    let c = [
+        near.iter().map(|p| p[0]).sum::<f64>() / n,
+        near.iter().map(|p| p[1]).sum::<f64>() / n,
+    ];
+    Some((
+        [c[0] - half, c[1] - half, c[0] + half, c[1] + half],
+        near.len(),
+        partner.is_some(),
+    ))
+}
+
 /// The FEM model of the window `win` (x0, y0, x1, y1, mil) through every
 /// copper layer, its parts, and notes on what was assumed.
 pub fn model(

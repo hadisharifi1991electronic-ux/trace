@@ -1431,7 +1431,8 @@ fn cover(m: &mut [f32], w: usize, h: usize, a: [f64; 2], b: [f64; 2], wd: f64, a
 
 /// An anti-aliased filled triangle.
 fn triangle(r: &mut Raster, p: [[f64; 2]; 3], c: [u8; 3], alpha: f64) {
-    let area = (p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]);
+    let area =
+        (p[1][0] - p[0][0]) * (p[2][1] - p[0][1]) - (p[2][0] - p[0][0]) * (p[1][1] - p[0][1]);
     if area.abs() < 1e-6 {
         return;
     }
@@ -1698,7 +1699,10 @@ fn flow_lines(r: &mut Raster, sc: &Scene, cam: &Cam, v: &View, pt: &Paint) {
     let test = sep * 0.5;
     let min_t = 0.12f32;
     // Points of the lines drawn so far, in cells `test` wide.
-    let (cw, ch) = ((w as f64 / test) as usize + 1, (h as f64 / test) as usize + 1);
+    let (cw, ch) = (
+        (w as f64 / test) as usize + 1,
+        (h as f64 / test) as usize + 1,
+    );
     let mut occ: Vec<Vec<[f64; 2]>> = vec![Vec::new(); cw * ch];
     let cell = |p: [f64; 2]| -> Option<usize> {
         if p[0] < 0.0 || p[1] < 0.0 {
@@ -1807,7 +1811,15 @@ fn flow_lines(r: &mut Raster, sc: &Scene, cam: &Cam, v: &View, pt: &Paint) {
     for (pts, ts) in &lines {
         for k in 1..pts.len() {
             let t = ts[k] as f64;
-            cover(&mut rim, w, h, pts[k - 1], pts[k], wd + 2.0, 0.40 * t.sqrt());
+            cover(
+                &mut rim,
+                w,
+                h,
+                pts[k - 1],
+                pts[k],
+                wd + 2.0,
+                0.40 * t.sqrt(),
+            );
             cover(&mut ink, w, h, pts[k - 1], pts[k], wd, 0.35 + 0.6 * t);
         }
     }
@@ -1837,7 +1849,11 @@ fn flow_lines(r: &mut Raster, sc: &Scene, cam: &Cam, v: &View, pt: &Paint) {
                 let hw = hl * 0.5;
                 triangle(
                     r,
-                    [tip, [bs[0] + n[0] * hw, bs[1] + n[1] * hw], [bs[0] - n[0] * hw, bs[1] - n[1] * hw]],
+                    [
+                        tip,
+                        [bs[0] + n[0] * hw, bs[1] + n[1] * hw],
+                        [bs[0] - n[0] * hw, bs[1] - n[1] * hw],
+                    ],
                     [240, 246, 255],
                     0.45 + 0.55 * t,
                 );
@@ -1885,7 +1901,9 @@ mod tests {
         // A uniform field: E up, H across the strip.
         let n = [8usize, 8, 8];
         let lo = [sc.lo[0] * MIL, sc.lo[1] * MIL, sc.lo[2] * MIL];
-        let h = (0..3).map(|a| (sc.hi[a] - sc.lo[a]) * MIL / 7.0).fold(0.0, f64::max);
+        let h = (0..3)
+            .map(|a| (sc.hi[a] - sc.lo[a]) * MIL / 7.0)
+            .fold(0.0, f64::max);
         let cnt = n[0] * n[1] * n[2];
         let g = FieldGrid {
             f_ghz: 6.0,

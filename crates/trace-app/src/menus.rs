@@ -296,6 +296,34 @@ impl App {
             self.go_board();
             self.mode3d = true;
         }
+        let via = self.edit.sel.vias.iter().next().copied();
+        if item(
+            ui,
+            board && via.is_some(),
+            "3D model of the selected via",
+            "",
+            "A cut-out about the via (and its pair partner) through every layer; \
+             right-click a via on the board for the same",
+        ) {
+            if let (Some(v), Some(scene)) = (via, &self.scene) {
+                self.message = Some(self.model3d.open_via(&scene.board, v));
+            }
+        }
+        if item(
+            ui,
+            board,
+            "3D model of an area…",
+            "",
+            "Drag a box on the board; it opens as a 3D cut-out through every layer",
+        ) {
+            self.go_board();
+            self.mode3d = false;
+            self.box3d = true;
+            self.message = Some((
+                "Drag a box over the area to see in 3D (Escape cancels).".into(),
+                false,
+            ));
+        }
         if item(
             ui,
             board,

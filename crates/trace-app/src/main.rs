@@ -125,6 +125,14 @@ pub struct App {
     needs_fit: bool,
     mode3d: bool,
     view3d: view3d::View3d,
+    /// The 3D model window for vias and cut-outs picked on the board.
+    model3d: model3d::Model3dWindow,
+    /// View > 3D model of an area: the next drag on the board is the box.
+    box3d: bool,
+    /// The last box drawn on the board (mil) and where the board's context
+    /// menu was opened.
+    last_box: Option<[f64; 4]>,
+    menu_at: Option<[f32; 2]>,
     cm: cm::Cm,
     imp: imp::Imp,
     mode_sch: bool,
@@ -239,6 +247,10 @@ impl App {
             needs_fit: false,
             mode3d: false,
             view3d: view3d::View3d::default(),
+            model3d: Default::default(),
+            box3d: false,
+            last_box: None,
+            menu_at: None,
             cm: cm::Cm::new(cc.storage.and_then(|s| s.get_string(cm::STORE_KEY))),
             imp: imp::Imp::new(cc.storage.and_then(|s| s.get_string(imp::STORE_KEY))),
             mode_sch: false,
@@ -319,6 +331,25 @@ impl App {
                 // 3d[:spec]: the 3D view, set as `View3d::apply_spec` reads.
                 app.mode3d = true;
                 app.view3d.apply_spec(rest.trim_start_matches(':'));
+            } else if let Some(net) = w.strip_prefix("via3d:") {
+                // via3d:NET: the 3D model about NET's first via.
+                if let Some(scene) = &app.scene {
+                    let b = &scene.board;
+                    let v = b
+                        .nets
+                        .iter()
+                        .position(|n| n.name.eq_ignore_ascii_case(net))
+                        .and_then(|id| {
+                            b.geometry
+                                .vias
+                                .iter()
+                                .position(|v| v.net == Some(id as u32))
+                        });
+                    if let Some(v) = v {
+                        app.edit.sel.vias.insert(v);
+                        app.message = Some(app.model3d.open_via(b, v));
+                    }
+                }
             } else if let Some(rest) = w.strip_prefix("rules") {
                 let kind = rest.strip_prefix(':').filter(|k| !k.is_empty());
                 app.rules_win.open_at(kind);
@@ -3172,6 +3203,7 @@ impl eframe::App for App {
                 self.edit.sel.clear();
                 self.edit.boxing = None;
                 self.edit.dragging = None;
+                self.box3d = false;
             }
         }
 
@@ -3424,6 +3456,7 @@ impl eframe::App for App {
             self.thermal.show(ctx, &scene.board, self.selected);
             self.bus_sim.show(ctx, &scene.board);
             self.via.show(ctx, &scene.board, self.imp.stackup());
+            self.model3d.show(ctx);
             self.pairs.show(ctx, &scene.board, self.imp.stackup());
         }
         // The Smith chart needs no board (Touchstone files alone).

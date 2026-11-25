@@ -4438,51 +4438,20 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
             .iter()
             .position(|n| n.name.eq_ignore_ascii_case(net))
             .ok_or_else(|| format!("no net {net}"))? as u32;
-        let partner = b
-            .diff_pairs
+        let first = b
+            .geometry
+            .vias
             .iter()
-            .cloned()
-            .chain(trace_core::zcheck::name_pairs(&b))
-            .find_map(|p| {
-                if p.positive.eq_ignore_ascii_case(net) {
-                    Some(p.negative)
-                } else if p.negative.eq_ignore_ascii_case(net) {
-                    Some(p.positive)
-                } else {
-                    None
-                }
-            })
-            .and_then(|n| b.nets.iter().position(|x| x.name == n))
-            .map(|n| n as u32);
-        let vias = &b.geometry.vias;
-        let first = vias
-            .iter()
-            .find(|v| v.net == Some(id))
+            .position(|v| v.net == Some(id))
             .ok_or_else(|| format!("net {net} has no via"))?;
-        let at = |v: &trace_core::geometry::Via| [v.at.x.mil(), v.at.y.mil()];
-        let c0 = at(first);
-        let near: Vec<[f64; 2]> = vias
-            .iter()
-            .filter(|v| v.net == Some(id) || (partner.is_some() && v.net == partner))
-            .map(at)
-            .filter(|p| (p[0] - c0[0]).hypot(p[1] - c0[1]) < 80.0)
-            .collect();
-        let c = [
-            near.iter().map(|p| p[0]).sum::<f64>() / near.len() as f64,
-            near.iter().map(|p| p[1]).sum::<f64>() / near.len() as f64,
-        ];
+        let (w, n, pair) = trace_core::cutout::around_via(&b, first, half).ok_or("no via")?;
         println!(
-            "Window about {} via(s) of {net}{} at ({:.1}, {:.1}) mil, +-{half} mil",
-            near.len(),
-            if partner.is_some() {
-                " and its pair"
-            } else {
-                ""
-            },
-            c[0],
-            c[1]
+            "Window about {n} via(s) of {net}{} at ({:.1}, {:.1}) mil, +-{half} mil",
+            if pair { " and its pair" } else { "" },
+            (w[0] + w[2]) / 2.0,
+            (w[1] + w[3]) / 2.0
         );
-        vec![c[0] - half, c[1] - half, c[0] + half, c[1] + half]
+        w.to_vec()
     } else {
         win.split(',')
             .map(|x| x.trim().parse::<f64>())

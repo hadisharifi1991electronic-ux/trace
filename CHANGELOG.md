@@ -3,6 +3,16 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.103.0 (2026-11-25)
+
+- 3D view looks like a real board: the solder mask is glossy, with a soft
+  sheen that moves across the board as you turn it and stronger
+  reflections at grazing angles. Gold pads and copper reflect a studio
+  sky and catch highlights, silkscreen ink and part bodies have a slight
+  gloss, and plated holes go dark half way down the barrel instead of
+  showing a flat copper wall.
+- Lighting per pixel, with a fill light, and a gradient backdrop.
+
 ## 0.102.2 (2026-11-25)
 
 - 3D view: the inner layers are there when you zoom in between them. They

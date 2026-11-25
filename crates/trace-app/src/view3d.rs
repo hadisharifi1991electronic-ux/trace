@@ -94,8 +94,13 @@ const CORE: [u8; 3] = [214, 196, 140];
 const PREPREG: [u8; 3] = [184, 160, 102];
 const DRILL_WALL: [u8; 3] = [150, 136, 96];
 
-/// Shine of polished copper and gold, and of everything else.
+/// Shine of polished copper and gold, and of everything else. Below
+/// `METAL` the shine is a clear gloss over a coloured surface: solder mask
+/// is lacquer-glossy, silkscreen ink and part bodies a little.
 const METAL: u8 = 255;
+const MASK_GLOSS: u8 = 150;
+const INK_GLOSS: u8 = 40;
+const BODY_GLOSS: u8 = 70;
 const MATTE: u8 = 0;
 
 /// Gold finish on bare pads, above their copper, mm.
@@ -357,13 +362,19 @@ impl Builder {
 
     /// A tube of radius r about (x, y) mm between z0 and z1.
     fn tube(&mut self, x: f32, y: f32, r: f32, z0: f32, z1: f32, c: [u8; 3]) {
+        self.tube_lit(x, y, r, [z0, z1], [c, c]);
+    }
+
+    /// A tube coloured c[0] at z[0] blending to c[1] at z[1].
+    fn tube_lit(&mut self, x: f32, y: f32, r: f32, z: [f32; 2], c: [[u8; 3]; 2]) {
+        let (z0, z1) = (z[0], z[1]);
         let n = segments(r).max(10);
         let ring = circle_pts(x, y, r, n);
         for i in 0..n {
             let (a, b) = (ring[i], ring[(i + 1) % n]);
             // Normals pointing out from the axis, for smooth shading.
             let i0 = self.m.verts.len() as u32;
-            for (p, z) in [(a, z0), (b, z0), (b, z1), (a, z1)] {
+            for (p, z, c) in [(a, z0, c[0]), (b, z0, c[0]), (b, z1, c[1]), (a, z1, c[1])] {
                 let nn = [(p[0] - x) / r, (p[1] - y) / r, 0.0];
                 self.vert([p[0], p[1], z], nn, c);
             }
@@ -615,8 +626,10 @@ pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
     let [lam_bot, lam_top] = st.lam;
     bld.lam = st.lam;
     bld.tag = TAG_DIEL;
+    bld.shine = if opt.xray { MATTE } else { MASK_GLOSS };
     bld.face(&v, &tr, lam_top, 1.0, mask);
     bld.face(&v, &tr, lam_bot, -1.0, mask);
+    bld.shine = MATTE;
     for i in 0..ring.len() {
         let (a, c) = (ring[i], ring[(i + 1) % ring.len()]);
         bld.wall(a, c, lam_bot, lam_top, EDGE);
@@ -662,13 +675,15 @@ pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
                 } else {
                     -(st.cu[last][0].abs() + Z_SILK)
                 };
+                bld.shine = INK_GLOSS;
                 bld.face(&pts, tris, z, z.signum(), silk);
+                bld.shine = MATTE;
             }
             s => {
                 if let Some(i) = slot_layer(s) {
                     let (top, side) = cu_color(i);
                     bld.tag = layer_tag(i);
-                    bld.shine = if top == mask_cu { MATTE } else { METAL };
+                    bld.shine = if top == mask_cu { MASK_GLOSS } else { METAL };
                     bld.slab(&pts, tris, st.cu[i][0], st.cu[i][1], top, side, Some(i));
                     bld.tag = TAG_MISC;
                     bld.shine = MATTE;
@@ -688,14 +703,22 @@ pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
             continue;
         }
         match p.slot {
-            Slot::TopSilk if opt.silk => bld.geom(&p.geom, st.cu[0][1] + Z_SILK, silk),
-            Slot::BottomSilk if opt.silk => bld.geom(&p.geom, st.cu[last][0] - Z_SILK, silk),
+            Slot::TopSilk | Slot::BottomSilk if opt.silk => {
+                let z = if p.slot == Slot::TopSilk {
+                    st.cu[0][1] + Z_SILK
+                } else {
+                    st.cu[last][0] - Z_SILK
+                };
+                bld.shine = INK_GLOSS;
+                bld.geom(&p.geom, z, silk);
+                bld.shine = MATTE;
+            }
             s => {
                 if let Some(i) = slot_layer(s) {
                     let (top, side) = cu_color(i);
                     let pts = bld.geom_ring(&p.geom);
                     bld.tag = layer_tag(i);
-                    bld.shine = if top == mask_cu { MATTE } else { METAL };
+                    bld.shine = if top == mask_cu { MASK_GLOSS } else { METAL };
                     bld.convex_slab(&pts, st.cu[i][0], st.cu[i][1], top, side, Some(i));
                     bld.tag = TAG_MISC;
                     bld.shine = MATTE;
@@ -823,7 +846,7 @@ pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
             ];
             let (vv, tr) = tessellate(&rings);
             bld.tag = layer_tag(layer);
-            bld.shine = if top == mask_cu { MATTE } else { METAL };
+            bld.shine = if top == mask_cu { MASK_GLOSS } else { METAL };
             bld.slab(
                 &vv,
                 &tr,
@@ -850,11 +873,12 @@ pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
     }
 
     bld.tag = TAG_MISC;
-    bld.shine = MATTE;
+    bld.shine = BODY_GLOSS;
     if opt.parts {
         let placed = place_models(&mut bld, scene, t, models);
         bld.m.parts = placed.len() + bodies(&mut bld, scene, t, &placed);
     }
+    bld.shine = MATTE;
     if opt.fold > 0 {
         if let Some(f) = trace_core::flex::fold(board, opt.fold as f64 / 100.0) {
             fold_mesh(&mut bld, &f);
@@ -871,7 +895,17 @@ const PLATING: f32 = 0.025;
 fn barrel(bld: &mut Builder, c: [f32; 2], r: f32, z0: f32, z1: f32) {
     let ri = (r - PLATING).max(r * 0.5);
     bld.shine = METAL;
-    bld.tube(c[0], c[1], ri, z0, z1, BARREL);
+    if bld.cap.is_some() {
+        bld.tube(c[0], c[1], ri, z0, z1, BARREL);
+    } else {
+        // Looking down a hole little light reaches the middle of the
+        // barrel: bright at the rims, dark half way down.
+        let d = (1.2 * ri).min((z1 - z0) / 2.0);
+        let deep = shade(BARREL, 0.10);
+        bld.tube_lit(c[0], c[1], ri, [z0, z0 + d], [BARREL, deep]);
+        bld.tube_lit(c[0], c[1], ri, [z0 + d, z1 - d], [deep, deep]);
+        bld.tube_lit(c[0], c[1], ri, [z1 - d, z1], [deep, BARREL]);
+    }
     bld.tube(c[0], c[1], r, z0, z1, shade(BARREL, 0.8));
     bld.shine = MATTE;
     if let Some(cap) = bld.cap.as_mut() {
@@ -1872,23 +1906,48 @@ void main() {{
     if (u_mode.x > 0.5 && u_mode.x < 1.5 && !solid) discard;
     if (u_mode.x > 1.5 && solid) discard;
     vec3 n = normalize(v_nrm);
+    // View from the camera to this point (per pixel, so a highlight
+    // slides across a flat board as it turns).
+    vec3 v = normalize(u_cam - v_pos);
     vec3 col = v_col;
     // The laminate seen from between the layers: bare glass-epoxy.
-    bool back = abs(n.z) > 0.9 && dot(n, u_cam - v_pos) < 0.0;
+    bool back = abs(n.z) > 0.9 && dot(n, v) < 0.0;
     if (diel && back) col = vec3(0.66, 0.58, 0.38);
     // The far face of a copper layer is always behind its near face; left
     // out, it cannot show through as stripes when seen edge on.
     if (back && v_tag > 0.5 && v_tag < 64.5) discard;
-    if (dot(n, u_eye) < 0.0) n = -n;
+    if (dot(n, v) < 0.0) n = -n;
     vec3 key = normalize(vec3(-0.35, -0.45, 0.82));
-    float ne = max(dot(n, u_eye), 0.0);
-    float l = 0.38 + 0.42 * ne + 0.30 * abs(dot(n, key));
+    vec3 fill = normalize(vec3(0.55, 0.35, 0.45));
+    float ne = max(dot(n, v), 0.0);
+    float l = 0.30 + 0.34 * ne + 0.30 * abs(dot(n, key)) + 0.10 * abs(dot(n, fill))
+        + 0.06 * n.z;
     vec3 base = col * min(l, 1.15);
-    vec3 h = normalize(key + u_eye);
-    float sp = pow(max(dot(n, h), 0.0), 60.0);
-    float rim = pow(1.0 - ne, 4.0);
-    vec3 metal = base * 0.95 + col * (1.2 * sp + 0.25 * rim) + vec3(0.3 * sp);
-    vec3 c = mix(base, metal, v_shine);
+    // A soft studio sky: bright overhead, dim at the horizon and below.
+    vec3 r = reflect(-v, n);
+    float up = clamp(r.z * 0.5 + 0.5, 0.0, 1.0);
+    vec3 sky = mix(vec3(0.10, 0.11, 0.13), vec3(1.0, 1.0, 0.98), up * up);
+    // A soft-box light where the board mirrors it to the viewer, so a
+    // sheen lies over the far half of the board and moves as it turns,
+    // and the fixed key light.
+    vec3 head = normalize(vec3(-u_eye.x, -u_eye.y, abs(u_eye.z) + 0.3));
+    float hb = max(dot(r, head), 0.0);
+    float kb = max(dot(r, key), 0.0);
+    vec3 c;
+    if (v_shine > 0.9) {{
+        // Metal: tinted reflections of the sky and lights.
+        vec3 env = col * (0.30 + 0.85 * sky);
+        float sp = 0.55 * pow(hb, 40.0) + 0.5 * pow(kb, 90.0);
+        c = mix(base, env, 0.5) + col * (0.8 * sp + 0.10 * pow(hb, 6.0)) + vec3(0.15 * sp);
+    }} else {{
+        // Coloured surface under a clear gloss: white highlights, more
+        // reflection at grazing angles (Fresnel).
+        float g = v_shine / 0.6;
+        float fr = 0.05 + 0.95 * pow(1.0 - ne, 5.0);
+        float sp = 0.035 * pow(hb, 6.0) + 0.10 * pow(hb, 60.0 * g + 10.0)
+            + 0.20 * pow(kb, 80.0);
+        c = base * (1.0 - 0.4 * fr * g) + g * (fr * 0.5 * sky + vec3(sp));
+    }}
     float a = u_mode.x > 1.5 ? (diel ? u_mode.y : u_mode.z) : 1.0;
     {frag} = vec4(c, a);
 }}
@@ -2108,7 +2167,16 @@ pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
     }
 
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, Color32::from_rgb(38, 42, 50));
+    // Backdrop: a studio gradient, lighter at the top.
+    let mut bg = egui::Mesh::default();
+    let (hi, lo) = (Color32::from_rgb(62, 68, 80), Color32::from_rgb(22, 24, 30));
+    bg.colored_vertex(rect.left_top(), hi);
+    bg.colored_vertex(rect.right_top(), hi);
+    bg.colored_vertex(rect.right_bottom(), lo);
+    bg.colored_vertex(rect.left_bottom(), lo);
+    bg.add_triangle(0, 1, 2);
+    bg.add_triangle(0, 2, 3);
+    painter.add(egui::Shape::mesh(bg));
     let mvp = cam.matrix(rect.width() / rect.height().max(1.0), v.radius);
     let eye = cam.eye_dir();
     let eye_at = cam.eye();

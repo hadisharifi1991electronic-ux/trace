@@ -1549,10 +1549,19 @@ fn cut_arrows(r: &mut Raster, sc: &Scene, cam: &Cam, v: &View, pt: &Paint) {
             }
             let dir = mul(f, 1.0 / m);
             let len = gap * 0.9 * (0.35 + 0.65 * t);
-            let a = sub(p, mul(dir, len / 2.0));
-            let b = add(p, mul(dir, len / 2.0));
+            // The arrow lies in the face (the part of the field along it);
+            // a field mostly through the face is a dot or a cross instead,
+            // so a tilted view never makes it look like an in-face arrow.
+            let mut inp = dir;
+            inp[ax] = 0.0;
+            let li = dot(inp, inp).sqrt();
+            let through = dir[ax].abs() > li;
+            let d2 = if through { dir } else { mul(inp, 1.0 / li.max(1e-12)) };
+            let a = sub(p, mul(d2, len / 2.0));
+            let b = add(p, mul(d2, len / 2.0));
             if let (Some(sa), Some(sb)) = (cam.project(a, w, h), cam.project(b, w, h)) {
-                list.push((t, sa, sb, dir, len * ppm));
+                // A zero length marks the dot or cross.
+                list.push((t, sa, sb, dir, if through { 0.0 } else { len * ppm }));
             }
         }
     }
@@ -1560,12 +1569,11 @@ fn cut_arrows(r: &mut Raster, sc: &Scene, cam: &Cam, v: &View, pt: &Paint) {
     list.sort_by(|a, b| a.0.total_cmp(&b.0));
     for (t, sa, sb, dir, full) in list {
         let c = emfield::colour(0.38 + 0.62 * t);
-        let l = (sb[0] - sa[0]).hypot(sb[1] - sa[1]);
-        if l < 0.3 * full {
+        if full == 0.0 {
             // Mostly through the cut: a dot (out toward the eye) or a
             // cross (into the face).
             let m = [(sa[0] + sb[0]) / 2.0, (sa[1] + sb[1]) / 2.0];
-            let rr = (full * 0.22).clamp(2.0, gap_px * 0.25);
+            let rr = (gap_px * (0.12 + 0.13 * t)).max(2.0);
             let out = dir[ax] * to_eye > 0.0;
             for k in 0..24 {
                 let a0 = k as f64 / 24.0 * std::f64::consts::TAU;
@@ -1926,6 +1934,20 @@ mod tests {
         v.vectors = true;
         let arrows = render(&sc, Some(&g), &v);
         assert_ne!(plain.rgb, arrows.rgb);
+        // H along the cut's normal: dots and crosses, no in-face arrows.
+        v.overlay = Overlay::H;
+        let mut g2 = g.clone();
+        let ax = v.cut.unwrap().0;
+        g2.hf = vec![[0.0; 6]; cnt];
+        for x in g2.hf.iter_mut() {
+            x[2 * ax] = 1.0;
+        }
+        let dots = render(&sc, Some(&g2), &v);
+        if let Ok(p) = std::env::var("TRACE_TEST_PNG") {
+            let _ = std::fs::write(p, emfield::png(&dots));
+        }
+        assert_ne!(dots.rgb, arrows.rgb);
+        v.overlay = Overlay::E;
         v.overlay = Overlay::J;
         v.cut = None;
         v.vectors = false;

@@ -3,6 +3,15 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.102.1 (2026-11-25)
+
+- 3D view arrows: each arrow now shows the part of E or H that lies in the
+  cut face, and a field mostly through the face is always drawn as a dot
+  (out toward you) or a cross (into it), sized by its strength. Before,
+  the choice went by the arrow's length on screen, so in a tilted view H
+  circling a trace (through the face) showed as long arrows that seemed
+  to run along the trace (seen on the DAC39RF12 EVM SYSREF pair via).
+
 ## 0.102.0 (2026-11-25)
 
 - A more realistic 2D board view. The board is drawn as a dark laminate

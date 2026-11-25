@@ -144,6 +144,9 @@ pub struct Scene {
     pub fills: Vec<Fill>,
     pub fill_verts: Vec<[f32; 2]>,
     pub fill_tris: Vec<u32>,
+    /// The board body (outline less milled slots), triangulated.
+    pub body_verts: Vec<[f32; 2]>,
+    pub body_tris: Vec<u32>,
     /// How each file was read, for boards rebuilt from Gerber or ODB++.
     pub import: Option<ImportInfo>,
 }
@@ -494,6 +497,7 @@ impl Scene {
         }
 
         let (fills, fill_verts, fill_tris) = triangulate(&board, &slot);
+        let (body_verts, body_tris) = tessellate(std::iter::once(&outline).chain(slots.iter()));
         let rooms = trace_core::drc::rooms(&board)
             .into_iter()
             .map(|(n, r)| (n, r.iter().map(|p| [p[0] as f32, p[1] as f32]).collect()))
@@ -505,6 +509,8 @@ impl Scene {
             fills,
             fill_verts,
             fill_tris,
+            body_verts,
+            body_tris,
             import: None,
             board,
             prims,
@@ -709,6 +715,39 @@ fn inside_triangle(p: [f32; 2], a: [f32; 2], b: [f32; 2], c: [f32; 2]) -> bool {
 /// Splits every copper pour into triangles once, so drawing is cheap.
 /// Planes can have thousands of cut-outs, so this uses a sweep-line
 /// tessellator with the even-odd rule rather than ear clipping.
+/// Triangles filling the rings (even-odd), for drawing.
+fn tessellate<'a>(rings: impl Iterator<Item = &'a Vec<[f32; 2]>>) -> (Vec<[f32; 2]>, Vec<u32>) {
+    use lyon_tessellation::geometry_builder::{BuffersBuilder, VertexBuffers};
+    use lyon_tessellation::math::point;
+    use lyon_tessellation::path::Path;
+    use lyon_tessellation::{FillOptions, FillRule, FillTessellator, FillVertex};
+
+    let mut path = Path::builder();
+    for ring in rings.filter(|r| r.len() >= 3) {
+        path.begin(point(ring[0][0], ring[0][1]));
+        for p in &ring[1..] {
+            path.line_to(point(p[0], p[1]));
+        }
+        path.end(true);
+    }
+    let mut out: VertexBuffers<lyon_tessellation::math::Point, u32> = VertexBuffers::new();
+    let options = FillOptions::tolerance(0.05).with_fill_rule(FillRule::EvenOdd);
+    if FillTessellator::new()
+        .tessellate_path(
+            &path.build(),
+            &options,
+            &mut BuffersBuilder::new(&mut out, |v: FillVertex| v.position()),
+        )
+        .is_err()
+    {
+        return (Vec::new(), Vec::new());
+    }
+    (
+        out.vertices.iter().map(|p| [p.x, p.y]).collect(),
+        out.indices,
+    )
+}
+
 fn triangulate(
     board: &Board,
     slot: &dyn Fn(&LayerRef) -> Slot,

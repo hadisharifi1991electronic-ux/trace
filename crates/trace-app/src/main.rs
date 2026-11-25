@@ -350,6 +350,17 @@ impl App {
                         app.message = Some(app.model3d.open_via(b, v));
                     }
                 }
+            } else if let Some(rest) = w.strip_prefix("at:") {
+                // at:x,y,scale: the board view centred on (x, y) mil at
+                // `scale` pixels per mil.
+                let v: Vec<f32> = rest
+                    .split(',')
+                    .filter_map(|s| s.trim().parse().ok())
+                    .collect();
+                if let [x, y, s] = v[..] {
+                    app.needs_fit = false;
+                    app.focus = Some(Focus::Point([x, y], s));
+                }
             } else if let Some(rest) = w.strip_prefix("rules") {
                 let kind = rest.strip_prefix(':').filter(|k| !k.is_empty());
                 app.rules_win.open_at(kind);

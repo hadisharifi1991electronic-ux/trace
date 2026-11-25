@@ -3,6 +3,21 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.102.0 (2026-11-25)
+
+- A more realistic 2D board view. The board is drawn as a dark laminate
+  with a soft shadow under it, instead of copper floating on the
+  background.
+- Copper on the active layer, and every via, is drawn as solid metal: a
+  dark edge round each track and pad, and a faint sheen down the middle.
+  Its pours are solid copper under its tracks.
+- Planes on the other layers are drawn as copper seen through the board,
+  opaque and dark, under all the tracks. Overlapping pours no longer pile
+  up into a pale pink and green wash, and inner routing still shows.
+- Drill holes look like plated bores, lighter at the wall and dark in the
+  middle.
+- `TRACE_OPEN=at:x,y,scale` starts the board view centred on (x, y) mil.
+
 ## 0.101.0 (2026-11-25)
 
 - 3D models straight from the board. Right-click a via on the PCB and

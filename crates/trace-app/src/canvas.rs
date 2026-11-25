@@ -100,6 +100,56 @@ pub(crate) fn draw(shapes: &mut Vec<Shape>, view: &View, g: &Geom, color: Color3
     }
 }
 
+/// The board's laminate, seen through the solder mask.
+const LAMINATE: [u8; 3] = [26, 38, 32];
+
+/// `a` blended towards `b` by the fraction `k`.
+fn mix(a: [u8; 3], b: [u8; 3], k: f32) -> [u8; 3] {
+    std::array::from_fn(|i| (a[i] as f32 + (b[i] as f32 - a[i] as f32) * k) as u8)
+}
+
+/// `c` made lighter (k > 0) or darker (k < 0) by the fraction |k|.
+fn tint(c: [u8; 3], k: f32) -> [u8; 3] {
+    c.map(|v| {
+        let v = v as f32;
+        (if k >= 0.0 {
+            v + (255.0 - v) * k
+        } else {
+            v * (1.0 + k)
+        }) as u8
+    })
+}
+
+/// The narrowest width of a shape, in mil.
+fn thickness(g: &Geom) -> f32 {
+    match *g {
+        Geom::Seg { w, .. } => w,
+        Geom::Circle { r, .. } => 2.0 * r,
+        Geom::Rect { sx, sy, .. } => sx.min(sy),
+    }
+}
+
+/// Copper drawn as metal once a shape is a few pixels across: a dark edge
+/// under every shape first (so joined tracks show no seams), then the
+/// copper, then a soft highlight down the middle of each.
+fn draw_metal(shapes: &mut Vec<Shape>, view: &View, items: &[(&Geom, [u8; 3], f32)]) {
+    let big = |g: &Geom| thickness(g) * view.scale > 4.0;
+    let edge = 0.9 / view.scale;
+    // Opaque when not dimmed, so that joints between segments do not
+    // show as brighter spots where their round ends overlap.
+    let paint = |c: [u8; 3], a: f32| if a > 0.9 { rgba(c, 1.0) } else { rgba(c, a) };
+    for (g, c, a) in items.iter().filter(|(g, ..)| big(g)) {
+        draw(shapes, view, &grow(g, edge), paint(tint(*c, -0.6), *a));
+    }
+    for (g, c, a) in items {
+        draw(shapes, view, g, paint(*c, *a));
+    }
+    for (g, c, a) in items.iter().filter(|(g, ..)| big(g)) {
+        let t = thickness(g);
+        draw(shapes, view, &grow(g, -0.3 * t), paint(tint(*c, 0.14), *a));
+    }
+}
+
 /// A shape made larger by `e` on every side.
 pub(crate) fn grow(g: &Geom, e: f32) -> Geom {
     match *g {
@@ -602,7 +652,24 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
     let visible = view.visible();
     let mut shapes: Vec<Shape> = Vec::with_capacity(60_000);
 
-    // Board body.
+    // Board body: laminate with a soft shadow under it, so the copper sits
+    // on a board instead of floating on the background.
+    if !scene.body_tris.is_empty() {
+        for (off, color) in [
+            (5.0, Color32::from_black_alpha(90)),
+            (
+                0.0,
+                Color32::from_rgb(LAMINATE[0], LAMINATE[1], LAMINATE[2]),
+            ),
+        ] {
+            let mut mesh = egui::Mesh::default();
+            for v in &scene.body_verts {
+                mesh.colored_vertex(view.to_screen(v[0], v[1]) + egui::vec2(off, off), color);
+            }
+            mesh.indices.extend_from_slice(&scene.body_tris);
+            shapes.push(Shape::mesh(mesh));
+        }
+    }
     if scene.outline.len() >= 3 {
         let pts: Vec<Pos2> = scene
             .outline
@@ -662,20 +729,37 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
         .layers
         .iter()
         .any(|l| matches!(l.slot, Slot::Copper(_)) && l.visible);
+    // Planes on the other layers go first, all of them, as solid copper
+    // seen through the laminate: drawn opaque so that overlapping pours
+    // do not pile up into a pale wash, and under every track so inner
+    // routing still shows.
+    for (slot, color) in order
+        .iter()
+        .filter(|(s, _)| matches!(s, Slot::Copper(_)) && *s != app.active)
+    {
+        let k = 0.2 * dim;
+        let [r, g, b] = mix(LAMINATE, *color, k);
+        draw_fills(&mut shapes, scene, &view, visible, |f| {
+            (f.slot == *slot).then_some(Color32::from_rgb(r, g, b))
+        });
+    }
     for (slot, color) in &order {
         let alpha = match slot {
             Slot::Copper(_) if *slot == app.active => 0.95,
             Slot::Copper(_) => 0.6,
             _ => 0.9,
         } * dim;
-        let col = rgba(*color, alpha);
-        if matches!(slot, Slot::Copper(_)) {
+        if *slot == app.active {
+            // The active layer's pours: solid copper under its tracks.
+            let [r, g, b] = mix(LAMINATE, *color, 0.45 * dim);
             draw_fills(&mut shapes, scene, &view, visible, |f| {
-                // Pours sit under the tracks; planes on other layers stay faint.
-                let a = if *slot == app.active { 0.5 } else { 0.22 };
-                (f.slot == *slot).then_some(rgba(*color, a * dim))
+                (f.slot == *slot).then_some(Color32::from_rgb(r, g, b))
             });
         }
+        // The active layer and the vias are drawn as solid metal: a dark
+        // edge, the copper, and a lighter sheen down the middle.
+        let relief = *slot == app.active || *slot == Slot::Vias;
+        let mut metal: Vec<(&Geom, [u8; 3], f32)> = Vec::new();
         for p in scene
             .prims
             .iter()
@@ -688,12 +772,17 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             if !overlaps(b, visible) || (b[2] - b[0] < tiny && b[3] - b[1] < tiny) {
                 continue;
             }
-            let c = match p.source {
-                Source::Via(vi) => rgba(via_color(scene, vi), 0.95 * dim),
-                _ => col,
+            let (c, a) = match p.source {
+                Source::Via(vi) => (via_color(scene, vi), 0.95 * dim),
+                _ => (*color, alpha),
             };
-            draw(&mut shapes, &view, &p.geom, c);
+            if relief {
+                metal.push((&p.geom, c, a));
+            } else {
+                draw(&mut shapes, &view, &p.geom, rgba(c, a));
+            }
         }
+        draw_metal(&mut shapes, &view, &metal);
         // Through-hole pads sit with the outermost visible copper, drawn once.
         let last_copper = order
             .iter()
@@ -701,17 +790,14 @@ pub fn show(app: &mut App, ui: &mut egui::Ui) {
             .find(|(s, _)| matches!(s, Slot::Copper(_)))
             .map(|(s, _)| *s);
         if Some(*slot) == last_copper {
-            let th = rgba([201, 180, 88], 0.95 * dim);
-            for p in scene
+            let th: Vec<(&Geom, [u8; 3], f32)> = scene
                 .prims
                 .iter()
                 .filter(|p: &&Prim| p.all_layers && p.slot != Slot::Vias && any_copper)
-                .filter(|p| !lifted(p))
-            {
-                if overlaps(p.geom.bbox(), visible) {
-                    draw(&mut shapes, &view, &p.geom, th);
-                }
-            }
+                .filter(|p| !lifted(p) && overlaps(p.geom.bbox(), visible))
+                .map(|p| (&p.geom, [201, 180, 88], 0.95 * dim))
+                .collect();
+            draw_metal(&mut shapes, &view, &th);
         }
     }
 
@@ -1391,7 +1477,7 @@ fn draw_holes(
     visible: [f32; 4],
     lifted: Option<u32>,
 ) {
-    let hole_color = Color32::from_rgb(24, 26, 31);
+    let hole_color = Color32::from_rgb(58, 54, 46);
     let g = &scene.board.geometry;
     let vias_on = scene.layer_visible(Slot::Vias);
     for p in scene
@@ -1412,11 +1498,22 @@ fn draw_holes(
         if !overlaps([x - r, y - r, x + r, y + r], visible) {
             continue;
         }
-        shapes.push(Shape::circle_filled(
-            view.to_screen(x, y),
-            r * view.scale,
-            hole_color,
-        ));
+        // The plated wall catches the light round the rim; the bore gets
+        // darker towards the bottom.
+        let (c, rs) = (view.to_screen(x, y), r * view.scale);
+        shapes.push(Shape::circle_filled(c, rs, hole_color));
+        if rs > 2.5 {
+            shapes.push(Shape::circle_filled(
+                c,
+                rs * 0.78,
+                Color32::from_rgb(24, 24, 26),
+            ));
+            shapes.push(Shape::circle_filled(
+                c,
+                rs * 0.5,
+                Color32::from_rgb(6, 6, 8),
+            ));
+        }
         // A backdrilled via: a ring the size of the backdrill.
         if let Source::Via(vi) = p.source {
             let f = &g.vias[vi].fab;

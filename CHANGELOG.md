@@ -3,6 +3,42 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.105.0 (2026-11-25)
+
+Board cut-outs that fit in a PC's memory:
+
+- The starting mesh no longer runs every via's pad and antipad lines
+  through the whole box (on a 240 mil CutiePi window that was 2.6 million
+  tetrahedra before the first solve, so it ran out of memory). When the
+  plain grid is too big, it starts from a coarse grid on the layers and
+  port edges and refines it only about each barrel, pad and antipad ring,
+  and along the driven pair's own traces, so the path from port through
+  the via is whole from the first pass. A new note says when the start
+  ran out of room before reaching all of the driven copper.
+- `via:NET` drives only the via's own pair: every other trace leaving the
+  window is a matched termination that absorbs but costs no solves (it
+  was 15 driven ports on that CutiePi window, now 2). `--drive NET,...`
+  picks the nets for an explicit window, `--all-ports` drives them all.
+- Where the pair ends on pads inside the window (BGA balls, chip pins)
+  instead of leaving it, the pads get a lumped port: P pad to N pad at
+  100 ohm, or a single net to the ground pad beside it. That was why
+  cut-outs on the DAC board came out with one port.
+- Traces that cross the window with both ends outside it are no longer
+  dropped.
+- Solver memory: the matrix is assembled straight into its sparse
+  pattern (no list of entries, about a fifth of the memory there), and
+  GMRES keeps only its Krylov basis, in batches of right-hand sides
+  (half the vectors of the flexible version).
+- Cut-outs use first-order elements by default (`--order 2` for second
+  order); their copper needs many small elements more than high-order
+  ones. The 3D model window does the same for cut-outs and starts them at
+  400k unknowns.
+- Checked on the CutiePi HDMI_D2 pair via, +-120 mil window, 6 layers, 23
+  nets: 3.1 GB peak at 354k unknowns (out of memory before); on 100 ohm
+  Sdd21 -1.1 dB at 3 GHz and -1.5 dB at 6 GHz, Sdd11 -14.8 / -13.6 dB
+  (the TOP pair reads 144 ohm, so most of the reflection is that
+  mismatch).
+
 ## 0.104.1 (2026-11-25)
 
 - 3D view: drill holes are cut out of pours and tracks too. Relief spokes

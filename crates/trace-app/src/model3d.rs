@@ -36,6 +36,9 @@ pub struct Model3dWindow {
     f_ghz: f64,
     port: usize,
     dof: usize,
+    /// Element order: 2, or 1 for a board cut-out (its copper needs many
+    /// small elements more than high-order ones).
+    order: usize,
     run: Option<Run>,
     note: Option<String>,
     tex: Option<(String, egui::TextureHandle)>,
@@ -60,6 +63,7 @@ impl Default for Model3dWindow {
             f_ghz: 6.0,
             port: 0,
             dof: 200_000,
+            order: 2,
             run: None,
             note: None,
             tex: None,
@@ -82,6 +86,7 @@ impl Model3dWindow {
         self.view.phase = None;
         self.title = title.to_string();
         self.f_ghz = f_ghz;
+        self.order = 2;
         self.tex = None;
         self.note = None;
         self.open = true;
@@ -94,6 +99,18 @@ impl Model3dWindow {
         board: &trace_core::Board,
         win: [f64; 4],
         what: Option<&str>,
+    ) -> (String, bool) {
+        self.open_cutout_on(board, win, what, &[])
+    }
+
+    /// As `open_cutout`, driving only the ports of the `focus` nets (all
+    /// when empty); the other traces leaving the box are terminations.
+    fn open_cutout_on(
+        &mut self,
+        board: &trace_core::Board,
+        win: [f64; 4],
+        what: Option<&str>,
+        focus: &[u32],
     ) -> (String, bool) {
         let (w, h) = ((win[2] - win[0]).abs(), (win[3] - win[1]).abs());
         if w < 5.0 || h < 5.0 {
@@ -108,14 +125,16 @@ impl Model3dWindow {
                 true,
             );
         }
-        match trace_core::cutout::model(board, win, true, 1.0) {
+        match trace_core::cutout::model(board, win, true, 1.0, focus) {
             Ok((m, parts, _notes)) => {
-                let ports = m.ports.len() + m.lumped.len();
+                let ports = m.ports.iter().filter(|p| !p.passive).count() + m.lumped.len();
                 let title = match what {
                     Some(t) => t.to_string(),
                     None => format!("Cut-out {w:.0} x {h:.0} mil"),
                 };
                 self.set_model(m, &title, 6.0);
+                self.order = 1;
+                self.dof = self.dof.max(400_000);
                 (
                     format!(
                         "{title}: {ports} port(s) ({} part(s) as lumped ports). \
@@ -143,7 +162,8 @@ impl Model3dWindow {
             if n > 1 { "s" } else { "" },
             if pair { " and its pair" } else { "" }
         );
-        self.open_cutout(board, win, Some(&title))
+        let focus = trace_core::cutout::via_nets(board, via);
+        self.open_cutout_on(board, win, Some(&title), &focus)
     }
 
     pub fn show(&mut self, ctx: &egui::Context) {
@@ -225,7 +245,9 @@ impl Model3dWindow {
                     .range(0.01..=200.0)
                     .suffix(" GHz"),
             );
-            let nports = self.model.as_ref().map_or(1, |m| m.ports.len().max(1));
+            let nports = self.model.as_ref().map_or(1, |m| {
+                (m.ports.iter().filter(|p| !p.passive).count() + m.lumped.len()).max(1)
+            });
             egui::ComboBox::from_id_salt("m3d-port")
                 .selected_text(format!("P{} driven", self.port + 1))
                 .show_ui(ui, |ui| {
@@ -424,6 +446,7 @@ impl Model3dWindow {
             f_adapt: f,
             sweep: vec![f],
             max_unknowns: self.dof,
+            order: self.order,
             fields: Some(fem3d::FieldAsk {
                 f_ghz: f,
                 port: self.port,

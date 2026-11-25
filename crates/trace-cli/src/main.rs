@@ -243,7 +243,7 @@ USAGE:
                                                 <board> may be a stack-up file (.txt) alone: the via in that
                                                 stack-up, without a board
     trace cutout <board> <x0,y0,x1,y1 | via:NET[,HALF]> [--fmin 0] [--fmax 6] [--points 100] [--fem-dof 400000]
-              [--lossless] [--order 1|2]
+              [--lossless] [--order 1|2] [--drive NET[,NET]...] [--all-ports]
               [--value C1=2.2pF]... [out.sNp] [smith.svg]
                                                 3D FEM cut-out of a board window through every layer, with
                                                 every net in it: traces, arcs, pads and pours on each layer,
@@ -251,7 +251,13 @@ USAGE:
                                                 leaves the window over ground is a wave port (a pair side by
                                                 side: one differential port); two-pad parts on the outer
                                                 layers are lumped ports as in planar. via:NET centres a
-                                                +-HALF mil (120) window on NET's via and its pair's.
+                                                +-HALF mil (120) window on NET's via and its pair's, and
+                                                drives only their ports: the other traces leaving are
+                                                matched terminations (no extra solves); where the pair
+                                                ends on pads inside the window (BGA balls), those get a
+                                                lumped port (P to N, 100 ohm; else to a ground pad).
+                                                --drive picks the nets for a window, --all-ports drives
+                                                every trace. First-order elements by default (--order 2).
     trace planar <board> <layer> <x0,y0,x1,y1> [--fmin 0] [--fmax 6] [--points 100] [--fem-dof 400000]
               [--lossless] [--value C1=2.2pF]... [out.sNp] [smith.svg]
                                                 Planar 3D FEM of a window (mil) of an outer layer: traces,
@@ -4428,6 +4434,8 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
     };
     // "via:NET[,HALF]": a window HALF mil (default 120) about NET's first
     // via, and its pair partner's vias beside it.
+    // The nets a via study drives (the rest are terminations).
+    let mut focus: Vec<u32> = Vec::new();
     let w: Vec<f64> = if let Some(spec) = win.strip_prefix("via:") {
         let (net, half) = match spec.rsplit_once(',') {
             Some((n, h)) if h.parse::<f64>().is_ok() => (n, h.parse::<f64>().unwrap()),
@@ -4445,6 +4453,7 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
             .position(|v| v.net == Some(id))
             .ok_or_else(|| format!("net {net} has no via"))?;
         let (w, n, pair) = trace_core::cutout::around_via(&b, first, half).ok_or("no via")?;
+        focus = trace_core::cutout::via_nets(&b, first);
         println!(
             "Window about {n} via(s) of {net}{} at ({:.1}, {:.1}) mil, +-{half} mil",
             if pair { " and its pair" } else { "" },
@@ -4465,7 +4474,9 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
     let mut fmin = 0.0;
     let mut points = 100usize;
     let mut dof = 400_000usize;
-    let mut order = 2usize;
+    // A cut-out's copper needs many small elements more than high-order
+    // ones: first order there.
+    let mut order = if all { 1usize } else { 2 };
     let mut lossy = true;
     let mut values: Vec<(String, String)> = Vec::new();
     let mut outs: Vec<&str> = Vec::new();
@@ -4488,6 +4499,19 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
                     .ok_or("--order 1|2")?
             }
             "--lossless" => lossy = false,
+            "--drive" => {
+                let list = it.next().ok_or("--drive NET[,NET]...")?;
+                focus.clear();
+                for net in list.split(',') {
+                    let id = b
+                        .nets
+                        .iter()
+                        .position(|n| n.name.eq_ignore_ascii_case(net.trim()))
+                        .ok_or_else(|| format!("no net {net}"))?;
+                    focus.push(id as u32);
+                }
+            }
+            "--all-ports" => focus.clear(),
             "--value" => {
                 let x = it.next().ok_or("--value REF=VALUE")?;
                 let (r, v) = x.split_once('=').ok_or("--value REF=VALUE")?;
@@ -4499,7 +4523,7 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
     }
     let win4 = [w[0], w[1], w[2], w[3]];
     let (model, parts, notes) = if all {
-        trace_core::cutout::model(&b, win4, lossy, 1.0)
+        trace_core::cutout::model(&b, win4, lossy, 1.0, &focus)
     } else {
         planar::model(&b, win4, l, lossy, 1.0)
     }
@@ -4542,7 +4566,9 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
             if model
                 .ports
                 .iter()
+                .filter(|p| !p.passive)
                 .all(|p| matches!(p.mode, fem3d::Mode::Diff { .. }))
+                && model.lumped[parts.len()..].iter().all(|l| l.r == 100.0)
             {
                 100.0
             } else {
@@ -4591,7 +4617,12 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
         );
     }
     let ext = planar::with_loads(&sol, &parts, &loads);
-    let np = model.ports.len();
+    // The ports left once the parts are put in: driven wave ports, then
+    // pin ports.
+    let kept: Vec<usize> = (0..sol.n())
+        .filter(|k| !parts.iter().any(|p| p.port == *k))
+        .collect();
+    let np = kept.len();
     let db = |z: trace_core::fdtd::Cx| 20.0 * z.abs().max(1e-12).log10();
     if all || np > 2 {
         // Each port: its Z0, return loss and where most of it goes.
@@ -4606,8 +4637,8 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
                 .join("   ")
         );
         for i in 0..np {
-            let z0 = sol.info.last().map_or(0.0, |x| x[i].z0);
-            let mut line = format!("  {:<34}{:7.1}", model.ports[i].name, z0);
+            let z0 = sol.info.last().map_or(0.0, |x| x[kept[i]].z0);
+            let mut line = format!("  {:<34}{:7.1}", sol.ports[kept[i]], z0);
             for &k in &picks {
                 let s = &ext[k];
                 let best = (0..np)
@@ -4639,7 +4670,10 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
     for o in &outs {
         if o.ends_with(".svg") {
             let c = smith::Curve {
-                name: format!("{} S11 with the parts", model.ports[0].name),
+                name: format!(
+                    "{} S11 with the parts",
+                    kept.first().map_or("", |&k| sol.ports[k].as_str())
+                ),
                 points: sol.f.iter().zip(&ext).map(|(&f, s)| (f, s[0])).collect(),
             };
             std::fs::write(o, smith::svg(&[c], &[fmax / 2.0, fmax], 50.0, file))?;

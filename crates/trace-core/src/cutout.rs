@@ -48,25 +48,7 @@ fn in_poly(v: &[[f64; 2]], p: [f64; 2]) -> bool {
 pub fn around_via(board: &Board, via: usize, half: f64) -> Option<([f64; 4], usize, bool)> {
     let vias = &board.geometry.vias;
     let first = vias.get(via)?;
-    let partner = first.net.and_then(|id| {
-        let net = &board.nets.get(id as usize)?.name;
-        board
-            .diff_pairs
-            .iter()
-            .cloned()
-            .chain(crate::zcheck::name_pairs(board))
-            .find_map(|p| {
-                if p.positive.eq_ignore_ascii_case(net) {
-                    Some(p.negative)
-                } else if p.negative.eq_ignore_ascii_case(net) {
-                    Some(p.positive)
-                } else {
-                    None
-                }
-            })
-            .and_then(|n| board.nets.iter().position(|x| x.name == n))
-            .map(|n| n as u32)
-    });
+    let partner = first.net.and_then(|id| partner(board, id));
     let at = |v: &crate::geometry::Via| [v.at.x.mil(), v.at.y.mil()];
     let c0 = at(first);
     let near: Vec<[f64; 2]> = vias
@@ -90,13 +72,49 @@ pub fn around_via(board: &Board, via: usize, half: f64) -> Option<([f64; 4], usi
     ))
 }
 
+/// The differential pair partner of net `id` (from the board's pairs, or
+/// by name: _P/_N, +/-).
+pub fn partner(board: &Board, id: u32) -> Option<u32> {
+    let net = &board.nets.get(id as usize)?.name;
+    board
+        .diff_pairs
+        .iter()
+        .cloned()
+        .chain(crate::zcheck::name_pairs(board))
+        .find_map(|p| {
+            if p.positive.eq_ignore_ascii_case(net) {
+                Some(p.negative)
+            } else if p.negative.eq_ignore_ascii_case(net) {
+                Some(p.positive)
+            } else {
+                None
+            }
+        })
+        .and_then(|n| board.nets.iter().position(|x| x.name == n))
+        .map(|n| n as u32)
+}
+
+/// The nets a via study drives: the via's own and its pair partner's.
+pub fn via_nets(board: &Board, via: usize) -> Vec<u32> {
+    let Some(id) = board.geometry.vias.get(via).and_then(|v| v.net) else {
+        return Vec::new();
+    };
+    std::iter::once(id).chain(partner(board, id)).collect()
+}
+
 /// The FEM model of the window `win` (x0, y0, x1, y1, mil) through every
-/// copper layer, its parts, and notes on what was assumed.
+/// copper layer, its parts, and notes on what was assumed. With `focus`
+/// (board net ids), only the ports of those nets are driven: every other
+/// trace leaving the window is a matched termination, which costs no
+/// solves; and where a focus net ends on a pad inside the window (a BGA
+/// ball, a chip pin) rather than leaving it, that pad gets a lumped port:
+/// to its pair partner's pad (100 ohm), else to the nearest ground pad.
 pub fn model(
     board: &Board,
     win: [f64; 4],
     lossy: bool,
     rough_um: f64,
+    focus: &[u32],
 ) -> Result<(Model, Vec<Part>, Vec<String>), String> {
     let st = crate::fdtd::stack(&board.stackup);
     let nl = st.sheet.len();
@@ -175,6 +193,8 @@ pub fn model(
     let mut crossings: Vec<Crossing> = Vec::new();
     let mut nets_seen: std::collections::BTreeSet<u32> = Default::default();
     let mut parts_pads: [BTreeMap<u32, Vec<&Pad>>; 2] = Default::default();
+    // Every surface pad in the window, by side (for pin ports).
+    let mut side_pads: [Vec<&Pad>; 2] = Default::default();
     for l in 0..nl {
         let on = |r: &LayerRef| *r == LayerRef::Copper(l as u8) || *r == LayerRef::AllCopper;
         // Tracks, and arcs as chords.
@@ -210,10 +230,26 @@ pub fn model(
             }
         }
         for (a, b, w, bnet) in segs {
-            if !inwin(a[0], a[1], w) && !inwin(b[0], b[1], w) {
+            // The part of the segment inside the window (Liang-Barsky):
+            // a trace can cross it with both ends outside.
+            let d = [b[0] - a[0], b[1] - a[1]];
+            let (mut t0, mut t1) = (0.0f64, 1.0f64);
+            let mut hit = true;
+            for (k, lo, hi) in [(0usize, x0 - w, x1 + w), (1, y0 - w, y1 + w)] {
+                if d[k].abs() < 1e-12 {
+                    if a[k] < lo || a[k] > hi {
+                        hit = false;
+                    }
+                    continue;
+                }
+                let (ta, tb) = ((lo - a[k]) / d[k], (hi - a[k]) / d[k]);
+                let (tn, tf) = (ta.min(tb), ta.max(tb));
+                t0 = t0.max(tn);
+                t1 = t1.min(tf);
+            }
+            if !hit || t0 > t1 {
                 continue;
             }
-            let d = [b[0] - a[0], b[1] - a[1]];
             let len = d[0].hypot(d[1]).max(1e-9);
             let (ux, uy) = (d[0] / len, d[1] / len);
             let (nx, ny) = (-uy * w / 2.0, ux * w / 2.0);
@@ -234,33 +270,44 @@ pub fn model(
             if net == 0 {
                 continue;
             }
-            for (p, q) in [(a, b), (b, a)] {
-                if inwin(p[0], p[1], 0.0) || !inwin(q[0], q[1], 0.0) {
+            // Where its centre line crosses the window's own edge, going
+            // in (from a) and out (to b).
+            let (mut s0, mut s1) = (0.0f64, 1.0f64);
+            let (mut e0, mut e1) = (None, None);
+            for (k, lo, hi) in [(0usize, x0, x1), (1, y0, y1)] {
+                if d[k].abs() < 1e-12 {
+                    if a[k] < lo || a[k] > hi {
+                        s0 = 2.0;
+                    }
                     continue;
                 }
-                // The face it enters by: the last one crossed from p.
-                let mut best = (0usize, false, x0, -1.0f64);
-                for (a, high, face) in
-                    [(0, false, x0), (0, true, x1), (1, false, y0), (1, true, y1)]
-                {
-                    let outside = if high { p[a] > face } else { p[a] < face };
-                    if outside {
-                        let t = (face - p[a]) / (q[a] - p[a]);
-                        if t > best.3 {
-                            best = (a, high, face, t);
-                        }
-                    }
+                let (ta, tb) = ((lo - a[k]) / d[k], (hi - a[k]) / d[k]);
+                let (tn, tf, hn) = if ta < tb {
+                    (ta, tb, false)
+                } else {
+                    (tb, ta, true)
+                };
+                if tn > s0 {
+                    s0 = tn;
+                    e0 = Some((k, hn, tn));
                 }
-                let (axis, high, face) = (best.0, best.1, best.2);
+                if tf < s1 {
+                    s1 = tf;
+                    e1 = Some((k, !hn, tf));
+                }
+            }
+            if s0 > s1 {
+                continue;
+            }
+            for (axis, high, t) in [e0, e1].into_iter().flatten() {
                 let along = 1 - axis;
-                let k = ((face - p[axis]) / (q[axis] - p[axis])).clamp(0.0, 1.0);
                 crossings.push(Crossing {
                     layer: l,
                     net,
                     board_net: bnet,
                     axis,
                     high,
-                    at: p[along] + (q[along] - p[along]) * k,
+                    at: a[along] + d[along] * t,
                     w,
                 });
             }
@@ -298,6 +345,9 @@ pub fn model(
             if p.hole.0 == 0 && (l == 0 || l == nl - 1) {
                 if let Some(c) = p.component {
                     parts_pads[(l != 0) as usize].entry(c).or_default().push(p);
+                }
+                if inwin(cx, cy, 0.0) {
+                    side_pads[(l != 0) as usize].push(p);
                 }
             }
             let net = mnet(p.net);
@@ -543,7 +593,10 @@ pub fn model(
         merged.push(s);
     }
     let layer_name = |l: usize| st.names.get(l).cloned().unwrap_or(format!("L{}", l + 1));
+    let focused = |n: Option<u32>| focus.is_empty() || n.is_some_and(|n| focus.contains(&n));
     let mut ports = Vec::new();
+    // Driven ports per focus net (a pair port counts for both).
+    let mut driven_of: HashMap<u32, usize> = HashMap::new();
     for s in &merged {
         let c = &crossings[s.c];
         let (lo_a, hi_a, wa) = if c.axis == 0 {
@@ -555,6 +608,17 @@ pub fn model(
             ((s.lo.max(lo_a)) - lo_a) * MIL,
             ((s.hi.min(hi_a)) - lo_a) * MIL,
         );
+        let passive =
+            !(focused(c.board_net) || s.minus.is_some_and(|m| focused(crossings[m].board_net)));
+        if !passive {
+            for n in [Some(c.board_net), s.minus.map(|m| crossings[m].board_net)]
+                .into_iter()
+                .flatten()
+                .flatten()
+            {
+                *driven_of.entry(n).or_insert(0) += 1;
+            }
+        }
         let (mode, label) = match s.minus {
             Some(m) => (
                 Mode::Diff {
@@ -566,16 +630,129 @@ pub fn model(
             None => (Mode::Tem { signal: c.net }, name(c.board_net)),
         };
         ports.push(Port {
-            name: format!("P{} {} {}", ports.len() + 1, label, layer_name(c.layer)),
+            name: format!("{label} {}", layer_name(c.layer)),
             axis: c.axis,
             high: c.high,
             lo: [a.max(0.0), s.zlo],
             hi: [b.min(wa), s.zhi],
             mode,
             deembed: 0.0,
+            passive,
         });
     }
-    if ports.is_empty() {
+    // Driven ports first (S counts them in order), then the terminations.
+    ports.sort_by_key(|p| p.passive);
+    let nd = ports.iter().filter(|p| !p.passive).count();
+    for (k, p) in ports.iter_mut().enumerate() {
+        p.name = if p.passive {
+            format!("T{} {}", k + 1 - nd, p.name)
+        } else {
+            format!("P{} {}", k + 1, p.name)
+        };
+    }
+    if nd < ports.len() {
+        notes.push(format!(
+            "{} other traces leave the window: matched terminations, not driven",
+            ports.len() - nd
+        ));
+    }
+    // Focus nets that end on a pad inside the window, not at its edge.
+    let centre = [(x0 + x1) / 2.0, (y0 + y1) / 2.0];
+    let pad_of = |n: u32| -> Option<(usize, &Pad)> {
+        (0..2)
+            .flat_map(|side| side_pads[side].iter().map(move |p| (side, *p)))
+            .filter(|(_, p)| p.net == Some(n))
+            .min_by(|a, b| {
+                let d = |p: &Pad| (p.at.x.mil() - centre[0]).hypot(p.at.y.mil() - centre[1]);
+                d(a.1).total_cmp(&d(b.1))
+            })
+    };
+    let ends: Vec<u32> = if focus.is_empty() {
+        Vec::new()
+    } else {
+        focus
+            .iter()
+            .copied()
+            .filter(|n| driven_of.get(n).copied().unwrap_or(0) < 2 && pad_of(*n).is_some())
+            .collect()
+    };
+    let mut pins: Vec<Lumped> = Vec::new();
+    let mut done: Vec<u32> = Vec::new();
+    for &n in &ends {
+        if done.contains(&n) {
+            continue;
+        }
+        let Some((side, pad)) = pad_of(n) else {
+            continue;
+        };
+        let zs = if side == 0 { z(0) } else { z(nl - 1) };
+        // Its pair partner's pad beside it: one differential pin port.
+        let mate = ends
+            .iter()
+            .copied()
+            .filter(|&m| m != n && !done.contains(&m) && is_pair(Some(n), Some(m)))
+            .find_map(|m| pad_of(m).filter(|(s2, _)| *s2 == side).map(|(_, p)| (m, p)));
+        if let Some((m, mp)) = mate {
+            if let Some((lo, hi, dir)) = crate::planar::pad_gap(pad, mp, &xy) {
+                // Positive end at the high side of the gap.
+                let (hi_net, lo_net) = if [mp.at.x.mil(), mp.at.y.mil()][dir]
+                    > [pad.at.x.mil(), pad.at.y.mil()][dir]
+                {
+                    (m, n)
+                } else {
+                    (n, m)
+                };
+                pins.push(Lumped {
+                    name: format!("pin {}/{}", name(Some(hi_net)), name(Some(lo_net))),
+                    z: zs,
+                    lo,
+                    hi,
+                    dir,
+                    r: 100.0,
+                });
+                done.extend([n, m]);
+                continue;
+            }
+        }
+        // Else to the nearest ground pad side by side with it.
+        let g = side_pads[side]
+            .iter()
+            .filter(|p| is_gnd(p.net))
+            .filter_map(|p| crate::planar::pad_gap(pad, p, &xy).map(|g| (p, g)))
+            .min_by(|a, b| {
+                let d =
+                    |p: &Pad| (p.at.x.mil() - pad.at.x.mil()).hypot(p.at.y.mil() - pad.at.y.mil());
+                d(a.0).total_cmp(&d(b.0))
+            });
+        match g {
+            Some((_, (lo, hi, dir))) => {
+                pins.push(Lumped {
+                    name: format!("pin {}", name(Some(n))),
+                    z: zs,
+                    lo,
+                    hi,
+                    dir,
+                    r: 50.0,
+                });
+                done.push(n);
+            }
+            None => notes.push(format!(
+                "{} ends on a pad in the window with no ground pad beside it along x or y: no port there",
+                name(Some(n))
+            )),
+        }
+    }
+    if !pins.is_empty() {
+        notes.push(format!(
+            "{} pad(s) where the via's nets end inside the window: lumped ports ({})",
+            pins.len(),
+            pins.iter()
+                .map(|p| p.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    if nd == 0 && pins.is_empty() {
         return Err(
             "no trace leaves the window over ground copper: nothing to drive (widen the window so the lines cross its edge)"
                 .into(),
@@ -589,8 +766,9 @@ pub fn model(
         parts.extend(pp);
     }
     for (k, p) in parts.iter_mut().enumerate() {
-        p.port = ports.len() + k;
+        p.port = nd + k;
     }
+    lumped.extend(pins);
     notes.insert(
         0,
         format!(
@@ -696,9 +874,90 @@ mod tests {
         b
     }
 
+    /// The via's net ending on a bottom pad inside the window (a BGA
+    /// ball): a pin port to the ground pad beside it, and the other trace
+    /// leaving the window only a termination when the via's net is the
+    /// focus.
+    #[test]
+    fn a_net_ending_on_a_pad_gets_a_pin_port() {
+        let mut b = board();
+        // The L3 line now stops short of the edge, and a second net runs
+        // across the window on L3 (a termination).
+        b.geometry.tracks[1].end = Point::mil(100.0, 60.0);
+        b.nets.push(Net {
+            name: "OTHER".into(),
+            routed_length: Length(0),
+            via_length: Length(0),
+            vias: 0,
+            pads: 0,
+            pieces: 1,
+            has_pour: false,
+        });
+        b.geometry.tracks.push(Track {
+            layer: LayerRef::Copper(2),
+            net: Some(2),
+            start: Point::mil(-40.0, 100.0),
+            end: Point::mil(240.0, 100.0),
+            width: Length::from_mil(4.0),
+            component: None,
+            text: false,
+        });
+        let pad = |x: f64, y: f64, net: u32| Pad {
+            layer: LayerRef::Copper(3),
+            net: Some(net),
+            component: None,
+            name: "B".into(),
+            at: Point::mil(x, y),
+            size_x: Length::from_mil(14.0),
+            size_y: Length::from_mil(14.0),
+            hole: Length(0),
+            shape: PadShape::Round,
+            rotation_deg: 0.0,
+            outline: Vec::new(),
+            stack: Vec::new(),
+            fab: Default::default(),
+        };
+        b.geometry.pads.push(pad(140.0, 60.0, 1));
+        b.geometry.pads.push(pad(140.0, 92.0, 0));
+        b.geometry.tracks.push(Track {
+            layer: LayerRef::Copper(3),
+            net: Some(1),
+            start: Point::mil(100.0, 60.0),
+            end: Point::mil(140.0, 60.0),
+            width: Length::from_mil(6.0),
+            component: None,
+            text: false,
+        });
+        // The bottom pour gives way about the via and the pads.
+        b.geometry.polygons[1].holes = vec![vec![
+            Point::mil(90.0, 45.0),
+            Point::mil(155.0, 45.0),
+            Point::mil(155.0, 105.0),
+            Point::mil(90.0, 105.0),
+        ]];
+        let (m, parts, notes) = model(&b, [0.0, 0.0, 200.0, 120.0], false, 0.0, &[1]).unwrap();
+        eprintln!("{notes:?}");
+        assert!(parts.is_empty());
+        let driven: Vec<&str> = m
+            .ports
+            .iter()
+            .filter(|p| !p.passive)
+            .map(|p| p.name.as_str())
+            .collect();
+        assert_eq!(driven.len(), 1, "{:?}", m.ports);
+        assert!(m.ports.iter().any(|p| p.passive), "{:?}", m.ports);
+        assert_eq!(m.lumped.len(), 1, "{notes:?}");
+        assert_eq!(m.lumped[0].name, "pin SIG");
+        assert_eq!(m.lumped[0].dir, 1);
+        // Without the focus: every trace leaving is driven, no pin.
+        let (m2, _, _) = model(&b, [0.0, 0.0, 200.0, 120.0], false, 0.0, &[]).unwrap();
+        assert!(m2.ports.iter().all(|p| !p.passive));
+        assert!(m2.lumped.is_empty());
+    }
+
     #[test]
     fn a_via_transition_through_the_planes() {
-        let (m, _, notes) = model(&board(), [0.0, 0.0, 200.0, 120.0], false, 0.0).unwrap();
+        let (m, _, notes) = model(&board(), [0.0, 0.0, 200.0, 120.0], false, 0.0, &[]).unwrap();
         eprintln!("{notes:?}");
         assert_eq!(m.ports.len(), 2, "{:?}", m.ports);
         // The signal via had no antipads drawn on L2 and L4: given them.

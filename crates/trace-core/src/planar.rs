@@ -192,6 +192,7 @@ pub fn model(
                     hi: [(c1 - lo_a) * MIL, h + air],
                     mode: Mode::Tem { signal: net },
                     deembed: 0.0,
+                    passive: false,
                 });
             }
         }
@@ -318,6 +319,55 @@ pub fn model(
     Ok((m, parts, notes))
 }
 
+/// The rectangle across the gap between two pads (board mil in, model
+/// metres out through `xy`), as (lo, hi, axis of the current); None when
+/// they are not side by side along x or y.
+pub(crate) fn pad_gap(
+    a: &crate::geometry::Pad,
+    b: &crate::geometry::Pad,
+    xy: &dyn Fn(f64, f64) -> [f64; 2],
+) -> Option<([f64; 2], [f64; 2], usize)> {
+    let ca = [a.at.x.mil(), a.at.y.mil()];
+    let cb = [b.at.x.mil(), b.at.y.mil()];
+    let (dx, dy) = (cb[0] - ca[0], cb[1] - ca[1]);
+    let dir = if dx.abs() >= dy.abs() { 0 } else { 1 };
+    let o = 1 - dir;
+    if [dx, dy][o].abs() > 0.2 * [dx, dy][dir].abs() {
+        return None;
+    }
+    // Pad extents along each axis (0 or 90 degrees).
+    let ext = |p: &crate::geometry::Pad| -> [f64; 2] {
+        let r = (p.rotation_deg.rem_euclid(180.0) - 90.0).abs() < 45.0;
+        let (sx, sy) = (p.size_x.mil(), p.size_y.mil());
+        if r {
+            [sy, sx]
+        } else {
+            [sx, sy]
+        }
+    };
+    let (ea, eb) = (ext(a), ext(b));
+    let (lo_p, hi_p, el, eh) = if [ca, cb][0][dir] <= [ca, cb][1][dir] {
+        (ca, cb, ea, eb)
+    } else {
+        (cb, ca, eb, ea)
+    };
+    let mut g0 = lo_p[dir] + el[dir] / 2.0;
+    let mut g1 = hi_p[dir] - eh[dir] / 2.0;
+    if g1 - g0 < 1.0 {
+        let m = (g0 + g1) / 2.0;
+        g0 = m - 0.5;
+        g1 = m + 0.5;
+    }
+    let wid = el[o].min(eh[o]);
+    let mid = (lo_p[o] + hi_p[o]) / 2.0;
+    let (mut lo, mut hi) = ([0.0; 2], [0.0; 2]);
+    lo[dir] = g0;
+    hi[dir] = g1;
+    lo[o] = mid - wid / 2.0;
+    hi[o] = mid + wid / 2.0;
+    Some((xy(lo[0], lo[1]), xy(hi[0], hi[1]), dir))
+}
+
 /// Two-pad parts: a lumped port across the gap between their pads, in the
 /// plane `z` (model metres; `xy` maps board mil to the model). Part ports
 /// count from 0 here; the caller adds the wave ports.
@@ -340,46 +390,10 @@ pub(crate) fn part_ports(
         if a.net == b.net {
             continue;
         }
-        let ca = [a.at.x.mil(), a.at.y.mil()];
-        let cb = [b.at.x.mil(), b.at.y.mil()];
-        let (dx, dy) = (cb[0] - ca[0], cb[1] - ca[1]);
-        let dir = if dx.abs() >= dy.abs() { 0 } else { 1 };
-        let o = 1 - dir;
-        if [dx, dy][o].abs() > 0.2 * [dx, dy][dir].abs() {
+        let Some((lo, hi, dir)) = pad_gap(a, b, xy) else {
             notes.push(format!("{} is not along x or y: left out", comp.designator));
             continue;
-        }
-        // Pad extents along each axis (0 or 90 degrees).
-        let ext = |p: &crate::geometry::Pad| -> [f64; 2] {
-            let r = (p.rotation_deg.rem_euclid(180.0) - 90.0).abs() < 45.0;
-            let (sx, sy) = (p.size_x.mil(), p.size_y.mil());
-            if r {
-                [sy, sx]
-            } else {
-                [sx, sy]
-            }
         };
-        let (ea, eb) = (ext(a), ext(b));
-        let (lo_p, hi_p, el, eh) = if [ca, cb][0][dir] <= [ca, cb][1][dir] {
-            (ca, cb, ea, eb)
-        } else {
-            (cb, ca, eb, ea)
-        };
-        let mut g0 = lo_p[dir] + el[dir] / 2.0;
-        let mut g1 = hi_p[dir] - eh[dir] / 2.0;
-        if g1 - g0 < 1.0 {
-            let m = (g0 + g1) / 2.0;
-            g0 = m - 0.5;
-            g1 = m + 0.5;
-        }
-        let wid = el[o].min(eh[o]);
-        let mid = (lo_p[o] + hi_p[o]) / 2.0;
-        let (mut lo, mut hi) = ([0.0; 2], [0.0; 2]);
-        lo[dir] = g0;
-        hi[dir] = g1;
-        lo[o] = mid - wid / 2.0;
-        hi[o] = mid + wid / 2.0;
-        let (lo, hi) = (xy(lo[0], lo[1]), xy(hi[0], hi[1]));
         let value = ["Value", "VALUE", "value", "Comment"]
             .iter()
             .find_map(|k| comp.params.get(*k).cloned())

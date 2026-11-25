@@ -172,6 +172,10 @@ pub struct Port {
     pub mode: Mode,
     /// Move the reference plane this far into the model (m).
     pub deembed: f64,
+    /// A matched termination only: it absorbs its mode but is not driven
+    /// and is left out of S (a cut-out's other nets), so it costs no
+    /// solves.
+    pub passive: bool,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -497,6 +501,9 @@ impl Solution {
 pub struct Mesh {
     pub nodes: Vec<[f64; 3]>,
     pub tets: Vec<[u32; 4]>,
+    /// The starting mesh ran out of room before it reached the driven
+    /// nets' copper everywhere (a board cut-out with too few unknowns).
+    pub short: bool,
 }
 
 fn sub(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
@@ -609,6 +616,9 @@ impl Model {
         let h = lambda / per_lambda;
         let tol = self.tol();
         let mut br: [Vec<f64>; 3] = Default::default();
+        // Pad, antipad and barrel lines: hard in the plain grid; when that
+        // is too big, soft, with the grid refined locally about them.
+        let mut capl: [Vec<f64>; 3] = Default::default();
         // Lines that must stay: the box, sheets and dielectric layers.
         let mut hard: [Vec<f64>; 3] = Default::default();
         for a in 0..3 {
@@ -649,8 +659,10 @@ impl Model {
                     for (k, a) in [u, v].into_iter().enumerate() {
                         br[a].push(clamp(a, c[k] - r));
                         br[a].push(clamp(a, c[k] + r));
-                        // The axis stays, so a barrel is never lost.
-                        hard[a].push(clamp(a, c[k]));
+                        // The axis stays, so a barrel is never lost
+                        // (or, when that grid is too big, local
+                        // refinement about it keeps it).
+                        capl[a].push(clamp(a, c[k]));
                     }
                 }
             }
@@ -659,6 +671,7 @@ impl Model {
         let driven: Vec<(u32, usize, f64)> = self
             .ports
             .iter()
+            .filter(|p| !p.passive)
             .flat_map(|p| {
                 let at = if p.high {
                     self.hi[p.axis]
@@ -699,11 +712,27 @@ impl Model {
             // from the mesh's own triangles, which must see the trace's
             // width. Other copper (a cut-out's many nets, the rest of a
             // driven net's route) is detail the passes refine.
+            // (In a grid too big for every outline, only where the sheet
+            // meets the port face.)
             let keep = s.net != 0 && at_port(s);
-            let to = if keep { &mut hard } else { &mut br };
+            let to = if keep { &mut capl } else { &mut br };
             for p in &s.poly {
                 to[u].push(clamp(u, p[0]));
                 to[v].push(clamp(v, p[1]));
+            }
+            if keep {
+                for &(n, a, at) in &driven {
+                    if n != s.net || a == s.axis {
+                        continue;
+                    }
+                    let k = if a == u { 0 } else { 1 };
+                    let o = [u, v][1 - k];
+                    for p in &s.poly {
+                        if (p[k] - at).abs() < tol {
+                            hard[o].push(clamp(o, p[1 - k]));
+                        }
+                    }
+                }
             }
             // Where its edges meet the port faces (a trace crossing at an
             // angle has no corner there), so the port sees its width.
@@ -732,12 +761,12 @@ impl Model {
             // Pads and antipads keep their extents too: merged away, a
             // via's clearance ring can close up and short it to a plane.
             for (c, r) in &caps {
-                hard[u].push(clamp(u, c[0]));
-                hard[v].push(clamp(v, c[1]));
-                hard[u].push(clamp(u, c[0] - r));
-                hard[u].push(clamp(u, c[0] + r));
-                hard[v].push(clamp(v, c[1] - r));
-                hard[v].push(clamp(v, c[1] + r));
+                capl[u].push(clamp(u, c[0]));
+                capl[v].push(clamp(v, c[1]));
+                capl[u].push(clamp(u, c[0] - r));
+                capl[u].push(clamp(u, c[0] + r));
+                capl[v].push(clamp(v, c[1] - r));
+                capl[v].push(clamp(v, c[1] + r));
             }
         }
         for p in &self.ports {
@@ -767,19 +796,31 @@ impl Model {
                     .collect::<Vec<_>>()
             }))
             .fold(ext, f64::min);
+        let lines =
+            |hard: &[Vec<f64>; 3], soft: &[Vec<f64>; 3], d: f64, pa: f64| -> Vec<Vec<f64>> {
+                (0..3)
+                    .map(|a| {
+                        axis_lines(
+                            merge_lines(&hard[a], &soft[a], d.max(tol)),
+                            h.min((self.hi[a] - self.lo[a]) / pa),
+                            tol,
+                        )
+                    })
+                    .collect()
+            };
+        let count = |g: &[Vec<f64>]| 6 * (g[0].len() - 1) * (g[1].len() - 1) * (g[2].len() - 1);
+        let log = std::env::var_os("TRACE_FEM_MESH").is_some();
+        // The plain grid: every pad, antipad and barrel line through the
+        // whole box, merged until it fits.
+        let mut all = hard.clone();
+        for a in 0..3 {
+            all[a].extend_from_slice(&capl[a]);
+        }
         let mut d = 0.0f64;
         loop {
-            let g: Vec<Vec<f64>> = (0..3)
-                .map(|a| {
-                    axis_lines(
-                        merge_lines(&hard[a], &br[a], d.max(tol)),
-                        h.min((self.hi[a] - self.lo[a]) / per_axis),
-                        tol,
-                    )
-                })
-                .collect();
-            let tets = 6 * (g[0].len() - 1) * (g[1].len() - 1) * (g[2].len() - 1);
-            if std::env::var_os("TRACE_FEM_MESH").is_some() {
+            let g = lines(&all, &br, d, per_axis);
+            let tets = count(&g);
+            if log {
                 eprintln!(
                     "  start mesh: merge {:.1} um, lines {} x {} x {}, {tets} tetrahedra",
                     d * 1e6,
@@ -788,13 +829,229 @@ impl Model {
                     g[2].len()
                 );
             }
+            if tets <= max_tets && std::env::var_os("TRACE_FEM_LOCAL").is_none() {
+                return kuhn(&g[0], &g[1], &g[2]);
+            }
             // Never merge past about a barrel's radius: coarser than that,
             // a via can lose its own hole in the planes.
-            if tets <= max_tets || d > ext || d > 1.5 * r_min {
-                return kuhn(&g[0], &g[1], &g[2]);
+            if d > ext || d > 1.5 * r_min {
+                break;
             }
             d = (d * 1.4).max(ext * 1e-3);
         }
+        // Too big (a board cut-out: every via's rings would run through
+        // the whole box): a coarse grid on the layers and the ports, then
+        // refined about each barrel, pad and antipad only.
+        for a in 0..3 {
+            br[a].extend_from_slice(&capl[a]);
+        }
+        let feats = self.features();
+        let budget = if feats.is_empty() {
+            max_tets
+        } else {
+            max_tets / 4
+        };
+        // Lines a micron or two apart (trace edges meeting at a bend)
+        // would grade the grid down to that gap: one line for each such
+        // cluster, the box's own faces kept.
+        let near = 2e-6f64.min(ext * 1e-3);
+        for a in 0..3 {
+            let (b0, b1) = (self.lo[a], self.hi[a]);
+            let mut v = std::mem::take(&mut hard[a]);
+            v.sort_by(|x, y| x.total_cmp(y));
+            let mut out: Vec<f64> = Vec::with_capacity(v.len());
+            for x in v {
+                match out.last_mut() {
+                    Some(l) if x - *l < near => {
+                        if (x - b1).abs() < tol {
+                            *l = x;
+                        }
+                    }
+                    _ => out.push(x),
+                }
+            }
+            if let Some(f) = out.first_mut() {
+                *f = f.min(b0);
+            }
+            hard[a] = out;
+            if log {
+                eprintln!("  hard lines on axis {a}: {}", hard[a].len());
+            }
+        }
+        let mut d = 0.0f64;
+        let g = loop {
+            // A few cells across each axis is enough here: the local
+            // refinement puts the resolution where the copper is.
+            let g = lines(&hard, &br, d, per_axis.min(5.0));
+            let tets = count(&g);
+            if log {
+                eprintln!(
+                    "  coarse mesh: merge {:.1} um, lines {} x {} x {}, {tets} tetrahedra",
+                    d * 1e6,
+                    g[0].len(),
+                    g[1].len(),
+                    g[2].len()
+                );
+            }
+            if tets <= budget || d > ext {
+                break g;
+            }
+            d = (d * 1.4).max(ext * 1e-3);
+        };
+        let mut m = kuhn(&g[0], &g[1], &g[2]);
+        // Up to half the unknowns (not a third): a start that misses its
+        // vias is no start at all.
+        m.short = !m.refine_about(&feats, max_tets * 3 / 2, log);
+        m
+    }
+
+    /// Where the starting mesh must be fine (board cut-outs): each barrel
+    /// (cells no wider than its radius, so it has nodes inside), each pad
+    /// (its radius) and each antipad ring (its width, so the ring stays
+    /// open between pad and plane); and the copper of the driven nets
+    /// (half a trace's width), so the path from port to via is whole.
+    /// Those of the driven nets come first (`pri` 0).
+    fn features(&self) -> Vec<Feature> {
+        let tol = self.tol();
+        let mut out = Vec::new();
+        let mut nets: Vec<u32> = Vec::new();
+        for p in self.ports.iter().filter(|p| !p.passive) {
+            match p.mode {
+                Mode::Tem { signal } => nets.push(signal),
+                Mode::Diff { plus, minus } => nets.extend([plus, minus]),
+                Mode::Te10 => {}
+            }
+        }
+        let driven = |n: u32| n != 0 && nets.contains(&n);
+        // Sheets under a lumped port (a pin's pads) count as driven too.
+        let at_lumped = |s: &Sheet| {
+            s.axis == 2
+                && self.lumped.iter().any(|l| {
+                    (l.z - s.at).abs() < tol && {
+                        let (mut lo, mut hi) = ([f64::MAX; 2], [f64::MIN; 2]);
+                        for q in s.poly.iter().chain(s.disc.iter().map(|d| &d.0)) {
+                            for k in 0..2 {
+                                lo[k] = lo[k].min(q[k]);
+                                hi[k] = hi[k].max(q[k]);
+                            }
+                        }
+                        if let Some((c, r)) = s.disc {
+                            for k in 0..2 {
+                                lo[k] = lo[k].min(c[k] - r);
+                                hi[k] = hi[k].max(c[k] + r);
+                            }
+                        }
+                        let m = 0.5 * (l.hi[0] - l.lo[0]).max(l.hi[1] - l.lo[1]);
+                        (0..2).all(|k| lo[k] <= l.hi[k] + m && hi[k] >= l.lo[k] - m)
+                    }
+                })
+        };
+        // Radii about each centre, by plane axis, for the rings' widths.
+        let key =
+            |a: usize, c: [f64; 2]| (a, (c[0] / tol).round() as i64, (c[1] / tol).round() as i64);
+        let mut inner: HashMap<(usize, i64, i64), Vec<f64>> = HashMap::new();
+        for s in &self.solids {
+            if let (Fill::Pec { net }, Shape::Cyl { axis, c, r, lo, hi }) = (&s.fill, &s.shape) {
+                inner.entry(key(*axis, *c)).or_default().push(*r);
+                let (u, v) = others(*axis);
+                let mut flo = [0.0; 3];
+                let mut fhi = [0.0; 3];
+                flo[*axis] = *lo;
+                fhi[*axis] = *hi;
+                flo[u] = c[0] - 1.5 * r;
+                fhi[u] = c[0] + 1.5 * r;
+                flo[v] = c[1] - 1.5 * r;
+                fhi[v] = c[1] + 1.5 * r;
+                out.push(Feature {
+                    axis: *axis,
+                    lo: flo,
+                    hi: fhi,
+                    h: *r,
+                    poly: None,
+                    pri: (!driven(*net)) as u8,
+                });
+            }
+        }
+        for s in &self.sheets {
+            if let Some((c, r)) = s.disc {
+                inner.entry(key(s.axis, c)).or_default().push(r);
+            }
+        }
+        for s in &self.sheets {
+            let (u, v) = others(s.axis);
+            let pri = (!(driven(s.net) || at_lumped(s))) as u8;
+            let mut push = |c0: [f64; 2], c1: [f64; 2], r: f64, h: f64, pri: u8| {
+                let mut flo = [0.0; 3];
+                let mut fhi = [0.0; 3];
+                flo[s.axis] = s.at - 1e3 * tol;
+                fhi[s.axis] = s.at + 1e3 * tol;
+                flo[u] = c0[0].min(c1[0]) - r - h;
+                fhi[u] = c0[0].max(c1[0]) + r + h;
+                flo[v] = c0[1].min(c1[1]) - r - h;
+                fhi[v] = c0[1].max(c1[1]) + r + h;
+                out.push(Feature {
+                    axis: s.axis,
+                    lo: flo,
+                    hi: fhi,
+                    h,
+                    poly: None,
+                    pri,
+                });
+            };
+            if let Some((c, r)) = s.disc {
+                push(c, c, r, r, pri);
+            }
+            for &(a, b, r) in &s.holes {
+                // The ring: from the largest pad or barrel inside the hole
+                // out to the hole's edge.
+                let pad = inner.get(&key(s.axis, a)).map_or(0.0, |rs| {
+                    rs.iter()
+                        .copied()
+                        .filter(|&x| x < r - tol)
+                        .fold(0.0, f64::max)
+                });
+                let w = (r - pad).max(0.1 * r);
+                // A ring about a driven via comes first.
+                let ring_pri = (!self.solids.iter().any(|so| {
+                    matches!((&so.fill, &so.shape),
+                        (Fill::Pec { net }, Shape::Cyl { c, .. })
+                            if driven(*net) && (c[0] - a[0]).hypot(c[1] - a[1]) < r)
+                })) as u8;
+                push(a, b, r, w, ring_pri.min(pri));
+            }
+            // A driven trace or pad: cells of 0.6 its width along it (a
+            // 45-degree strip still has a chain of edges inside it).
+            if pri == 0 && s.poly.len() >= 3 && s.poly.len() <= 8 {
+                let n = s.poly.len();
+                let mut w = f64::MAX;
+                for i in 0..n {
+                    let (a, b) = (s.poly[i], s.poly[(i + 1) % n]);
+                    let l = (b[0] - a[0]).hypot(b[1] - a[1]);
+                    if l > tol {
+                        w = w.min(l);
+                    }
+                }
+                if w < f64::MAX {
+                    let mut flo = [0.0; 3];
+                    let mut fhi = [0.0; 3];
+                    flo[s.axis] = s.at - 1e3 * tol;
+                    fhi[s.axis] = s.at + 1e3 * tol;
+                    flo[u] = s.poly.iter().map(|q| q[0]).fold(f64::MAX, f64::min);
+                    fhi[u] = s.poly.iter().map(|q| q[0]).fold(f64::MIN, f64::max);
+                    flo[v] = s.poly.iter().map(|q| q[1]).fold(f64::MAX, f64::min);
+                    fhi[v] = s.poly.iter().map(|q| q[1]).fold(f64::MIN, f64::max);
+                    out.push(Feature {
+                        axis: s.axis,
+                        lo: flo,
+                        hi: fhi,
+                        h: 0.6 * w,
+                        poly: Some(s.poly.clone()),
+                        pri: 0,
+                    });
+                }
+            }
+        }
+        out
     }
 
     /// Material at a point: (complex Er, PEC net).
@@ -926,7 +1183,11 @@ fn kuhn(x: &[f64], y: &[f64], z: &[f64]) -> Mesh {
             }
         }
     }
-    Mesh { nodes, tets }
+    Mesh {
+        nodes,
+        tets,
+        short: false,
+    }
 }
 
 fn ekey(a: u32, b: u32) -> (u32, u32) {
@@ -1015,6 +1276,148 @@ impl Mesh {
             }
         }
         self.tets = cur;
+    }
+}
+
+/// A box where the starting mesh's cells must be no wider than `h`
+/// across the plane normal to `axis`.
+struct Feature {
+    axis: usize,
+    lo: [f64; 3],
+    hi: [f64; 3],
+    h: f64,
+    /// A sheet's outline (in its plane's axes): only the tetrahedra that
+    /// reach it, not its whole box.
+    poly: Option<Vec<[f64; 2]>>,
+    /// 0 first (the driven nets), then 1 while the budget lasts.
+    pri: u8,
+}
+
+impl Mesh {
+    /// Bisects the tetrahedra in each feature's box that are wider than
+    /// its `h` (across its plane, by their widest edge there) until none
+    /// is, or the mesh would pass `max_tets`.
+    /// False when the driven nets' features (`pri` 0) did not all fit.
+    fn refine_about(&mut self, feats: &[Feature], max_tets: usize, log: bool) -> bool {
+        for pri in 0..2u8 {
+            let fs: Vec<&Feature> = feats.iter().filter(|f| f.pri <= pri).collect();
+            if fs.is_empty() {
+                continue;
+            }
+            if !self.refine_rounds(&fs, max_tets, log) {
+                return pri > 0;
+            }
+        }
+        true
+    }
+
+    /// Rounds of `refine_about` on these features; false when the budget
+    /// ran out first.
+    fn refine_rounds(&mut self, feats: &[&Feature], max_tets: usize, log: bool) -> bool {
+        for round in 0..60 {
+            let mut edges = Vec::new();
+            for t in &self.tets {
+                let p = [
+                    self.nodes[t[0] as usize],
+                    self.nodes[t[1] as usize],
+                    self.nodes[t[2] as usize],
+                    self.nodes[t[3] as usize],
+                ];
+                let mut lo = p[0];
+                let mut hi = p[0];
+                for q in &p[1..] {
+                    for a in 0..3 {
+                        lo[a] = lo[a].min(q[a]);
+                        hi[a] = hi[a].max(q[a]);
+                    }
+                }
+                // The finest feature this tetrahedron meets, and its axis.
+                let mut need: Option<(f64, usize)> = None;
+                for f in feats {
+                    if !(0..3).all(|a| lo[a] <= f.hi[a] && hi[a] >= f.lo[a]) {
+                        continue;
+                    }
+                    let (u, v) = others(f.axis);
+                    let wide = (hi[u] - lo[u]).max(hi[v] - lo[v]);
+                    if wide <= 1.01 * f.h || need.is_some_and(|n| f.h >= n.0) {
+                        continue;
+                    }
+                    if let Some(poly) = &f.poly {
+                        // Near the outline: its centre within half the
+                        // box's diagonal of it.
+                        let c = [(lo[u] + hi[u]) / 2.0, (lo[v] + hi[v]) / 2.0];
+                        let rad = 0.5 * (hi[u] - lo[u]).hypot(hi[v] - lo[v]);
+                        if !point_in_poly(poly, c, rad) {
+                            continue;
+                        }
+                    }
+                    need = Some((f.h, f.axis));
+                }
+                let Some((fh, ax)) = need else { continue };
+                // Split the edge widest across the feature's plane.
+                let (u, v) = others(ax);
+                let mut best = (ekey(t[0], t[1]), -1.0);
+                for (a, b) in LOCAL_EDGES {
+                    let d = sub(p[b], p[a]);
+                    let l = d[u] * d[u] + d[v] * d[v];
+                    let e = ekey(t[a], t[b]);
+                    if l > best.1 || (l == best.1 && e < best.0) {
+                        best = (e, l);
+                    }
+                }
+                let (u2, v2) = others(ax);
+                let wide = (hi[u2] - lo[u2]).max(hi[v2] - lo[v2]);
+                edges.push((best.0, wide / fh));
+            }
+            if edges.is_empty() {
+                return true;
+            }
+            // Coarsest first (by how far each is from its size), so a
+            // round cut short for the budget still does the most good.
+            edges.sort_unstable_by(|a, b| b.1.total_cmp(&a.1));
+            let mut seen = std::collections::HashSet::new();
+            let edges: Vec<(u32, u32)> = edges
+                .into_iter()
+                .filter(|e| seen.insert(e.0))
+                .map(|e| e.0)
+                .collect();
+            let before = (self.nodes.len(), self.tets.clone());
+            self.refine(&[], &edges);
+            // Over the budget: the coarsest half, then a quarter...
+            let mut take = edges.len();
+            while self.tets.len() > max_tets && take > edges.len() / 64 + 1 {
+                take /= 2;
+                self.nodes.truncate(before.0);
+                self.tets = before.1.clone();
+                self.refine(&[], &edges[..take]);
+            }
+            if log {
+                eprintln!(
+                    "  refine about pads and vias {}: {} edges split, {} tetrahedra",
+                    round + 1,
+                    edges.len(),
+                    self.tets.len()
+                );
+            }
+            if self.tets.len() > max_tets {
+                self.nodes.truncate(before.0);
+                self.tets = before.1;
+                if log {
+                    eprintln!("  (over {max_tets}: kept the last round)");
+                }
+                return false;
+            }
+            if take < edges.len() {
+                if log {
+                    eprintln!(
+                        "  (budget: {take} of {} edges in the last round)",
+                        edges.len()
+                    );
+                }
+                return false;
+            }
+        }
+        true
     }
 }
 
@@ -1385,6 +1788,9 @@ fn assemble_mesh(
             on_conductor(&pts, m)
         });
     }
+    if std::env::var_os("TRACE_FEM_CONN").is_some() {
+        conn_report(model, mesh, &pec, tol);
+    }
     let mut key_dof: HashMap<Key, u32> = HashMap::new();
     let mut dof = Vec::with_capacity(tets.len());
     for s in &tets {
@@ -1451,6 +1857,17 @@ fn assemble_mesh(
         if port_tris[pi].is_empty() {
             return Err(format!("port {} has no mesh faces", pt.name));
         }
+        // A termination absorbs as the radiation walls do (k = k0 √εr of
+        // the fill at each face: β of a stripline, near it on microstrip),
+        // without a mode solve.
+        if pt.passive {
+            for bf in &port_tris[pi] {
+                if is_pec_tet[bf.tet].is_none() {
+                    rad.push((*bf, k0 * eps[bf.tet].re.sqrt()));
+                }
+            }
+            continue;
+        }
         ports.push(port_mode(
             model,
             mesh,
@@ -1471,6 +1888,79 @@ fn assemble_mesh(
         ports,
         rad,
     })
+}
+
+/// Debug: the conductors as the mesh sees them (nodes joined by PEC
+/// edges), and whether each driven port's signal copper at its face is
+/// joined to the others'.
+fn conn_report(model: &Model, mesh: &Mesh, pec: &HashMap<Key, bool>, tol: f64) {
+    let n = mesh.nodes.len();
+    let mut up: Vec<u32> = (0..n as u32).collect();
+    fn find(up: &mut [u32], mut a: u32) -> u32 {
+        while up[a as usize] != a {
+            up[a as usize] = up[up[a as usize] as usize];
+            a = up[a as usize];
+        }
+        a
+    }
+    for (k, v) in pec {
+        if *v && k.0 == 0 {
+            let (a, b) = (find(&mut up, k.1[0]), find(&mut up, k.1[1]));
+            if a != b {
+                up[a as usize] = b;
+            }
+        }
+    }
+    for (pi, p) in model.ports.iter().enumerate().filter(|(_, p)| !p.passive) {
+        let at = if p.high {
+            model.hi[p.axis]
+        } else {
+            model.lo[p.axis]
+        };
+        let nets: Vec<u32> = match p.mode {
+            Mode::Tem { signal } => vec![signal],
+            Mode::Diff { plus, minus } => vec![plus, minus],
+            Mode::Te10 => vec![],
+        };
+        for net in nets {
+            let mut comps: Vec<u32> = Vec::new();
+            for (i, q) in mesh.nodes.iter().enumerate() {
+                if (q[p.axis] - at).abs() < tol
+                    && model.conductor_at(*q, tol, 2 * p.axis + p.high as usize) == Some(net)
+                {
+                    let c = find(&mut up, i as u32);
+                    if !comps.contains(&c) {
+                        comps.push(c);
+                    }
+                }
+            }
+            // How many nodes each component has, and where it reaches.
+            for c in &comps {
+                let mut cnt = 0;
+                let mut lo = [f64::MAX; 3];
+                let mut hi = [f64::MIN; 3];
+                for i in 0..n {
+                    if find(&mut up, i as u32) == *c {
+                        cnt += 1;
+                        for a in 0..3 {
+                            lo[a] = lo[a].min(mesh.nodes[i][a]);
+                            hi[a] = hi[a].max(mesh.nodes[i][a]);
+                        }
+                    }
+                }
+                eprintln!(
+                    "  conn: port {} net {net}: component {c} ({cnt} nodes) spans x {:.1}..{:.1} y {:.1}..{:.1} z {:.1}..{:.1} mil",
+                    pi + 1,
+                    lo[0] / 25.4e-6,
+                    hi[0] / 25.4e-6,
+                    lo[1] / 25.4e-6,
+                    hi[1] / 25.4e-6,
+                    lo[2] / 25.4e-6,
+                    hi[2] / 25.4e-6
+                );
+            }
+        }
+    }
 }
 
 /// The 2D potential problem on a port: Lagrange elements of order `p`
@@ -1890,10 +2380,17 @@ fn solve_at(
     };
     let nb = if order >= 2 { 20 } else { 6 };
     let iter = iterative.unwrap_or(n > ITER_MIN);
-    let mut trip: Vec<Triplet<usize, usize, c64>> =
-        Vec::with_capacity(asm.tets.len() * nb * nb / 2);
-    // The iterative solver's factor is taken at f_pre: keep ε·mass.
-    let mut emass: Vec<[f32; 2]> = Vec::new();
+    // Straight into the matrix's own pattern (every pair of unknowns that
+    // share a tetrahedron), not a list of entries: a fifth of the memory.
+    let mut trip = Csr::pattern(n, &asm.dof);
+    tlog("pattern");
+    // The iterative solver's factor is taken at f_pre: keep ε·mass, on
+    // the same pattern.
+    let mut emass: Vec<[f32; 2]> = if iter {
+        vec![[0.0; 2]; trip.val.len()]
+    } else {
+        Vec::new()
+    };
     let mut b = Vec::new();
     let mut stiff = vec![0.0; nb * nb];
     let mut mass = vec![0.0; nb * nb];
@@ -1918,15 +2415,17 @@ fn solve_at(
             for c in 0..nb {
                 let Some(dc) = d[c] else { continue };
                 let v = c64::new(stiff[a * nb + c], 0.0) - ke * mass[a * nb + c];
-                trip.push(Triplet::new(da as usize, dc as usize, v));
+                let k = trip.at(da, dc);
+                trip.val[k] += v;
                 if iter {
                     let em = asm.eps[ti] * mass[a * nb + c];
-                    emass.push([em.re as f32, em.im as f32]);
+                    emass[k][0] += em.re as f32;
+                    emass[k][1] += em.im as f32;
                 }
             }
         }
     }
-    let add_face = |trip: &mut Vec<Triplet<usize, usize, c64>>, bf: &BFace, coef: c64| {
+    let add_face = |trip: &mut Csr, bf: &BFace, coef: c64| {
         let (area, tr) = face_traces(mesh, &asm, bf);
         let d = &asm.dof[bf.tet];
         for (q, (_, wq)) in Q_TRI4.iter().enumerate() {
@@ -1934,11 +2433,7 @@ fn solve_at(
                 let Some(da) = d[*ia] else { continue };
                 for (ic, vc) in &tr[q] {
                     let Some(dc) = d[*ic] else { continue };
-                    trip.push(Triplet::new(
-                        da as usize,
-                        dc as usize,
-                        coef * (wq * area * dot(*va, *vc)),
-                    ));
+                    trip.add(da, dc, coef * (wq * area * dot(*va, *vc)));
                 }
             }
         }
@@ -1953,7 +2448,12 @@ fn solve_at(
     // V = ∫E·e0 / ∫e·e0, e0 the magnetic shape. On microstrip, where the
     // dielectric makes the electric and magnetic shapes differ, the plain
     // local condition loses a few percent of the power.
-    let np = asm.ports.len();
+    // The driven ports (`asm.ports` holds only these; the passive ones
+    // absorb as radiation faces), by their model index.
+    let dr: Vec<usize> = (0..model.ports.len())
+        .filter(|&i| !model.ports[i].passive)
+        .collect();
+    let np = dr.len();
     let mut be = vec![vec![0.0f64; n]; np];
     let mut b0 = vec![vec![0.0f64; n]; np];
     for (pi, pm) in asm.ports.iter().enumerate() {
@@ -1998,11 +2498,7 @@ fn solve_at(
                     lvolt[li][da as usize] -= wa / wid;
                     for (ic, vc) in &tr[q] {
                         let Some(dc) = d[*ic] else { continue };
-                        trip.push(Triplet::new(
-                            da as usize,
-                            dc as usize,
-                            coef * (wa * vc[lp.dir]),
-                        ));
+                        trip.add(da, dc, coef * (wa * vc[lp.dir]));
                     }
                 }
             }
@@ -2126,6 +2622,7 @@ fn solve_at(
     let mut s = vec![czero(); nt * nt];
     for pe in 0..nt {
         for (pq, pm) in asm.ports.iter().enumerate() {
+            let port = dr[pq];
             let mut g = czero();
             for r in 0..n {
                 if b0[pq][r] != 0.0 {
@@ -2138,9 +2635,9 @@ fn solve_at(
             }
             let mut v = v * (pm.norm / a_in(pe));
             // De-embed: move both reference planes inwards.
-            let mut shift = model.ports[pq].deembed * pm.info.beta;
+            let mut shift = model.ports[port].deembed * pm.info.beta;
             if pe < np {
-                shift += model.ports[pe].deembed * asm.ports[pe].info.beta;
+                shift += model.ports[dr[pe]].deembed * asm.ports[pe].info.beta;
             }
             v *= c64::new(shift.cos(), shift.sin());
             s[pq * nt + pe] = v;
@@ -2155,7 +2652,7 @@ fn solve_at(
             let src = if pe == np + k { lp.r } else { 0.0 };
             let mut b = (vk * 2.0 - src) / (2.0 * lp.r.sqrt());
             if pe < np {
-                let shift = model.ports[pe].deembed * asm.ports[pe].info.beta;
+                let shift = model.ports[dr[pe]].deembed * asm.ports[pe].info.beta;
                 b *= c64::new(shift.cos(), shift.sin());
             }
             s[(np + k) * nt + pe] = b / a_in(pe);
@@ -2321,31 +2818,64 @@ impl<T: Real> SymFactor<T> {
     /// From (row, col, value) entries, both triangles given (duplicates
     /// add up).
     fn new(n: usize, trip: &[Triplet<usize, usize, c64>]) -> Result<SymFactor<T>, String> {
+        let a = Csr::new(n, trip.to_vec());
+        Self::from_csr(n, &a, |_, v| v)
+    }
+
+    /// From a symmetric matrix by rows (both triangles), each value `v`
+    /// at position k of `a.val` taken as `val(k, v)`. The lower triangle
+    /// of the real [[Re, Im], [Im, −Re]] form is built column by column
+    /// straight from the rows (row j's entries right of the diagonal are
+    /// column j's below it).
+    fn from_csr(
+        n: usize,
+        csr: &Csr,
+        val: impl Fn(usize, c64) -> c64,
+    ) -> Result<SymFactor<T>, String> {
         use faer::dyn_stack::{MemBuffer, MemStack};
         use faer::sparse::linalg::cholesky::{
             factorize_symbolic_cholesky, CholeskySymbolicParams, SymmetricOrdering,
         };
-        let mut rt: Vec<Triplet<usize, usize, T>> = Vec::with_capacity(trip.len() * 2);
-        for t in trip {
-            let (i, j, v) = (t.row, t.col, t.val);
-            if i < j {
-                continue;
-            }
-            if i > j {
-                rt.push(Triplet::new(2 * i, 2 * j, T::of(v.re)));
-                rt.push(Triplet::new(2 * i, 2 * j + 1, T::of(v.im)));
-                rt.push(Triplet::new(2 * i + 1, 2 * j, T::of(v.im)));
-                rt.push(Triplet::new(2 * i + 1, 2 * j + 1, T::of(-v.re)));
-            } else {
-                rt.push(Triplet::new(2 * i, 2 * i, T::of(v.re)));
-                rt.push(Triplet::new(2 * i + 1, 2 * i, T::of(v.im)));
-                rt.push(Triplet::new(2 * i + 1, 2 * i + 1, T::of(-v.re)));
-            }
-        }
+        use faer::sparse::{SparseColMatRef, SymbolicSparseColMatRef};
         let m = 2 * n;
-        let a = SparseColMat::<usize, T>::try_new_from_triplets(m, m, &rt)
-            .map_err(|e| format!("{e:?}"))?;
-        drop(rt);
+        let mut cp = Vec::with_capacity(m + 1);
+        cp.push(0usize);
+        let mut ri: Vec<usize> = Vec::new();
+        let mut vs: Vec<T> = Vec::new();
+        let upper = |j: usize| -> usize {
+            let (a, b) = (csr.ptr[j], csr.ptr[j + 1]);
+            a + csr.col[a..b].partition_point(|&c| (c as usize) < j)
+        };
+        let nnz: usize = (0..n).map(|j| csr.ptr[j + 1] - upper(j)).sum();
+        ri.try_reserve_exact(4 * nnz)
+            .map_err(|_| "out of memory for the matrix".to_string())?;
+        vs.try_reserve_exact(4 * nnz)
+            .map_err(|_| "out of memory for the matrix".to_string())?;
+        for j in 0..n {
+            let (a, b) = (upper(j), csr.ptr[j + 1]);
+            for k in a..b {
+                let v = val(k, csr.val[k]);
+                let c = csr.col[k] as usize;
+                ri.push(2 * c);
+                vs.push(T::of(v.re));
+                ri.push(2 * c + 1);
+                vs.push(T::of(v.im));
+            }
+            cp.push(ri.len());
+            for k in a..b {
+                let v = val(k, csr.val[k]);
+                let c = csr.col[k] as usize;
+                if c > j {
+                    ri.push(2 * c);
+                    vs.push(T::of(v.im));
+                }
+                ri.push(2 * c + 1);
+                vs.push(T::of(-v.re));
+            }
+            cp.push(ri.len());
+        }
+        let sy = SymbolicSparseColMatRef::new_checked(m, m, &cp, None, &ri);
+        let a = SparseColMatRef::new(sy, &vs);
         let sym = factorize_symbolic_cholesky(
             a.symbolic(),
             faer::Side::Lower,
@@ -2367,6 +2897,14 @@ impl<T: Real> SymFactor<T> {
             )
         })?;
         lv.resize(sym.len_val(), T::of(0.0));
+        if std::env::var_os("TRACE_FEM_TIME").is_some() {
+            eprintln!(
+                "  factor: {} unknowns, matrix {} entries, factor {:.2} GB",
+                n,
+                vs.len(),
+                sym.len_val() as f64 * std::mem::size_of::<T>() as f64 * 1e-9
+            );
+        }
         let mut sub = vec![T::of(0.0); m];
         let mut pf = vec![0usize; m];
         let mut pi = vec![0usize; m];
@@ -2416,12 +2954,8 @@ impl<T: Real> SymFactor<T> {
 
 /// Solves the complex symmetric system (`trip`, both triangles given) for
 /// each column of `rhs`, directly.
-fn sym_solve(
-    n: usize,
-    trip: Vec<Triplet<usize, usize, c64>>,
-    rhs: &faer::Mat<c64>,
-) -> Result<Vec<Vec<c64>>, String> {
-    let f = SymFactor::<f64>::new(n, &trip)?;
+fn sym_solve(n: usize, trip: Csr, rhs: &faer::Mat<c64>) -> Result<Vec<Vec<c64>>, String> {
+    let f = SymFactor::<f64>::from_csr(n, &trip, |_, v| v)?;
     drop(trip);
     let mut x = rhs.clone();
     f.solve(&mut x);
@@ -2465,6 +2999,68 @@ impl Csr {
         self.ptr.len() - 1
     }
 
+    /// The pattern of a FEM matrix: every two unknowns of a tetrahedron,
+    /// values zero.
+    fn pattern(n: usize, dof: &[Vec<Option<u32>>]) -> Csr {
+        // Count first, then fill, then sort and squeeze each row.
+        let mut cnt = vec![0usize; n + 1];
+        for d in dof {
+            let k = d.iter().flatten().count();
+            for &a in d.iter().flatten() {
+                cnt[a as usize + 1] += k;
+            }
+        }
+        for i in 0..n {
+            cnt[i + 1] += cnt[i];
+        }
+        let mut col = vec![0u32; cnt[n]];
+        let mut fill = cnt.clone();
+        for d in dof {
+            for &a in d.iter().flatten() {
+                for &c in d.iter().flatten() {
+                    col[fill[a as usize]] = c;
+                    fill[a as usize] += 1;
+                }
+            }
+        }
+        drop(fill);
+        let mut ptr = vec![0usize; n + 1];
+        let mut w = 0;
+        for i in 0..n {
+            let row = &mut col[cnt[i]..cnt[i + 1]];
+            row.sort_unstable();
+            let mut last = u32::MAX;
+            let mut k = 0;
+            for r in 0..row.len() {
+                if row[r] != last {
+                    last = row[r];
+                    row[k] = last;
+                    k += 1;
+                }
+            }
+            col.copy_within(cnt[i]..cnt[i] + k, w);
+            w += k;
+            ptr[i + 1] = w;
+        }
+        col.truncate(w);
+        col.shrink_to_fit();
+        let val = vec![czero(); w];
+        Csr { ptr, col, val }
+    }
+
+    /// Where entry (i, j) is kept (it must be in the pattern).
+    fn at(&self, i: u32, j: u32) -> usize {
+        let (a, b) = (self.ptr[i as usize], self.ptr[i as usize + 1]);
+        a + self.col[a..b]
+            .binary_search(&j)
+            .expect("entry outside the matrix pattern")
+    }
+
+    fn add(&mut self, i: u32, j: u32, v: c64) {
+        let k = self.at(i, j);
+        self.val[k] += v;
+    }
+
     /// y = A x, rows split over the threads.
     fn mul(&self, x: &[c64], y: &mut [c64]) {
         let threads = std::thread::available_parallelism().map_or(4, |t| t.get());
@@ -2486,10 +3082,13 @@ impl Csr {
     }
 }
 
-/// Right-preconditioned restarted flexible GMRES for A x = b, for several
+/// Right-preconditioned restarted GMRES for A x = b, for several
 /// right-hand sides in step, so the preconditioner works on all of them
-/// at once (`m` maps a batch of vectors to M⁻¹ of each). To a relative
-/// residual of `tol`; returns each system's iterations, or an error.
+/// at once (`m` maps a batch of vectors to M⁻¹ of each; it must be the
+/// same linear map every time). Only the Krylov basis is kept, not its
+/// preconditioned copy: each cycle ends with one more M⁻¹ (x += M⁻¹ V y),
+/// half the memory of flexible GMRES. To a relative residual of `tol`;
+/// returns each system's iterations, or an error.
 fn gmres(
     a: &Csr,
     m: &dyn Fn(&[&[c64]]) -> Vec<Vec<c64>>,
@@ -2501,7 +3100,6 @@ fn gmres(
     const RESTART: usize = 25;
     struct St {
         v: Vec<Vec<c64>>,
-        zs: Vec<Vec<c64>>,
         h: Vec<Vec<c64>>,
         cs: Vec<c64>,
         sn: Vec<c64>,
@@ -2519,7 +3117,6 @@ fn gmres(
         .iter()
         .map(|b| St {
             v: Vec::new(),
-            zs: Vec::new(),
             h: Vec::new(),
             cs: Vec::new(),
             sn: Vec::new(),
@@ -2560,7 +3157,6 @@ fn gmres(
                 ));
             }
             s.v = vec![r.iter().map(|q| q / beta).collect()];
-            s.zs.clear();
             s.h = vec![vec![czero(); RESTART]; RESTART + 1];
             s.cs = vec![czero(); RESTART];
             s.sn = vec![czero(); RESTART];
@@ -2572,6 +3168,8 @@ fn gmres(
         if st.iter().all(|s| s.done) {
             return Ok(st.iter().map(|s| s.it).collect());
         }
+        // Each finished cycle's V y, for one batched M⁻¹ at the end.
+        let mut pend: Vec<(usize, Vec<c64>)> = Vec::new();
         while st.iter().any(|s| s.open) {
             let act: Vec<usize> = (0..st.len()).filter(|&i| st[i].open).collect();
             let zb = {
@@ -2582,7 +3180,7 @@ fn gmres(
                 let s = &mut st[i];
                 let k = s.k;
                 a.mul(&z, &mut w);
-                s.zs.push(z);
+                drop(z);
                 for j in 0..=k {
                     let hj = dotc(&s.v[j], &w);
                     s.h[j][k] = hj;
@@ -2625,13 +3223,26 @@ fn gmres(
                     }
                     y[r] = acc / s.h[r][r];
                 }
+                let mut u = vec![czero(); n];
                 for (j, yj) in y.iter().enumerate() {
-                    for (xi, zi) in xs[i].iter_mut().zip(&s.zs[j]) {
-                        *xi += yj * zi;
+                    for (ui, vi) in u.iter_mut().zip(&s.v[j]) {
+                        *ui += yj * vi;
                     }
                 }
                 s.v.clear();
-                s.zs.clear();
+                s.v.shrink_to_fit();
+                pend.push((i, u));
+            }
+        }
+        if !pend.is_empty() {
+            let zs = {
+                let us: Vec<&[c64]> = pend.iter().map(|p| &p.1[..]).collect();
+                m(&us)
+            };
+            for ((i, _), z) in pend.iter().zip(zs) {
+                for (xi, zi) in xs[*i].iter_mut().zip(&z) {
+                    *xi += zi;
+                }
             }
         }
     }
@@ -2795,7 +3406,7 @@ fn anchor(f: f64, f_adapt: f64) -> f64 {
 /// are k² smaller than the rest of the matrix).
 fn iter_solve(
     n: usize,
-    trip: Vec<Triplet<usize, usize, c64>>,
+    trip: Csr,
     rhs: &faer::Mat<c64>,
     grad: &[Vec<(u32, f64)>],
     emass: &[[f32; 2]],
@@ -2818,9 +3429,11 @@ fn iter_solve(
         // the small-eigenvalue (low-frequency, gradient) part of a
         // balanced matrix.
         let mut diag = vec![0.0f64; n];
-        for t in &trip {
-            if t.row == t.col {
-                diag[t.row] += t.val.norm();
+        for r in 0..n {
+            for k in trip.ptr[r]..trip.ptr[r + 1] {
+                if trip.col[k] as usize == r {
+                    diag[r] += trip.val[k].norm();
+                }
             }
         }
         let d: Vec<f64> = diag
@@ -2836,24 +3449,25 @@ fn iter_solve(
                 .get(i)
                 .map_or(czero(), |m| c64::new(m[0] as f64, m[1] as f64))
         };
-        for (i, t) in trip.iter_mut().enumerate() {
-            t.val = (t.val + shift * em(i)) * (d[t.row] * d[t.col]);
-        }
-        let m = SymFactor::<f32>::new(n, &trip)?;
-        for (i, t) in trip.iter_mut().enumerate() {
-            t.val -= shift * em(i) * (d[t.row] * d[t.col]);
-        }
+        // Rows of each entry, for the scaling.
+        let row_of = |k: usize| trip.ptr.partition_point(|&p| p <= k) - 1;
+        let m = SymFactor::<f32>::from_csr(n, &trip, |k, v| {
+            (v + shift * em(k)) * (d[row_of(k)] * d[trip.col[k] as usize])
+        })?;
         *slot = Some(Precond { f: f_pre, n, d, m });
-    } else if let Some(pc) = slot.as_ref() {
-        for t in trip.iter_mut() {
-            t.val *= pc.d[t.row] * pc.d[t.col];
+    }
+    if let Some(pc) = slot.as_ref() {
+        for r in 0..n {
+            for k in trip.ptr[r]..trip.ptr[r + 1] {
+                trip.val[k] *= pc.d[r] * pc.d[trip.col[k] as usize];
+            }
         }
     }
     let Some(pc) = slot.as_ref() else {
         return Err("no preconditioner".into());
     };
     let (d, m) = (&pc.d, &pc.m);
-    let a = Csr::new(n, trip);
+    let a = trip;
     // Gradient space in the scaled unknowns: G' = D⁻¹ G; S = G'ᵀ A' G'.
     let g: Vec<Vec<(u32, f64)>> = grad
         .iter()
@@ -2948,7 +3562,13 @@ fn iter_solve(
         .collect();
     let mut ys = vec![vec![czero(); n]; bs.len()];
     tlog("before gmres");
-    let its = gmres(&a, &pre, &bs, &mut ys, 1e-9, 300)?;
+    // Right-hand sides in batches whose Krylov bases fit in about 400 MB.
+    let per = 26.0 * n as f64 * 16.0;
+    let batch = ((4.0e8 / per) as usize).clamp(1, bs.len().max(1));
+    let mut its = Vec::new();
+    for (b, y) in bs.chunks(batch).zip(ys.chunks_mut(batch)) {
+        its.extend(gmres(&a, &pre, b, y, 1e-9, 300)?);
+    }
     tlog("gmres");
     if std::env::var_os("TRACE_FEM_MESH").is_some() {
         eprintln!("  gmres: {its:?} iterations");
@@ -3148,6 +3768,15 @@ pub fn solve(
     } else {
         model.mesh(setup.f_adapt, setup.per_lambda, 12.0, max_tets)
     };
+    if mesh.short
+        && !progress(&format!(
+            "the starting mesh ran out of room ({} tetrahedra) before it reached all of the \
+             driven copper: the result may be off; raise the unknowns (--fem-dof) or use --order 1",
+            mesh.tets.len()
+        ))
+    {
+        return Err("stopped".into());
+    }
     // Coarse port faces first: refine the tetrahedra on any port whose
     // mode on the mesh's own triangles is off the fine 2D solve by more
     // than 2%, so the ports start right (their power and Z0 hang on it).
@@ -3463,6 +4092,7 @@ pub fn solve(
     let names: Vec<String> = model
         .ports
         .iter()
+        .filter(|p| !p.passive)
         .map(|p| p.name.clone())
         .chain(model.lumped.iter().map(|l| l.name.clone()))
         .collect();
@@ -3502,6 +4132,7 @@ pub fn solve(
         ports: model
             .ports
             .iter()
+            .filter(|p| !p.passive)
             .map(|p| p.name.clone())
             .chain(model.lumped.iter().map(|l| l.name.clone()))
             .collect(),
@@ -3545,6 +4176,7 @@ pub fn waveguide(a: f64, b: f64, len: f64, slab: Option<(f64, f64)>) -> Model {
         hi: [a * MM, b * MM],
         mode: Mode::Te10,
         deembed: 0.0,
+        passive: false,
     };
     Model {
         lo: [0.0; 3],
@@ -3694,6 +4326,7 @@ pub fn line_spec(spec: &LineSpec) -> Model {
         hi: [width * MIL, top * MIL],
         mode,
         deembed: 0.0,
+        passive: false,
     };
     Model {
         lo: [0.0; 3],
@@ -3914,6 +4547,7 @@ pub fn via(stackup: &crate::Stackup, setup: &crate::fdtd::ViaSetup) -> Result<Mo
         hi: [hi[1], hi[2]],
         mode,
         deembed: if high { xa - c[0] } else { xa + c[0] },
+        passive: false,
     };
     // Lids over the air are perfect conductor (as in `line`): a radiation
     // wall that close soaks up the traces' fringing field.

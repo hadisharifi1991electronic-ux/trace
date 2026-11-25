@@ -1556,7 +1556,11 @@ fn cut_arrows(r: &mut Raster, sc: &Scene, cam: &Cam, v: &View, pt: &Paint) {
             inp[ax] = 0.0;
             let li = dot(inp, inp).sqrt();
             let through = dir[ax].abs() > li;
-            let d2 = if through { dir } else { mul(inp, 1.0 / li.max(1e-12)) };
+            let d2 = if through {
+                dir
+            } else {
+                mul(inp, 1.0 / li.max(1e-12))
+            };
             let a = sub(p, mul(d2, len / 2.0));
             let b = add(p, mul(d2, len / 2.0));
             if let (Some(sa), Some(sb)) = (cam.project(a, w, h), cam.project(b, w, h)) {

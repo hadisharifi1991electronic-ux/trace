@@ -220,6 +220,10 @@ struct Builder {
     tag: i8,
     shine: u8,
     cap: Option<CapSrc>,
+    /// The laminate's outer faces (bottom, top): the outer copper's faces
+    /// lying on them are left out, as they would fight the laminate for
+    /// the same depth when seen from between the layers.
+    lam: [f32; 2],
 }
 
 fn shade(c: [u8; 3], k: f32) -> [u8; 3] {
@@ -299,8 +303,12 @@ impl Builder {
         if tris.len() < 3 {
             return;
         }
-        self.face(verts, tris, z1, 1.0, top);
-        self.face(verts, tris, z0, -1.0, side);
+        if z1 != self.lam[0] {
+            self.face(verts, tris, z1, 1.0, top);
+        }
+        if z0 != self.lam[1] {
+            self.face(verts, tris, z0, -1.0, side);
+        }
         let mut edges: HashMap<(u32, u32), (u32, u32, u32)> = HashMap::new();
         for t in tris.chunks_exact(3) {
             for e in 0..3 {
@@ -510,6 +518,7 @@ pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
         tag: TAG_MISC,
         shine: MATTE,
         cap: section.then(CapSrc::default),
+        lam: [f32::NAN; 2],
     };
     bld.m.radius = ((b[2] - b[0]).hypot(b[3] - b[1]) / 2.0 * MM_PER_MIL).max(1.0);
     bld.m.half = [
@@ -523,7 +532,6 @@ pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
     let t = st.half;
     let (mask, mask_cu, silk) = opt.mask.colors();
     // Inner copper only shows through clear laminate or a cut.
-    let inner = opt.xray || section;
     let layer_color = |i: usize| -> [u8; 3] {
         if !opt.xray {
             return COPPER;
@@ -543,7 +551,9 @@ pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
             (c, shade(c, 0.72))
         }
     };
-    let wanted = |i: usize| i == 0 || i == last || inner;
+    // Inner layers are built always: hidden by the laminate from outside,
+    // but there when the camera goes in between the layers.
+    let wanted = |i: usize| i < n;
     if let Some(cap) = bld.cap.as_mut() {
         cap.layers = (0..n)
             .map(|i| (st.cu[i], layer_color(i), Vec::new()))
@@ -603,6 +613,7 @@ pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
         (v, tr) = tessellate(std::slice::from_ref(&ring));
     }
     let [lam_bot, lam_top] = st.lam;
+    bld.lam = st.lam;
     bld.tag = TAG_DIEL;
     bld.face(&v, &tr, lam_top, 1.0, mask);
     bld.face(&v, &tr, lam_bot, -1.0, mask);
@@ -1486,7 +1497,7 @@ impl Camera {
             dot(f, eye),
             1.0,
         ];
-        let near = (self.dist - radius * 1.5).max(self.dist * 0.02);
+        let near = (self.dist - radius * 1.5).max(self.dist * 0.05);
         let far = self.dist + radius * 3.0;
         let t = 1.0 / (FOV / 2.0).tan();
         let proj = [
@@ -1526,6 +1537,7 @@ struct Gpu {
     caps: Buffers,
     u_mvp: Option<glow::UniformLocation>,
     u_eye: Option<glow::UniformLocation>,
+    u_cam: Option<glow::UniformLocation>,
     u_mode: Option<glow::UniformLocation>,
     u_clip: Option<glow::UniformLocation>,
     u_hide: Option<glow::UniformLocation>,
@@ -1848,6 +1860,7 @@ void main() {{
 {fin} float v_tag;
 {fin} float v_hide;
 uniform vec3 u_eye;
+uniform vec3 u_cam;
 uniform vec4 u_mode;
 uniform vec4 u_clip;
 {out}
@@ -1859,15 +1872,22 @@ void main() {{
     if (u_mode.x > 0.5 && u_mode.x < 1.5 && !solid) discard;
     if (u_mode.x > 1.5 && solid) discard;
     vec3 n = normalize(v_nrm);
+    vec3 col = v_col;
+    // The laminate seen from between the layers: bare glass-epoxy.
+    bool back = abs(n.z) > 0.9 && dot(n, u_cam - v_pos) < 0.0;
+    if (diel && back) col = vec3(0.66, 0.58, 0.38);
+    // The far face of a copper layer is always behind its near face; left
+    // out, it cannot show through as stripes when seen edge on.
+    if (back && v_tag > 0.5 && v_tag < 64.5) discard;
     if (dot(n, u_eye) < 0.0) n = -n;
     vec3 key = normalize(vec3(-0.35, -0.45, 0.82));
     float ne = max(dot(n, u_eye), 0.0);
     float l = 0.38 + 0.42 * ne + 0.30 * abs(dot(n, key));
-    vec3 base = v_col * min(l, 1.15);
+    vec3 base = col * min(l, 1.15);
     vec3 h = normalize(key + u_eye);
     float sp = pow(max(dot(n, h), 0.0), 60.0);
     float rim = pow(1.0 - ne, 4.0);
-    vec3 metal = base * 0.95 + v_col * (1.2 * sp + 0.25 * rim) + vec3(0.3 * sp);
+    vec3 metal = base * 0.95 + col * (1.2 * sp + 0.25 * rim) + vec3(0.3 * sp);
     vec3 c = mix(base, metal, v_shine);
     float a = u_mode.x > 1.5 ? (diel ? u_mode.y : u_mode.z) : 1.0;
     {frag} = vec4(c, a);
@@ -1902,6 +1922,7 @@ void main() {{
     Ok(Gpu {
         u_mvp: gl.get_uniform_location(program, "u_mvp"),
         u_eye: gl.get_uniform_location(program, "u_eye"),
+        u_cam: gl.get_uniform_location(program, "u_cam"),
         u_mode: gl.get_uniform_location(program, "u_mode"),
         u_clip: gl.get_uniform_location(program, "u_clip"),
         u_hide: gl
@@ -2090,6 +2111,7 @@ pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
     painter.rect_filled(rect, 0.0, Color32::from_rgb(38, 42, 50));
     let mvp = cam.matrix(rect.width() / rect.height().max(1.0), v.radius);
     let eye = cam.eye_dir();
+    let eye_at = cam.eye();
     let shared = v.shared.clone();
     let xray = v.options.xray;
     let clip = if cutting {
@@ -2140,6 +2162,7 @@ pub fn show(v: &mut View3d, scene: &Scene, ui: &mut egui::Ui) {
             gl.use_program(Some(gpu.program));
             gl.uniform_matrix_4_f32_slice(gpu.u_mvp.as_ref(), false, &mvp);
             gl.uniform_3_f32(gpu.u_eye.as_ref(), eye[0], eye[1], eye[2]);
+            gl.uniform_3_f32(gpu.u_cam.as_ref(), eye_at[0], eye_at[1], eye_at[2]);
             gl.uniform_1_f32_slice(gpu.u_hide.as_ref(), &hide);
             let mode =
                 |m: f32| gl.uniform_4_f32(gpu.u_mode.as_ref(), m, XRAY_ALPHA, XRAY_COPPER, 0.0);

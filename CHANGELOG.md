@@ -3,6 +3,18 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.102.2 (2026-11-25)
+
+- 3D view: the inner layers are there when you zoom in between them. They
+  used to be built only for X-ray and Section, so the board was hollow
+  inside. Now every inner plane and track is built, with its antipads
+  round the barrels.
+- The stripes across the board when seen edge-on are gone: the outer
+  copper no longer sits at the same depth as the laminate, and a copper
+  layer's far face is no longer drawn through its near face.
+- Seen from between the layers, the laminate shows as bare glass-epoxy
+  instead of solder mask.
+
 ## 0.102.1 (2026-11-25)
 
 - 3D view arrows: each arrow now shows the part of E or H that lies in the

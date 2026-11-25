@@ -3,6 +3,14 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.104.1 (2026-11-25)
+
+- 3D view: drill holes are cut out of pours and tracks too. Relief spokes
+  (and track ends) that run to a pad's or via's centre used to be drawn
+  straight across the hole, so thermal pads showed a green cross and vias
+  in a pour looked filled. Every hole now shows open, through the copper
+  on each layer it passes.
+
 ## 0.104.0 (2026-11-25)
 
 - Schematic view polished to match the board view: the sheet lies on the

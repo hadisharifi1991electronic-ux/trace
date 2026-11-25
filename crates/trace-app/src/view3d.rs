@@ -486,6 +486,112 @@ fn tessellate(rings: &[Vec<[f32; 2]>]) -> (Vec<[f32; 2]>, Vec<u32>) {
     )
 }
 
+/// Drill holes (mm, board centred) with the copper layers they pass,
+/// found by a coarse grid.
+#[derive(Default)]
+struct Drills {
+    holes: Vec<([f32; 2], f32, u8, u8)>,
+    grid: HashMap<(i32, i32), Vec<usize>>,
+}
+
+impl Drills {
+    const CELL: f32 = 1.0;
+
+    fn add(&mut self, c: [f32; 2], r: f32, from: u8, to: u8) {
+        let k = self.holes.len();
+        self.holes.push((c, r, from, to));
+        let cell = |v: f32| (v / Self::CELL).floor() as i32;
+        for gx in cell(c[0] - r)..=cell(c[0] + r) {
+            for gy in cell(c[1] - r)..=cell(c[1] + r) {
+                self.grid.entry((gx, gy)).or_default().push(k);
+            }
+        }
+    }
+
+    /// The holes on `layer` that a box (x0, y0, x1, y1) touches.
+    fn near(&self, b: [f32; 4], layer: u8, out: &mut Vec<usize>) {
+        let cell = |v: f32| (v / Self::CELL).floor() as i32;
+        for gx in cell(b[0])..=cell(b[2]) {
+            for gy in cell(b[1])..=cell(b[3]) {
+                for &k in self.grid.get(&(gx, gy)).into_iter().flatten() {
+                    let (c, r, a, z) = self.holes[k];
+                    if layer >= a
+                        && layer <= z
+                        && c[0] + r > b[0]
+                        && c[0] - r < b[2]
+                        && c[1] + r > b[1]
+                        && c[1] - r < b[3]
+                        && !out.contains(&k)
+                    {
+                        out.push(k);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Copper triangles with the holes on `layer` taken out, or None when
+    /// no hole touches them. Triangles clear of every hole are kept as
+    /// they are; the rest are clipped together.
+    fn cut(&self, pts: &[[f32; 2]], tris: &[u32], layer: u8) -> Option<(Vec<[f32; 2]>, Vec<u32>)> {
+        use i_overlay::core::fill_rule::FillRule;
+        use i_overlay::core::overlay_rule::OverlayRule;
+        use i_overlay::float::single::SingleFloatOverlay;
+
+        if self.holes.is_empty() {
+            return None;
+        }
+        let mut hit: Vec<usize> = Vec::new();
+        let mut seen = std::collections::HashSet::new();
+        let mut local = Vec::new();
+        let mut keep: Vec<u32> = Vec::new();
+        let mut subject: Vec<Vec<[f64; 2]>> = Vec::new();
+        for t in tris.chunks_exact(3) {
+            let p = [pts[t[0] as usize], pts[t[1] as usize], pts[t[2] as usize]];
+            let b = [
+                p[0][0].min(p[1][0]).min(p[2][0]),
+                p[0][1].min(p[1][1]).min(p[2][1]),
+                p[0][0].max(p[1][0]).max(p[2][0]),
+                p[0][1].max(p[1][1]).max(p[2][1]),
+            ];
+            local.clear();
+            self.near(b, layer, &mut local);
+            if local.is_empty() {
+                keep.extend_from_slice(t);
+            } else {
+                subject.push(p.iter().map(|q| [q[0] as f64, q[1] as f64]).collect());
+                hit.extend(local.iter().filter(|&&k| seen.insert(k)));
+            }
+        }
+        if subject.is_empty() {
+            return None;
+        }
+        let clip: Vec<Vec<[f64; 2]>> = hit
+            .iter()
+            .map(|&k| {
+                let (c, r, ..) = self.holes[k];
+                circle_pts(c[0], c[1], r, segments(r).max(10))
+                    .into_iter()
+                    .map(|q| [q[0] as f64, q[1] as f64])
+                    .collect()
+            })
+            .collect();
+        let shapes = subject.overlay(&clip, OverlayRule::Difference, FillRule::NonZero);
+        let mut verts = pts.to_vec();
+        for shape in shapes {
+            let rings: Vec<Vec<[f32; 2]>> = shape
+                .iter()
+                .map(|c| c.iter().map(|q| [q[0] as f32, q[1] as f32]).collect())
+                .collect();
+            let (v, t) = tessellate(&rings);
+            let base = verts.len() as u32;
+            verts.extend(v);
+            keep.extend(t.iter().map(|i| base + i));
+        }
+        Some((verts, keep))
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 pub struct Options {
     pub mask: MaskColor,
@@ -597,6 +703,22 @@ pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
         }
     }
 
+    // The same holes by layer span, for drilling pours and tracks.
+    let mut drills = Drills::default();
+    for pad in &g.pads {
+        let r = mil(pad.hole) / 2.0 * MM_PER_MIL;
+        if r > 0.0 {
+            drills.add(bld.pt(mil(pad.at.x), mil(pad.at.y)), r, 0, 255);
+        }
+    }
+    for v in &g.vias {
+        let r = mil(v.hole) / 2.0 * MM_PER_MIL;
+        if r > 0.0 {
+            let (a, z) = (v.from_layer.min(v.to_layer), v.from_layer.max(v.to_layer));
+            drills.add(bld.pt(mil(v.at.x), mil(v.at.y)), r, a, z);
+        }
+    }
+
     // Laminate: top and bottom faces with the holes drilled, and the edge.
     let mut ring: Vec<[f32; 2]> = if scene.outline.len() >= 3 {
         scene.outline.iter().map(|p| bld.pt(p[0], p[1])).collect()
@@ -684,7 +806,13 @@ pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
                     let (top, side) = cu_color(i);
                     bld.tag = layer_tag(i);
                     bld.shine = if top == mask_cu { MASK_GLOSS } else { METAL };
-                    bld.slab(&pts, tris, st.cu[i][0], st.cu[i][1], top, side, Some(i));
+                    // Relief spokes run to the pad's centre: drill them.
+                    let cut = drills.cut(&pts, tris, i as u8);
+                    let (pts, tris) = match &cut {
+                        Some((v, t)) => (v, t.as_slice()),
+                        None => (&pts, tris),
+                    };
+                    bld.slab(pts, tris, st.cu[i][0], st.cu[i][1], top, side, Some(i));
                     bld.tag = TAG_MISC;
                     bld.shine = MATTE;
                 }
@@ -719,7 +847,16 @@ pub fn build(scene: &Scene, opt: Options, models: &Models) -> Mesh {
                     let pts = bld.geom_ring(&p.geom);
                     bld.tag = layer_tag(i);
                     bld.shine = if top == mask_cu { MASK_GLOSS } else { METAL };
-                    bld.convex_slab(&pts, st.cu[i][0], st.cu[i][1], top, side, Some(i));
+                    // A track ending on a via or pad stops at its hole.
+                    let fan: Vec<u32> = (1..pts.len().max(2) as u32 - 1)
+                        .flat_map(|k| [0, k, k + 1])
+                        .collect();
+                    match drills.cut(&pts, &fan, i as u8) {
+                        Some((v, t)) => {
+                            bld.slab(&v, &t, st.cu[i][0], st.cu[i][1], top, side, Some(i))
+                        }
+                        None => bld.convex_slab(&pts, st.cu[i][0], st.cu[i][1], top, side, Some(i)),
+                    }
                     bld.tag = TAG_MISC;
                     bld.shine = MATTE;
                 }

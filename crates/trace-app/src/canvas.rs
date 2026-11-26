@@ -1851,13 +1851,14 @@ fn local_bumps(
     (a, b): ([f64; 2], [f64; 2]),
     cursor: [f64; 2],
     need: f64,
-    (amp, space, flip, style): (f64, f64, bool, trace_core::route::TuneStyle),
+    (amp, space, flip, shape): (f64, f64, bool, trace_core::route::TuneShape),
 ) -> (
     Vec<trace_core::route::Piece>,
     f64,
     Option<trace_core::route::Hit>,
 ) {
     use trace_core::route::{tune_pattern, Piece, TuneStyle};
+    let style = shape.style;
     let len = (b[0] - a[0]).hypot(b[1] - a[1]);
     if len < 1e-6 {
         return (vec![Piece::Line(a, b)], 0.0, None);
@@ -1872,7 +1873,7 @@ fn local_bumps(
     };
     let build = |h: f64| -> (Vec<Piece>, f64) {
         if style == TuneStyle::Trombone {
-            return tune_pattern(a, b, need, h, space, flip, style);
+            return tune_pattern(a, b, need, h, space, flip, shape);
         }
         let mut best = (vec![Piece::Line(a, b)], 0.0);
         let mut n = 1.0;
@@ -1880,7 +1881,7 @@ fn local_bumps(
             let span = (n * pitch + space).min(len);
             let s0 = (mid - span / 2.0).clamp(0.0, len - span);
             let s1 = s0 + span;
-            let (v, added) = tune_pattern(at(s0), at(s1), need, h, space, flip, style);
+            let (v, added) = tune_pattern(at(s0), at(s1), need, h, space, flip, shape);
             if added > best.1 {
                 let mut out = Vec::new();
                 if s0 > 1e-6 {
@@ -1967,7 +1968,7 @@ fn tune_preview(
         amp: router.tune.amp,
         space: Some(space),
         clearance,
-        style: router.tune.style,
+        shape: router.tune.style,
     };
     if mode != TuneMode::Single && pair.is_none() {
         router.message = Some(format!(
@@ -2008,7 +2009,7 @@ fn tune_preview(
                 (a, b),
                 cursor,
                 need,
-                (amp, space, flip, opts.style),
+                (amp, space, flip, opts.shape),
             );
             let skew = len(*p) - len(*n);
             let after = skew + if net == *p { added } else { -added };
@@ -2124,7 +2125,7 @@ fn tune_preview(
                 (a, b),
                 cursor,
                 extra,
-                (opts.amp, space, flip, opts.style),
+                (opts.amp, space, flip, opts.shape),
             );
             let skew = pair.as_ref().map(|(_, p, n, _)| {
                 let s = len(*p) - len(*n);

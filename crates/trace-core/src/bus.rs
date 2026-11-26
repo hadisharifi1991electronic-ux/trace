@@ -8,7 +8,7 @@
 //! narrower than the lanes, as a fan-out does.
 
 use crate::edit::Edit;
-use crate::route::{self, seg_seg, Obstacles, Piece, TuneStyle, P};
+use crate::route::{self, seg_seg, Obstacles, Piece, TuneShape, P};
 
 /// A pair meander tried: its skew, the two legs and their lengths.
 type PairTry = (f64, Vec<Piece>, Vec<Piece>, f64, f64);
@@ -353,7 +353,7 @@ pub struct TuneOpts {
     pub amp: f64,
     pub space: Option<f64>,
     pub clearance: f64,
-    pub style: TuneStyle,
+    pub shape: TuneShape,
 }
 
 /// A pair run meandered: the new positive and negative tracks (the run's
@@ -406,7 +406,7 @@ fn pair_run(
             break;
         }
         for &flip in flips {
-            let (centre, add) = route::tune_pattern(c0, c1, need, h, step, flip, o.style);
+            let (centre, add) = route::tune_pattern(c0, c1, need, h, step, flip, o.shape);
             if add <= 0.0 {
                 continue;
             }
@@ -668,7 +668,7 @@ fn tune_net(
                 break;
             }
             for flip in flips {
-                let (pieces, added) = route::tune_pattern(a, b, need, h, step, flip, o.style);
+                let (pieces, added) = route::tune_pattern(a, b, need, h, step, flip, o.shape);
                 if added <= 0.0 {
                     continue;
                 }
@@ -878,7 +878,7 @@ mod tests {
             amp,
             space: None,
             clearance,
-            style: TuneStyle::Accordion,
+            shape: TuneShape::default(),
         }
     }
 
@@ -1027,9 +1027,10 @@ mod tests {
         b.geometry.tracks[2].end = Point::mil(1200.0, 400.0);
         crate::connectivity::analyse(&mut b);
         assert_eq!(away_from(&b, 0, 1), Some(true));
-        for style in TuneStyle::ALL {
+        for style in route::TuneStyle::ALL {
             let mut o = opts(25.0, 5.0);
-            o.style = style;
+            o.shape.style = style;
+            o.shape.round = style == route::TuneStyle::Trombone;
             let m = phase_match(&b, (0, 1), &o);
             let mut c = b.clone();
             let mut h = crate::edit::History::default();

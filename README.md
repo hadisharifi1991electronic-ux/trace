@@ -192,7 +192,9 @@ checker and simulator all read.
   tuning bar picks what to tune (Shift+T): one net, both legs of a pair
   together (its mean length), or a pair's phase (small bumps on the
   shorter leg, away from its partner, until the skew is zero), and the
-  bump style (Tab): accordion, mitered, rounded, trombone or sawtooth. A
+  bump run (Tab): accordion, trombone or sawtooth. Bends are never square:
+  each is mitered (at an angle you set, 5 / 6) or an arc, with its size
+  as a share of the room at the bend (7 / 8). A
   gauge by the cursor shows the length (or skew) now, with the bumps, and
   the goal with its tolerance and skew limit: green when it passes. 1 / 2
   change the spacing, 3 / 4 the height, as in Altium
@@ -305,7 +307,8 @@ trace drc board.PcbDoc [--all]   design rule check: clearance, shorts, width, un
                                  plane voids and splits, crosstalk between parallel tracks)
 trace impedance board.PcbDoc     stack-up widths for 50 Ω and 100 Ω pairs, and each pair's Zdiff
 trace match board.PcbDoc D0,D1,D2 [out.tracepcb] [--target 1500mil] [--amp 40mil]
-              [--space L] [--style accordion|mitered|rounded|trombone|sawtooth] [--skew]
+              [--space L] [--style accordion|trombone|sawtooth] [--bend miter|arc]
+              [--miter-angle 45] [--bend-size 50%] [--skew]
                                  match the nets' lengths to the longest (or the target) with meanders where
                                  they fit; with out, save the board tuned. A pair's name (or both legs) tunes
                                  the pair together: one meander on both legs, keeping its gap and skew.

@@ -11,7 +11,7 @@
 use trace_core::bus;
 use trace_core::edit::{Edit, History};
 use trace_core::push::{self, Pushed, Pusher};
-use trace_core::route::{self, Corner, Hit, Obstacles, Piece, TuneStyle, ViaKind, P};
+use trace_core::route::{self, Corner, Hit, Obstacles, Piece, TuneShape, ViaKind, P};
 use trace_core::walk::{self, Ask};
 use trace_core::{Arc, Board, LayerRef, Length, Point, Track, Via};
 
@@ -264,7 +264,8 @@ pub struct Tune {
     /// Height of phase tuning bumps; 0 is 3 × the track width.
     pub phase_amp: f64,
     pub flip: bool,
-    pub style: TuneStyle,
+    /// Bump run and bends (always mitered or arcs).
+    pub style: TuneShape,
     pub mode: TuneMode,
     pub preview: Option<TunePreview>,
 }
@@ -422,7 +423,7 @@ impl Router {
                 space: 0.0,
                 phase_amp: 0.0,
                 flip: false,
-                style: TuneStyle::Accordion,
+                style: TuneShape::default(),
                 mode: TuneMode::Single,
                 preview: None,
             },

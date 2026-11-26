@@ -47,13 +47,16 @@ USAGE:
                                                 Panel of copies with rails, fiducials, tooling holes, and
                                                 tabs with mouse bites (or V-score lines); then fab or odb it
     trace match <board> <net|pair,...> [out.tracepcb] [--target L] [--amp L] [--space L]
-                [--style accordion|mitered|rounded|trombone|sawtooth] [--skew]
+                [--style accordion|trombone|sawtooth] [--bend miter|arc] [--miter-angle 45]
+                [--bend-size 50%] [--skew]
                                                 Match the nets' lengths (to the longest, or the target) with
                                                 meanders where they fit; with out, save the board tuned. A
                                                 differential pair (named, or both nets given) is tuned as a pair:
                                                 both legs meander together and its mean length is matched.
                                                 --skew: phase tune each pair's skew instead, with small bumps on its
-                                                shorter leg away from the partner (height 3 track widths by default)
+                                                shorter leg away from the partner (height 3 track widths by default).
+                                                Bends are never square: mitered at --miter-angle to the track
+                                                (default 45) or arcs, --bend-size of the room at each bend (50%)
     trace sim <board> <U1.pin> <U2.pin> --ibis drv.ibs [--rx-ibis rx.ibs] [--model M] [--rx-model M]
               [--rate 1G] [--bits N] [--corner typ|min|max] [--term 50|50@0.9|100diff] [--single]
               [--df 0.02] [--rough 1um] [--lossless] [--no-xtalk] [--formulas] [out.svg]
@@ -2006,11 +2009,11 @@ fn stubs(file: &str, out: Option<&str>) -> Res {
 
 fn match_nets(file: &str, nets: &str, rest: &[&str]) -> Res {
     use trace_core::bus::{self, TuneOpts};
-    use trace_core::route::TuneStyle;
+    use trace_core::route::{TuneShape, TuneStyle};
     let mut b = board(file)?;
     let mut out = None;
     let (mut target, mut amp, mut space) = (None, None, None);
-    let mut style = TuneStyle::Accordion;
+    let mut style = TuneShape::default();
     let mut phase = false;
     let mut it = rest.iter();
     while let Some(&a) = it.next() {
@@ -2025,9 +2028,45 @@ fn match_nets(file: &str, nets: &str, rest: &[&str]) -> Res {
             "--skew" => phase = true,
             "--style" => {
                 let v = it.next().ok_or("--style needs a style")?;
-                style = TuneStyle::parse(v).ok_or(format!(
-                    "unknown style {v} (accordion, mitered, rounded, trombone, sawtooth)"
-                ))?;
+                match v.to_ascii_lowercase().as_str() {
+                    // Older names: accordion bumps with that bend.
+                    "mitered" => style.round = false,
+                    "rounded" => style.round = true,
+                    _ => {
+                        style.style = TuneStyle::parse(v)
+                            .ok_or(format!("unknown style {v} (accordion, trombone, sawtooth)"))?
+                    }
+                }
+            }
+            "--bend" => {
+                let v = it.next().ok_or("--bend needs miter or arc")?;
+                style.round = match v.to_ascii_lowercase().as_str() {
+                    "miter" | "mitre" | "mitered" => false,
+                    "arc" | "round" | "rounded" | "curve" => true,
+                    _ => return Err(format!("--bend {v}: use miter or arc").into()),
+                };
+            }
+            "--miter-angle" => {
+                let v = it.next().ok_or("--miter-angle needs degrees")?;
+                let d: f64 = v
+                    .trim_end_matches("deg")
+                    .parse()
+                    .map_err(|_| format!("not an angle: {v}"))?;
+                if !(10.0..=80.0).contains(&d) {
+                    return Err("--miter-angle must be 10 to 80 degrees".into());
+                }
+                style.angle = d;
+            }
+            "--bend-size" => {
+                let v = it.next().ok_or("--bend-size needs a percentage")?;
+                let p: f64 = v
+                    .trim_end_matches('%')
+                    .parse()
+                    .map_err(|_| format!("not a percentage: {v}"))?;
+                if !(10.0..=100.0).contains(&p) {
+                    return Err("--bend-size must be 10 to 100 %".into());
+                }
+                style.size = p / 100.0;
             }
             _ if out.is_none() && !a.starts_with("--") => out = Some(a),
             _ => return Err(format!("unknown option {a}").into()),
@@ -2066,7 +2105,7 @@ fn match_nets(file: &str, nets: &str, rest: &[&str]) -> Res {
                 amp: amp.unwrap_or(3.0 * w),
                 space,
                 clearance,
-                style,
+                shape: style,
             };
             let m = bus::phase_match(&b, (p, n), &o);
             let after = |x: u32| m.nets.iter().find(|t| t.net == x).map_or(0.0, |t| t.after);
@@ -2096,7 +2135,7 @@ fn match_nets(file: &str, nets: &str, rest: &[&str]) -> Res {
             amp: amp.unwrap_or(40.0),
             space,
             clearance,
-            style,
+            shape: style,
         };
         let m = bus::match_lengths(&b, &ids, target, &o);
         for &(p, n) in &m.pairs {

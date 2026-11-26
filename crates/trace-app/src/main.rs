@@ -378,8 +378,23 @@ impl App {
                         "phase" => TuneMode::Phase,
                         _ => TuneMode::Single,
                     };
-                    if let Some(st) = trace_core::route::TuneStyle::parse(style) {
-                        app.router.tune.style = st;
+                    // style[/miter|arc[/angle][/size %]], e.g. accordion/arc/80
+                    // or sawtooth/miter/30/100.
+                    let mut it = style.split('/');
+                    let sh = &mut app.router.tune.style;
+                    if let Some(st) = it.next().and_then(trace_core::route::TuneStyle::parse) {
+                        sh.style = st;
+                    }
+                    sh.round = it.next() == Some("arc");
+                    let nums: Vec<f64> = it.filter_map(|x| x.parse().ok()).collect();
+                    match (sh.round, &nums[..]) {
+                        (true, [size, ..]) => sh.size = size / 100.0,
+                        (false, [angle, size, ..]) => {
+                            sh.angle = *angle;
+                            sh.size = size / 100.0;
+                        }
+                        (false, [angle]) => sh.angle = *angle,
+                        _ => {}
                     }
                     app.set_tool(Tool::Tune);
                     if let Ok(l) = layer.parse() {
@@ -2107,15 +2122,57 @@ impl App {
             .response
             .on_hover_text("What to tune (Shift+T cycles)");
         egui::ComboBox::from_id_salt("tune_style")
-            .width(95.0)
-            .selected_text(t.style.label())
+            .width(90.0)
+            .selected_text(t.style.style.label())
             .show_ui(ui, |ui| {
                 for st in TuneStyle::ALL {
-                    ui.selectable_value(&mut t.style, st, st.label());
+                    ui.selectable_value(&mut t.style.style, st, st.label());
                 }
             })
             .response
-            .on_hover_text("Shape of the bumps (Tab cycles)");
+            .on_hover_text("Run of the bumps (Tab cycles)");
+        ui.end_row();
+        ui.label("Bends");
+        egui::ComboBox::from_id_salt("tune_bend")
+            .width(70.0)
+            .selected_text(if t.style.round { "Arc" } else { "Miter" })
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut t.style.round, false, "Miter")
+                    .on_hover_text("Each bend cut by a straight piece at the miter angle");
+                ui.selectable_value(&mut t.style.round, true, "Arc")
+                    .on_hover_text("Each bend a curve");
+            })
+            .response
+            .on_hover_text("How every bend is made; bends are never square");
+        if !t.style.round {
+            ui.add(
+                egui::DragValue::new(&mut t.style.angle)
+                    .speed(0.5)
+                    .range(10.0..=80.0)
+                    .max_decimals(1)
+                    .suffix("°"),
+            )
+            .on_hover_text("Miter angle to the track: 45° cuts evenly, less gives a longer, flatter cut along the track (5 and 6 change it)");
+        }
+        let mut pct = t.style.size * 100.0;
+        if ui
+            .add(
+                egui::DragValue::new(&mut pct)
+                    .speed(1.0)
+                    .range(10.0..=100.0)
+                    .max_decimals(0)
+                    .suffix(" %"),
+            )
+            .on_hover_text(if t.style.round {
+                "Curve size: how much of the room at each bend the arc takes; 100 % gives semicircles over tall enough bumps (7 and 8 change it)"
+            } else {
+                "Miter size: how much of the room at each bend the cut takes (7 and 8 change it)"
+            })
+            .changed()
+        {
+            t.style.size = pct / 100.0;
+        }
+        ui.end_row();
         if t.mode != TuneMode::Phase {
             let mut own = t.target.is_some();
             ui.checkbox(&mut own, "Target")
@@ -2177,7 +2234,7 @@ impl App {
         .on_hover_text(
             "Centre-to-centre distance between bump sides; auto is 4 × the track width (a 3W gap). 1 and 2 change it",
         );
-        ui.separator();
+        ui.end_row();
         let text = match (&t.preview, &self.router.message) {
             (Some(p), _) => {
                 let g = &p.gauge;
@@ -2215,7 +2272,8 @@ impl App {
     }
 
     /// Keys while tuning, as in Altium: 1/2 spacing down/up, 3/4 height
-    /// down/up, Tab the bump style, Shift+T the mode.
+    /// down/up, 5/6 miter angle, 7/8 bend size, Tab the
+    /// bump run, Shift+T the mode.
     fn tune_keys(&mut self, ctx: &egui::Context) {
         use crate::router::TuneMode;
         use trace_core::route::TuneStyle;
@@ -2230,6 +2288,14 @@ impl App {
                 i.consume_key(egui::Modifiers::NONE, egui::Key::Num4),
                 i.consume_key(egui::Modifiers::NONE, egui::Key::Tab),
                 i.consume_key(egui::Modifiers::SHIFT, egui::Key::T),
+            )
+        });
+        let (k5, k6, k7, k8) = ctx.input_mut(|i| {
+            (
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Num5),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Num6),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Num7),
+                i.consume_key(egui::Modifiers::NONE, egui::Key::Num8),
             )
         });
         let t = &mut self.router.tune;
@@ -2255,9 +2321,15 @@ impl App {
         if tab {
             let i = TuneStyle::ALL
                 .iter()
-                .position(|s| *s == t.style)
+                .position(|s| *s == t.style.style)
                 .unwrap_or(0);
-            t.style = TuneStyle::ALL[(i + 1) % TuneStyle::ALL.len()];
+            t.style.style = TuneStyle::ALL[(i + 1) % TuneStyle::ALL.len()];
+        }
+        if k5 || k6 {
+            t.style.angle = (t.style.angle + if k6 { 5.0 } else { -5.0 }).clamp(10.0, 80.0);
+        }
+        if k7 || k8 {
+            t.style.size = (t.style.size + if k8 { 0.1 } else { -0.1 }).clamp(0.1, 1.0);
         }
         if mode {
             let i = TuneMode::ALL.iter().position(|m| *m == t.mode).unwrap_or(0);
@@ -2462,7 +2534,7 @@ impl App {
                 amp: t.amp,
                 space,
                 clearance: self.router.clearance,
-                style: t.style,
+                shape: t.style,
             },
         );
         let name = |n: u32| board.nets[n as usize].name.clone();
@@ -3160,6 +3232,8 @@ impl eframe::App for App {
                 self.nudge_sel(arrows[0] * k, arrows[1] * k);
             }
         }
+        // While tuning, 3 lowers the bump height (Altium) instead of the 3D view.
+        let tuning = self.tool == Tool::Tune && board2d;
         let (open_shortcut, fit, flip, esc, measure_key, toggle3d, cm_key, sch_key) = ctx
             .input_mut(|i| {
                 (
@@ -3168,7 +3242,7 @@ impl eframe::App for App {
                     !typing && board2d && plain_key(i, egui::Key::B),
                     i.key_pressed(egui::Key::Escape),
                     !typing && board2d && plain_key(i, egui::Key::M),
-                    !typing && plain_key(i, egui::Key::Num3),
+                    !typing && !tuning && plain_key(i, egui::Key::Num3),
                     !typing && plain_key(i, egui::Key::C),
                     !typing && plain_key(i, egui::Key::S),
                 )

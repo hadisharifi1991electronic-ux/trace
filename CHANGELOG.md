@@ -3,6 +3,25 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.108.0 (2026-11-26)
+
+Tuning bends are never square:
+
+- Every bend of the tuning bumps is mitered or an arc. The tuning bar has
+  Bends (Miter or Arc), the miter angle to the track (10 to 80°, 45 by
+  default; less gives a longer, flatter cut along the track) and the bend
+  size (10 to 100 % of the room at each bend; an arc at 100 % gives
+  semicircles over tall enough bumps). Keys while tuning: 5 / 6 change the
+  angle, 7 / 8 the size.
+- The bump run is Accordion, Trombone or Sawtooth (Tab); the old Mitered
+  and Rounded styles are now Accordion with miter or arc bends.
+- Pressing 3 while tuning lowers the bump height instead of opening the 3D
+  view.
+- `trace match` takes `--bend miter|arc`, `--miter-angle 45` and
+  `--bend-size 50%`. On the DAC39RF12 EVM, phase tuning with 30° full
+  miters or full arcs brings all 13 skewed pairs within 2 mil (the DRC
+  still finds the same 296 results).
+
 ## 0.107.1 (2026-11-26)
 
 - `trace thermal --ir NET=A@SRC:-1.8` (and the thermal window) keep a

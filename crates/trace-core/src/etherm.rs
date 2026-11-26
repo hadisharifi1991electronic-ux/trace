@@ -112,7 +112,7 @@ pub fn rail(
             .ok_or(format!("{net}: no likely source on the net, name one"))?,
     };
     let volts = volts
-        .filter(|v| *v > 0.0)
+        .filter(|v| *v != 0.0)
         .or_else(|| crate::pdn::volts_in_name(&board.nets[id as usize].name))
         .unwrap_or(1.0);
     let parts = pi::default_loads(board, id, source);

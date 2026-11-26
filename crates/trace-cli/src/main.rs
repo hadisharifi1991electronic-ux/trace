@@ -3907,7 +3907,11 @@ fn thermal_cmd(file: &str, rest: &[&str]) -> Res {
         let mut es = trace_core::etherm::Setup::new(rails, setup.clone());
         es.couple = couple;
         let er = trace_core::etherm::solve(&b, &es)?;
-        eprintln!("  coupled solve in {:.1} s", t.elapsed().as_secs_f64());
+        eprintln!(
+            "  {} solve in {:.1} s",
+            if couple { "coupled" } else { "one-pass" },
+            t.elapsed().as_secs_f64()
+        );
         let text = er.report(&b);
         print!("{text}");
         for o in outs

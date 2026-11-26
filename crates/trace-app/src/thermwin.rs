@@ -319,7 +319,7 @@ impl ThermalWindow {
                         ui.add(
                             egui::DragValue::new(&mut r.volts)
                                 .speed(0.01)
-                                .range(0.0..=60.0)
+                                .range(-60.0..=60.0)
                                 .suffix(" V"),
                         )
                         .on_hover_text("0: read from the net's name (1V8 = 1.8 V), else 1 V");
@@ -397,7 +397,9 @@ impl ThermalWindow {
                                     let text = r.report(&b);
                                     let ir: String = text
                                         .lines()
-                                        .take_while(|l| !l.starts_with("Part "))
+                                        .take_while(|l| {
+                                            !l.starts_with("Part ") && !l.starts_with("Hottest")
+                                        })
                                         .map(|l| format!("{l}\n"))
                                         .collect();
                                     (r.thermal, None, Some(ir))

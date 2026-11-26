@@ -1737,10 +1737,12 @@ impl Result {
     /// A plain-text report.
     pub fn report(&self) -> String {
         let mut s = String::new();
-        s += &format!(
-            "{:<10} {:>7} {:>9} {:>9} {:>9} {:>9} {:>8} {:>9}\n",
-            "Part", "W", "Tj °C", "Tcase °C", "Tboard °C", "Tsink °C", "board %", "θJA K/W"
-        );
+        if !self.parts.is_empty() {
+            s += &format!(
+                "{:<10} {:>7} {:>9} {:>9} {:>9} {:>9} {:>8} {:>9}\n",
+                "Part", "W", "Tj °C", "Tcase °C", "Tboard °C", "Tsink °C", "board %", "θJA K/W"
+            );
+        }
         for p in &self.parts {
             s += &format!(
                 "{:<10} {:>7.2} {:>9.1} {:>9.1} {:>9.1} {:>9} {:>8.0} {:>9.1}\n",

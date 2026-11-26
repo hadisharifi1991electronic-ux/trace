@@ -3,6 +3,16 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.107.1 (2026-11-26)
+
+- `trace thermal --ir NET=A@SRC:-1.8` (and the thermal window) keep a
+  negative rail voltage instead of falling back to 1 V.
+- `--no-couple` says "one-pass solve"; the parts table is left out when
+  only copper loss heats the board.
+- DAC39RF12 EVM (DVDD 3 A, VEExA 2 A, VDDCLK10 1 A): 0.093 W of copper
+  loss, board up 1.5 K, drops 0.4 mV larger hot; settles in 2 passes,
+  152 s.
+
 ## 0.107.0 (2026-11-25)
 
 Coupled thermal and electrical simulation: heat from IR drop in planes

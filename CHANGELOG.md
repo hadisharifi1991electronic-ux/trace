@@ -3,6 +3,40 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.110.0 (2026-11-26)
+
+3D FEM power now adds up (found on TI's DAC39RF12 EVM SYSREF_LMK pair via,
+where |S|² summed to 0.5-0.9). A new power audit (TRACE_FEM_POWER=1)
+shows where each port's power goes: back out of the ports, into the
+radiation walls, the other nets' terminations, the dielectric, and what
+is left over. The walls took under 1%, so the window was not leaking. The
+real causes:
+
+- 0-ohm links are copper. The SYSREF pair runs through four 0-ohm
+  resistors (R107-R110), which were lumped ports shorted afterwards: the
+  whole signal went through a 50-ohm sheet and back out through Γ = -1,
+  which blew each small solver error up in S (S11 -3.9 dB, S21 -2.5 dB
+  at 6 GHz). As copper, the pair reads S11 -11 dB, S21 -0.5 dB.
+- Wave ports take their power from their own field on the mesh. With the
+  fine 2D solve's Z0 there instead, S was not reciprocal against lumped
+  ports (S21 0.69 against S12 0.66 on a test line) and a column's power
+  went over 1. S is now reciprocal to 0.0001 there. The reported Z0 is
+  still the fine solve's.
+- Lumped ports carry an even current across their width, as HFSS's do.
+  A local resistive sheet took more power than S showed where the field
+  across it was uneven: on the DAC pin port at 535k unknowns 94.5%
+  against 88.2%, so 6% of the power seemed lost. Every pass of the DAC
+  run now adds up to 1.000.
+- A port face with a coarse mesh is refined where its 2D error is, not
+  all over: the pair's port Z0 starts at 123-126 ohm (was 117, fine solve
+  125) for fewer tetrahedra.
+- The iterative solver's single-precision factor can break down (every
+  unknown NaN, a 600 s pass); it is now checked and factored again with
+  a little loss in the shift. The DAC pass at 370k unknowns takes 90 s.
+- DAC 120-mil window at 540k unknowns: the passes move 0.08 then 0.048
+  (were 0.08-0.09 flat). Not yet under 0.02 in that budget, but S is
+  reciprocal and passive now, so what is left is mesh refinement.
+
 ## 0.109.1 (2026-11-26)
 
 - 3D FEM sweep: no factor below 0.4 of the top frequency again. 0.109.0

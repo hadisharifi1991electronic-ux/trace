@@ -29,7 +29,7 @@
     clippy::map_entry
 )]
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use faer::c64;
 use faer::linalg::solvers::Solve;
@@ -88,6 +88,9 @@ fn port_infos(model: &Model, asm: &Assembled) -> Vec<PortInfo> {
 /// dielectrics would otherwise grade fine lines across the whole box; the
 /// adaptive passes refine where it matters).
 const GRADE: f64 = 8.0;
+/// The share of a lumped port's resistor kept as a local sheet (the rest
+/// carries an even current).
+const LUMPED_SHEET: f64 = 0.0;
 /// Above this many unknowns the iterative solver is used.
 const ITER_MIN: usize = 150_000;
 
@@ -2472,7 +2475,21 @@ fn port_mode(
             ee0 += wq * area * dot(e[ti][q], e0[ti][q]);
         }
     }
+    // The power of a unit mode from its own shape on the mesh, ½ β ∫e·e0
+    // / (k0 η0), the same functional the port drives and reads with: with
+    // the fine 2D solve's Z0 in its place S lost reciprocity against
+    // lumped ports by the 2D gap (a microstrip into a gap port: S21 0.691
+    // vs S12 0.656), so a pin port's S21 read high and the column's power
+    // over 1. S is then on the line's own impedance as the mesh holds it
+    // (a uniform line matched), and Z0, which renormalises it, stays the
+    // fine solve's (TE10: the same as ee / Zte).
     let norm = match norm {
+        Some(zf) if ee0 > 0.0 => {
+            let zm = k0 * ETA0 / (info.beta * ee0);
+            // A coarse port face shows here: refine it first.
+            gap = gap.max((zm - zf).abs() / zf);
+            (1.0 / zm).sqrt()
+        }
         Some(z0) => (1.0 / z0).sqrt(),
         None => (ee / info.z0).sqrt(),
     };
@@ -2669,21 +2686,34 @@ fn solve_at(
             }
         }
     }
-    // Lumped ports: a resistive sheet of R along the current (Zs = R w/l
-    // per square), its source the current I0 = 1 across it, and the
-    // functional that reads its voltage.
+    // Lumped ports: mostly a resistor R carrying an even current across the
+    // port's width (as HFSS's lumped ports), its source the current
+    // I0 = 1, and the functional that reads its voltage. It enters as a
+    // rank-1 term j k0 η0 / (R w²) (u·E)(u·W), u = ∫ W_dir over the
+    // rectangle, beside the wave ports' rank-2 ones: the power it takes is
+    // then |V|² / 2R, as S reads it. (A local resistive sheet took more
+    // where the field across it is uneven, by a pad's edge: on the
+    // DAC39RF12 EVM pin port at 535k unknowns 94.5% against S's 88.2%.)
+    // LUMPED_SHEET of it can stay a local sheet (that share of the old
+    // error comes back with it); none by default.
     let nl = model.lumped.len();
     let mut lsrc = vec![vec![czero(); n]; nl];
     let mut lvolt = vec![vec![0.0f64; n]; nl];
+    let mut lcoef = vec![czero(); nl];
+    let mut lscale = vec![czero(); nl];
     for (li, lp) in model.lumped.iter().enumerate() {
         let faces = lumped_faces(mesh, &asm, lp, model.tol());
         if faces.is_empty() {
             return Err(format!("lumped port {} has no mesh faces", lp.name));
         }
         let o = 1 - lp.dir;
-        let (len, wid) = (lp.hi[lp.dir] - lp.lo[lp.dir], lp.hi[o] - lp.lo[o]);
-        let zs = lp.r * wid / len;
-        let coef = c64::new(0.0, k0 * ETA0 / zs);
+        let wid = lp.hi[o] - lp.lo[o];
+        let len = lp.hi[lp.dir] - lp.lo[lp.dir];
+        lcoef[li] = c64::new(0.0, (1.0 - LUMPED_SHEET) * k0 * ETA0 / (lp.r * wid * wid));
+        // The local share, as a resistive sheet of R / LUMPED_SHEET.
+        let sheet = c64::new(0.0, LUMPED_SHEET * k0 * ETA0 * len / (lp.r * wid));
+        // A0⁻¹ u from A0⁻¹ lsrc.
+        lscale[li] = c64::new(0.0, wid / (k0 * ETA0));
         for bf in &faces {
             let (area, tr) = face_traces(mesh, &asm, bf);
             let d = &asm.dof[bf.tet];
@@ -2695,7 +2725,7 @@ fn solve_at(
                     lvolt[li][da as usize] -= wa / wid;
                     for (ic, vc) in &tr[q] {
                         let Some(dc) = d[*ic] else { continue };
-                        trip.add(da, dc, coef * (wa * vc[lp.dir]));
+                        trip.add(da, dc, sheet * (wa * vc[lp.dir]));
                     }
                 }
             }
@@ -2737,36 +2767,60 @@ fn solve_at(
         sym_solve(n, trip, &cols)?
     };
     tlog("solve");
-    // A = A0 + U C Uᵀ, U = [b0 | be], C = diag(jβ/ee0, -jβ/ee).
-    let mut cinv_d = vec![czero(); m2];
+    // A = A0 + U C Uᵀ, U = [b0 | be | u], C = diag(jβ/ee0, -jβ/ee, c_l).
+    let m3 = m2 + nl;
+    let mut cinv_d = vec![czero(); m3];
     for (p, pm) in asm.ports.iter().enumerate() {
         let jb = c64::new(0.0, pm.info.beta);
         cinv_d[p] = c64::new(pm.ee0, 0.0) / jb;
         cinv_d[np + p] = -c64::new(pm.ee, 0.0) / jb;
     }
+    for l in 0..nl {
+        cinv_d[m2 + l] = c64::new(1.0, 0.0) / lcoef[l];
+    }
+    let ulum: Vec<Vec<f64>> = (0..nl)
+        .map(|l| {
+            let o = 1 - model.lumped[l].dir;
+            let wid = model.lumped[l].hi[o] - model.lumped[l].lo[o];
+            lvolt[l].iter().map(|v| -v * wid).collect()
+        })
+        .collect();
+    let ylum: Vec<Vec<c64>> = (0..nl)
+        .map(|l| y[m2 + l].iter().map(|v| v * lscale[l]).collect())
+        .collect();
     let ucol = |k: usize| -> &Vec<f64> {
         if k < np {
             &b0[k]
-        } else {
+        } else if k < m2 {
             &be[k - np]
+        } else {
+            &ulum[k - m2]
+        }
+    };
+    let ycol = |k: usize| -> &Vec<c64> {
+        if k < m2 {
+            &y[k]
+        } else {
+            &ylum[k - m2]
         }
     };
     // S = C⁻¹ + Uᵀ A0⁻¹ U.
-    let mut sm = vec![czero(); m2 * m2];
-    for i in 0..m2 {
+    let mut sm = vec![czero(); m3 * m3];
+    for i in 0..m3 {
         let u = ucol(i);
-        for j in 0..m2 {
+        for j in 0..m3 {
+            let yj = ycol(j);
             let mut acc = czero();
             for r in 0..n {
                 if u[r] != 0.0 {
-                    acc += y[j][r] * u[r];
+                    acc += yj[r] * u[r];
                 }
             }
-            sm[i * m2 + j] = acc;
+            sm[i * m3 + j] = acc;
         }
-        sm[i * m2 + i] += cinv_d[i];
+        sm[i * m3 + i] += cinv_d[i];
     }
-    let sinv = cinv(&sm, m2);
+    let sinv = cinv(&sm, m3);
     // Excitation p: r = 2jβ b0_p, so A0⁻¹ r = 2jβ y[p]; x = z − Y S⁻¹ Uᵀ z.
     let mut sols = Vec::with_capacity(np + nl);
     for p in 0..np + nl {
@@ -2776,7 +2830,7 @@ fn solve_at(
         } else {
             y[m2 + p - np].clone()
         };
-        let utz: Vec<c64> = (0..m2)
+        let utz: Vec<c64> = (0..m3)
             .map(|i| {
                 let u = ucol(i);
                 let mut acc = czero();
@@ -2788,17 +2842,18 @@ fn solve_at(
                 acc
             })
             .collect();
-        let mut coef = vec![czero(); m2];
-        for i in 0..m2 {
-            for j in 0..m2 {
-                coef[i] += sinv[i * m2 + j] * utz[j];
+        let mut coef = vec![czero(); m3];
+        for i in 0..m3 {
+            for j in 0..m3 {
+                coef[i] += sinv[i * m3 + j] * utz[j];
             }
         }
         let mut x = z;
-        for j in 0..m2 {
+        for j in 0..m3 {
             if coef[j] != czero() {
+                let yj = ycol(j);
                 for r in 0..n {
-                    x[r] -= y[j][r] * coef[j];
+                    x[r] -= yj[r] * coef[j];
                 }
             }
         }
@@ -2855,6 +2910,9 @@ fn solve_at(
             s[(np + k) * nt + pe] = b / a_in(pe);
         }
     }
+    if std::env::var_os("TRACE_FEM_POWER").is_some() {
+        power_report(model, mesh, &asm, &sols, &s, nt, k0, &|pe| a_in(pe));
+    }
     let np = nt;
     // Copper: each excitation's surface loss takes its share off the
     // power that gets through (the reflection barely moves).
@@ -2876,6 +2934,222 @@ fn solve_at(
         }
     }
     Ok((asm, sols, s))
+}
+
+/// Debug (TRACE_FEM_POWER): where each excitation's power goes. Each
+/// absorbing face takes ½ √εr ∫|Eₜ|² / η0 (k ∫|Eₜ|² / (2 k0 η0)), the
+/// dielectric ½ k0 ε'' ∫|E|² / η0; both as shares of the incident power,
+/// beside Σ|S|² over the ports, so the rest is what the model cannot
+/// account for.
+#[allow(clippy::too_many_arguments)]
+fn power_report(
+    model: &Model,
+    mesh: &Mesh,
+    asm: &Assembled,
+    sols: &[Vec<c64>],
+    s: &[c64],
+    nt: usize,
+    k0: f64,
+    a_in: &dyn Fn(usize) -> f64,
+) {
+    let tol = model.tol();
+    let wall_name = ["x-", "x+", "y-", "y+", "z-", "z+"];
+    // Each radiation face's group: a passive port's name, else its wall.
+    let group = |bf: &BFace| -> String {
+        let p = face_nodes(mesh, &bf.f);
+        let c = scale(add(add(p[0], p[1]), p[2]), 1.0 / 3.0);
+        for a in 0..3 {
+            for (side, b) in [(0, model.lo[a]), (1, model.hi[a])] {
+                if !p.iter().all(|q| (q[a] - b).abs() < tol) {
+                    continue;
+                }
+                let (u, w) = others(a);
+                if let Some(pt) = model.ports.iter().find(|pt| {
+                    pt.axis == a
+                        && pt.high == (side == 1)
+                        && c[u] > pt.lo[0]
+                        && c[u] < pt.hi[0]
+                        && c[w] > pt.lo[1]
+                        && c[w] < pt.hi[1]
+                }) {
+                    return format!("term {}", pt.name);
+                }
+                // Which layer gap the face sits in (by z), for walls.
+                return format!("wall {} z={:.0}um", wall_name[2 * a + side], {
+                    let zc = c[2] * 1e6;
+                    (zc / 50.0).round() * 50.0
+                });
+            }
+        }
+        "inside".into()
+    };
+    let groups: Vec<String> = asm.rad.iter().map(|(bf, _)| group(bf)).collect();
+    let quad: Vec<([f64; 4], f64)> = if asm.order >= 2 {
+        q_tet4()
+    } else {
+        Q_TET2.to_vec()
+    };
+    let drive = model.ports.iter().filter(|p| !p.passive).count();
+    for pe in 0..nt.min(drive.max(1)) {
+        let x = &sols[pe];
+        let p_inc = 0.5 * a_in(pe) * a_in(pe);
+        let scale_p = 1.0 / (2.0 * k0 * ETA0) / p_inc;
+        let mut by: BTreeMap<String, f64> = BTreeMap::new();
+        let (mut walls, mut terms) = (0.0, 0.0);
+        for ((bf, k), g) in asm.rad.iter().zip(&groups) {
+            let (area, tr) = face_traces(mesh, asm, bf);
+            let d = &asm.dof[bf.tet];
+            let mut acc = 0.0;
+            for (q, (_, wq)) in Q_TRI4.iter().enumerate() {
+                let mut e = [czero(); 3];
+                for (ia, va) in &tr[q] {
+                    if let Some(da) = d[*ia] {
+                        for c in 0..3 {
+                            e[c] += x[da as usize] * va[c];
+                        }
+                    }
+                }
+                acc += wq * area * e.iter().map(|v| v.norm_sqr()).sum::<f64>();
+            }
+            let p = k * acc * scale_p;
+            if g.starts_with("term") {
+                terms += p;
+            } else {
+                walls += p;
+            }
+            *by.entry(g.clone()).or_insert(0.0) += p;
+        }
+        // Dielectric loss.
+        let mut diel = 0.0;
+        let mut b = Vec::new();
+        for (ti, st) in asm.tets.iter().enumerate() {
+            let epp = -asm.eps[ti].im;
+            if epp <= 0.0 {
+                continue;
+            }
+            let geo = tet_geo(tet_nodes(mesh, st));
+            let d = &asm.dof[ti];
+            for (l, wq) in &quad {
+                basis(&geo.g, l, asm.order, &mut b);
+                let mut e = [czero(); 3];
+                for (ia, bv) in b.iter().enumerate() {
+                    if let Some(da) = d[ia] {
+                        for c in 0..3 {
+                            e[c] += x[da as usize] * bv.0[c];
+                        }
+                    }
+                }
+                diel += wq * geo.vol * epp * e.iter().map(|v| v.norm_sqr()).sum::<f64>();
+            }
+        }
+        let diel = diel * k0 * k0 * scale_p;
+        // Lumped ports: what each resistor takes (k0 η0 / (R w²) |u·E|²),
+        // against what its S says (½|b|² for a port not driven).
+        for (li, lp) in model.lumped.iter().enumerate() {
+            let o = 1 - lp.dir;
+            let wid = lp.hi[o] - lp.lo[o];
+            let mut ue = czero();
+            for bf in lumped_faces(mesh, asm, lp, tol) {
+                let (area, tr) = face_traces(mesh, asm, &bf);
+                let d = &asm.dof[bf.tet];
+                for (q, (_, wq)) in Q_TRI4.iter().enumerate() {
+                    for (ia, va) in &tr[q] {
+                        if let Some(da) = d[*ia] {
+                            ue += x[da as usize] * (va[lp.dir] * wq * area);
+                        }
+                    }
+                }
+            }
+            let len = lp.hi[lp.dir] - lp.lo[lp.dir];
+            let mut sh = 0.0;
+            for bf in lumped_faces(mesh, asm, lp, tol) {
+                let (area, tr) = face_traces(mesh, asm, &bf);
+                let d = &asm.dof[bf.tet];
+                for (q, (_, wq)) in Q_TRI4.iter().enumerate() {
+                    let mut e = czero();
+                    for (ia, va) in &tr[q] {
+                        if let Some(da) = d[*ia] {
+                            e += x[da as usize] * va[lp.dir];
+                        }
+                    }
+                    sh += wq * area * e.norm_sqr();
+                }
+            }
+            let p = ((1.0 - LUMPED_SHEET) * ue.norm_sqr() / (wid * wid)
+                + LUMPED_SHEET * sh * len / wid)
+                * k0
+                * ETA0
+                / lp.r
+                * scale_p;
+            let k = drive + li;
+            eprintln!(
+                "    lumped {} takes {:.4}, its |S|² {:.4}",
+                lp.name,
+                p,
+                if k < nt { s[k * nt + pe].norm_sqr() } else { f64::NAN }
+            );
+        }
+        // Driven ports' faces: what is not the port's own mode (the even
+        // mode of a pair, higher modes) is absorbed by the local jβ there.
+        for (pi, pm) in asm.ports.iter().enumerate() {
+            let mut et: Vec<[[c64; 3]; 6]> = Vec::with_capacity(pm.tris.len());
+            let mut proj = czero();
+            for (ti, bf) in pm.tris.iter().enumerate() {
+                let (area, tr) = face_traces(mesh, asm, bf);
+                let d = &asm.dof[bf.tet];
+                let mut v = [[czero(); 3]; 6];
+                for (q, (_, wq)) in Q_TRI4.iter().enumerate() {
+                    for (ia, va) in &tr[q] {
+                        if let Some(da) = d[*ia] {
+                            for c in 0..3 {
+                                v[q][c] += x[da as usize] * va[c];
+                            }
+                        }
+                    }
+                    for c in 0..3 {
+                        proj += v[q][c] * (wq * area * pm.e0[ti][q][c]);
+                    }
+                }
+                et.push(v);
+            }
+            let vm = proj / pm.ee0;
+            let mut res = 0.0;
+            for (ti, bf) in pm.tris.iter().enumerate() {
+                let (_, area, _) = tri_geo(face_nodes(mesh, &bf.f));
+                for (q, (_, wq)) in Q_TRI4.iter().enumerate() {
+                    let r: f64 = (0..3)
+                        .map(|c| (et[ti][q][c] - vm * pm.e[ti][q][c]).norm_sqr())
+                        .sum();
+                    res += wq * area * r;
+                }
+            }
+            let p = pm.info.beta * res * scale_p;
+            *by.entry(format!("port {} not its mode", pi + 1)).or_insert(0.0) += p;
+            terms += p;
+        }
+        let ss: f64 = (0..nt).map(|q| s[q * nt + pe].norm_sqr()).sum();
+        eprintln!(
+            "  power, port {} driven: S {:.3}, walls {:.3}, terminations {:.3}, dielectric {:.3}, \
+             sum {:.3}",
+            pe + 1,
+            ss,
+            walls,
+            terms,
+            diel,
+            ss + walls + terms + diel
+        );
+        let mut v: Vec<(&String, &f64)> = by.iter().collect();
+        v.sort_by(|a, b| b.1.total_cmp(a.1));
+        for (g, p) in v.iter().take(12) {
+            if **p > 1e-3 {
+                eprintln!("    {g}: {p:.4}");
+            }
+        }
+        let row: Vec<String> = (0..nt)
+            .map(|q| format!("{:.3}", s[q * nt + pe].norm_sqr()))
+            .collect();
+        eprintln!("    |S|² by port: {}", row.join(" "));
+    }
 }
 
 /// The mesh faces on a lumped port's rectangle (each once).
@@ -3668,9 +3942,29 @@ fn iter_solve(
         };
         // Rows of each entry, for the scaling.
         let row_of = |k: usize| trip.ptr.partition_point(|&p| p <= k) - 1;
-        let m = SymFactor::<f32>::from_csr(n, &trip, |k, v| {
-            (v + shift * em(k)) * (d[row_of(k)] * d[trip.col[k] as usize])
-        })?;
+        // Single precision can break down on a pivot (the DAC39RF12 EVM
+        // cut-out with a finely meshed port face: every unknown NaN):
+        // check the factor on a test vector, and if it fails factor again
+        // with a little loss in the shift (a shifted-Laplacian
+        // preconditioner; GMRES still solves the lossless matrix).
+        let kp = 2.0 * std::f64::consts::PI * f_pre * 1e9 / C0;
+        let mut made = None;
+        for alpha in [0.0, 0.02, 0.1, 0.5] {
+            let sh = shift - c64::new(0.0, alpha * kp * kp);
+            let m = SymFactor::<f32>::from_csr(n, &trip, |k, v| {
+                (v + sh * em(k)) * (d[row_of(k)] * d[trip.col[k] as usize])
+            })?;
+            let mut t = faer::Mat::<c64>::from_fn(n, 1, |r, _| c64::new(1.0, (r % 7) as f64 * 0.1));
+            m.solve(&mut t);
+            if (0..n).all(|r| t[(r, 0)].re.is_finite() && t[(r, 0)].im.is_finite()) {
+                if alpha > 0.0 && std::env::var_os("TRACE_FEM_MESH").is_some() {
+                    eprintln!("  preconditioner: single precision broke down, refactored with loss {alpha}");
+                }
+                made = Some(m);
+                break;
+            }
+        }
+        let m = made.ok_or("the preconditioner's factor broke down (NaN)")?;
         *slot = Some(Precond { f: f_pre, n, d, m });
     }
     if let Some(pc) = slot.as_ref() {
@@ -4096,17 +4390,25 @@ pub fn solve(
     // Coarse port faces first: refine the tetrahedra on any port whose
     // mode on the mesh's own triangles is off the fine 2D solve by more
     // than 2%, so the ports start right (their power and Z0 hang on it).
-    for _ in 0..4 {
+    for _ in 0..8 {
         let asm = assemble_mesh(model, &mesh, setup.f_adapt, setup.order)?;
         let marked = vec![false; mesh.tets.len()];
         let mut edges = Vec::new();
         let mut any = false;
+        let mut worst_gap = 0.0f64;
         for pm in asm.ports.iter().filter(|p| p.gap > 0.02) {
             any = true;
-            // Each port triangle's longest side, so the face really gets
-            // finer.
-            for t in &pm.tris {
-                let f = t.f;
+            worst_gap = worst_gap.max(pm.gap);
+            // The third of its triangles where the 2D solve's error is
+            // largest (by the traces' edges, where the field crowds), by
+            // each one's longest side, so the face really gets finer
+            // there: the whole face at once spent the room on open
+            // laminate and left the pair's Z0 6% off.
+            let mut order: Vec<usize> = (0..pm.tris.len()).collect();
+            order.sort_by(|&a, &b| pm.err[b].total_cmp(&pm.err[a]));
+            let take = (pm.tris.len() / 3).max(1);
+            for &ti in order.iter().take(take) {
+                let f = pm.tris[ti].f;
                 let mut best = (ekey(f[0], f[1]), -1.0);
                 for (a, b) in TRI_EDGES {
                     let e = ekey(f[a], f[b]);
@@ -4129,8 +4431,9 @@ pub fn solve(
             break;
         }
         if !progress(&format!(
-            "ports: refined to {} tetrahedra (port Z0 on the mesh off by more than 2%)",
-            mesh.tets.len()
+            "ports: refined to {} tetrahedra (port Z0 on the mesh off by up to {:.1}%)",
+            mesh.tets.len(),
+            worst_gap * 100.0
         )) {
             return Err("stopped".into());
         }
@@ -5263,11 +5566,11 @@ mod tests {
         let s = &r.s[0];
         // Reciprocal and passive.
         for (i, j) in [(0, 1), (0, 2), (1, 2)] {
-            assert!((s[i * 3 + j] - s[j * 3 + i]).norm() < 0.06, "S{i}{j}");
+            assert!((s[i * 3 + j] - s[j * 3 + i]).norm() < 0.002, "S{i}{j}");
         }
         for c in 0..3 {
             let p: f64 = (0..3).map(|q| s[q * 3 + c].norm_sqr()).sum();
-            assert!(p < 1.05, "column {c} power {p}");
+            assert!((p - 1.0).abs() < 0.002, "column {c} power {p}");
         }
         let short = terminate(s, 3, &[(2, c64::new(-1.0, 0.0))]);
         let open = terminate(s, 3, &[(2, c64::new(1.0, 0.0))]);
@@ -5275,3 +5578,4 @@ mod tests {
         assert!(open[2].norm() < 0.5, "open S21 {}", open[2].norm());
     }
 }
+

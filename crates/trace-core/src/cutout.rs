@@ -760,10 +760,44 @@ pub fn model(
     }
     // Two-pad parts on the outer layers.
     let (mut lumped, mut parts): (Vec<Lumped>, Vec<Part>) = (Vec::new(), Vec::new());
+    let mut links: Vec<String> = Vec::new();
     for (side, l) in [(0usize, 0usize), (1, nl - 1)] {
         let (lp, pp) = part_ports(board, &parts_pads[side], &xy, z(l), &mut notes);
-        lumped.extend(lp);
-        parts.extend(pp);
+        for (lu, part) in lp.into_iter().zip(pp) {
+            // A 0-ohm link is copper: as a port shorted afterwards it
+            // takes the whole signal through a 50-ohm sheet and back out
+            // through Γ = -1, which turns each few-percent error of the
+            // solve into a large one in S (the DAC39RF12 EVM SYSREF pair
+            // runs through four of them).
+            if crate::planar::parse_load(&part.designator, &part.value)
+                == Some(crate::planar::Load::Short)
+            {
+                let net = board
+                    .components
+                    .iter()
+                    .position(|c| c.designator == part.designator)
+                    .and_then(|c| parts_pads[side].get(&(c as u32)))
+                    .map_or(u32::MAX - 1, |p| mnet(p[0].net));
+                let d = lu.dir;
+                // Into each pad by a mil, so the link overlaps both.
+                let (mut a, mut b) = (lu.lo, lu.hi);
+                a[d] -= MIL;
+                b[d] += MIL;
+                let mut s = sheet(l, vec![a, [b[0], a[1]], b, [a[0], b[1]]], net);
+                s.at = lu.z;
+                sheets.push(s);
+                links.push(part.designator.clone());
+                continue;
+            }
+            lumped.push(lu);
+            parts.push(part);
+        }
+    }
+    if !links.is_empty() {
+        notes.push(format!(
+            "0-ohm links solved as copper (no ports): {}",
+            links.join(", ")
+        ));
     }
     for (k, p) in parts.iter_mut().enumerate() {
         p.port = nd + k;

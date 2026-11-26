@@ -1,0 +1,20 @@
+Rail                   V         A    loss W hot loss W    drop mV    hot mV
+VBAT               3.700     5.000    0.0618     0.0634      25.37     26.07
+    U597         V min 3.6746 -> 3.6739 V (-0.70 mV)
+    R3095        V min 3.6878 -> 3.6875 V (-0.30 mV)
+    R3100        V min 3.6880 -> 3.6877 V (-0.30 mV)
+3V3                3.300     3.000    0.0345     0.0353      32.52     33.25
+    U602         V min 3.2675 -> 3.2667 V (-0.73 mV)
+    R3145        V min 3.2882 -> 3.2879 V (-0.28 mV)
+    R3153        V min 3.2898 -> 3.2895 V (-0.25 mV)
+Pass  copper loss W  hottest °C  worst drop mV
+   1         0.0963       27.48          32.52
+   2         0.0987       27.55          33.25
+   3         0.0987       27.55          33.25
+Settled after 3 passes (resistivity +0.393 %/K)
+Part             W     Tj °C  Tcase °C Tboard °C  Tsink °C  board %   θJA K/W
+Hottest board point 27.5 °C on TOP at (69.7, 21.6) mm; ambient 25.0 °C
+Copper loss (IR drop) heating the board: 0.099 W
+Air film: top 3.1 W/m²K (8.5 with radiation), bottom 2.2 (7.6)
+Heat out: board 0.10 W, cases 0.00 W, heatsinks 0.00 W; balance -0.000 % in 4 passes, 217987 nodes
+Note: 19817 cells of 0.72 mm, 11 slabs through 1.20 mm; copper cover TOP 62%, GND02 92%, L03 58%, L04 65%, GND05 92%, BOTTOM 87%; 1146 via barrels

@@ -1,0 +1,17 @@
+---
+name: release-history-01
+description: Trace release/thread log, 2026-11-13 22:53 H to 2026-11-14 11:20: (versions, installs, test results)
+metadata:
+  type: project
+---
+
+- 2026-11-13 22:53 Hadi asked to test the field solver on an SDR RF trace (J503 SMA line, Net-(J503-SIG), F.Cu 11 mil, GND pour 6.13 mil): 54.6 ohm CPWG. Reading SDR_Card.PcbDoc for that test was OK'd by that request only.
+- 2026-11-14 05:36 Hadi uploaded ADI ADRV902x package port-Z models (SEDZ .s1p: TX1/TX4, TX2/TX3 0-6 GHz; RX2/RX3 0.5-6 GHz), copied to /mnt/project-files/trace-release/adi/. They model the chip pins, not the board; plan: Touchstone import + cascade board path with them. Asked Hadi for ADI EVB board S-params for a true comparison.
+- 2026-11-14 06:40: 0.43.0 pushed (24dc2c6, README fix f7ef0c9): viaopt.rs, pairopt.rs, touchstone.rs (trace cascade), validate.rs (trace validate, 26/26 pass; report /mnt/project-files/trace-release/reports/accuracy-0.43.0.txt). FDTD fix: one-third rule (metal drawn d0/3 inside edges), default cell drill/4 clamp 3. Asked Hadi for "yes" to install 0.43.0; then test on ADRV0926 .brd via RC. openEMS system install here was blocked by the permission classifier; offered to run it on Hadi's PC. Thread hit 24 attached outputs: give file paths instead.
+- 2026-11-14 07:03: 0.43.0 installed on Hadi's PC. ADRV0926 .brd test showed Trace's Allegro reader gets no stack-up (0x21 blocks subtype 0x0518 hold cross-section: material, thickness, Er, layer type, loss tangent as fixed 20-byte strings; no unit = metres). Fixing that as 0.44.0. After it Hadi wants "more PCB features" (not the channel simulator, which was proposed and dropped for now).
+- 2026-11-14 07:40: ADRV0926 .brd is Allegro 16.x (00 04 14 00) with an empty cross-section; stack-up rebuilt from its fab drawing text by RC -> /mnt/project-files/trace-release/reports/adrv9026_evb_stackup.txt (16 Cu, all Isola I-Speed, 87.33 mil; Er/Df ESTIMATED by glass/resin mixing). 0.44.0 (e3604d1): Allegro 17.x cross-section reader (0x21/0x0518), stackfile.rs (`trace stackup`, global `--stackup file`, Impedance Load/Save stack-up). Next after the RF retest: "more PCB features" (Hadi). Disk: rm -rf target/debug when full (it reached 20G).
+- 2026-11-14 ~09:30: 0.44.0 installed. ADRV results: pair via as built -22 dB to 6 GHz. 0.44.1 (c92001e) pushed: pair return vias were placed on the traces (fixed), optimiser keeps pitch unless --free-pitch, clearance 4 mil or the start's own. Next: Hadi's "yes" to install 0.44.1, RC rerun of via cases with --stackup results-0.44.0\adrv9026_stackup.txt, then "more PCB features".
+- 2026-11-14 10:55: 0.44.1 installed. ADRV pair via (31.5 pitch): as built -30.8 dB to 6 GHz; best antipad 34 + 4-6 returns @31.5 -> -41..-53 dB (below ~-45 dB is under solver accuracy; s2p slightly non-passive, 1.002). Results in Trace\results-0.44.1. Asked Hadi which PCB feature first (card): via stitching/RF fences (recommended), teardrops, 3D collision, pair-aware bus tuning. None of these exist in Trace yet.
+- 2026-11-14 11:20: Hadi picked via stitching + RF via fences. 0.45.0 (7d80668) pushed: stitch.rs (stitch/fence, plane clearance holes), Edit > "Via stitching and fences…", `trace stitch`, `trace fence`. Sample boards lack GND on 2 layers except CutiePi (85 vias, DRC clean). Remaining PCB-feature offers: teardrops, 3D collision, pair-aware bus tuning.
+
+See [[pcb-tool-project]].

@@ -1,0 +1,60 @@
+
+Field solver
+  PASS Stripline 5 mil wide, planes 10 mil apart: Z0
+      want 49.0399 Ω, got 48.7244: error -0.64% (allowed ±1%); exact (Cohn, thin strip)
+  PASS Stripline 8 mil wide, planes 12 mil apart: Z0
+      want 41.5535 Ω, got 41.2873: error -0.64% (allowed ±1%); exact (Cohn, thin strip)
+  PASS Stripline 3 mil wide, planes 16 mil apart: Z0
+      want 76.5835 Ω, got 76.0672: error -0.67% (allowed ±1%); exact (Cohn, thin strip)
+  PASS Stripline 12 mil wide, planes 10 mil apart: Z0
+      want 28.0206 Ω, got 27.8579: error -0.58% (allowed ±1%); exact (Cohn, thin strip)
+  PASS Stripline delay
+      want 173.6352 ps/in, got 173.6352: error +0.00% (allowed ±0.5%); exact (√Er / c)
+  PASS Stripline pair 5/5 mil, planes 10 mil apart: Zodd
+      want 45.5168 Ω, got 45.1810: error -0.74% (allowed ±1.5%); exact (Cohn, thin strips)
+  PASS Stripline pair 5/5 mil, planes 10 mil apart: Zeven
+      want 52.3222 Ω, got 52.0360: error -0.55% (allowed ±1.5%); exact (Cohn, thin strips)
+  PASS Stripline pair 4/8 mil, planes 12 mil apart: Zodd
+      want 57.2366 Ω, got 56.8516: error -0.67% (allowed ±1.5%); exact (Cohn, thin strips)
+  PASS Stripline pair 4/8 mil, planes 12 mil apart: Zeven
+      want 63.0298 Ω, got 62.6741: error -0.56% (allowed ±1.5%); exact (Cohn, thin strips)
+  PASS Microstrip 10 mil wide, 5 mil high: Z0
+      want 49.7484 Ω, got 49.2986: error -0.90% (allowed ±2%); formula (Hammerstad and Jensen, about 0.2%)
+  PASS Microstrip 10 mil wide, 5 mil high: Eeff
+      want 3.2070 , got 3.1991: error -0.25% (allowed ±2%); formula (Hammerstad and Jensen, about 0.2%)
+  PASS Microstrip 5 mil wide, 5 mil high: Z0
+      want 72.5443 Ω, got 71.9432: error -0.83% (allowed ±2%); formula (Hammerstad and Jensen, about 0.2%)
+  PASS Microstrip 5 mil wide, 5 mil high: Eeff
+      want 3.0413 , got 3.0369: error -0.14% (allowed ±2%); formula (Hammerstad and Jensen, about 0.2%)
+  PASS Microstrip 20 mil wide, 10 mil high: Z0
+      want 49.7484 Ω, got 49.3475: error -0.81% (allowed ±2%); formula (Hammerstad and Jensen, about 0.2%)
+  PASS Microstrip 20 mil wide, 10 mil high: Eeff
+      want 3.2070 , got 3.1983: error -0.27% (allowed ±2%); formula (Hammerstad and Jensen, about 0.2%)
+  PASS Grounded CPW 10 mil, gaps 5 mil, 10 mil high: Z0
+      want 62.8129 Ω, got 62.1545: error -1.05% (allowed ±3%); formula (conformal mapping, about 1-2%)
+
+IR drop
+  PASS Pour 1980 by 200 mil, 1 oz, 2 A: drop
+      want 9.5771 mV, got 9.4595: error -1.23% (allowed ±3%); exact (I·ρL/wt)
+  PASS Track 3000 by 4 mil, 1 oz, 0.5 A: drop
+      want 181.3836 mV, got 181.2962: error -0.05% (allowed ±2%); exact (I·ρL/wt)
+
+3D via solver
+  PASS Straight microstrip (no via), to 20 GHz: worst reflection
+      want -30.0000 dB, got -43.5718: error -13.572 dB (allowed at most +0 dB); exact (a uniform line does not reflect; at most −30 dB)
+  PASS Straight microstrip (no via), to 20 GHz: worst |S21| error
+      want 0.0000 dB, got 0.0182: error +0.018 dB (allowed at most +0.1 dB); exact (0 dB, lossless)
+  PASS Microstrip impedance in the 3D grid
+      want 50.0000 Ω, got 50.0757: error +0.15% (allowed ±3%); independent (2D field solver)
+  PASS Through via, to 20 GHz: worst |S11|² + |S21|²
+      want 1.0000 , got 0.9999: error -0.01% (allowed at most +2%); exact (≤ 1: a lossless via makes no energy)
+  PASS Stripline impedance in the 3D grid
+      want 50.0000 Ω, got 49.6599: error -0.68% (allowed ±3%); independent (2D field solver)
+  PASS Through via: S11 at 16 GHz, 2 mil cells vs 1 mil
+      want -17.7584 dB, got -15.9309: error +1.827 dB (allowed ±2 dB); convergence (the finer grid)
+  PASS Through via: S21 at 16 GHz, 2 mil cells vs 1 mil
+      want -0.1009 dB, got -0.1495: error -0.049 dB (allowed ±0.1 dB); convergence (the finer grid)
+  PASS 60 mil via stub: notch frequency, 2 mil cells vs 1 mil
+      want 17.3683 GHz, got 16.9779: error -2.25% (allowed ±3%); convergence (the finer grid)
+
+26 of 26 checks pass

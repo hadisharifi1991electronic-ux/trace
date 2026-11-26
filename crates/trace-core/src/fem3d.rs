@@ -3608,7 +3608,11 @@ fn near_anchor(f: f64, f_adapt: f64, held: Option<f64>) -> f64 {
     }
     match held {
         Some(h) if h > 0.0 && f > 0.0 && (f / h) > 0.75 && (f / h) < 1.34 => h,
-        _ => f.max(1e-3 * f_adapt),
+        // Never below the older low anchor (0.4 of the adaptive
+        // frequency): lower, the single-precision factor breaks down (the
+        // DAC cut-out's 0.1 and 0.66 GHz points: residual NaN, then a
+        // direct solve that ran out of RAM on a 15 GB PC).
+        _ => f.max(0.4 * f_adapt),
     }
 }
 
@@ -4324,8 +4328,12 @@ pub fn solve(
             Ok(x) => x,
             // A factor from another frequency can fail to precondition
             // a point (the iteration stalls or blows up): factor there.
-            Err(e) if e.starts_with("iterative solver") && (fa - f).abs() > 1e-9 => {
-                progress(&format!("sweep: {f:.4} GHz: {e}; factoring at this point"));
+            Err(e)
+                if e.starts_with("iterative solver")
+                    && (near_anchor(f, setup.f_adapt, None) - fa).abs() > 1e-9 =>
+            {
+                let fl = near_anchor(f, setup.f_adapt, None);
+                progress(&format!("sweep: {f:.4} GHz: {e}; factoring at {fl:.4} GHz"));
                 cache = None;
                 solve_at(
                     model,
@@ -4333,11 +4341,42 @@ pub fn solve(
                     f,
                     setup.order,
                     setup.iterative,
-                    Some((f, &mut cache)),
+                    Some((fl, &mut cache)),
                 )
                 .or_else(|e| {
                     if e.starts_with("iterative solver") {
                         progress(&format!("sweep: {f:.4} GHz: {e}; solving directly"));
+                        cache = None;
+                        solve_at(model, &mesh, f, setup.order, Some(false), None)
+                    } else {
+                        Err(e)
+                    }
+                })?
+            }
+            // Factored here and still failing: try the older anchor (a
+            // factor well above a low point holds), only then directly
+            // (double precision: about twice the memory).
+            Err(e)
+                if e.starts_with("iterative solver")
+                    && (anchor(f, setup.f_adapt) - fa).abs() > 1e-9 =>
+            {
+                let fo = anchor(f, setup.f_adapt);
+                progress(&format!(
+                    "sweep: {f:.4} GHz: {e}; using the {fo:.3} GHz factor"
+                ));
+                cache = None;
+                solve_at(
+                    model,
+                    &mesh,
+                    f,
+                    setup.order,
+                    setup.iterative,
+                    Some((fo, &mut cache)),
+                )
+                .or_else(|e| {
+                    if e.starts_with("iterative solver") {
+                        progress(&format!("sweep: {f:.4} GHz: {e}; solving directly"));
+                        cache = None;
                         solve_at(model, &mesh, f, setup.order, Some(false), None)
                     } else {
                         Err(e)
@@ -4346,6 +4385,7 @@ pub fn solve(
             }
             Err(e) if e.starts_with("iterative solver") => {
                 progress(&format!("sweep: {f:.4} GHz: {e}; solving directly"));
+                cache = None;
                 solve_at(model, &mesh, f, setup.order, Some(false), None)?
             }
             Err(e) => return Err(e),

@@ -3,6 +3,15 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.109.1 (2026-11-26)
+
+- 3D FEM sweep: no factor below 0.4 of the top frequency again. 0.109.0
+  factored low points at their own frequency; near DC the single-precision
+  factor broke down (DAC39RF12 EVM cut-out, 0.1 GHz: residual NaN), and
+  the direct fallback then ran Hadi's PC out of RAM. A failed point now
+  tries the older anchor first, and frees the factor before any direct
+  solve.
+
 ## 0.109.0 (2026-11-26)
 
 More reliable 3D FEM on board cut-outs (found on TI's DAC39RF12 EVM,

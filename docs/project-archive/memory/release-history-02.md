@@ -1,0 +1,17 @@
+---
+name: release-history-02
+description: Trace release/thread log, 2026-11-14 12:30: to 2026-11-14 16:05: (versions, installs, test results)
+metadata:
+  type: project
+---
+
+- 2026-11-14 12:30: Hadi asked to add every feature Altium AND Allegro share. Plan doc: https://claude.ai/artifact/PLBiPa5urx1JrnFaUNUm7Q (24 missing; order 0.46 teardrops+gloss, 0.47 multi-select/copy/align/text/dims, 0.48 shape editing+thermals, 0.49 BGA fanout, 0.50 annotate/ERC/pin swap, 0.51 IPC-2581/STEP/DXF/fab drawing, 0.52 testpoints/variants, 0.53 reuse/net ties, 0.54 3D clearance/pair bus tuning, 0.55 autorouter/hier sch). 0.45.1 (a6fd4f9, Allegro per-layer TH pads + fence fixes) pushed, not installed: install with 0.46. Open Allegro gap: custom pad shapes (ADRV T410/T413 pad 1).
+- 2026-11-14 13:40: 0.46.0 (844af0e) built: teardrop.rs (Polygon.teardrop flag), gloss.rs, tidywin.rs, `trace teardrops`, `trace gloss`. Asked Hadi for "yes, install 0.46.0" (RC pre-downloads). Working on 0.47 (multi-select/copy/align/text/dims).
+- 2026-11-14 ~14:30: 0.47.0 (236980f) pushed: select.rs (Sel, in_box, move/rotate/align/delete/copy/paste, text, dimension), app editing.rs (Shift+drag box, Ctrl+click, Ctrl+C/X/V via egui Copy/Cut/Paste events, arrows, Ctrl+R, Edit > Align, Text and Dimension tools, Mechanical layer tab). Tested in the app under Xvfb :77 + xdotool on CutiePi (works; windowfocus --sync needed for keys). Not installed; 0.46.0 install still waits for Hadi's phrase. Next: 0.48 shape editing + thermal relief styles.
+- 2026-11-14 ~14:10: 0.48.0 (2d14d17) pushed: shape.rs (ShapeRef Pour/Area/Cutout/Outline, add/set_ring/move/delete/set_pour/pour_again, Edit::Shapes), Pour.connect: Option<PourConnect{th_pads,smd_pads,vias: Join Direct|Relief|None}>, pours clipped to board outline, app shapetool.rs (Tool::Shape, Draw/Edit, Shape window). GUI-tested on CutiePi. Next per plan: 0.49 BGA fanout. Install of 0.48 still waits for Hadi's exact phrase.
+- 2026-11-14 15:20: 0.48.0 installed on Hadi's PC (Hadi's "ok"). ADRV DRC 214 (ReturnPath 190, Short 24: 12 T410/T413 custom pad 1, 12 NEW false shorts between Net_517..Net_540 SMD pad pairs TOP/BOTTOM at ±765/±735 mil, appeared with 0.45.1 per-layer pads). Results in Trace\results-0.48.0. Investigating, then 0.49 BGA fanout.
+- 2026-11-14 15:40: The 12 Net_517..540 shorts = alternate balun footprints stacked (T301/T302 etc., XFMR2450BL15B050 vs T0603-6P, pin 6 dummy nets). Fixed in drc.rs alternate_parts() (f667039, unreleased; ships with 0.49). Remaining ADRV shorts: 12 from T410/T413 custom pad 1 (Allegro custom pad shapes not read).
+- 2026-11-14 ~16:30: f667039 DRC skips alternate footprints on one spot (fixed the 12 Net_517..540 ADRV shorts). 0.49.0 (42717fd) pushed: fanout.rs (dogbone/in-pad, pitch from pads, stitch::Planes checks other-net copper areas + cuts plane holes, joined via i_overlay), app fanwin.rs (Edit > Fanout…), `trace fanout`. Not installed: ask Hadi "yes, install 0.49.0". Next: 0.50 annotation, ERC, pin/gate swap.
+- 2026-11-14 16:05: 0.49.0 installed (Hadi "yes"); ADRV DRC 202 (ReturnPath 190, Short 12 = T410/T413 custom pad 1). Hadi saw no logo: Desktop\Trace.lnk IconLocation still pointed at recycled 0.42.0 exe; fixed. Every install must set IconLocation along with TargetPath. RC is reached by start_remote_control(instructions, message_id of Hadi's approval) since SendMessage cannot reach it.
+
+See [[pcb-tool-project]].

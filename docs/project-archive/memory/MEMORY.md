@@ -1,0 +1,28 @@
+# Project: Trace, open-source PCB design tool (Rust, GPL-3.0)
+- QUEUE (Hadi 2026-11-26 20:48): 1) FEM power-loss fix on DAC (thread "Fix FEM power loss on DAC board"), then 2) Gerber/ODB++/drill/pick-place output, then 3) live DRC halos. Start each in a fresh thread when the previous ships.
+- 0.109.1 (37d9712) INSTALLED on PC 2026-11-26 22:30 (sweep factor floored at 0.4 fmax; 0.109.0 hit NaN at 0.1 GHz on PC). PC test runs need Hadi to type "rerun the DAC test" in the thread; "install" alone does not cover the run.
+- 0.109.0 (c7915c0): DAC broken-trace fixed (driven copper pri 0, rings pri 1, local closure in start refine only, fem3d::path_breaks check, Setup.loads = parts' Γ, sweep near_anchor reuse). Cloud DAC SYSREF via:120 still dS 0.05-0.1 up to 600k (5 GB peak, ~8.7 KB/unknown); via:NET,70 dS 0.022. |S|² sums ~0.5-0.9: suspect parallel-plate leak at window walls. TRACE_FEM_MESH prints "S seen" per pass. Local closure in passes hurts accuracy (stripline S11 0.12).
+- USAGE (Hadi 2026-11-26 20:48): DON'T ask for usage readings; Hadi will say when it reaches 85%, then stop and wait for next week.
+- STANDING (Hadi 2026-11-18 19:30): keep improving the app continuously, release each version; install newest when PC is on. Stop when Hadi says usage hit 85%. Keep features lean.
+- Goal: KiCad-like tool with Altium/Allegro-level features, high-speed/RF focus, desktop first. Design doc: https://claude.ai/artifact/HcAHhJCop3Py7qGFneKfZF
+- PRIORITY (Hadi 2026-11-18): 1) PCB/schematic tools; 2) EM + thermal sim HFSS-like. NO antenna/far-field plots for now. Balun .s3p work stopped. Hadi 2026-11-24 22:12: prefers more realistic graphics (vias etc.).
+- TUNING (Hadi 2026-11-26): always use mitered or curved bends; user defines miter angle and curve degree.
+- Code: github.com/hadisharifi1991electronic-ux/trace (public, master). Commit as Hadi <hadisharifi1991electronic-ux@users.noreply.github.com>, never the university email. Pushing a Cargo.toml version bump to master makes release.yml build Windows exes onto the dist branch (raw/dist/<file>, SHA256SUMS). GitHub Releases refused (403). CI Rust 1.97.0. Non-master pushes refused by classifier. Disk: rm -rf target/debug when full.
+- Installs: Remote Control session on Hadi's PC downloads from dist, checks hashes, repoints Desktop\Trace.lnk TargetPath AND IconLocation, recycles the old exe. PC guard needs Hadi to type "install" IN THE THREAD doing the install (project-chat "install" doesn't count). Only one thread should install at a time. openEMS v0.37.0 at C:\openEMS. Hadi PC ~15 GB RAM (often only ~3.3 GB free; Recall/WorkloadsSessionHost holds 3.8 GB).
+- Hadi's boards: Altium C:\Users\hshar\Desktop\SDR\Altium (SDR_Card_Final; read only with Hadi's OK). TEST BOARD (Hadi 2026-11-24 22:27): test new versions on "C:\Users\hshar\Downloads\sbac313\Fab Data\DAC39RF12 EVM RevC_ASCII.PcbDoc" (read-only), NOT the ADRV9026 EVB. ADI port models in /mnt/project-files/trace-release/adi/.
+- Hadi: minimal permission prompts, just proceed. Use Chrome for anything opened on their PC.
+- Usage (Hadi 2026-11-15): one fresh thread per feature; keep memory short; keep Opus/default effort. "next" = start next feature.
+- Logo: "1 · Pair" is the app icon.
+- Old release notes: [[release-history-01]]..[[release-history-07]], CHANGELOG.md; backlog [[next-features-backlog]].
+- 0.85-0.89: schematic editing, push-and-shove, buses/harnesses, rules editor, symbol editor. Screenshots: Xvfb + TRACE_OPEN + `import`.
+- 0.90-0.95 FEM: fem3d.rs, low-memory f32+fgmres solver, interpolating sweep, copper/Df loss, Smith chart (`trace smith`), `trace via stackup.txt ... --check fem`. ADRV pair via FEM converges, S21 within 0.07 dB of FDTD.
+- 0.96.0: `trace planar` (planar.rs; two-pad parts = lumped ports). TOP/BOTTOM port Z0 fix.
+- 0.97.0: `trace cutout <board> <window|via:NET>` (cutout.rs), `trace fem cpw|cpwg g= s=`.
+- 0.100.0 (22d4fc7) vector plots: render3d View.vectors, E/H arrows on cut, J flow lines; CLI --vectors. 0.102.1 (03ef8cb): H/E through the cut as dots/crosses. Don't run cargo test + FEM together in cloud (OOM restart).
+- 0.101.0: open 3D model from board (right-click via, View > 3D model of an area, box ≤1500 mil).
+- 0.102.0 (e1930d5): 2D canvas realism. TRACE_OPEN=at:x,y,scale for zoomed shots. 0.102.2 (bfdaa4a) fixed 3D inner layers. 0.104.1 (409bafa): 3D drills cut through pours/tracks. PC guard: Hadi must name the exact version ("install 0.105.0") when the RC go-ahead differs from what Hadi typed. RC cannot launch trace-app on PC (auto-mode blocks); Hadi tests it.
+- 0.104.0 (9b2679f): schview.rs polish, auto T-junction dots. TRACE_OPEN=schat:x0,y0,x1,y1. Shots: LIBGL_ALWAYS_SOFTWARE=1 + apt libxkbcommon-x11-0; run shots sequentially.
+- 0.105.0 (3b7ae55): cut-out coarse grid + local refine, Port.passive terminations, pin lumped ports, Csr::pattern, GMRES V-only batched, order 1 default (app 400k dof). Debug env TRACE_FEM_CONN/LOCAL/MESH/TIME. ti.com blocked from cloud.
+- 0.98.0 (700285e): render3d.rs realistic 3D, model3d.rs. CLI --render --field e|h|j.
+- 0.106.0 (1772987): tuning modes Net/Pair/Phase (router.rs TuneMode, Gauge), route::TuneStyle + tune_pattern, bus::tune_pair_at, phase_match. CLI `trace match ... --skew --style`. TRACE_OPEN=tune:mode,style,layer,x,y,scale[,target] + xdotool. Full trace-core lib test run exceeds 30 min; run filtered.
+- 0.107.0 (39dc9bb): etherm.rs couples pi.rs with thermal.rs. CLI `trace thermal b --ir NET=AMPS[@SRC][:V] [--no-couple]`. Most DAC rails need @SOURCE. 0.107.1 fixes negative volts; 0.108.0 adds user miter/curve bends.

@@ -1,0 +1,75 @@
+# ADRV9026 EVB RF pair via (L1-L16, pitch 31.5, drill 8, pad 16), Trace 0.78.0, stack-up adrv9026_evb_stackup.txt
+## As built, antipad 30.2 mil: trace via ... --accurate
+Dielectric between the layers: Er 3.41, Df 0.0056 (stack-up); copper loss on, 1.0 um rough
+Via L1 to L16, pair at 31.5 mil pitch: drill 8.0 mil, pad 16.0, antipad 30.2, 2 return via(s) at 30.0 mil
+
+Accurate solve:
+  grid 1.91 mil, 0.82 M cells: worst S11 -15.4 dB, S21 -0.844 dB at 40.0 GHz, via 87.5 ohm
+  grid 1.32 mil, 1.50 M cells: worst S11 -16.7 dB, S21 -0.759 dB at 40.0 GHz, via 89.7 ohm
+  grid 0.93 mil, 2.91 M cells: worst S11 -17.3 dB, S21 -0.753 dB at 40.0 GHz, via 89.2 ohm
+  grid 0.65 mil, 5.92 M cells: worst S11 -18.0 dB, S21 -0.734 dB at 40.0 GHz, via 89.7 ohm
+  |S11| moved 11.38 dB and |S21| 0.019 dB between the last two; NOT converged within the limits, so the error bars are wide; the finest grid is kept (the changes are not yet shrinking steadily)
+
+  solved: 5916064 cells, 10786 steps, 622.1 s
+Traces: 12.75 mil (50.0 ohm) in, 12.78 mil (50.0 ohm) out; stub 0.0 mil
+Via impedance: 89.7 ohm (as a TDR would show it)
+      GHz   Sdd11 dB   Sdd21 dB        deg
+     2.50     -32.98     -0.015      -12.8   S11 -38.5 to -29.6, S21 -0.091 to 0.060
+     5.00     -27.20     -0.031      -25.6   S11 -32.9 to -23.8, S21 -0.174 to 0.110
+     7.50     -23.82     -0.056      -38.3   S11 -27.9 to -21.0, S21 -0.277 to 0.160
+    10.00     -21.75     -0.080      -51.1   S11 -26.3 to -18.8, S21 -0.357 to 0.189
+    12.50     -20.18     -0.099      -63.9   S11 -23.2 to -17.9, S21 -0.458 to 0.246
+    15.00     -19.27     -0.114      -76.8   S11 -22.4 to -17.0, S21 -0.527 to 0.279
+    17.50     -18.62     -0.142      -89.8   S11 -20.6 to -17.0, S21 -0.616 to 0.308
+    20.00     -18.59     -0.182     -102.8   S11 -20.3 to -17.1, S21 -0.716 to 0.321
+    22.50     -18.93     -0.235     -115.9   S11 -20.2 to -17.8, S21 -0.886 to 0.371
+    25.00     -19.93     -0.263     -128.9   S11 -20.7 to -19.2, S21 -1.016 to 0.430
+    27.50     -21.93     -0.284     -142.2   S11 -25.0 to -19.7, S21 -1.141 to 0.495
+    30.00     -25.83     -0.310     -155.8   S11 -36.0 to -21.3, S21 -1.259 to 0.545
+    32.50     -38.76     -0.389     -169.8   S11 -98.8 to -24.7, S21 -1.481 to 0.581
+    35.00     -30.07     -0.491      176.3   S11 -90.1 to -20.5, S21 -1.779 to 0.631
+    37.50     -21.65     -0.593      162.0   S11 -37.3 to -16.4, S21 -1.875 to 0.524
+    40.00     -17.98     -0.734      147.6   S11 -25.5 to -14.0, S21 -2.055 to 0.412
+Physics check: passivity: max |S11|^2+|S21|^2 = 0.9997 (passive); causality: 0.00 % of the impulse response before t = 0 (causal)
+Worst return loss -18.0 dB at 40.00 GHz
+Note: conformal metal: 59948 faces cut where the round shapes really are (28776 slivers given a little extra area)
+Note: barrel loss added (copper 1.0 um rough, Df 0.0056): 0.029 dB copper + 0.041 dB dielectric at 20 GHz
+Note: the pair's traces enter the vias at the vias' pitch (uncoupled), 50.0 Ω each
+Note: accurate solve: 4 grids down to 0.65 mil, finest grid kept (changes not yet shrinking steadily); not converged within the limits
+Saved via_302_accurate.s2p
+Saved via_302_accurate.svg
+
+real	10m22.132s
+user	31m54.622s
+sys	0m24.702s
+
+## Sized to 100 ohm: trace via ... --fmax 10 --target 100
+Dielectric between the layers: Er 3.41, Df 0.0056 (stack-up); copper loss on, 1.0 um rough
+Via L1 to L16, pair at 31.5 mil pitch: drill 8.0 mil, pad 16.0, antipad 30.2, 2 return via(s) at 30.0 mil
+
+  sized in 2650 s                                                            
+Quick-grid solves (they steer the search):
+    96.6 Ω  drill 8.0, pad 16.0, antipad 37.3 mil, pitch 31.5 mil, 2 return via(s) 30.6 mil from each via
+    98.8 Ω  drill 8.0, pad 16.0, antipad 39.3 mil, pitch 31.5 mil, 2 return via(s) 31.7 mil from each via
+   100.1 Ω  drill 8.0, pad 16.0, antipad 40.5 mil, pitch 31.5 mil, 2 return via(s) 32.3 mil from each via
+   100.1 Ω  drill 8.0, pad 16.0, antipad 40.5 mil, pitch 31.5 mil, 2 return via(s) 32.3 mil from each via
+    98.7 Ω  drill 8.0, pad 16.0, antipad 39.1 mil, pitch 31.5 mil, 2 return via(s) 32.3 mil from each via
+Accurate solve 1: 102.3 Ω at drill 8.0, pad 16.0, antipad 40.5 mil, pitch 31.5 mil, 2 return via(s) 32.3 mil from each via
+  grid 1.91 mil, 0.58 M cells: worst S11 -36.3 dB, S21 -0.052 dB at 10.0 GHz, via 100.1 ohm
+  grid 1.32 mil, 1.17 M cells: worst S11 -36.9 dB, S21 -0.052 dB at 10.0 GHz, via 102.2 ohm
+  grid 0.93 mil, 2.43 M cells: worst S11 -37.8 dB, S21 -0.053 dB at 10.0 GHz, via 101.5 ohm
+  grid 0.65 mil, 5.25 M cells: worst S11 -37.1 dB, S21 -0.050 dB at 10.0 GHz, via 102.0 ohm
+  |S11| moved 1.74 dB and |S21| 0.004 dB between the last two; NOT converged within the limits, so the error bars are wide; extrapolated to zero cell size (order 2.7)
+Accurate solve 2: 101.0 Ω at drill 8.0, pad 16.0, antipad 39.1 mil, pitch 31.5 mil, 2 return via(s) 32.3 mil from each via
+  grid 1.91 mil, 0.58 M cells: worst S11 -33.6 dB, S21 -0.053 dB at 10.0 GHz, via 98.7 ohm
+  grid 1.32 mil, 1.17 M cells: worst S11 -38.4 dB, S21 -0.052 dB at 10.0 GHz, via 100.8 ohm
+  grid 0.93 mil, 2.43 M cells: worst S11 -37.0 dB, S21 -0.053 dB at 10.0 GHz, via 100.2 ohm
+  grid 0.65 mil, 5.25 M cells: worst S11 -38.1 dB, S21 -0.050 dB at 10.0 GHz, via 100.7 ohm
+  |S11| moved 1.11 dB and |S21| 0.004 dB between the last two; NOT converged within the limits, so the error bars are wide; extrapolated to zero cell size (order 2.6)
+Sized: drill 8.0, pad 16.0, antipad 39.1 mil, pitch 31.5 mil, 2 return via(s) 32.3 mil from each via gives 101.0 Ω (target 100 Ω)
+Wrote via_100ohm.s2p
+Wrote via_100ohm.svg
+
+real	44m10.322s
+user	134m18.136s
+sys	2m13.975s

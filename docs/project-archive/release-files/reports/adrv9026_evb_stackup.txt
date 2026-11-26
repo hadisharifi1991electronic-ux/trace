@@ -1,0 +1,37 @@
+# ADRV9026 EVB (ADRV0926_EVB_Cadence_File_MB_HB.brd) stack-up, rebuilt from its fab drawing
+# (16_LAYER_STACKUP-R6): thicknesses and glass styles from the drawing; all dielectrics Isola I-Speed.
+# Er and Df are ESTIMATES (the board gives none): glass/resin mixing from resin content,
+# resin Er 3.0 / Df 0.0065, E-glass Er 6.1 / Df 0.0015, about 10 GHz. Replace with the fab's values.
+# name, kind, thickness, Er, Df, material
+L1, copper, 2.15mil
+prepreg 1035(77)x2, dielectric, 6.15mil, 3.28, 0.0059, I-Speed 1035(77)
+L2, copper, 0.55mil
+prepreg 1086(66.5), dielectric, 3.20mil, 3.44, 0.0055, I-Speed 1086(66.5)
+L3, copper, 1.85mil
+prepreg 1035(71.5)x2, dielectric, 4.69mil, 3.36, 0.0057, I-Speed 1035(71.5)
+L4, copper, 0.60mil
+core 3313, dielectric, 4.00mil, 3.61, 0.0052, I-Speed 3313
+L5, copper, 1.20mil
+prepreg 1078(69.5)x2, dielectric, 6.88mil, 3.39, 0.0056, I-Speed 1078(69.5)
+L6, copper, 0.60mil
+core 3313, dielectric, 4.00mil, 3.61, 0.0052, I-Speed 3313
+L7, copper, 1.20mil
+prepreg 1035(77), dielectric, 2.88mil, 3.28, 0.0059, I-Speed 1035(77)
+L8, copper, 1.85mil
+prepreg 1035(71.5)x2, dielectric, 4.25mil, 3.36, 0.0057, I-Speed 1035(71.5)
+L9, copper, 1.85mil
+prepreg 1035(77), dielectric, 2.98mil, 3.28, 0.0059, I-Speed 1035(77)
+L10, copper, 0.60mil
+core 3313, dielectric, 4.00mil, 3.61, 0.0052, I-Speed 3313
+L11, copper, 0.60mil
+prepreg 1078(69.5)x2, dielectric, 6.96mil, 3.39, 0.0056, I-Speed 1078(69.5)
+L12, copper, 0.60mil
+core 3313, dielectric, 4.00mil, 3.61, 0.0052, I-Speed 3313
+L13, copper, 1.20mil
+prepreg 1035(71.5)x2, dielectric, 4.58mil, 3.36, 0.0057, I-Speed 1035(71.5)
+L14, copper, 1.85mil
+prepreg 1086(66.5), dielectric, 3.20mil, 3.44, 0.0055, I-Speed 1086(66.5)
+L15, copper, 0.55mil
+prepreg 1035(77)x2, dielectric, 6.16mil, 3.28, 0.0059, I-Speed 1035(77)
+L16, copper, 2.15mil
+# total 87.33 mil

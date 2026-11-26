@@ -247,6 +247,11 @@ pub struct Setup {
     pub iterative: Option<bool>,
     /// Keep the fields of one excitation on a 3D grid (for the 3D view).
     pub fields: Option<FieldAsk>,
+    /// The parts' loads on their lumped ports (port index in S, Γ at
+    /// `f_adapt` on `z_ref`): the passes converge on S with the parts in
+    /// place, as it is read, not on each part port's own S (a 0-ohm
+    /// jumper's port can move while the pair's S has settled).
+    pub loads: Vec<(usize, c64)>,
 }
 
 /// Which fields to keep after the solve.
@@ -411,6 +416,7 @@ impl Default for Setup {
             interp_max: 20,
             iterative: None,
             fields: None,
+            loads: Vec::new(),
         }
     }
 }
@@ -901,7 +907,11 @@ impl Model {
         let mut m = kuhn(&g[0], &g[1], &g[2]);
         // Up to half the unknowns (not a third): a start that misses its
         // vias is no start at all.
-        m.short = !m.refine_about(&feats, max_tets * 3 / 2, log);
+        // The driven copper may take up to half the unknowns (it must
+        // be whole); the rest (rings, other nets' pads) only up to a
+        // quarter, so at least three passes fit after it and the passes,
+        // which know where the field is, spend the room.
+        m.short = !m.refine_about(&feats, max_tets * 3 / 2, max_tets * 3 / 4, log);
         m
     }
 
@@ -1017,7 +1027,12 @@ impl Model {
                         (Fill::Pec { net }, Shape::Cyl { c, .. })
                             if driven(*net) && (c[0] - a[0]).hypot(c[1] - a[1]) < r)
                 })) as u8;
-                push(a, b, r, w, ring_pri.min(pri));
+                // Rings come after the driven copper: a coarse ring
+                // cannot short the via (no edge lies on both pad and
+                // plane), it only starts the gap too wide, which the passes
+                // refine; a broken trace leaves no path at all.
+                let _ = ring_pri;
+                push(a, b, r, w, 1);
             }
             // A driven trace or pad: cells of 0.6 its width along it (a
             // 45-degree strip still has a chain of edges inside it).
@@ -1223,6 +1238,15 @@ impl Mesh {
     /// Longest-edge bisection of the marked tetrahedra, then of every
     /// tetrahedron left with a split edge, until the mesh conforms.
     pub fn refine(&mut self, marked: &[bool], edges: &[(u32, u32)]) {
+        self.refine_with(marked, edges, false);
+    }
+
+    /// `refine`; `local` closes on split edges already there where it can
+    /// (see below): the starting mesh's grading about pads and traces,
+    /// which would otherwise run through every layer. The passes keep the
+    /// longest-edge closure: its shapes stay better (a stripline's S11
+    /// 0.12 with local closure in the passes against 0.05).
+    fn refine_with(&mut self, marked: &[bool], edges: &[(u32, u32)], local: bool) {
         let mut mids: HashMap<(u32, u32), u32> = HashMap::new();
         for &e in edges {
             let e = ekey(e.0, e.1);
@@ -1256,11 +1280,27 @@ impl Mesh {
             let mut changed = false;
             let mut next = Vec::with_capacity(cur.len() + cur.len() / 8);
             for t in cur {
-                let hanging = LOCAL_EDGES
-                    .iter()
-                    .any(|&(a, b)| mids.contains_key(&ekey(t[a], t[b])));
-                if hanging {
-                    let e = self.longest(&t);
+                // Close on a split edge it already has when that edge is
+                // at least half its longest: no new node, so the closure
+                // stays local (longest-edge closure in a stack of thin
+                // layers runs through every layer). Else its longest edge.
+                let mut hang: Option<((u32, u32), f64)> = None;
+                for &(a, b) in &LOCAL_EDGES {
+                    let e = ekey(t[a], t[b]);
+                    if mids.contains_key(&e) {
+                        let l = self.len2(e);
+                        if hang.is_none_or(|h| l > h.1 || (l == h.1 && e < h.0)) {
+                            hang = Some((e, l));
+                        }
+                    }
+                }
+                if let Some((he, hl)) = hang {
+                    let long = self.longest(&t);
+                    let e = if local && hl >= 0.25 * self.len2(long) {
+                        he
+                    } else {
+                        long
+                    };
                     let m = mid(self, e, &mut mids);
                     let (a, b) = split(t, e, m);
                     next.push(a);
@@ -1298,13 +1338,26 @@ impl Mesh {
     /// its `h` (across its plane, by their widest edge there) until none
     /// is, or the mesh would pass `max_tets`.
     /// False when the driven nets' features (`pri` 0) did not all fit.
-    fn refine_about(&mut self, feats: &[Feature], max_tets: usize, log: bool) -> bool {
+    /// `max_rest` caps the second round (`pri` 1), never below where the
+    /// first left the mesh.
+    fn refine_about(
+        &mut self,
+        feats: &[Feature],
+        max_tets: usize,
+        max_rest: usize,
+        log: bool,
+    ) -> bool {
         for pri in 0..2u8 {
             let fs: Vec<&Feature> = feats.iter().filter(|f| f.pri <= pri).collect();
             if fs.is_empty() {
                 continue;
             }
-            if !self.refine_rounds(&fs, max_tets, log) {
+            let cap = if pri == 0 {
+                max_tets
+            } else {
+                max_rest.max(self.tets.len())
+            };
+            if !self.refine_rounds(&fs, cap, log) {
                 return pri > 0;
             }
         }
@@ -1382,14 +1435,14 @@ impl Mesh {
                 .map(|e| e.0)
                 .collect();
             let before = (self.nodes.len(), self.tets.clone());
-            self.refine(&[], &edges);
+            self.refine_with(&[], &edges, true);
             // Over the budget: the coarsest half, then a quarter...
             let mut take = edges.len();
             while self.tets.len() > max_tets && take > edges.len() / 64 + 1 {
                 take /= 2;
                 self.nodes.truncate(before.0);
                 self.tets = before.1.clone();
-                self.refine(&[], &edges[..take]);
+                self.refine_with(&[], &edges[..take], true);
             }
             if log {
                 eprintln!(
@@ -1888,6 +1941,150 @@ fn assemble_mesh(
         ports,
         rad,
     })
+}
+
+/// Is the driven copper whole in the mesh? For each driven port's net,
+/// the conductor it meets on its face (nodes joined by edges that lie on
+/// one sheet, or inside one barrel) must reach another port's face or a
+/// lumped port (the pin where the pair ends). A trace the mesh is too
+/// coarse to hold falls apart into pieces and carries nothing (the
+/// DAC39RF12 EVM SYSREF cut-out at 250k unknowns). Returns one line per
+/// side that reaches nowhere; empty when every path is whole.
+pub fn path_breaks(model: &Model, mesh: &Mesh) -> Vec<String> {
+    let tol = model.tol();
+    let n = mesh.nodes.len();
+    let node_pec: Vec<Option<u32>> = mesh
+        .nodes
+        .iter()
+        .map(|&p| {
+            let mut net = None;
+            for s in &model.solids {
+                if let Fill::Pec { net: k } = s.fill {
+                    if inside(&s.shape, p, tol) {
+                        net = Some(k);
+                    }
+                }
+            }
+            net
+        })
+        .collect();
+    // Sheets by plane, so each edge tests only its own plane's copper.
+    let mut by_plane: HashMap<(usize, i64), Vec<&Sheet>> = HashMap::new();
+    let pk = |a: usize, z: f64| (a, (z / (tol * 10.0)).round() as i64);
+    for sh in &model.sheets {
+        by_plane.entry(pk(sh.axis, sh.at)).or_default().push(sh);
+    }
+    let mut up: Vec<u32> = (0..n as u32).collect();
+    fn find(up: &mut [u32], mut a: u32) -> u32 {
+        while up[a as usize] != a {
+            up[a as usize] = up[up[a as usize] as usize];
+            a = up[a as usize];
+        }
+        a
+    }
+    let mut seen: std::collections::HashSet<(u32, u32)> = Default::default();
+    for t in &mesh.tets {
+        for (i, j) in LOCAL_EDGES {
+            let e = ekey(t[i], t[j]);
+            if !seen.insert(e) {
+                continue;
+            }
+            let (p, q) = (mesh.nodes[e.0 as usize], mesh.nodes[e.1 as usize]);
+            let mut joined = matches!((node_pec[e.0 as usize], node_pec[e.1 as usize]),
+                (Some(a), Some(b)) if a == b);
+            if !joined {
+                let m = scale(add(p, q), 0.5);
+                'ax: for a in 0..3 {
+                    if (p[a] - q[a]).abs() >= tol {
+                        continue;
+                    }
+                    if let Some(list) = by_plane.get(&pk(a, p[a])) {
+                        for sh in list {
+                            if on_sheet(sh, p, tol) && on_sheet(sh, q, tol) && on_sheet(sh, m, tol)
+                            {
+                                joined = true;
+                                break 'ax;
+                            }
+                        }
+                    }
+                }
+            }
+            if joined {
+                let (a, b) = (find(&mut up, e.0), find(&mut up, e.1));
+                if a != b {
+                    up[a as usize] = b;
+                }
+            }
+        }
+    }
+    // The conductor components on each driven port's face, by net.
+    let face = |p: &Port| {
+        if p.high {
+            model.hi[p.axis]
+        } else {
+            model.lo[p.axis]
+        }
+    };
+    let mut ends: Vec<(usize, u32, Vec<u32>)> = Vec::new();
+    for (pi, p) in model.ports.iter().enumerate().filter(|(_, p)| !p.passive) {
+        let nets: Vec<u32> = match p.mode {
+            Mode::Tem { signal } => vec![signal],
+            Mode::Diff { plus, minus } => vec![plus, minus],
+            Mode::Te10 => vec![],
+        };
+        let at = face(p);
+        for net in nets {
+            let mut comps = Vec::new();
+            for (i, q) in mesh.nodes.iter().enumerate() {
+                if (q[p.axis] - at).abs() < tol
+                    && model.conductor_at(*q, tol, 2 * p.axis + p.high as usize) == Some(net)
+                {
+                    let c = find(&mut up, i as u32);
+                    if !comps.contains(&c) {
+                        comps.push(c);
+                    }
+                }
+            }
+            ends.push((pi, net, comps));
+        }
+    }
+    // Components touching a lumped port's rectangle.
+    let mut at_lumped: Vec<u32> = Vec::new();
+    for (i, q) in mesh.nodes.iter().enumerate() {
+        if model.lumped.iter().any(|l| {
+            (q[2] - l.z).abs() < tol
+                && q[0] >= l.lo[0] - tol
+                && q[0] <= l.hi[0] + tol
+                && q[1] >= l.lo[1] - tol
+                && q[1] <= l.hi[1] + tol
+        }) {
+            let c = find(&mut up, i as u32);
+            if !at_lumped.contains(&c) {
+                at_lumped.push(c);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    for (k, (pi, net, comps)) in ends.iter().enumerate() {
+        let whole = comps.iter().any(|c| {
+            at_lumped.contains(c)
+                || ends
+                    .iter()
+                    .enumerate()
+                    .any(|(j, e)| j != k && e.0 != *pi && e.2.contains(c))
+        });
+        if !whole {
+            let name = &model.ports[*pi].name;
+            out.push(if comps.is_empty() {
+                format!("port {name}: no mesh copper of net {net} on the port face")
+            } else {
+                format!(
+                    "port {name}: net {net}'s copper from the port reaches no other port or pin"
+                )
+            });
+        }
+    }
+    out
 }
 
 /// Debug: the conductors as the mesh sees them (nodes joined by PEC
@@ -3399,6 +3596,22 @@ fn anchor(f: f64, f_adapt: f64) -> f64 {
     }
 }
 
+/// The factor a sweep point uses: the one held when its frequency is
+/// within a quarter of the point's (few GMRES steps), else a new one at
+/// the point itself. A factor far off (the 6 GHz one at 0.1 GHz) costs
+/// many times its own price in iterations (DAC39RF12 EVM cut-out: 470 s
+/// against about 20 s to factor). TRACE_FEM_ANCHOR=1 keeps the older
+/// two-anchor rule.
+fn near_anchor(f: f64, f_adapt: f64, held: Option<f64>) -> f64 {
+    if std::env::var("TRACE_FEM_ANCHOR").is_ok_and(|v| v == "1") {
+        return anchor(f, f_adapt);
+    }
+    match held {
+        Some(h) if h > 0.0 && f > 0.0 && (f / h) > 0.75 && (f / h) < 1.34 => h,
+        _ => f.max(1e-3 * f_adapt),
+    }
+}
+
 /// Solves with the factor in single precision (half the memory of the
 /// direct solve), polished to double precision by preconditioned GMRES.
 /// `grad` (node gradients) adds an exact correction on the gradient
@@ -3669,6 +3882,66 @@ fn estimate(mesh: &Mesh, asm: &Assembled, sols: &[Vec<c64>], f_ghz: f64) -> Vec<
     eta
 }
 
+/// The fields the estimator weighs: with parts' loads, each kept port's
+/// excitation with the parts in place (its own field plus the waves the
+/// loads send back into their ports, Γ (I - S_tt Γ)⁻¹ S_te), so the
+/// passes refine where the result's field is, not about each part's own
+/// port (four 0-ohm jumpers took most of the DAC cut-out's room). `s` is
+/// the S the solutions belong to (each port on its own Z0).
+fn loaded_fields(sols: &[Vec<c64>], s: &[c64], z0: &[f64], setup: &Setup) -> Vec<Vec<c64>> {
+    let n = sols.len();
+    if setup.loads.is_empty() || s.len() != n * n || z0.len() != n {
+        return sols.to_vec();
+    }
+    let zr = setup.z_ref;
+    // Γ on each port's own Z0.
+    let ld: Vec<(usize, c64)> = setup
+        .loads
+        .iter()
+        .filter(|l| l.0 < n)
+        .map(|&(k, g)| match zr {
+            Some(r) if (r - z0[k]).abs() > 1e-9 => {
+                let one = c64::new(1.0, 0.0);
+                let z = (one + g) * r / (one - g);
+                if !z.re.is_finite() || !z.im.is_finite() {
+                    (k, one)
+                } else {
+                    (k, (z - z0[k]) / (z + z0[k]))
+                }
+            }
+            _ => (k, g),
+        })
+        .collect();
+    let ti: Vec<usize> = ld.iter().map(|l| l.0).collect();
+    let nt = ti.len();
+    let mut m = vec![czero(); nt * nt];
+    for a in 0..nt {
+        for b in 0..nt {
+            m[a * nt + b] =
+                if a == b { c64::new(1.0, 0.0) } else { czero() } - s[ti[a] * n + ti[b]] * ld[b].1;
+        }
+    }
+    let mi = cinv(&m, nt);
+    (0..n)
+        .filter(|e| !ti.contains(e))
+        .map(|e| {
+            let mut f = sols[e].clone();
+            for a in 0..nt {
+                // Wave into part port a: Γ_a Σ_b M⁻¹_ab S_b,e.
+                let mut w = czero();
+                for b in 0..nt {
+                    w += mi[a * nt + b] * s[ti[b] * n + e];
+                }
+                let w = w * ld[a].1;
+                for (x, y) in f.iter_mut().zip(&sols[ti[a]]) {
+                    *x += w * y;
+                }
+            }
+            f
+        })
+        .collect()
+}
+
 fn max_delta(a: &[c64], b: &[c64]) -> f64 {
     a.iter()
         .zip(b)
@@ -3768,6 +4041,45 @@ pub fn solve(
     } else {
         model.mesh(setup.f_adapt, setup.per_lambda, 12.0, max_tets)
     };
+    // The driven copper must be whole before any solve: when the start
+    // ran short of room, refine the driven nets' own copper again with
+    // the room the unknowns allow (most of it; the passes add little
+    // there), then check once more.
+    let mut breaks = path_breaks(model, &mesh);
+    if !breaks.is_empty() && !mesh.short {
+        // Refined in full and still apart: the model's own copper is
+        // open there (a stub), not the mesh.
+        if !progress(&format!("note: {}", breaks.join("; "))) {
+            return Err("stopped".into());
+        }
+    } else if breaks.is_empty()
+        && !progress("copper path check: the driven copper is whole from each port")
+    {
+        return Err("stopped".into());
+    }
+    if !breaks.is_empty() && mesh.short {
+        let feats = model.features();
+        let pri0: Vec<&Feature> = feats.iter().filter(|f| f.pri == 0).collect();
+        let room = ((setup.max_unknowns as f64 * 0.6) / per_tet) as usize;
+        if !progress(&format!(
+            "the starting mesh broke the driven copper ({}); refining it again (up to {} tetrahedra)",
+            breaks.join("; "),
+            room
+        )) {
+            return Err("stopped".into());
+        }
+        let log = std::env::var_os("TRACE_FEM_MESH").is_some();
+        mesh.short = !mesh.refine_rounds(&pri0, room, log);
+        breaks = path_breaks(model, &mesh);
+        if !breaks.is_empty() {
+            return Err(format!(
+                "the mesh cannot hold the driven copper in {} unknowns ({}): \
+                 the result would carry no signal; raise --fem-dof or make the window smaller",
+                setup.max_unknowns,
+                breaks.join("; ")
+            ));
+        }
+    }
     if mesh.short
         && !progress(&format!(
             "the starting mesh ran out of room ({} tetrahedra) before it reached all of the \
@@ -3820,6 +4132,7 @@ pub fn solve(
         }
     }
     let mut passes: Vec<Pass> = Vec::new();
+    let mut last_seen: Option<Vec<c64>> = None;
     let mut converged = false;
     let mut last_unknowns;
     let mut last_z0: Vec<f64> = Vec::new();
@@ -3854,6 +4167,7 @@ pub fn solve(
             .iter()
             .map(|p| p.z0)
             .collect::<Vec<f64>>();
+        let raw = s.clone();
         // Converge on the S-parameters the user gets (renormalised), and
         // on the ports' Z0 to within 0.5% (HFSS's port accuracy).
         let s = match setup.z_ref {
@@ -3870,7 +4184,19 @@ pub fn solve(
             .collect::<Vec<_>>()
             .join(" / ");
         last_z0 = z0;
-        let delta = passes.last().map(|p| max_delta(&p.s, &s));
+        let np = (s.len() as f64).sqrt().round() as usize;
+        let seen = terminate(&s, np, &setup.loads);
+        let delta = last_seen.as_ref().map(|p| max_delta(p, &seen));
+        if std::env::var_os("TRACE_FEM_MESH").is_some() {
+            let m = (seen.len() as f64).sqrt().round() as usize;
+            let txt: Vec<String> = seen
+                .iter()
+                .take(m.min(3) * m)
+                .map(|z| format!("{:.3}<{:.0}", z.norm(), z.arg().to_degrees()))
+                .collect();
+            eprintln!("  S seen: {}", txt.join(" "));
+        }
+        last_seen = Some(seen);
         passes.push(Pass {
             tets: mesh.tets.len(),
             unknowns: asm.n,
@@ -3905,7 +4231,12 @@ pub fn solve(
             break;
         }
         let frac = setup.refine.min((0.92 * room - 1.0) / 2.3).max(0.05);
-        let eta = estimate(&mesh, &asm, &sols, setup.f_adapt);
+        let eta = estimate(
+            &mesh,
+            &asm,
+            &loaded_fields(&sols, &raw, &last_z0, setup),
+            setup.f_adapt,
+        );
         let mut order: Vec<usize> = (0..eta.len()).collect();
         order.sort_by(|a, b| eta[*b].partial_cmp(&eta[*a]).unwrap());
         let mut take = ((eta.len() as f64) * frac).ceil() as usize;
@@ -3981,7 +4312,7 @@ pub fn solve(
                        solved: &mut Vec<(f64, Vec<c64>, Vec<PortInfo>)>,
                        progress: &mut dyn FnMut(&str) -> bool|
      -> Result<(), String> {
-        let fa = anchor(f, setup.f_adapt);
+        let fa = near_anchor(f, setup.f_adapt, cache.as_ref().map(|c| c.f));
         let (asm, _, s) = match solve_at(
             model,
             &mesh,
@@ -4056,20 +4387,35 @@ pub fn solve(
                 solve_f(f, &mut solved, &mut progress)?;
             }
             let mut good = 0;
+            let mut last_f = 0.5 * (f0 + f1);
             while good < 2 && solved.len() < setup.interp_max {
                 let inb: Vec<f64> = solved
                     .iter()
                     .map(|p| p.0)
                     .filter(|&f| f >= f0 - 1e-9 && f <= f1 + 1e-9)
                     .collect();
+                let Some(widest) = inb
+                    .windows(2)
+                    .map(|w| w[1] - w[0])
+                    .max_by(|x, y| x.total_cmp(y))
+                else {
+                    break;
+                };
+                // Of the gaps nearly as wide as the widest, the one nearest
+                // the last point solved: its factor serves it.
                 let Some((ga, gb)) = inb
                     .windows(2)
                     .map(|w| (w[0], w[1]))
-                    .max_by(|x, y| (x.1 - x.0).total_cmp(&(y.1 - y.0)))
+                    .filter(|w| w.1 - w.0 >= 0.7 * widest)
+                    .min_by(|x, y| {
+                        let d = |w: &(f64, f64)| (0.5 * (w.0 + w.1) / last_f).ln().abs();
+                        d(x).total_cmp(&d(y))
+                    })
                 else {
                     break;
                 };
                 let f = 0.5 * (ga + gb);
+                last_f = f;
                 let guess = interp_s(&solved, f);
                 solve_f(f, &mut solved, &mut progress)?;
                 let got = &solved.iter().find(|p| (p.0 - f).abs() < 1e-12).unwrap().1;

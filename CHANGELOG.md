@@ -3,6 +3,35 @@
 Each release is installed as `trace-app-<version>.exe`; the previous version
 is moved to the Recycle Bin.
 
+## 0.109.0 (2026-11-26)
+
+More reliable 3D FEM on board cut-outs (found on TI's DAC39RF12 EVM,
+SYSREF_LMK pair via, 16 layers):
+
+- The starting mesh puts the driven copper first. Before, the clearance
+  rings of all 16 layers came first and used up the room, so at 250k
+  unknowns the pair's trace stopped 60 mil from the port and nothing
+  reached the via (S21 at the floor, the passes moving 0.15 then 0.56).
+  The rings now come after: a coarse ring cannot short a via, it only
+  starts the gap too wide, and the passes refine it.
+- Refining about pads and traces no longer runs through every layer of
+  the stack (the closure reuses edges already split where it can).
+- Copper path check before the first solve: each driven port's copper
+  must reach another port or the pin. When the start ran short, the
+  driven copper is refined again with more room; if it still breaks, the
+  run stops in seconds with a clear message (raise --fem-dof or use a
+  smaller window) instead of solving for 25 minutes with no signal.
+- The passes converge on S with the parts' values in place (the S you
+  read), and refine where that field is, not about each part's own port
+  (four 0-ohm jumpers took much of the DAC window's room).
+- Faster sweep: each point reuses a factor from within a quarter of its
+  frequency, else factors at the point. On the DAC window the slow points
+  went from up to 470 s to under 50 s.
+- On the DAC window the signal now goes through (S21 -0.9 dB at 5 GHz at
+  250k unknowns), but the 120-mil window still moves 0.05 to 0.1 between
+  passes up to 600k unknowns; a 70-mil window (`via:NET,70`) gets to
+  0.022. Treat 120-mil DAC results as rough.
+
 ## 0.108.0 (2026-11-26)
 
 Tuning bends are never square:

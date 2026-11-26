@@ -4738,7 +4738,7 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
     if render_model(&model, None, &format!("{what} (3D FEM model)"))? {
         return Ok(());
     }
-    let setup = fem3d::Setup {
+    let mut setup = fem3d::Setup {
         fields: render_ask(fmax),
         f_adapt: fmax,
         sweep: sweep_points(fmin, fmax, points),
@@ -4760,6 +4760,18 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
         order,
         ..fem3d::Setup::default()
     };
+    // The parts' values in place while the passes converge.
+    let r = setup.z_ref.unwrap_or(50.0);
+    setup.loads = parts
+        .iter()
+        .filter_map(|p| {
+            let v = values
+                .iter()
+                .find(|x| x.0.eq_ignore_ascii_case(&p.designator))
+                .map_or(p.value.as_str(), |x| x.1.as_str());
+            planar::parse_load(&p.designator, v).map(|ld| (p.port, ld.gamma(fmax, r)))
+        })
+        .collect();
     let t0 = std::time::Instant::now();
     let sol = fem3d::solve(&model, &setup, |m| {
         eprintln!("  {m}");

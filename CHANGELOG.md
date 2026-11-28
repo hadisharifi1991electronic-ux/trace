@@ -26,6 +26,9 @@ BOM…), in place of the one-click zip:
   with the sizes or names that are missing.
 - Drill tools are split by plating as well as size, and a tool is marked
   ViaDrill only when all its holes are vias (it was the first hole's kind).
+- Gerber import takes an empty X1 layer (a format statement, nothing
+  drawn, no attributes) as Gerber: it was dropped as "not Gerber", so the
+  check of an X1 set with an empty silkscreen or paste layer failed.
 
 `trace fab <board> <out> [--x1] [--drill-inch] [--drill-merge] [--check]`
 does the same from the command line; `--check` prints the comparison and

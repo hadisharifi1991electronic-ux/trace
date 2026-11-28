@@ -233,6 +233,9 @@ pub fn parse(data: &[u8]) -> Result<Gerber, String> {
     p.attr_index.insert(ObjAttrs::default(), 0);
 
     let text = String::from_utf8_lossy(data);
+    // A format statement marks Gerber even with nothing drawn: an empty
+    // layer (no silkscreen, no paste) written as X1, without attributes.
+    let format_spec = text.contains("%FS");
     let mut chars = text.chars().peekable();
     let mut word = String::new();
     while let Some(c) = chars.next() {
@@ -271,7 +274,11 @@ pub fn parse(data: &[u8]) -> Result<Gerber, String> {
     }
     let root = p.stack.pop().unwrap();
     p.g.items = root.items;
-    if p.g.items.is_empty() && p.g.apertures.is_empty() && p.g.file_function.is_none() {
+    if p.g.items.is_empty()
+        && p.g.apertures.is_empty()
+        && p.g.file_function.is_none()
+        && !format_spec
+    {
         return Err("no Gerber data found".into());
     }
     Ok(p.g)
@@ -1087,6 +1094,13 @@ fn factor(t: &[char], p: &mut usize, vars: &HashMap<u32, f64>) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_x1_layer_is_gerber() {
+        let g = parse(b"%FSLAX46Y46*%\n%MOMM*%\nG01*\nM02*\n").unwrap();
+        assert!(g.items.is_empty());
+        assert!(parse(b"just some notes\nM02*\n").is_err());
+    }
 
     #[test]
     fn expressions() {

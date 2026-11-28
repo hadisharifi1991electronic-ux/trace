@@ -1704,9 +1704,11 @@ pub(crate) mod tests {
         let gtl = get("t.GTL");
         assert!(!gtl.contains("%TF") && !gtl.contains("%TO") && !gtl.contains("%TA"));
         assert!(gtl.contains("%FSLAX46Y46*%") && gtl.contains("%ADD"));
+        // No separate plated and non-plated files (the merged one's name,
+        // t-PTH-NPTH.DRL, ends like the non-plated one's).
         assert!(!files
             .iter()
-            .any(|f| f.name.ends_with("-PTH.DRL") || f.name.ends_with("-NPTH.DRL")));
+            .any(|f| f.name == "t-PTH.DRL" || f.name == "t-NPTH.DRL"));
         let drl = get("t-PTH-NPTH.DRL");
         assert!(drl.contains("TF.FileFunction,MixedPlating,1,2"), "{drl}");
         assert!(drl.contains("\nINCH\n") && !drl.contains("METRIC"), "{drl}");

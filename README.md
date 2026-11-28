@@ -353,6 +353,7 @@ trace convert sheet.SchDoc out.svg   draw a schematic sheet as SVG
 trace convert sheet.SchDoc out.SchDoc     write a schematic sheet as an Altium sheet
 trace convert sheets.tracesch folder  write every sheet of a Trace schematic as Altium sheets
 trace fab board.PcbDoc out.zip   Gerber X2, drill, IPC-356, pick-and-place and BOM (or a folder)
+trace fab board.PcbDoc out.zip --x1 --drill-inch --drill-merge --check   X1, inch drills in one file, read back and compared
 trace odb board.PcbDoc out.tgz   ODB++ job: layers, drills, parts, nets and stack-up (or a folder)
 trace assembly board.PcbDoc out.pdf [--a4]   Assembly drawing: top and bottom views, parts list
 trace fabdrawing board.PcbDoc out.pdf [--a4] Fabrication drawing: drill symbols, dimensions, drill table, stack-up, notes

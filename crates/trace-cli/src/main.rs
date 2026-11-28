@@ -378,7 +378,12 @@ USAGE:
     trace convert <file.SchDoc> <out.svg>       Draw a schematic sheet as SVG
     trace convert <file.SchDoc> <out.SchDoc>    Write a schematic sheet as an Altium sheet
     trace convert <file.tracesch> <folder>      Write every sheet of a Trace schematic as Altium sheets
-    trace fab <board> <out.zip|folder>          Gerber X2, drill, IPC-356, pick-and-place and BOM files
+    trace fab <board> <out.zip|folder> [--x1] [--drill-inch] [--drill-merge] [--check]
+                                                Gerber X2, drill, IPC-356, pick-and-place and BOM files;
+                                                --x1 leaves out the X2 attributes, --drill-inch writes
+                                                inch drill files, --drill-merge puts plated and
+                                                non-plated holes in one file, --check reads the files
+                                                back and compares layers, holes, nets, parts, outline
     trace odb <board> <out.tgz|folder>          ODB++ job: layers, drills, parts and nets in one package
     trace assembly <board> <out.pdf> [--a4]     Assembly drawing: top and bottom views with part bodies,
                                                 designators and pin 1 marks, then the parts list (A3)
@@ -754,7 +759,7 @@ fn main() -> ExitCode {
         ["stubs", file, out] => stubs(file, Some(out)),
         ["convert", file, out] => convert(file, out),
         ["layers", file] => layers(file),
-        ["fab", file, out] => fab(file, out),
+        ["fab", file, out, rest @ ..] => fab(file, out, rest),
         ["odb", file, out] => odb(file, out),
         ["assembly", file, out] => assembly(file, out, trace_export::Paper::A3),
         ["assembly", file, out, "--a4"] => assembly(file, out, trace_export::Paper::A4),
@@ -5865,9 +5870,19 @@ fn view_board(file: &str, out: Option<&str>) -> Res {
     Ok(())
 }
 
-fn fab(file: &str, out: &str) -> Res {
+fn fab(file: &str, out: &str, rest: &[&str]) -> Res {
+    let mut opt_check = false;
     let b = board(file)?;
-    let opt = trace_export::FabOptions::from_board(&b);
+    let mut opt = trace_export::FabOptions::from_board(&b);
+    for a in rest {
+        match *a {
+            "--x1" => opt.gerber_x2 = false,
+            "--drill-inch" => opt.drill_units = trace_export::DrillUnits::Inch,
+            "--drill-merge" => opt.drill_merge = true,
+            "--check" => opt_check = true,
+            o => return Err(format!("unknown option {o}").into()),
+        }
+    }
     let path = Path::new(out);
     let stem = Path::new(file)
         .file_stem()
@@ -5897,6 +5912,25 @@ fn fab(file: &str, out: &str) -> Res {
         println!("  {:<40} {:>9} bytes", f.name, f.data.len());
     }
     println!("wrote {} files to {out}", files.len());
+    if opt_check {
+        let src = files
+            .iter()
+            .map(|f| trace_gerber::SourceFile {
+                name: f.name.clone(),
+                data: f.data.clone(),
+            })
+            .collect();
+        let c = trace_gerber::check(&b, src);
+        println!("Read back:");
+        print!("{}", c.text());
+        for w in &c.warnings {
+            println!("  warning: {w}");
+        }
+        match c.problems() {
+            0 => println!("The files match the board."),
+            n => return Err(format!("{n} items differ between the board and the files").into()),
+        }
+    }
     Ok(())
 }
 

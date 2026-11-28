@@ -30,6 +30,40 @@ pub struct FabOptions {
     /// Vias covered by mask on the top and bottom side.
     pub tent_top: bool,
     pub tent_bottom: bool,
+    /// Gerber X2: file, aperture and object attributes (layer functions,
+    /// nets, parts and pins). Off writes plain X1 (RS-274X) for older CAM.
+    pub gerber_x2: bool,
+    /// Units of the Excellon drill files.
+    pub drill_units: DrillUnits,
+    /// Plated and non-plated through holes in one drill file.
+    pub drill_merge: bool,
+}
+
+/// Units of the Excellon drill files.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DrillUnits {
+    /// Millimetres, 4 decimals.
+    #[default]
+    Metric,
+    /// Inches, 5 decimals.
+    Inch,
+}
+
+impl DrillUnits {
+    fn header(self) -> &'static str {
+        match self {
+            DrillUnits::Metric => "; FORMAT={-:-/ absolute / metric / decimal}\nFMAT,2\nMETRIC\n",
+            DrillUnits::Inch => "; FORMAT={-:-/ absolute / inch / decimal}\nFMAT,2\nINCH\n",
+        }
+    }
+
+    /// A length in nm in the file's units.
+    fn num(self, v: i64) -> String {
+        match self {
+            DrillUnits::Metric => format!("{:.4}", v as f64 / 1e6),
+            DrillUnits::Inch => format!("{:.5}", v as f64 / 25.4e6),
+        }
+    }
 }
 
 impl Default for FabOptions {
@@ -39,6 +73,9 @@ impl Default for FabOptions {
             paste_expansion: Length(0),
             tent_top: true,
             tent_bottom: true,
+            gerber_x2: true,
+            drill_units: DrillUnits::Metric,
+            drill_merge: false,
         }
     }
 }
@@ -86,10 +123,11 @@ const BOTTOM_MASK: u8 = 38;
 pub fn fab_files(board: &Board, stem: &str, opt: &FabOptions) -> Vec<FabFile> {
     let n = board.stackup.copper_layers().count().max(1) as u8;
     let mut out = Vec::new();
+    let x2 = opt.gerber_x2;
     let mut put = |ext: String, data: Vec<u8>| {
         out.push(FabFile {
             name: format!("{stem}.{ext}"),
-            data,
+            data: if x2 { data } else { strip_x2(&data) },
         })
     };
     for l in 0..n {
@@ -123,7 +161,7 @@ pub fn fab_files(board: &Board, stem: &str, opt: &FabOptions) -> Vec<FabFile> {
     for (m, text) in mechanical(board) {
         put(format!("GM{m}"), text.into_bytes());
     }
-    for (name, text) in drills(board, n) {
+    for (name, text) in drills(board, n, opt.drill_units, opt.drill_merge) {
         out.push(FabFile {
             name: format!("{stem}-{name}.DRL"),
             data: text.into_bytes(),
@@ -146,6 +184,24 @@ pub fn fab_files(board: &Board, stem: &str, opt: &FabOptions) -> Vec<FabFile> {
         );
     }
     out
+}
+
+/// A Gerber file without its X2 attributes (`%TF`, `%TA`, `%TO`, `%TD`),
+/// which X1 readers would reject or misread.
+fn strip_x2(data: &[u8]) -> Vec<u8> {
+    let text = String::from_utf8_lossy(data);
+    let mut o = String::with_capacity(text.len());
+    for line in text.lines() {
+        if ["%TF", "%TA", "%TO", "%TD"]
+            .iter()
+            .any(|p| line.starts_with(p))
+        {
+            continue;
+        }
+        o.push_str(line);
+        o.push('\n');
+    }
+    o.into_bytes()
 }
 
 /// The files packed in one zip archive.
@@ -943,12 +999,21 @@ pub(crate) fn plated(p: &Pad) -> bool {
     !p.fab.unplated
 }
 
-/// Drill files: plated through holes, non-plated holes, and one file per
-/// blind or buried via span, as (name, text).
-fn drills(board: &Board, n: u8) -> Vec<(String, String)> {
-    // (from, to, plated) -> holes as (diameter, at, via, slot ends)
-    type Hole = (i64, Point, bool, Option<(Point, Point)>);
-    let mut sets: BTreeMap<(u8, u8, bool), Vec<Hole>> = BTreeMap::new();
+/// Drill files: plated through holes, non-plated holes (or both in one
+/// file when `merge`), and one file per blind or buried via span, as (name,
+/// text).
+fn drills(board: &Board, n: u8, units: DrillUnits, merge: bool) -> Vec<(String, String)> {
+    // (from, to, plated; None for a merged through-hole file) -> holes as
+    // (diameter, at, via, slot ends, plated)
+    type Hole = (i64, Point, bool, Option<(Point, Point)>, bool);
+    let mut sets: BTreeMap<(u8, u8, Option<bool>), Vec<Hole>> = BTreeMap::new();
+    let key = |a: u8, b: u8, pl: bool| {
+        if merge && a == 0 && b == n - 1 {
+            (a, b, None)
+        } else {
+            (a, b, Some(pl))
+        }
+    };
     for p in &board.geometry.pads {
         if p.hole.0 > 0 {
             let slot = (p.fab.slot.0 > p.hole.0).then(|| {
@@ -961,40 +1026,49 @@ fn drills(board: &Board, n: u8) -> Vec<(String, String)> {
                 };
                 (at(-1), at(1))
             });
-            sets.entry((0, n - 1, plated(p)))
+            let pl = plated(p);
+            sets.entry(key(0, n - 1, pl))
                 .or_default()
-                .push((p.hole.0, p.at, false, slot));
+                .push((p.hole.0, p.at, false, slot, pl));
         }
     }
     for v in &board.geometry.vias {
         if v.hole.0 > 0 {
             let (a, b) = (v.from_layer.min(n - 1), v.to_layer.min(n - 1));
-            sets.entry((a, b, !v.fab.unplated))
+            let pl = !v.fab.unplated;
+            sets.entry(key(a, b, pl))
                 .or_default()
-                .push((v.hole.0, v.at, true, None));
+                .push((v.hole.0, v.at, true, None, pl));
         }
     }
     let mut out = Vec::new();
     for ((a, b, pl), mut holes) in sets {
-        let (name, function) = if !pl {
-            ("NPTH".to_string(), format!("NonPlated,1,{n},NPTH"))
-        } else if a == 0 && b == n - 1 {
-            ("PTH".to_string(), format!("Plated,1,{n},PTH"))
-        } else {
-            let kind = if a == 0 || b == n - 1 {
-                "Blind"
-            } else {
-                "Buried"
-            };
-            (
-                format!("L{}-L{}", a + 1, b + 1),
-                format!("Plated,{},{},{kind}", a + 1, b + 1),
-            )
+        let (name, function) = match pl {
+            None => ("PTH-NPTH".to_string(), format!("MixedPlating,1,{n}")),
+            Some(false) => ("NPTH".to_string(), format!("NonPlated,1,{n},NPTH")),
+            Some(true) if a == 0 && b == n - 1 => ("PTH".to_string(), format!("Plated,1,{n},PTH")),
+            Some(true) => {
+                let kind = if a == 0 || b == n - 1 {
+                    "Blind"
+                } else {
+                    "Buried"
+                };
+                (
+                    format!("L{}-L{}", a + 1, b + 1),
+                    format!("Plated,{},{},{kind}", a + 1, b + 1),
+                )
+            }
         };
-        holes.sort_by_key(|h| (h.0, h.1.x.0, h.1.y.0));
-        let mut tools: Vec<(i64, bool)> = holes.iter().map(|h| (h.0, h.2)).collect();
-        let mm4 = |v: i64| format!("{:.4}", v as f64 / 1e6);
-        tools.dedup_by_key(|t| t.0);
+        // One tool per size and plating; vias first among plated holes of
+        // a size, so the tool says ViaDrill only when every hit is a via.
+        holes.sort_by_key(|h| (h.0, !h.4, h.1.x.0, h.1.y.0));
+        let mut tools: Vec<(i64, bool, bool)> = Vec::new();
+        for h in &holes {
+            match tools.iter_mut().find(|t| t.0 == h.0 && t.2 == h.4) {
+                Some(t) => t.1 &= h.2,
+                None => tools.push((h.0, h.2, h.4)),
+            }
+        }
         let mut t = String::new();
         t.push_str("M48\n");
         let _ = writeln!(
@@ -1004,39 +1078,37 @@ fn drills(board: &Board, n: u8) -> Vec<(String, String)> {
         );
         let _ = writeln!(t, "; #@! TF.FileFunction,{function}");
         t.push_str("; #@! TF.FilePolarity,Positive\n");
-        t.push_str("; FORMAT={-:-/ absolute / metric / decimal}\n");
-        t.push_str("FMAT,2\nMETRIC\n");
-        for (i, (d, via)) in tools.iter().enumerate() {
-            let f = match (pl, via) {
-                (false, _) => "ComponentDrill",
+        t.push_str(units.header());
+        for (i, (d, via, tpl)) in tools.iter().enumerate() {
+            let f = match (tpl, via) {
                 (true, true) => "ViaDrill",
-                (true, false) => "ComponentDrill",
+                _ => "ComponentDrill",
             };
             let _ = writeln!(
                 t,
                 "; #@! TA.AperFunction,{},{f}",
-                if pl { "Plated,PTH" } else { "NonPlated,NPTH" }
+                if *tpl { "Plated,PTH" } else { "NonPlated,NPTH" }
             );
-            let _ = writeln!(t, "T{}C{:.4}", i + 1, *d as f64 / 1e6);
+            let _ = writeln!(t, "T{}C{}", i + 1, units.num(*d));
         }
         t.push_str("%\nG90\nG05\n");
-        for (i, (d, _)) in tools.iter().enumerate() {
+        for (i, (d, _, tpl)) in tools.iter().enumerate() {
             let _ = writeln!(t, "T{}", i + 1);
-            for h in holes.iter().filter(|h| h.0 == *d) {
+            for h in holes.iter().filter(|h| h.0 == *d && h.4 == *tpl) {
                 match h.3 {
                     // A slot: drilled from one end and routed to the other.
                     Some((a, b)) => {
                         let _ = writeln!(
                             t,
                             "X{}Y{}G85X{}Y{}",
-                            mm4(a.x.0),
-                            mm4(a.y.0),
-                            mm4(b.x.0),
-                            mm4(b.y.0)
+                            units.num(a.x.0),
+                            units.num(a.y.0),
+                            units.num(b.x.0),
+                            units.num(b.y.0)
                         );
                     }
                     None => {
-                        let _ = writeln!(t, "X{}Y{}", mm4(h.1.x.0), mm4(h.1.y.0));
+                        let _ = writeln!(t, "X{}Y{}", units.num(h.1.x.0), units.num(h.1.y.0));
                     }
                 }
             }
@@ -1044,14 +1116,14 @@ fn drills(board: &Board, n: u8) -> Vec<(String, String)> {
         t.push_str("M30\n");
         out.push((name, t));
     }
-    out.extend(backdrills(board, n));
+    out.extend(backdrills(board, n, units));
     out
 }
 
 /// One drill file per backdrill: side and the layer it must not cut. The
 /// file names the copper layers drilled through; the comment names the
 /// layer that stays.
-fn backdrills(board: &Board, n: u8) -> Vec<(String, String)> {
+fn backdrills(board: &Board, n: u8, units: DrillUnits) -> Vec<(String, String)> {
     // (from the top, keep) -> (diameter, at)
     let mut sets: BTreeMap<(bool, u8), Vec<(i64, Point)>> = BTreeMap::new();
     for v in &board.geometry.vias {
@@ -1088,7 +1160,6 @@ fn backdrills(board: &Board, n: u8) -> Vec<(String, String)> {
         holes.sort_by_key(|h| (h.0, h.1.x.0, h.1.y.0));
         let mut tools: Vec<i64> = holes.iter().map(|h| h.0).collect();
         tools.dedup();
-        let mm4 = |v: i64| format!("{:.4}", v as f64 / 1e6);
         let mut t = String::new();
         t.push_str("M48\n");
         let _ = writeln!(
@@ -1105,17 +1176,16 @@ fn backdrills(board: &Board, n: u8) -> Vec<(String, String)> {
             keep + 1,
             layer_name(keep)
         );
-        t.push_str("; FORMAT={-:-/ absolute / metric / decimal}\n");
-        t.push_str("FMAT,2\nMETRIC\n");
+        t.push_str(units.header());
         for (i, d) in tools.iter().enumerate() {
             t.push_str("; #@! TA.AperFunction,NonPlated,Blind,BackDrill\n");
-            let _ = writeln!(t, "T{}C{:.4}", i + 1, *d as f64 / 1e6);
+            let _ = writeln!(t, "T{}C{}", i + 1, units.num(*d));
         }
         t.push_str("%\nG90\nG05\n");
         for (i, d) in tools.iter().enumerate() {
             let _ = writeln!(t, "T{}", i + 1);
             for h in holes.iter().filter(|h| h.0 == *d) {
-                let _ = writeln!(t, "X{}Y{}", mm4(h.1.x.0), mm4(h.1.y.0));
+                let _ = writeln!(t, "X{}Y{}", units.num(h.1.x.0), units.num(h.1.y.0));
             }
         }
         t.push_str("M30\n");
@@ -1570,6 +1640,90 @@ pub(crate) mod tests {
         assert!(d("R10") && d("R2"));
     }
 
+    fn read_back(files: &[FabFile]) -> trace_gerber::FabCheck {
+        let src = files
+            .iter()
+            .map(|f| trace_gerber::SourceFile {
+                name: f.name.clone(),
+                data: f.data.clone(),
+            })
+            .collect();
+        trace_gerber::check(&board_with_npth(), src)
+    }
+
+    /// The test board with a 2.5 mm mounting hole.
+    fn board_with_npth() -> Board {
+        let mut b = board();
+        let mut p = b.geometry.pads[2].clone();
+        p.at = pt(35.0, 9.0);
+        p.net = None;
+        p.component = None;
+        p.hole = Length::from_mm(2.5);
+        p.size_x = Length::from_mm(2.5);
+        p.size_y = Length::from_mm(2.5);
+        p.fab.unplated = true;
+        b.geometry.pads.push(p);
+        b
+    }
+
+    #[test]
+    fn written_files_check_out_against_the_board() {
+        let files = fab_files(&board_with_npth(), "t", &FabOptions::default());
+        let c = read_back(&files);
+        assert_eq!(c.problems(), 0, "{}\n{:?}", c.text(), c.files);
+        let holes = c.lines.iter().find(|l| l.item == "Holes").unwrap();
+        assert_eq!(holes.board, "3 in 3 sizes");
+        assert!(c
+            .lines
+            .iter()
+            .any(|l| l.item == "Nets" && l.board == "2 with copper"));
+        // A board with a hole the files lack is caught.
+        let mut short = files.clone();
+        short.retain(|f| !f.name.ends_with("-NPTH.DRL"));
+        let c = read_back(&short);
+        let holes = c.lines.iter().find(|l| l.item == "Holes").unwrap();
+        assert!(
+            !holes.ok && holes.note.starts_with("2.500 mm: 1 on the board, 0"),
+            "{}",
+            c.text()
+        );
+    }
+
+    #[test]
+    fn x1_inch_and_merged_drill_options() {
+        let opt = FabOptions {
+            gerber_x2: false,
+            drill_units: DrillUnits::Inch,
+            drill_merge: true,
+            ..FabOptions::default()
+        };
+        let files = fab_files(&board_with_npth(), "t", &opt);
+        let get = |n: &str| {
+            String::from_utf8(files.iter().find(|f| f.name == n).unwrap().data.clone()).unwrap()
+        };
+        let gtl = get("t.GTL");
+        assert!(!gtl.contains("%TF") && !gtl.contains("%TO") && !gtl.contains("%TA"));
+        assert!(gtl.contains("%FSLAX46Y46*%") && gtl.contains("%ADD"));
+        assert!(!files
+            .iter()
+            .any(|f| f.name.ends_with("-PTH.DRL") || f.name.ends_with("-NPTH.DRL")));
+        let drl = get("t-PTH-NPTH.DRL");
+        assert!(drl.contains("TF.FileFunction,MixedPlating,1,2"), "{drl}");
+        assert!(drl.contains("\nINCH\n") && !drl.contains("METRIC"), "{drl}");
+        // 2.5 mm non-plated, 1 mm plated, 0.3 mm via, in inches.
+        assert!(
+            drl.contains("C0.09843") && drl.contains("C0.03937") && drl.contains("C0.01181"),
+            "{drl}"
+        );
+        assert!(
+            drl.contains("NonPlated,NPTH,ComponentDrill") && drl.contains("Plated,PTH,ViaDrill")
+        );
+        // The via at (30, 5.8) mm.
+        assert!(drl.contains("X1.18110Y0.22835"), "{drl}");
+        let c = read_back(&files);
+        assert_eq!(c.problems(), 0, "{}\n{:?}", c.text(), c.files);
+    }
+
     #[test]
     fn assembly_files_sort_designators_naturally() {
         let b = board();
@@ -1636,7 +1790,7 @@ pub(crate) mod tests {
             keep: 1,
             diameter: Length::from_mm(0.5),
         });
-        let files = drills(&b, 4);
+        let files = drills(&b, 4, DrillUnits::Metric, false);
         let (name, text) = files
             .iter()
             .find(|(n, _)| n.starts_with("BACKDRILL"))

@@ -13,6 +13,7 @@ mod comparewin;
 mod drc;
 mod editing;
 mod emiwin;
+mod fabwin;
 mod fanwin;
 mod fieldview;
 mod flexwin;
@@ -157,6 +158,7 @@ pub struct App {
     scroll_tab: bool,
     pub drc: drc::Drc,
     panel: panelize::PanelWindow,
+    fab: fabwin::FabWindow,
     sim: simwin::SimWindow,
     power: power::PowerWindow,
     pdn: pdnwin::PdnWindow,
@@ -267,6 +269,7 @@ impl App {
             scroll_tab: false,
             drc: drc::Drc::default(),
             panel: panelize::PanelWindow::default(),
+            fab: fabwin::FabWindow::default(),
             sim: simwin::SimWindow::default(),
             power: power::PowerWindow::default(),
             pdn: pdnwin::PdnWindow::default(),
@@ -801,38 +804,6 @@ impl App {
                 let bad = m.contains("Read back differs");
                 (m, bad)
             }
-            Err(e) => (format!("Could not save: {e}"), true),
-        });
-    }
-
-    /// Gerber X2, drill, IPC-356, pick-and-place and BOM files, in one zip.
-    fn export_fab(&mut self) {
-        let Some(scene) = &self.scene else { return };
-        let stem = scene
-            .path
-            .file_stem()
-            .map(|s| s.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "board".into());
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter("Zip archive", &["zip"])
-            .set_file_name(format!("{stem}-fab.zip"))
-            .save_file()
-        else {
-            return;
-        };
-        let opt = trace_export::FabOptions::from_board(&scene.board);
-        let files = trace_export::fab_files(&scene.board, &stem, &opt);
-        let result = trace_export::fab_zip(&files).and_then(|z| std::fs::write(&path, z));
-        self.message = Some(match result {
-            Ok(()) => (
-                format!(
-                    "Saved {} fab files to {} (Gerber X2, drill, IPC-356 netlist, pick-and-place, BOM; mask {:.3} mm)",
-                    files.len(),
-                    path.display(),
-                    opt.mask_expansion.mm()
-                ),
-                false,
-            ),
             Err(e) => (format!("Could not save: {e}"), true),
         });
     }
@@ -3566,6 +3537,18 @@ impl eframe::App for App {
             });
             if let Some(spec) = self.panel.show(ctx, size) {
                 self.make_panel(&spec);
+            }
+        }
+        if self.fab.open && !self.mode_sch && !self.mode_fp {
+            if let Some(scene) = &self.scene {
+                let stem = scene
+                    .path
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_else(|| "board".into());
+                if let Some(m) = self.fab.show(ctx, &scene.board, &stem) {
+                    self.message = Some(m);
+                }
             }
         }
         if !self.mode_sch && !self.mode_fp {

@@ -97,8 +97,8 @@ impl App {
         ui.separator();
         ui.add_enabled_ui(has, |ui| {
             ui.menu_button("Fabrication outputs", |ui| {
-                if item(ui, true, "Gerber, drill and BOM…", "", "Gerber X1 per layer, Excellon drill, BOM and pick and place") {
-                    self.export_fab();
+                if item(ui, true, "Gerber, drill and BOM…", "", "Fabrication Outputs: Gerber X2 or X1 per layer, Excellon drill, IPC-356, BOM and pick and place, with a read-back check, in one zip") {
+                    self.fab.open_window();
                 }
                 if item(ui, true, "ODB++…", "", "One ODB++ job (.tgz): every layer, the drills, the parts, the nets and the stack-up") {
                     self.export_odb();

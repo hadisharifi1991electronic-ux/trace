@@ -18,7 +18,7 @@ pub use altium::{to_altium, to_pcblib};
 pub use altium_rt::{to_altium_over, SaveReport};
 pub use assembly::{assembly_pdf, Paper};
 pub use dxf::to_dxf;
-pub use fab::{fab_files, fab_zip, FabFile, FabOptions};
+pub use fab::{fab_files, fab_zip, DrillUnits, FabFile, FabOptions};
 pub use fabdraw::fab_drawing_pdf;
 pub use ipc2581::to_ipc2581;
 #[doc(hidden)]

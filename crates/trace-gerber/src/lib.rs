@@ -7,6 +7,7 @@
 #![allow(clippy::type_complexity)]
 
 mod build;
+pub mod check;
 pub mod detect;
 pub mod excellon;
 #[doc(hidden)]
@@ -18,6 +19,7 @@ pub mod nets;
 pub mod odb;
 
 pub use build::{FileReport, Import};
+pub use check::{check, CheckLine, FabCheck};
 
 use build::{Layer, LayerData};
 use detect::{Content, Role};

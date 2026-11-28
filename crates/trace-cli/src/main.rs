@@ -17,11 +17,21 @@ on the board, for boards whose file has none.
 USAGE:
     trace inspect <board|file.SchDoc>           Summary of a board or sheet
     trace pairs <board> [max-skew]              Differential pair lengths and skew (default max-skew 5mil)
-    trace fem <waveguide|microstrip|stripline|cpw|cpwg> [key=value ...] [-o out.s2p]
+    trace fem <waveguide|microstrip|stripline|cpw|cpwg|crossover> [key=value ...] [-o out.s2p]
                                                 3D FEM (HFSS-style): adaptive tetrahedral mesh to dS, wave ports,
                                                 S-parameter sweep. Keys: w h len (mil), er tand, a b (mm, waveguide;
                                                 len in mm too), g (cpw/cpwg gap, mil), s (pair spacing, mil: odd mode,
                                                 Z0 differential), f (adapt GHz), sweep=lo:hi:n, ds, passes, zref (0 = port Z0)
+                                                hfss=out.py: write the model as an HFSS IronPython script instead
+                                                crossover: an X2AS-class SMT RF/DC crossover (5.08 mm, DC-6 GHz) on a
+                                                50 ohm microstrip test board, graded against the X2AS limits. Keys in
+                                                mm: body thick z_gnd z_strip w_strip w_end taper r_cast clear pcb_h
+                                                w_feed feed w_dc margin air; er tand pcb_er pcb_tand; rough (um, -1
+                                                lossless); dc_ports=1 (drive the DC line: isolation); ref=meas.s2p
+                                                (compare with a measured RF path)
+    trace hfss <board> <x0,y0,x1,y1 | via:NET[,HALF]> <out.py> [cutout options]
+                                                The cut-out `trace cutout` solves, as an HFSS IronPython script
+                                                (Tools > Run Script): materials, copper, wave and lumped ports, setup
     trace rules <board>                         Design rules by category and kind, in priority order
     trace rules <board> --net <net>             The rule of each kind that applies to a net
     trace rules <board> --check                 Rule problems and scope terms Trace does not judge
@@ -723,6 +733,12 @@ fn main() -> ExitCode {
         ["via", file, from, to, rest @ ..] => via(file, from, to, rest),
         ["planar", file, layer, win, rest @ ..] => planar(file, layer, win, rest),
         ["cutout", file, win, rest @ ..] => planar(file, "all", win, rest),
+        // The cut-out as an HFSS script (not solved here).
+        ["hfss", file, win, out, rest @ ..] => {
+            let mut a: Vec<&str> = rest.to_vec();
+            a.extend(["--hfss", *out]);
+            planar(file, "all", win, &a)
+        }
         ["zcheck", file, rest @ ..] => zcheck_cmd(file, rest),
         ["path" | "pathloss", file, rest @ ..] => path_cmd(file, rest),
         ["rf" | "rfreport", file, rest @ ..] => rf_cmd(file, rest),
@@ -1304,10 +1320,36 @@ fn fem_run(kind: &str, rest: &[&str]) -> Result<(), String> {
                 },
             })
         }
+        "crossover" => {
+            // An X2AS-class SMT crossover on its test board; dimensions in
+            // mm by name (trace_core::crossover::Crossover::KEYS).
+            const GENERIC: [&str; 8] = [
+                "f", "sweep", "zref", "ds", "passes", "maxdof", "hfss", "ref",
+            ];
+            let mut c = trace_core::crossover::Crossover::default();
+            for (k, v) in &kv {
+                if GENERIC.contains(k) {
+                    continue;
+                }
+                let x: f64 = v.parse().map_err(|_| format!("{k}: not a number"))?;
+                if !c.set(k, x) {
+                    return Err(format!(
+                        "crossover: unknown key {k} (keys: {})",
+                        trace_core::crossover::Crossover::KEYS.join(", ")
+                    ));
+                }
+            }
+            c.model()?
+        }
         _ => return Err(format!("unknown model {kind}")),
     };
-    let f = num("f", 10.0)?;
-    let sweep = match kv.get("sweep") {
+    let crossover = kind == "crossover";
+    let f = num("f", if crossover { 6.0 } else { 10.0 })?;
+    let sweep_spec = kv
+        .get("sweep")
+        .copied()
+        .or(if crossover { Some("0.1:6:60") } else { None });
+    let sweep = match sweep_spec {
         Some(s) => {
             let p: Vec<f64> = s
                 .split(':')
@@ -1340,6 +1382,16 @@ fn fem_run(kind: &str, rest: &[&str]) -> Result<(), String> {
         fields: render_ask(f),
         ..fem3d::Setup::default()
     };
+    // hfss=OUT.py: the HFSS script of this model and setup, not solved here.
+    if let Some(path) = kv.get("hfss") {
+        let e = trace_core::hfss::script(&model, &setup, &format!("Trace {kind} model"));
+        std::fs::write(path, &e.script).map_err(|e| format!("{path}: {e}"))?;
+        println!("wrote {path} (HFSS IronPython: Tools > Run Script in ANSYS Electronics Desktop)");
+        for n in &e.notes {
+            println!("Note: {n}");
+        }
+        return Ok(());
+    }
     if render_model(&model, None, &format!("{kind} (3D FEM model)"))? {
         return Ok(());
     }
@@ -1384,9 +1436,81 @@ fn fem_run(kind: &str, rest: &[&str]) -> Result<(), String> {
             .collect();
         println!("{f} GHz  {}", row.join("  "));
     }
+    if crossover {
+        crossover_report(&r, kv.get("ref").copied())?;
+    }
     if let Some(o) = out {
         std::fs::write(o, r.touchstone()).map_err(|e| format!("{o}: {e}"))?;
         println!("wrote {o}");
+    }
+    Ok(())
+}
+
+/// The crossover's grade against the X2AS-class limits, and with `ref` (a
+/// measured .s2p of the RF path) the same for it and the two side by side.
+fn crossover_report(
+    r: &trace_core::fem3d::Solution,
+    reference: Option<&str>,
+) -> Result<(), String> {
+    use trace_core::crossover::{grade, report};
+    let n = r.n();
+    let p1 = r
+        .ports
+        .iter()
+        .position(|p| p == "RF1")
+        .ok_or("no RF1 port")?;
+    let p2 = r
+        .ports
+        .iter()
+        .position(|p| p == "RF2")
+        .ok_or("no RF2 port")?;
+    let pts: Vec<(f64, f64, f64, f64)> =
+        r.f.iter()
+            .enumerate()
+            .map(|(k, &f)| {
+                let s = &r.s[k];
+                (
+                    f,
+                    s[p1 * n + p1].norm(),
+                    s[p2 * n + p1].norm(),
+                    s[p2 * n + p2].norm(),
+                )
+            })
+            .collect();
+    println!();
+    println!("Trace model against the X2AS limits:");
+    print!("{}", report(&grade(&pts)));
+    let Some(path) = reference else {
+        return Ok(());
+    };
+    let net = trace_core::touchstone::read(std::path::Path::new(path))?;
+    if net.ports != 2 {
+        return Err(format!("{path}: expected a 2-port file"));
+    }
+    let meas: Vec<(f64, f64, f64, f64)> = net
+        .f
+        .iter()
+        .zip(&net.s)
+        .map(|(&f, s)| (f, s[0].abs(), s[2].abs(), s[3].abs()))
+        .collect();
+    println!("Measured ({path}) against the same limits:");
+    print!("{}", report(&grade(&meas)));
+    println!();
+    println!("   GHz   RL model  RL meas   IL model  IL meas   S21 phase model  meas");
+    let db = |x: f64| -20.0 * x.max(1e-12).log10();
+    for (k, &f) in r.f.iter().enumerate() {
+        let Some(m) = net.at(f) else { continue };
+        let s = &r.s[k];
+        let (s11, s21) = (s[p1 * n + p1], s[p2 * n + p1]);
+        println!(
+            "{f:>6.2}  {:>8.1}  {:>8.1}  {:>8.3}  {:>8.3}  {:>15.1}  {:>5.1}",
+            db(s11.norm()),
+            db(m[0].abs()),
+            db(s21.norm()),
+            db(m[2].abs()),
+            s21.arg().to_degrees(),
+            m[2].im.atan2(m[2].re).to_degrees()
+        );
     }
     Ok(())
 }
@@ -4666,6 +4790,7 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
     let mut lossy = true;
     let mut values: Vec<(String, String)> = Vec::new();
     let mut outs: Vec<&str> = Vec::new();
+    let mut hfss_out: Option<&str> = None;
     let mut it = rest.iter();
     while let Some(a) = it.next() {
         match *a {
@@ -4698,6 +4823,7 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
                 }
             }
             "--all-ports" => focus.clear(),
+            "--hfss" => hfss_out = Some(*it.next().ok_or("--hfss OUT.py")?),
             "--value" => {
                 let x = it.next().ok_or("--value REF=VALUE")?;
                 let (r, v) = x.split_once('=').ok_or("--value REF=VALUE")?;
@@ -4777,6 +4903,17 @@ fn planar(file: &str, layer: &str, win: &str, rest: &[&str]) -> Res {
             planar::parse_load(&p.designator, v).map(|ld| (p.port, ld.gamma(fmax, r)))
         })
         .collect();
+    // --hfss OUT.py: the HFSS script of this model, not solved here.
+    if let Some(path) = hfss_out {
+        let e =
+            trace_core::hfss::script(&model, &setup, &format!("{what} of {file}, window {win}"));
+        std::fs::write(path, &e.script).map_err(|e| format!("{path}: {e}"))?;
+        println!("wrote {path} (HFSS IronPython: Tools > Run Script in ANSYS Electronics Desktop)");
+        for n in &e.notes {
+            println!("Note: {n}");
+        }
+        return Ok(());
+    }
     let t0 = std::time::Instant::now();
     let sol = fem3d::solve(&model, &setup, |m| {
         eprintln!("  {m}");

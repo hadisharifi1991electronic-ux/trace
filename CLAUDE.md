@@ -45,16 +45,22 @@ first, desktop first. Planning notes from earlier work are in PR #1
 
 ## State (2026-11-28)
 
-- `master` is 0.110.0 (FEM power balance on the DAC window), installed on
-  Hadi's PC.
-- Branch `claude/fab-outputs-0.111` holds **0.111.0**: the Fabrication
-  Outputs window (`crates/trace-app/src/fabwin.rs`), X2/X1, drill units and
-  merging (`crates/trace-export/src/fab.rs`), the read-back check
-  (`crates/trace-gerber/src/check.rs`), `trace fab --x1 --drill-inch
-  --drill-merge --check`, and a rustfmt fix to `fem3d.rs` that `master`'s CI
-  was failing on. Clippy passed on both OSes; check the test result of the
-  last CI run on that branch, fix anything red, then fast-forward `master`
-  to it (that releases 0.111.0) and install.
+- `master` is **0.111.0** (Fabrication Outputs window, read-back check),
+  released and installed on Hadi's PC (2026-11-28).
+- Branch `claude/x2as-hfss-0.112` (not released): `trace_core::hfss` (any
+  FEM model as an HFSS IronPython script; `trace fem ... hfss=out.py`,
+  `trace hfss`, `trace cutout --hfss`), `trace_core::crossover` (the
+  X2AS-class model, `trace fem crossover key=value`, `ref=X2AS.S2P`), and
+  a CAD look for `--render` (`--style cad`, the CLI default: white, floor
+  grid, green laminate, gold copper, mm scale; `--style dark` the old one).
+  Results in `...\Altium\Trace\results-0.112-x2as`.
+- Crossover so far (250k unknowns, 2 passes, not converged): the baseline
+  has about 2 nH too much series inductance at the RF castellations (RL
+  4-10 dB). `side_gnd=1.3` (ground-signal-ground launch) gives RL 15-20 dB
+  to 4 GHz but a resonance near 5 GHz (IL up to 8 dB): probably a mode
+  between the part's two ground planes; stitch them (vias along the RF
+  path) next. Hadi's PC has about 3.8 GB free after a restart, which caps
+  solves near 250k unknowns.
 
 ## Next: an X2AS-style RF/DC crossover, simulated in Trace, with HFSS export
 

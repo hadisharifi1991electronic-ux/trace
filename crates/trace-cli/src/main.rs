@@ -293,6 +293,7 @@ USAGE:
               --render FILE.png|FILE.gif [--field e|h|j|none] [--field-ghz F] [--field-port N]
               [--view AZ,EL[,ZOOM]] [--cut y=MIL|x=MIL|none] [--phase DEG] [--range 40]
               [--size 1200x800] [--copper 1.4] [--no-laminate] [--frames 24] [--geometry-only] [--vectors]
+              [--style cad|dark]
                                                 A realistic ray-cast picture: copper with its thickness, plated
                                                 barrels with their holes, pads, antipads, see-through laminate,
                                                 wave ports, cut open through the signal via by default. --field e|h
@@ -303,7 +304,9 @@ USAGE:
                                                 and stops before solving. --vectors adds a vector plot: E or H
                                                 arrows on the cut (dot: out of the face, cross: into it), or
                                                 current-flow lines with heads on the copper for j, at --phase
-                                                (0 deg without it; a .gif animates them).
+                                                (0 deg without it; a .gif animates them). --style: cad (default:
+                                                white backdrop and floor grid, green laminate, gold copper, the
+                                                air box in light blue, scale in mm) or dark (the earlier look).
     trace pairsize <board> <layer> [--zdiff 100] [--wmin W] [--wmax W] [--gap S] [--ghz 8] [--next D] [--xtalk 2]
                                                 Every track width and gap on a layer that gives the target Zdiff
                                                 (2D field solver), ranked by loss, with crosstalk and etch
@@ -441,7 +444,12 @@ impl RenderOpts {
     fn take(args: &mut Vec<String>) -> Result<Option<RenderOpts>, String> {
         let mut r = RenderOpts {
             out: Vec::new(),
-            view: trace_core::render3d::View::default(),
+            // The CAD look (white, green laminate, gold copper) unless
+            // --style dark.
+            view: trace_core::render3d::View {
+                style: trace_core::render3d::Style::Cad,
+                ..trace_core::render3d::View::default()
+            },
             cut: None,
             field_ghz: None,
             port: 0,
@@ -528,6 +536,11 @@ impl RenderOpts {
                 "--no-laminate" => {
                     r.view.laminate = false;
                     1
+                }
+                "--style" => {
+                    r.view.style =
+                        trace_core::render3d::Style::parse(&val(i)?).ok_or("--style cad|dark")?;
+                    2
                 }
                 "--vectors" | "--arrows" => {
                     r.view.vectors = true;

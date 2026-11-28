@@ -80,9 +80,32 @@ impl Overlay {
     }
 }
 
+/// The look of the picture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Style {
+    /// Dark backdrop, copper metal, amber see-through laminate, mil.
+    #[default]
+    Dark,
+    /// As 3D CAD and EM tools draw a model: white backdrop with a floor
+    /// grid, solid green laminates, gold copper, a light-blue see-through
+    /// air box, dark labels and a scale bar in mm.
+    Cad,
+}
+
+impl Style {
+    pub fn parse(s: &str) -> Option<Style> {
+        match s.to_ascii_lowercase().as_str() {
+            "dark" => Some(Style::Dark),
+            "cad" | "hfss" | "light" => Some(Style::Cad),
+            _ => None,
+        }
+    }
+}
+
 /// How the picture is taken.
 #[derive(Clone, Debug)]
 pub struct View {
+    pub style: Style,
     /// Turn about the vertical, degrees (0: looking along +y).
     pub az: f64,
     /// Height of the eye above the board's plane, degrees.
@@ -113,6 +136,7 @@ pub struct View {
 impl Default for View {
     fn default() -> View {
         View {
+            style: Style::Dark,
             az: -32.0,
             el: 24.0,
             zoom: 1.25,
@@ -169,6 +193,8 @@ struct Diel {
     lo: V,
     hi: V,
     tint: V,
+    /// Its colour in the CAD style.
+    green: V,
 }
 
 struct Port {
@@ -533,6 +559,7 @@ impl Scene {
                             lo: mv(*lo),
                             hi: mv(*hi),
                             tint,
+                            green: lerp3(CAD_GREEN, CAD_GREEN_DEEP, k),
                         });
                     }
                 }
@@ -889,6 +916,76 @@ fn lin(c: [u8; 3]) -> V {
 
 /// Copper's colour (linear; about sRGB 232, 142, 88).
 const COPPER: V = [0.80, 0.27, 0.10];
+/// CAD style: gold copper (about sRGB 235, 180, 60), laminate greens
+/// (about sRGB 50, 160, 45 and 30, 125, 40), the air box's light blue.
+const CAD_GOLD: V = [0.83, 0.47, 0.05];
+const CAD_GREEN: V = [0.035, 0.36, 0.025];
+const CAD_GREEN_DEEP: V = [0.012, 0.20, 0.02];
+const CAD_AIR: V = [0.45, 0.80, 0.95];
+const MIL_PER_MM: f64 = 1.0 / 0.0254;
+
+/// The CAD style's backdrop: near white, with a floor grid (`step` mil,
+/// every fifth line darker) on the plane under the model, fading with
+/// distance.
+fn cad_background(sc: &Scene, o: V, d: V, sy: f64, step: f64) -> V {
+    let sky = lerp3([1.0, 1.0, 1.0], [0.82, 0.84, 0.87], sy * sy);
+    if d[2] >= -1e-9 {
+        return sky;
+    }
+    let z0 = sc.lo[2];
+    let t = (z0 - o[2]) / d[2];
+    if t <= 0.0 {
+        return sky;
+    }
+    let p = add(o, mul(d, t));
+    // Line half-width grows with distance (about a pixel).
+    let hw = t * 0.0011;
+    let near = |x: f64, s: f64| {
+        let f = (x / s).rem_euclid(1.0);
+        f.min(1.0 - f) * s
+    };
+    let fade = (-(t / (sc.radius() * 12.0))).exp();
+    let major = near(p[0], step * 5.0).min(near(p[1], step * 5.0)) < hw * 1.4;
+    let minor = near(p[0], step).min(near(p[1], step)) < hw;
+    let k = if major {
+        0.55
+    } else if minor {
+        0.28
+    } else {
+        0.0
+    } * fade;
+    lerp3(sky, [0.35, 0.37, 0.42], k)
+}
+
+/// The outward normal of the face of a box a ray enters at `t`.
+fn entry_normal(lo: V, hi: V, o: V, d: V, t: f64) -> V {
+    let p = add(o, mul(d, t));
+    let mut best = (f64::MAX, [0.0, 0.0, 1.0]);
+    for a in 0..3 {
+        for (face, s) in [(lo[a], -1.0), (hi[a], 1.0)] {
+            let e = (p[a] - face).abs();
+            if e < best.0 {
+                let mut n = [0.0; 3];
+                n[a] = s;
+                best = (e, n);
+            }
+        }
+    }
+    best.1
+}
+
+/// A round grid step (mil) for the CAD floor: 1, 2 or 5 times a power of
+/// ten mm, about a twelfth of the model's size.
+fn grid_step(sc: &Scene) -> f64 {
+    let want = sc.radius() * 2.0 / 12.0 / MIL_PER_MM;
+    let mag = 10f64.powf(want.log10().floor());
+    let mm = [1.0, 2.0, 5.0, 10.0]
+        .iter()
+        .map(|k| k * mag)
+        .rfind(|x| *x <= want)
+        .unwrap_or(mag);
+    mm * MIL_PER_MM
+}
 
 struct Cam {
     eye: V,
@@ -985,7 +1082,13 @@ fn cast(sc: &Scene, paint: Option<&Paint>, v: &View, cam: &Cam, d: V, sy: f64) -
     let key = norm(add(key, [0.0, 0.0, 0.6]));
     let fill = norm(add(add(mul(cam.u, 0.3), mul(cam.r, 0.9)), mul(cam.f, -0.5)));
     let (bt0, bt1) = box_range(sc.lo, sc.hi, o, inv);
-    let bg = background(sy);
+    let cad = v.style == Style::Cad;
+    let copper = if cad { CAD_GOLD } else { COPPER };
+    let bg = if cad {
+        cad_background(sc, o, d, sy, grid_step(sc))
+    } else {
+        background(sy)
+    };
     if bt0 > bt1 || bt1 < 0.0 {
         return bg;
     }
@@ -1019,9 +1122,9 @@ fn cast(sc: &Scene, paint: Option<&Paint>, v: &View, cam: &Cam, d: V, sy: f64) -
         let mut n = [0.0; 3];
         n[ax] = if o[ax] < p[ax] { -1.0 } else { 1.0 };
         if sc.in_copper(p) {
-            let c = shade_metal(COPPER, n, d, key, fill, 1.0);
+            let c = shade_metal(copper, n, d, key, fill, 1.0);
             // A polished section reads a little paler.
-            col = lerp3(c, [0.90, 0.45, 0.25], 0.15);
+            col = lerp3(c, lerp3(copper, [1.0; 3], 0.3), 0.15);
             t_end = tc;
             done = true;
         } else if let Some(pt) = paint.filter(|_| matches!(v.overlay, Overlay::E | Overlay::H)) {
@@ -1054,7 +1157,7 @@ fn cast(sc: &Scene, paint: Option<&Paint>, v: &View, cam: &Cam, d: V, sy: f64) -
             } else {
                 1.0
             };
-            let mut base = COPPER;
+            let mut base = copper;
             if let (Some(pt), Overlay::J) = (paint, v.overlay) {
                 let q = add(p, mul(nf, pt.g.h / MIL * 0.9));
                 let (_, h) = pt.g.at(mul(q, MIL));
@@ -1074,19 +1177,55 @@ fn cast(sc: &Scene, paint: Option<&Paint>, v: &View, cam: &Cam, d: V, sy: f64) -
             t_end = th;
         }
     }
-    // See-through laminate and the ports in front, far to near.
-    let mut layers: Vec<(f64, V, f64)> = Vec::new();
+    // See-through laminate and the ports in front, far to near: (distance,
+    // colour, opacity, face normal to shade by; None faces the eye).
+    let mut layers: Vec<(f64, V, f64, Option<V>)> = Vec::new();
     if v.laminate {
         let thick = 0.3 * sc.radius();
         for dl in &sc.diel {
-            let (a, b) = box_range(dl.lo, dl.hi, o, inv);
-            let a = a.max(t0);
-            let b = b.min(t_end);
+            let (a0, b0) = box_range(dl.lo, dl.hi, o, inv);
+            let a = a0.max(t0);
+            let b = b0.min(t_end);
             if b > a {
-                let alpha = 1.0 - (-(b - a) / thick).exp();
-                // A faint sheen where the ray enters the board.
-                layers.push((a, dl.tint, (alpha * 0.9).min(0.8)));
+                if cad {
+                    // Solid-looking laminate, lit by the face it is
+                    // entered through (a cut face counts as one).
+                    let n = if a0 >= t0 - eps {
+                        entry_normal(dl.lo, dl.hi, o, d, a0)
+                    } else {
+                        v.cut.map_or(mul(d, -1.0), |(ax, _)| {
+                            let mut n = [0.0; 3];
+                            n[ax] = -d[ax].signum();
+                            n
+                        })
+                    };
+                    layers.push((a, dl.green, 0.88, Some(n)));
+                } else {
+                    let alpha = 1.0 - (-(b - a) / thick).exp();
+                    // A faint sheen where the ray enters the board.
+                    layers.push((a, dl.tint, (alpha * 0.9).min(0.8), None));
+                }
             }
+        }
+    }
+    if cad && v.cut.is_none() {
+        // The air box: its near faces, and its far ones where nothing
+        // stands in front of them.
+        if bt0 > 0.0 {
+            layers.push((
+                bt0,
+                CAD_AIR,
+                0.10,
+                Some(entry_normal(sc.lo, sc.hi, o, d, bt0)),
+            ));
+        }
+        if t_end >= t1 - eps {
+            layers.push((
+                t1,
+                CAD_AIR,
+                0.10,
+                Some(mul(entry_normal(sc.lo, sc.hi, o, d, t1), -1.0)),
+            ));
         }
     }
     for p in &sc.ports {
@@ -1095,13 +1234,23 @@ fn cast(sc: &Scene, paint: Option<&Paint>, v: &View, cam: &Cam, d: V, sy: f64) -
             let q = add(o, mul(d, t));
             let (u, w) = across(p.axis);
             if q[u] >= p.lo[0] && q[u] <= p.hi[0] && q[w] >= p.lo[1] && q[w] <= p.hi[1] {
-                layers.push((t, p.tint, 0.16));
+                layers.push((t, p.tint, if cad { 0.10 } else { 0.16 }, None));
             }
         }
     }
     layers.sort_by(|a, b| b.0.total_cmp(&a.0));
-    for (_, c, a) in layers {
-        let lam = shade_matte(c, mul(d, -1.0), d, key, fill);
+    for (_, c, a, n) in layers {
+        let lam = match n {
+            // Matte, with more ambient than metal so faces stay light.
+            Some(n) => {
+                let n = if dot(n, d) > 0.0 { mul(n, -1.0) } else { n };
+                mul(
+                    c,
+                    0.55 + 0.45 * dot(n, key).max(0.0) + 0.15 * dot(n, fill).max(0.0),
+                )
+            }
+            None => shade_matte(c, mul(d, -1.0), d, key, fill),
+        };
         col = lerp3(col, lam, a);
     }
     col
@@ -1163,10 +1312,16 @@ pub fn render(sc: &Scene, fields: Option<&FieldGrid>, v: &View) -> Raster {
     });
     let mut r = Raster::new(w, h, [0, 0, 0]);
     for (i, c) in lin_px.iter().enumerate() {
-        // A soft tone curve so bright copper does not clip.
+        // A soft tone curve so bright copper does not clip (the CAD style
+        // keeps its white backdrop white).
+        let cad = v.style == Style::Cad;
         let tone = |x: f32| {
             let x = x as f64 * 1.1;
-            x / (1.0 + 0.25 * x)
+            if cad {
+                x.min(1.0)
+            } else {
+                x / (1.0 + 0.25 * x)
+            }
         };
         let px = srgb([tone(c[0]), tone(c[1]), tone(c[2])]);
         r.rgb[i * 3..i * 3 + 3].copy_from_slice(&px);
@@ -1185,7 +1340,14 @@ pub fn render(sc: &Scene, fields: Option<&FieldGrid>, v: &View) -> Raster {
 /// Box edges, port names, the axes, a scale bar, the title and colour bar.
 fn decorate(r: &mut Raster, sc: &Scene, cam: &Cam, v: &View, paint: Option<&Paint>) {
     let (w, h) = (r.w, r.h);
+    let cad = v.style == Style::Cad;
     let grey = [92, 98, 112];
+    // Text and the scale bar: light on the dark backdrop, dark on white.
+    let (ink, ink2, port_ink) = if cad {
+        ([25, 28, 34], [70, 74, 84], [190, 40, 30])
+    } else {
+        ([235, 235, 240], [190, 192, 200], [255, 120, 110])
+    };
     let (lo, hi) = (sc.lo, sc.hi);
     let corner = |k: usize| {
         [
@@ -1202,7 +1364,11 @@ fn decorate(r: &mut Raster, sc: &Scene, cam: &Cam, v: &View, paint: Option<&Pain
             }
             if let (Some(p), Some(q)) = (cam.project(corner(a), w, h), cam.project(corner(b), w, h))
             {
-                dashed(r, p, q, grey);
+                if cad {
+                    r.line(p, q, [70, 140, 200]);
+                } else {
+                    dashed(r, p, q, grey);
+                }
             }
         }
     }
@@ -1215,12 +1381,7 @@ fn decorate(r: &mut Raster, sc: &Scene, cam: &Cam, v: &View, paint: Option<&Pain
         c[ww] = p.hi[1];
         if let Some(s) = cam.project(c, w, h) {
             let tw = Raster::text_width(size, &p.name);
-            r.text(
-                [s[0] - tw / 2.0, s[1] - 6.0],
-                size,
-                &p.name,
-                [255, 120, 110],
-            );
+            r.text([s[0] - tw / 2.0, s[1] - 6.0], size, &p.name, port_ink);
         }
     }
     // Axes, lower left.
@@ -1243,7 +1404,39 @@ fn decorate(r: &mut Raster, sc: &Scene, cam: &Cam, v: &View, paint: Option<&Pain
     let c0 = sc.centre();
     if let (Some(p), Some(q)) = (cam.project(c0, w, h), cam.project(add(c0, cam.r), w, h)) {
         let px_per_mil = (q[0] - p[0]).hypot(q[1] - p[1]);
-        if px_per_mil > 0.0 {
+        if cad && px_per_mil > 0.0 {
+            // As CAD tools draw it: two segments, black and white, in mm.
+            let px_mm = px_per_mil * MIL_PER_MM;
+            let want = w as f64 / 5.0 / px_mm;
+            let mag = 10f64.powf(want.log10().floor());
+            let nice = [1.0, 2.0, 4.0, 5.0, 10.0]
+                .iter()
+                .map(|k| k * mag)
+                .rfind(|x| *x <= want)
+                .unwrap_or(mag);
+            let len = nice * px_mm;
+            let x0 = size * 8.0;
+            let y0 = h as f64 - size * 2.6;
+            let bh = (size * 0.6).max(4.0);
+            let (xa, xm, xb) = (x0 as usize, (x0 + len / 2.0) as usize, (x0 + len) as usize);
+            let (ya, yb) = ((y0 - bh / 2.0) as usize, (y0 + bh / 2.0) as usize);
+            r.fill(xa, ya, xb + 1, yb + 1, ink);
+            r.fill(xa + 1, ya + 1, xm, yb, [255, 255, 255]);
+            // Each number centred on its tick; the unit after the last.
+            let ts = size * 0.85;
+            let ty = y0 + bh + size * 1.1;
+            for (x, n) in [(x0, 0.0), (x0 + len / 2.0, nice / 2.0), (x0 + len, nice)] {
+                let mut t = format!("{n:.3}");
+                while t.contains('.') && (t.ends_with('0') || t.ends_with('.')) {
+                    t.pop();
+                }
+                let tw = Raster::text_width(ts, &t);
+                r.text([x - tw / 2.0, ty], ts, &t, ink);
+                if n == nice {
+                    r.text([x + tw / 2.0 + ts * 0.4, ty], ts, "(mm)", ink);
+                }
+            }
+        } else if px_per_mil > 0.0 {
             let want = w as f64 / 6.0 / px_per_mil;
             let mag = 10f64.powf(want.log10().floor());
             let nice = [1.0, 2.0, 5.0, 10.0]
@@ -1267,12 +1460,7 @@ fn decorate(r: &mut Raster, sc: &Scene, cam: &Cam, v: &View, paint: Option<&Pain
         }
     }
     if !v.title.is_empty() {
-        r.text(
-            [size * 1.2, size * 2.2],
-            size * 1.1,
-            &v.title,
-            [235, 235, 240],
-        );
+        r.text([size * 1.2, size * 2.2], size * 1.1, &v.title, ink);
     }
     let sub_t = match (paint, v.overlay) {
         (Some(pt), o) if o != Overlay::None => {
@@ -1298,12 +1486,7 @@ fn decorate(r: &mut Raster, sc: &Scene, cam: &Cam, v: &View, paint: Option<&Pain
         }
         _ => "Copper, laminate and wave ports".into(),
     };
-    r.text(
-        [size * 1.2, size * 4.0],
-        size * 0.85,
-        &sub_t,
-        [190, 192, 200],
-    );
+    r.text([size * 1.2, size * 4.0], size * 0.85, &sub_t, ink2);
     if let (Some(pt), true) = (paint, v.overlay != Overlay::None) {
         let x0 = w - (size * 6.5) as usize;
         let y0 = (size * 6.0) as usize;

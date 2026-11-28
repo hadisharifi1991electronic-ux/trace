@@ -16,6 +16,8 @@
 use crate::fem3d::{Copper, Fill, Mode, Model, Port, Shape, Sheet, Solid, Wall};
 
 const MM: f64 = 1e-3;
+/// Half the y size of a side-ground pad on the board, mm.
+const SIDE_PAD: f64 = 0.35;
 
 /// The crossover and its test board, mm.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -55,6 +57,10 @@ pub struct Crossover {
     /// Drive the DC line's ports too (RF-to-DC isolation); otherwise they
     /// are matched terminations.
     pub dc_ports: bool,
+    /// Ground castellations beside each RF castellation, this far from it
+    /// (y), with board pads and vias: a ground-signal-ground launch whose
+    /// return current runs close to the RF path. 0: none (corners only).
+    pub side_gnd: f64,
 }
 
 impl Default for Crossover {
@@ -81,6 +87,7 @@ impl Default for Crossover {
             air: 3.0,
             rough_um: Some(0.5),
             dc_ports: false,
+            side_gnd: 0.0,
         }
     }
 }
@@ -117,6 +124,7 @@ impl Crossover {
                 self.dc_ports = v != 0.0;
                 return true;
             }
+            "side_gnd" => &mut self.side_gnd,
             _ => return false,
         };
         *f = v;
@@ -127,7 +135,7 @@ impl Crossover {
     pub const KEYS: &'static [&'static str] = &[
         "body", "thick", "er", "tand", "z_gnd", "z_strip", "w_strip", "w_end", "taper", "r_cast",
         "clear", "pcb_h", "pcb_er", "pcb_tand", "w_feed", "feed", "w_dc", "margin", "air", "rough",
-        "dc_ports",
+        "dc_ports", "side_gnd",
     ];
 
     /// What is wrong with the dimensions, if anything.
@@ -146,6 +154,15 @@ impl Crossover {
             || c.w_dc >= c.body - 2.0 * (c.r_cast + 0.45)
         {
             return Err("the feed or DC line is too wide to pass the ground corners".into());
+        }
+        if c.side_gnd > 0.0 {
+            // Clear of the feed and the internal ground's clearance, short
+            // of the corner pads.
+            let lo = (c.w_feed / 2.0 + SIDE_PAD + 0.1).max(c.clear + c.r_cast);
+            let hi = c.body / 2.0 - 0.45 - SIDE_PAD - 0.1;
+            if c.side_gnd < lo || c.side_gnd > hi {
+                return Err(format!("side_gnd: {lo:.2} to {hi:.2} mm here (or 0)"));
+            }
         }
         if c.taper < 0.0 || 2.0 * c.taper > c.body {
             return Err("taper: 0 to half the body".into());
@@ -257,6 +274,29 @@ impl Crossover {
                 Vec::new(),
                 0,
             ));
+        }
+        // Side grounds: castellations through the body beside each RF one,
+        // pads on the board (clear of the feed) and vias to its ground.
+        if c.side_gnd > 0.0 {
+            for (x, sx) in [(bx0, -1.0), (bx1, 1.0)] {
+                for sy in [-1.0, 1.0] {
+                    let y = yc + sy * c.side_gnd;
+                    solids.push(cyl(x, y, c.r_cast, 0.0, c.thick, 0));
+                    solids.push(cyl(x, y, via_r, -c.pcb_h, 0.0, 0));
+                    solids.push(cyl(x + sx * via_out, y, via_r, -c.pcb_h, 0.0, 0));
+                    sheets.push(sheet(
+                        0.0,
+                        rect(
+                            x + sx * pad_out,
+                            y - SIDE_PAD,
+                            x - sx * pad_in,
+                            y + SIDE_PAD,
+                        ),
+                        Vec::new(),
+                        0,
+                    ));
+                }
+            }
         }
         // Board: the feeds run in under the castellations; the DC line runs
         // the board's length under the part.
@@ -481,6 +521,25 @@ mod tests {
         assert!(bad.model().is_err());
         assert!(c.clone().set("w_strip", 0.5));
         assert!(!c.clone().set("nope", 1.0));
+    }
+
+    #[test]
+    fn side_grounds() {
+        let base = Crossover::default().model().unwrap();
+        let c = Crossover {
+            side_gnd: 1.3,
+            ..Crossover::default()
+        };
+        let m = c.model().unwrap();
+        // Four castellations and eight vias more, four pads.
+        assert_eq!(m.solids.len(), base.solids.len() + 12);
+        assert_eq!(m.sheets.len(), base.sheets.len() + 4);
+        assert!(Crossover {
+            side_gnd: 0.7,
+            ..Crossover::default()
+        }
+        .model()
+        .is_err());
     }
 
     #[test]

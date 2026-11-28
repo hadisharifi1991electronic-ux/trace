@@ -61,6 +61,14 @@ pub struct Crossover {
     /// (y), with board pads and vias: a ground-signal-ground launch whose
     /// return current runs close to the RF path. 0: none (corners only).
     pub side_gnd: f64,
+    /// Vias joining the part's internal and top ground planes in two rows
+    /// beside the stripline (it becomes a shielded channel, and the
+    /// parallel-plate modes between the planes are pushed up in
+    /// frequency): the pitch along the line, 0 none; each row `stitch_off`
+    /// from the line's centre; via radius `stitch_r`.
+    pub stitch: f64,
+    pub stitch_off: f64,
+    pub stitch_r: f64,
 }
 
 impl Default for Crossover {
@@ -88,6 +96,9 @@ impl Default for Crossover {
             rough_um: Some(0.5),
             dc_ports: false,
             side_gnd: 0.0,
+            stitch: 0.0,
+            stitch_off: 0.75,
+            stitch_r: 0.10,
         }
     }
 }
@@ -125,6 +136,9 @@ impl Crossover {
                 return true;
             }
             "side_gnd" => &mut self.side_gnd,
+            "stitch" => &mut self.stitch,
+            "stitch_off" => &mut self.stitch_off,
+            "stitch_r" => &mut self.stitch_r,
             _ => return false,
         };
         *f = v;
@@ -133,9 +147,31 @@ impl Crossover {
 
     /// The names `set` takes, for help text.
     pub const KEYS: &'static [&'static str] = &[
-        "body", "thick", "er", "tand", "z_gnd", "z_strip", "w_strip", "w_end", "taper", "r_cast",
-        "clear", "pcb_h", "pcb_er", "pcb_tand", "w_feed", "feed", "w_dc", "margin", "air", "rough",
-        "dc_ports", "side_gnd",
+        "body",
+        "thick",
+        "er",
+        "tand",
+        "z_gnd",
+        "z_strip",
+        "w_strip",
+        "w_end",
+        "taper",
+        "r_cast",
+        "clear",
+        "pcb_h",
+        "pcb_er",
+        "pcb_tand",
+        "w_feed",
+        "feed",
+        "w_dc",
+        "margin",
+        "air",
+        "rough",
+        "dc_ports",
+        "side_gnd",
+        "stitch",
+        "stitch_off",
+        "stitch_r",
     ];
 
     /// What is wrong with the dimensions, if anything.
@@ -154,6 +190,21 @@ impl Crossover {
             || c.w_dc >= c.body - 2.0 * (c.r_cast + 0.45)
         {
             return Err("the feed or DC line is too wide to pass the ground corners".into());
+        }
+        if c.stitch > 0.0 {
+            let w = c.w_strip.max(c.w_end) / 2.0;
+            if c.stitch < 4.0 * c.stitch_r || c.stitch_r <= 0.0 {
+                return Err("stitch: pitch at least 4 via radii".into());
+            }
+            if c.stitch_off < w + c.stitch_r + 0.15
+                || c.stitch_off + c.stitch_r > c.body / 2.0 - 0.6
+            {
+                return Err(format!(
+                    "stitch_off: {:.2} to {:.2} mm here",
+                    w + c.stitch_r + 0.15,
+                    c.body / 2.0 - 0.6 - c.stitch_r
+                ));
+            }
         }
         if c.side_gnd > 0.0 {
             // Clear of the feed and the internal ground's clearance, short
@@ -328,6 +379,30 @@ impl Crossover {
             Vec::new(),
             2,
         ));
+        // Stitching: rows of vias from the internal ground to the top one,
+        // either side of the stripline, clear of the RF castellations'
+        // clearances, centred on the body.
+        if c.stitch > 0.0 {
+            let (x0, x1) = (
+                bx0 + c.clear + c.stitch_r + 0.1,
+                bx1 - c.clear - c.stitch_r - 0.1,
+            );
+            let n = ((x1 - x0) / c.stitch).floor() as usize + 1;
+            let start = xc - (n - 1) as f64 * c.stitch / 2.0;
+            for k in 0..n {
+                let x = start + k as f64 * c.stitch;
+                for sy in [-1.0, 1.0] {
+                    solids.push(cyl(
+                        x,
+                        yc + sy * c.stitch_off,
+                        c.stitch_r,
+                        c.z_gnd,
+                        c.thick,
+                        0,
+                    ));
+                }
+            }
+        }
         // The part: internal ground (cleared round the RF castellations),
         // the stripline, the top ground.
         let body = rect(bx0, by0, bx1, by1);
@@ -536,6 +611,36 @@ mod tests {
         assert_eq!(m.sheets.len(), base.sheets.len() + 4);
         assert!(Crossover {
             side_gnd: 0.7,
+            ..Crossover::default()
+        }
+        .model()
+        .is_err());
+    }
+
+    #[test]
+    fn stitching_vias() {
+        let base = Crossover::default().model().unwrap();
+        let c = Crossover {
+            stitch: 0.8,
+            ..Crossover::default()
+        };
+        let m = c.model().unwrap();
+        let vias: Vec<_> = m.solids[base.solids.len()..].to_vec();
+        // Rows either side of the line, from the internal ground to the top.
+        assert!(vias.len() >= 6 && vias.len() % 2 == 0, "{}", vias.len());
+        for v in &vias {
+            match v.shape {
+                Shape::Cyl { lo, hi, c: cc, .. } => {
+                    assert!((lo - c.z_gnd * MM).abs() < 1e-12 && (hi - c.thick * MM).abs() < 1e-12);
+                    let yc = (c.margin + c.body / 2.0) * MM;
+                    assert!(((cc[1] - yc).abs() - c.stitch_off * MM).abs() < 1e-12);
+                }
+                _ => panic!("not a via"),
+            }
+        }
+        assert!(Crossover {
+            stitch: 0.8,
+            stitch_off: 0.3,
             ..Crossover::default()
         }
         .model()

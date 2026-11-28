@@ -3086,7 +3086,11 @@ fn power_report(
                 "    lumped {} takes {:.4}, its |S|² {:.4}",
                 lp.name,
                 p,
-                if k < nt { s[k * nt + pe].norm_sqr() } else { f64::NAN }
+                if k < nt {
+                    s[k * nt + pe].norm_sqr()
+                } else {
+                    f64::NAN
+                }
             );
         }
         // Driven ports' faces: what is not the port's own mode (the even
@@ -3124,7 +3128,8 @@ fn power_report(
                 }
             }
             let p = pm.info.beta * res * scale_p;
-            *by.entry(format!("port {} not its mode", pi + 1)).or_insert(0.0) += p;
+            *by.entry(format!("port {} not its mode", pi + 1))
+                .or_insert(0.0) += p;
             terms += p;
         }
         let ss: f64 = (0..nt).map(|q| s[q * nt + pe].norm_sqr()).sum();
@@ -5578,4 +5583,3 @@ mod tests {
         assert!(open[2].norm() < 0.5, "open S21 {}", open[2].norm());
     }
 }
-
